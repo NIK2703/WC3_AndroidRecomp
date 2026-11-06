@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Read PE32 import directories without third-party packages.
+"""Read PE32 import/export directories without third-party packages.
 
 The licensed 1.27.1.7085 files live outside the repository
 (`E:\\Games\\Warcraft III` by default).  This tool writes only names, ordinals,
-IAT slot VAs and file hashes; it never copies game code or data.
+IAT slot VAs, export indexes and file hashes; it never copies game code or data.
 """
 from __future__ import annotations
 
@@ -67,6 +67,18 @@ class Export:
     name: str
 
 
+@dataclass(frozen=True)
+class ExportIndex:
+    """Export names (original case) and every non-zero export ordinal.
+
+    Import binding uses GetProcAddress semantics: names are case-sensitive and
+    an ordinal is valid only when its function RVA is non-zero.
+    """
+
+    names: dict[str, int]
+    ordinals: frozenset[int]
+
+
 def digests(path: Path) -> tuple[str, str]:
     md5 = hashlib.md5()
     sha = hashlib.sha256()
@@ -77,8 +89,8 @@ def digests(path: Path) -> tuple[str, str]:
     return md5.hexdigest(), sha.hexdigest()
 
 
-def parse_exports(path: Path) -> list[Export]:
-    """Read named exports; ordinal-only exports cannot be mapped to a name."""
+def parse_export_index(path: Path) -> ExportIndex:
+    """Read the export directory as a name->ordinal map plus ordinal set."""
     data = path.read_bytes()
     e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
     if data[e_lfanew : e_lfanew + 4] != b"PE\0\0":
@@ -92,7 +104,7 @@ def parse_exports(path: Path) -> list[Export]:
     export_rva, export_size = struct.unpack_from("<II", data, opt + 96)
     size_of_headers = struct.unpack_from("<I", data, opt + 60)[0]
     if export_rva == 0 or export_size == 0:
-        return []
+        return ExportIndex(names={}, ordinals=frozenset())
 
     sections = []
     sec = opt + opt_size
@@ -123,22 +135,32 @@ def parse_exports(path: Path) -> list[Export]:
     base = struct.unpack_from("<I", data, exp + 16)[0]
     nfunc = struct.unpack_from("<I", data, exp + 20)[0]
     nnames = struct.unpack_from("<I", data, exp + 24)[0]
+    funcs_rva = struct.unpack_from("<I", data, exp + 28)[0]
     names_rva = struct.unpack_from("<I", data, exp + 32)[0]
     ords_rva = struct.unpack_from("<I", data, exp + 36)[0]
-    out: list[Export] = []
-    seen: set[tuple[int, str]] = set()
+
+    names: dict[str, int] = {}
+    ordinals: set[int] = set()
+    for i in range(nfunc):
+        rva = struct.unpack_from("<I", data, rva_to_off(funcs_rva + i * 4))[0]
+        # A non-zero RVA inside the export directory is a forwarder string;
+        # wc3_pe_export() refuses those, so do not claim them as lifted.
+        if rva and not (export_rva <= rva < export_rva + export_size):
+            ordinals.add(base + i)
     for i in range(nnames):
         name_rva = struct.unpack_from("<I", data, rva_to_off(names_rva + i * 4))[0]
-        name = cstr(name_rva)
         index = struct.unpack_from("<H", data, rva_to_off(ords_rva + i * 2))[0]
-        if index >= nfunc:
-            continue
-        item = (base + index, name)
-        if item in seen:
-            continue
-        seen.add(item)
-        out.append(Export(ordinal=item[0], name=item[1]))
-    return out
+        if index < nfunc:
+            ordinal = base + index
+            if ordinal in ordinals:
+                names[cstr(name_rva)] = ordinal
+    return ExportIndex(names=names, ordinals=frozenset(ordinals))
+
+
+def parse_exports(path: Path) -> list[Export]:
+    """Read named exports; ordinal-only exports cannot be mapped to a name."""
+    index = parse_export_index(path)
+    return [Export(ordinal=ordinal, name=name) for name, ordinal in index.names.items()]
 
 
 def image_info(path: Path) -> tuple[int, int]:
@@ -165,13 +187,20 @@ def build_fixture(game_dir: Path, corpus: str, modules: list[str] | None = None)
     files = []
     raw_entries: list[tuple[str, Import, int]] = []
     export_maps: dict[str, dict[int, str]] = {}
+    export_index: dict[str, dict[str, list]] = {}
     for rel in modules:
         path = game_dir / rel
         if not path.exists():
             raise FileNotFoundError(f"missing module: {path}")
         imports = parse_imports(path)
-        exports = parse_exports(path)
-        export_maps[path.name.lower()] = {e.ordinal: e.name for e in exports}
+        index = parse_export_index(path)
+        export_maps[path.name.lower()] = {
+            ordinal: name for name, ordinal in index.names.items()
+        }
+        export_index[path.name.lower()] = {
+            "names": sorted(index.names),
+            "ordinals": sorted(index.ordinals),
+        }
         pe_base, image_size = image_info(path)
         target_base = TARGET_BASE.get(rel)
         if target_base is None:
@@ -190,7 +219,7 @@ def build_fixture(game_dir: Path, corpus: str, modules: list[str] | None = None)
                 "rebased": target_base != pe_base,
                 "target_in_scope": rel in TARGET_BASE,
                 "imports": len(imports),
-                "exports": len(exports),
+                "exports": len(index.names),
                 "hash_pinned": expected is not None,
                 "hash_verified": expected is not None and md5 == expected,
             }
@@ -222,6 +251,7 @@ def build_fixture(game_dir: Path, corpus: str, modules: list[str] | None = None)
         "pe_fixture_status": "available",
         "game_dir_basename": game_dir.name,
         "files": files,
+        "exports": export_index,
         "total": len(entries),
         "entries": entries,
     }

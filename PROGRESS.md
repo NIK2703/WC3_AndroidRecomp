@@ -1,5 +1,95 @@
 # Прогресс переноса инструментария (2026-11-06, продолжение)
 
+## Headless platform backend (track A, T0)
+
+- `runtime/platform/headless/` — первая реализация всех 15 интерфейсов
+  `Wc3Platform` для верификационного DUT: mem/file/time, thread/sync,
+  window/input/audio/clipboard/surface/log/config/asset/locale/vulkan.
+  Файлы разделены по подсистемам, каждый < 2000 строк; `platform.h` не менялся.
+- Mem — фиксированные 32-битные VA: `VirtualAlloc` на Windows,
+  `mmap(MAP_FIXED_NOREPLACE)`/`mprotect` на POSIX, с отказом от чужого
+  mapping вместо тихой подмены. File — stdio с 64-битными `seek`/`size`
+  (`_fseeki64`/`fseeko`), без текстового режима. Thread — реальный pthread на
+  каждый guest thread, TLS-индексы и join/detach; sync — Win32-семантика
+  event/mutex/semaphore/critical section, включая recursive acquire,
+  `WAIT_ABANDONED_0` при выходе владельца и `wait_all`.
+- `ConfigApi` больше не читает process environment: значения передаются
+  явно через `Wc3HeadlessConfigEntry`, дубликаты и кривые ключи отвергаются.
+  Это шаг к DUT-1 («запрет getenv»), но **не** полный DUT-1: время пока
+  реальное host-время, виртуальные тики/TA-12 расписания не реализованы.
+- Asset — явные asset/save roots, MPQ-имена сортируются для
+  детерминированного `enumerate_mpq`, `present` делает case-insensitive
+  поиск и отвергает `..`/разделители. Audio — валидный null-stream с
+  подтверждённой записью; Vulkan честно возвращает `-1` (в headless нет
+  instance/device). Input — тот же SPSC mailbox на 1024 события с
+  dropped-счётчиком.
+- `tests/platform_headless_test.c` — контрактный тест: таблица 15 API,
+  mem reserve/commit/protect/decommit/release, файлы, часы, pthread/TLS,
+  события/мьютексы/семафоры/CS/abandoned, input, окно, clipboard, locale
+  (UTF-8/1252), config, asset enumeration, audio/surface, guest memory.
+  `tools/run_tests.py --test platform_headless` — **OK** (debug+release).
+- `check_file_layout.py --strict` — только две предсуществующие R4-ошибки
+  (`runtime/legacy/hle_android.c`, `runtime/platform/android/platform_android.c`),
+  новых ошибок нет. POSIX-ветка на этом хосте не собиралась (нет
+  Linux/WSL); это зафиксировано как `unavailable`, а не pass.
+
+## Cross-module import binding и аудит импорта (вечернее продолжение)
+
+- `runtime/guest/guest_modules.{h,c}` — каталог загруженных guest-модулей и
+  привязка IAT: загруженный lifted-модуль выигрывает у HLE (как в
+  `runtime/legacy/boot_probe.c`), отсутствующий экспорт загруженного модуля
+  считается отдельно (`export_missing`) и только затем падает в HLE,
+  неразрешённый импорт не выдумывается. Каталог lock-free, без аллокаций,
+  имена DLL сравниваются по basename без учёта регистра; экспорт —
+  по имени (case-sensitive, как `GetProcAddress`) или ординалу.
+- `tests/module_registry_test.c` — синтетические PE32-образы в low memory:
+  именованные/ординальные экспорты, пути и регистр имён, дубликаты,
+  lifted binding, HLE fallback, missing export, unresolved import,
+  `wc3_module_bind_all`. Тест входит в T0 (`module_registry`, debug+release).
+- `tests/corpus_binding_test.c` — real-corpus проверка того же пути:
+  лицензионные rebased PE из `build/corpus-inputs` маппятся настоящим
+  `wc3_pe_load` по фиксированным базам (war3.exe 0x400000, game.dll 0x6F000000,
+  Storm 0x35000000, Mss32 0x35100000, Mssfast 0x35200000, Mp3dec 0x35300000,
+  ijl15 0x60000000), регистрируются и биндятся `wc3_module_bind_all`.
+  Ожидание из пинящей фикстуры: **1896** импортов семи файлов = **428**
+  lifted + **1468** HLE, `missing=0`, `export_missing=0`. Дополнительно
+  проверяются именованный IAT (`mss32.dll!_AIL_open_stream@12`), ординальный
+  (`Storm.dll!#279`), попадание `KERNEL32.dll!Sleep` в HLE-окно, отсутствие
+  диагностик и **полный обход import-таблиц**: все 428 lifted-слотов равны
+  `wc3_pe_export*`, все 1468 остальных лежат в HLE-окне, ни один descriptor
+  не остался без `OriginalFirstThunk`. Без корпуса тест возвращает
+  `unavailable`, а не pass. `run_tests.py --test corpus_binding`
+  (debug+release) — OK.
+- **Аудит лицензионного корпуса:** все **428** импортов из lifted-модулей
+  (`mss32.dll` 259, `Storm.dll` 166, `ijl15.dll` 3) разрешаются экспортами
+  этих модулей; 0 case-mismatch, 0 forwarder, 0 отсутствующих ординалов.
+  `game.dll` и `war3.exe` импортируют их статически, поэтому это не HLE-долг.
+- `config/pe_imports.1.27b.json` теперь несёт `exports` (имена + ординалы
+  каждого модуля), `config/imports.1.27b.json` — статус `lifted`:
+  `hle=1051`, `lifted=428`, `unresolved=832→404`, `excluded=76`,
+  `forbidden=50`. `tools/import_fixture.py` классифицирует lifted раньше HLE
+  и учитывает только in-scope (loaded) модули; `tools/hle_coverage.py`
+  требует, чтобы **каждый** импорт из loaded-модуля был lifted и чтобы
+  каждый lifted-символ действительно был в export index; lifted не считается
+  HLE-долгом. Обе негативные проверки (demoted-строка и поддельное имя)
+  возвращают FAIL. Генерация детерминирована (повторный прогон даёт тот же
+  sha256).
+- `tools/check_file_layout.py`: предупреждение R10 о missing
+  `import_policy.1.27b.json` теперь берёт остаток из
+  `config/imports.1.27b.json` (404), а не хардкодит 832.
+- Нормативные `docs/HLE_MODULES.md` H3/H4 всё ещё называют 832 unresolved и
+  426 реализованных HLE; они не правились, потому что HLE-раздел ведёт
+  параллельный агент. Расхождение зафиксировано здесь, а не замолчано.
+
+Проверки: `run_tests.py --test imports` — pass; `module_registry` — pass
+(debug/release); `corpus_binding` — **OK** на реальных 7 PE: 428 lifted /
+1468 HLE / 0 missing / 0 export_missing (debug+release);
+`check_layout.py --require-corpus` — pass;
+`check_file_layout.py --strict` — те же 2 предсуществующие R4-ошибки
+(`hle_android.c`, `platform_android.c`), warning теперь 404;
+`check_arch.py --concurrency --release` — только предсуществующие ошибки
+`runtime/legacy/`.
+
 Статус: M8 доведён до рабочего **C-only** конвейера. `build_tools.ps1` собирает
 **26 бинарников** и гоняет расширенный `-Smoke`. Замыкание
 `entry → seed → lift32 → closure → known → liftpass` **зелёное на полном
@@ -116,7 +206,11 @@ PowerShell (`build_tools.ps1`) — только оркестрация. `docs/*`
 - `check_equivalence.py` = `provisional`, G-15 = `missing` (нужен golden-набор
   по 18 модулям). G-05 закрыт только по **статической идентичности входов**;
   поведенческая эквивалентность остаётся за G-08/G-09.
-- M5: `QUARANTINE.md`, `hle_legacy_shim`, разделение `hle_android.c` по DLL.
+- M5: cross-module каталог и привязка импортов готовы
+  (`runtime/guest/guest_modules.c`), но boot-path продукта всё ещё идёт через
+  `runtime/legacy/boot_probe.c`; остаются `QUARANTINE.md`, `hle_legacy_shim`,
+  разделение `hle_android.c` по DLL и cutover загрузки модулей на новый
+  каталог.
 
 ## Планы
 

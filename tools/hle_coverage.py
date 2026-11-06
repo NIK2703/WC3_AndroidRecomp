@@ -34,6 +34,11 @@ def key(row: dict) -> tuple[str, str, int]:
     return (row["module"].lower(), row.get("name") or "", row.get("ordinal") or 0)
 
 
+def module_key(module: str) -> str:
+    """Basename shared by import descriptors and the PE export index."""
+    return module.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
 def read_table(path: Path) -> list[dict]:
     rows = []
     for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -113,7 +118,13 @@ def main(argv: list[str] | None = None) -> int:
         rows = imports.get("entries", [])
         if imports.get("total") != len(rows):
             errors.append("total does not match entries")
-        status_counts = {"hle": 0, "unresolved": 0, "excluded": 0, "forbidden": 0}
+        status_counts = {
+            "hle": 0,
+            "lifted": 0,
+            "unresolved": 0,
+            "excluded": 0,
+            "forbidden": 0,
+        }
         for i, row in enumerate(rows):
             status = row.get("status")
             if status not in status_counts:
@@ -136,6 +147,47 @@ def main(argv: list[str] | None = None) -> int:
         for name, count in status_counts.items():
             if imports.get(f"{name}_total", count) != count:
                 errors.append(f"{name}_total mismatch")
+        if sum(status_counts.values()) != imports.get("total"):
+            errors.append("status counts do not sum to total")
+        # The classification is only as good as the export index it was
+        # derived from.  Re-check every row against the PE fixture: an import
+        # from a loaded module must be lifted, and a lifted symbol must exist
+        # in that module's export table.  A stale or hand-edited entry cannot
+        # silence HLE debt this way.
+        fixture_path = ROOT / str(imports.get("pe_imports_file", ""))
+        try:
+            fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            fixture = {}
+            errors.append("cannot read the PE export fixture")
+        in_scope = {
+            module_key(str(item.get("name", "")))
+            for item in fixture.get("files", [])
+            if isinstance(item, dict) and item.get("target_in_scope")
+        }
+        exports = {
+            name.lower(): index
+            for name, index in fixture.get("exports", {}).items()
+            if name.lower() in in_scope
+        }
+        for i, row in enumerate(rows):
+            module = module_key(row.get("module", ""))
+            if module in in_scope and row.get("status") != "lifted":
+                errors.append(
+                    f"entry {i}: import from loaded module {module} is not lifted"
+                )
+            if row.get("status") != "lifted":
+                continue
+            index = exports.get(module)
+            if index is None:
+                errors.append(f"entry {i}: lifted module has no export index")
+            elif row.get("name") is not None:
+                if row["name"] not in index.get("names", []):
+                    errors.append(f"entry {i}: lifted name is not exported")
+            elif row.get("ordinal") is None or row["ordinal"] not in index.get(
+                "ordinals", []
+            ):
+                errors.append(f"entry {i}: lifted ordinal is not exported")
         files = imports.get("pe_files", [])
         pinned = [f for f in files if f.get("hash_pinned")]
         if len(pinned) < 5:
@@ -186,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"PE presence OK: total={imports.get('total')} "
             f"hle={imports.get('hle_total')} "
+            f"lifted={imports.get('lifted_total')} "
             f"excluded={imports.get('excluded_total')} "
             f"unresolved={unresolved} forbidden={forbidden}"
         )

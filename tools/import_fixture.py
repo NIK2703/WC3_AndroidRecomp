@@ -282,20 +282,58 @@ def find_hle(hle_map: dict[tuple[str, str, int], Entry], module: str,
     return None
 
 
+def import_module_key(module: str) -> str:
+    """Basename used by both PE import descriptors and the export index."""
+    return module.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
 def merge_pe(pe: dict, hle_entries: list[Entry]) -> tuple[list[dict], dict, list[Entry]]:
     hle_map = {hle_key(e.module, e.name, e.ordinal): e for e in hle_entries}
+    # The PE fixture carries each module's export directory.  A loaded lifted
+    # module owns its import namespace before HLE does: the legacy boot path
+    # resolves a loaded module export first and only then falls back to HLE.
+    # Out-of-scope files (blizzard.ax) are never loaded by the target, so their
+    # exports must not turn an import into a false "lifted".
+    in_scope = {
+        import_module_key(str(item.get("name", "")))
+        for item in pe.get("files", [])
+        if isinstance(item, dict) and item.get("target_in_scope")
+    }
+    exports = {
+        name.lower(): index
+        for name, index in pe.get("exports", {}).items()
+        if name.lower() in in_scope
+    }
     used: set[tuple[str, str, int]] = set()
     rows: list[dict] = []
-    counts = {"hle": 0, "unresolved": 0, "excluded": 0, "forbidden": 0}
+    counts = {
+        "hle": 0,
+        "lifted": 0,
+        "unresolved": 0,
+        "excluded": 0,
+        "forbidden": 0,
+    }
 
     for pe_row in pe.get("entries", []):
         module = pe_row["module"]
         name = pe_row.get("name")
         ordinal = pe_row.get("ordinal")
+        index = exports.get(import_module_key(module))
+        lifted = False
+        if index is not None:
+            if name is not None:
+                lifted = name in index.get("names", [])
+            elif ordinal is not None:
+                lifted = ordinal in index.get("ordinals", [])
         hle = find_hle(hle_map, module, name, ordinal)
         status: str
         reason = None
-        if hle is not None:
+        if lifted:
+            status = "lifted"
+            argc = None
+            callconv = None
+            hle_source = None
+        elif hle is not None:
             status = "hle"
             used.add(hle_key(hle.module, hle.name, hle.ordinal))
             argc = hle.argc
@@ -431,6 +469,7 @@ def main(argv: list[str] | None = None) -> int:
             "pe_files": pe.get("files", []),
             "total": len(rows),
             "hle_total": counts["hle"],
+            "lifted_total": counts["lifted"],
             "unresolved_total": counts["unresolved"],
             "forbidden_total": counts["forbidden"],
             "excluded_total": counts["excluded"],
@@ -498,6 +537,7 @@ def main(argv: list[str] | None = None) -> int:
     if imports.get("presence") == "pe":
         print(
             f"imports: {imports['total']} PE slots, hle={imports['hle_total']}, "
+            f"lifted={imports['lifted_total']}, "
             f"unresolved={imports['unresolved_total']}, "
             f"forbidden={imports['forbidden_total']}, "
             f"excluded={imports['excluded_total']} (pe_fixture=available)"

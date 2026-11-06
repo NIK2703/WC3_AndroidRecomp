@@ -135,8 +135,19 @@ def check() -> dict:
         if not (cfg / "schema").is_dir():
             warnings.append("R10: config/schema/ is missing (step M3)")
         if not (cfg / "import_policy.1.27b.json").is_file():
+            unresolved = "unclassified"
+            try:
+                fixture = json.loads(
+                    (cfg / "imports.1.27b.json").read_text(encoding="utf-8")
+                )
+                if isinstance(fixture, dict) and isinstance(
+                    fixture.get("unresolved_total"), int
+                ):
+                    unresolved = f"{fixture['unresolved_total']} unresolved"
+            except (OSError, json.JSONDecodeError):
+                pass
             warnings.append("R10: import_policy.1.27b.json is missing "
-                            "(832 unresolved PE imports are unclassified)")
+                            f"({unresolved} PE imports are unclassified)")
         for p in sorted(cfg.glob("*.json")):
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))

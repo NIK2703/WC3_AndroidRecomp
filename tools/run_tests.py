@@ -224,6 +224,57 @@ def test_platform_contract() -> int:
                 "--platform-contract", "--concurrency", "--lifecycle", "--release"])
 
 
+def test_platform_headless() -> int:
+    """T0: the verification platform implements all Wc3Platform APIs.
+
+    Real host primitives (memory, files, threads, sync) plus null
+    window/audio/surface.  No corpus and no device are required.
+    """
+    cc = gcc()
+    if not cc:
+        print("platform headless: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "runtime" / "platform" / "headless"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    headless = ROOT / "runtime" / "platform" / "headless"
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "platform" / "platform.c"),
+        str(headless / "headless_mem.c"),
+        str(headless / "headless_file.c"),
+        str(headless / "headless_time.c"),
+        str(headless / "headless_thread.c"),
+        str(headless / "headless_sync.c"),
+        str(headless / "headless_services.c"),
+        str(headless / "headless_init.c"),
+        str(ROOT / "runtime" / "guest" / "guest_memory.c"),
+        str(ROOT / "tests" / "platform_headless_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("platform_headless_test_debug.exe", 1),
+                        ("platform_headless_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_dispatch() -> int:
     cc = gcc()
     if not cc:
@@ -330,6 +381,166 @@ def test_t2() -> int:
     return run([sys.executable, str(script), "--corpus", "1.27b"])
 
 
+def test_module_registry() -> int:
+    """Cross-module binding: lifted export, HLE thunk, unresolved import."""
+    cc = gcc()
+    if not cc:
+        print("module registry: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "guest" / "guest_modules.c"),
+        str(ROOT / "runtime" / "guest" / "pe.c"),
+        str(ROOT / "runtime" / "guest" / "guest_memory.c"),
+        str(ROOT / "tests" / "module_registry_test.c"),
+    ]
+    for name, debug in (("module_registry_test_debug.exe", 1),
+                        ("module_registry_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_corpus_binding() -> int:
+    """Real 1.27b corpus through wc3_pe_load and the module registry.
+
+    Asset-gated: build/corpus-inputs comes from `corpusinput prepare`.  When it
+    is absent the test reports `unavailable`, never a pass.
+    """
+    cc = gcc()
+    if not cc:
+        print("corpus binding: unavailable (no host C compiler)")
+        return 2
+    corpus = ROOT / "build" / "corpus-inputs"
+    if not (corpus / "war3.exe").is_file():
+        print("corpus binding: unavailable (build/corpus-inputs missing)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "guest" / "guest_modules.c"),
+        str(ROOT / "runtime" / "guest" / "pe.c"),
+        str(ROOT / "runtime" / "guest" / "guest_memory.c"),
+        str(ROOT / "tests" / "corpus_binding_test.c"),
+    ]
+    for name, debug in (("corpus_binding_test_debug.exe", 1),
+                        ("corpus_binding_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe), str(corpus)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_hle_process() -> int:
+    """T0: kernel32/process identity handlers against a fake platform."""
+    cc = gcc()
+    if not cc:
+        print("hle process: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "process"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "process" / "process_hle.c"),
+        str(ROOT / "tests" / "process_hle_test.c"),
+    ]
+    for name, debug in (("process_hle_test_debug.exe", 1),
+                        ("process_hle_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_hle_memory() -> int:
+    """T0: kernel32/memory heap handlers against a fake guest heap."""
+    cc = gcc()
+    if not cc:
+        print("hle memory: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "memory"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "memory" / "memory_hle.c"),
+        str(ROOT / "tests" / "memory_hle_test.c"),
+    ]
+    for name, debug in (("memory_hle_test_debug.exe", 1),
+                        ("memory_hle_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_mailbox_set() -> int:
     """P0-8: four concurrent producers, one consumer, zero loss, FIFO."""
     cc = gcc()
@@ -392,8 +603,12 @@ def test_hle_time() -> int:
 TESTS = {
     "hle_abi": test_hle_abi,
     "direct_call": test_direct_call,
+    "module_registry": test_module_registry,
+    "corpus_binding": test_corpus_binding,
     "mailbox_set": test_mailbox_set,
     "hle_time": test_hle_time,
+    "hle_process": test_hle_process,
+    "hle_memory": test_hle_memory,
     "file_layout": test_file_layout,
     "docs": test_docs,
     "upstream_pin": test_upstream_pin,
@@ -406,6 +621,7 @@ TESTS = {
     "guest_runner": test_guest_runner,
     "asset_api": test_asset_api,
     "platform_contract": test_platform_contract,
+    "platform_headless": test_platform_headless,
 }
 
 T0_TESTS = list(TESTS)

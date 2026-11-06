@@ -69,6 +69,7 @@ target_compile_definitions(wc3_platform PUBLIC WC3_DEBUG=${WC3_DEBUG_DEFINE})
 
 add_library(wc3_guest STATIC
     "${WC3_ROOT}/runtime/guest/guest_memory.c"
+    "${WC3_ROOT}/runtime/guest/guest_modules.c"
     "${WC3_ROOT}/runtime/guest/pe.c")
 target_include_directories(wc3_guest PUBLIC ${WC3_INCLUDES})
 target_link_libraries(wc3_guest PUBLIC wc3_platform)
