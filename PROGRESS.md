@@ -95,6 +95,35 @@
   входит в `wc3_headless`; `null_backend_sha256` не публикуется, G-09/T1
   остаётся `missing`. Android/T2 не проверялись.
 
+## T1 difftest harness (track A, DUT-4 partial, 2026-11-07)
+
+- `tools/difftest.py` — харнес сравнения для T1 по V5.2/V5.3/V5.8; V5.7-хэши
+  отчёта проверяются, но исполнение H остаётся за будущим `wc3_headless`.
+  Сравнивает отчёт DUT с `oracle/identity.json` и `oracle/normalization.json`
+  по сценарию (`seed`, `input_script_sha256`, разрешение, `caps_snapshot`,
+  `schedule_sha256`), семи контрольным точкам, маркерам, нормализованным хэшам
+  guest memory, снимку `CPU`, каноническому хэшу D3D9-потока и трём
+  инвариантам V5.9. Save/replay сравниваются побайтово, если файлы доступны;
+  заявленный `sha256` проверяется отдельно.
+- Вердикты строгие по E11: `pass` невозможен без заполненного identity,
+  `normalization.json`, шести DUT-хэшей V5.7, всех контрольных точек и
+  golden-наборов E3/E4 (`scenario.golden` или `golden_sets`). Отсутствующее
+  доказательство даёт `unavailable` (exit 2), расхождение — `fail` (exit 1),
+  `pass` — только exit 0. Frame hash в T1 не сравнивается (V4.3).
+- `python tools/difftest.py self-test` — **OK, 23 проверки**: валидный эталон
+  проходит, испорченный D3D9-поток, сдвинутый байт save, изменённый маркер,
+  упавший V5.9-инвариант, malformed identity/run/normalization и
+  несовпавший `identity_sha256` дают `fail`; отсутствующие golden E3,
+  identity, normalization или checkpoint дают `unavailable`; побайтовое
+  сравнение отдельно проверено на совпадающих и сдвинутых файлах.
+  `run_tests.py --test difftest` — **OK**. `run_tests.py --t1` больше не ищет
+  запрещённый `wc3_host27.exe`; до появления `wc3_headless` он честно
+  возвращает `unavailable`, а не подменяет исполнение статическим отчётом.
+- **Не закрыто:** реальных `oracle/identity.json`/`normalization.json`,
+  golden E3/E4 и `wc3_headless` нет, поэтому `compare` на текущем дереве
+  возвращает `unavailable` (exit 2) и не пишет ложный `pass`. G-09 остаётся
+  `missing`; Android/T2 не проверялись.
+
 ## Config schemas (track A, M3/R10)
 
 - `config/schema/` — 10 JSON Schema (draft 2020-12): `common.schema.json`

@@ -313,6 +313,11 @@ def test_null_gfx() -> int:
     return 0
 
 
+def test_difftest() -> int:
+    """T1 harness self-test (V5.4): corrupted stream/save/marker fail."""
+    return run([sys.executable, str(ROOT / "tools" / "difftest.py"), "self-test"])
+
+
 def test_dispatch() -> int:
     cc = gcc()
     if not cc:
@@ -392,22 +397,14 @@ def test_upstream_pin() -> int:
 
 
 def test_t1() -> int:
-    """Run the Windows reference host difftest, if the oracle is built."""
-    candidates = [
-        ROOT / "build" / "host" / "wc3_host27.exe",
-        ROOT / "build" / "wc3_host27.exe",
-        ROOT / "bin" / "wc3_host27.exe",
-    ]
-    host = next((p for p in candidates if p.exists()), None)
-    if host is None:
-        print("T1: unavailable (no wc3_host27.exe; Windows oracle not ported)")
-        return 2
-    difftest = ROOT / "tools" / "difftest.py"
-    if not difftest.exists():
-        print("T1: unavailable (wc3_host27.exe exists but tools/difftest.py does not)")
-        return 2
-    return run([sys.executable, str(difftest), "--host", str(host),
-                "--corpus", "1.27b"])
+    """T1: execute the headless DUT and compare it with the oracle.
+
+    V5.7 requires the harness to execute H (`wc3_headless`).  A report-only
+    comparison is useful while the DUT is being built, but it is not this gate;
+    the historical Windows host is not a substitute (ADR-026/027).
+    """
+    print("T1: unavailable (wc3_headless is not built; no Windows oracle host)")
+    return 2
 
 
 def test_t2() -> int:
@@ -662,6 +659,7 @@ TESTS = {
     "platform_contract": test_platform_contract,
     "platform_headless": test_platform_headless,
     "null_gfx": test_null_gfx,
+    "difftest": test_difftest,
 }
 
 T0_TESTS = list(TESTS)
