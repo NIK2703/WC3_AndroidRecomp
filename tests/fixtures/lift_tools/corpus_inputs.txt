@@ -1,0 +1,7 @@
+# Deterministic corpus inputs for the corpus.exe smoke test.
+# Paths are relative to the repository root (--root), so the hash is stable
+# across checkouts.  No licensed PE and no generated C is listed here.
+tests/fixtures/lift_tools/game_smoke.c
+tests/fixtures/lift_tools/todo_smoke.c
+tests/fixtures/lift_tools/war3_smoke.c
+tests/fixtures/lift_tools/lifted_smoke.h

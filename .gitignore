@@ -1,0 +1,51 @@
+# wc3_android_recomp - source tree hygiene
+#
+# The generated lift corpus is derived from the licensed game binaries and is
+# never committed.  Build products, host test binaries and tool caches are
+# regenerated locally.  See docs/FILE_LAYOUT.md for the rules enforced by
+# tools/check_file_layout.py.
+
+# --- generated code and build products -------------------------------------
+/build/
+/out/
+/gen/
+/runtime/guest/generated/
+/runtime/gfx/dxvk_*/build/
+/apps/android_gameactivity/build/
+/apps/android_gameactivity/.gradle/
+
+# --- compiled artefacts -----------------------------------------------------
+*.o
+*.obj
+*.a
+*.so
+*.exe
+*.apk
+*.dll
+!third_party/capstone/bin/capstone.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+/third_party/softfloat/build-host/
+
+# --- caches -----------------------------------------------------------------
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# --- generated reports (regenerate with the tools) --------------------------
+/reports/generated/
+
+# --- game assets must never be committed -----------------------------------
+*.mpq
+*.mix
+*.wav
+*.mp3
+*.blp
+*.mdx
+*.mdl
+*.w3m
+*.w3x
+*.w3g

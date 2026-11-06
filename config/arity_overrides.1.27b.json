@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "corpus": "1.27b",
+  "entries": [
+    {
+      "module": "MSVCR80.dll",
+      "name": "_crt_debugger_hook",
+      "argc": 1,
+      "callconv": "cdecl",
+      "source": "runtime/host/hle.c:787 (historical host table; resolves legacy Android duplicate 0/1)"
+    }
+  ]
+}

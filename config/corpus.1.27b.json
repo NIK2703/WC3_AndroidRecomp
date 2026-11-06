@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "corpus": "1.27b",
+  "generator": "wc3lift",
+  "lift_rev": 1,
+  "layout_file": "runtime/guest/guest_layout.h",
+  "inputs_root": "build/corpus-inputs",
+  "note": "BP-6 / V4.6: declarative lift inputs. Four modules are lifted from copies rebased to their Android bases (0x35xxxxxx), not from the installed originals. corpusinput.exe prepare generates build/corpus-inputs/ from the licensed files and verifies each rebase by a round trip; corpus.exe hash produces corpus.sha256 over those real files. The generated copies are build artefacts (R2/R3), never committed.",
+  "inputs": [
+    {
+      "name": "war3.exe",
+      "path": "build/corpus-inputs/war3.exe",
+      "source": "E:\\Games\\Warcraft III\\war3.exe",
+      "source_sha256": "0ea3434d2bdfd9609eda5fce2a68febac2137af72846de52e0008b142297ffbd",
+      "base": 4194304,
+      "rebase": false
+    },
+    {
+      "name": "game.dll",
+      "path": "build/corpus-inputs/game.dll",
+      "source": "E:\\Games\\Warcraft III\\game.dll",
+      "source_sha256": "d51e5680243fc90e19c9d6074f7fac433c466d3cf5f46e2364291725574d8236",
+      "base": 1862270976,
+      "rebase": false
+    },
+    {
+      "name": "Storm.dll",
+      "path": "build/corpus-inputs/Storm_a35.dll",
+      "source": "E:\\Games\\Warcraft III\\Storm.dll",
+      "source_sha256": "36339f69727f0f3dcb4431a9567b84f56007c331cfa3b183862af43e8314eb72",
+      "base": 889192448,
+      "rebase": true
+    },
+    {
+      "name": "Mss32.dll",
+      "path": "build/corpus-inputs/Mss32_a35.dll",
+      "source": "E:\\Games\\Warcraft III\\Mss32.dll",
+      "source_sha256": "cc142b9d8b5223e2720c6440cb7a124c0a80d2fb04ecf59ad7331dfd6e3cb51f",
+      "base": 890241024,
+      "rebase": true
+    },
+    {
+      "name": "Mssfast.m3d",
+      "path": "build/corpus-inputs/Mssfast_a35.m3d",
+      "source": "E:\\Games\\Warcraft III\\redist\\miles\\Mssfast.m3d",
+      "source_sha256": "92dc46b5a48f259b7638d64eaa980019b94633f24933c59c7a25c4e14bd5253d",
+      "base": 891289600,
+      "rebase": true
+    },
+    {
+      "name": "Mp3dec.asi",
+      "path": "build/corpus-inputs/Mp3dec_a35.asi",
+      "source": "E:\\Games\\Warcraft III\\redist\\miles\\Mp3dec.asi",
+      "source_sha256": "31bcb7cc08b5a9c0d856913f2879c93e175dc8eb7b3d1fb2a61f50a169efa66a",
+      "base": 892338176,
+      "rebase": true
+    },
+    {
+      "name": "ijl15.dll",
+      "path": "build/corpus-inputs/ijl15.dll",
+      "source": "E:\\Games\\Warcraft III\\ijl15.dll",
+      "source_sha256": "d6d997c79a8c8c29b5485710ba97c7d27b4065297ed24929e30cab549269d755",
+      "base": 1610612736,
+      "rebase": false
+    }
+  ]
+}

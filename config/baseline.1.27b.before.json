@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "corpus": "1.27b",
+  "phase": "before",
+  "captured_at": "2026-11-06T07:11:02.395301+00:00",
+  "artifacts": [
+    {
+      "path": "config/imports.1.27b.json",
+      "status": "ok",
+      "size": 1107977,
+      "sha256": "b1db2a1114e24ebd1da59ecd12f843cd0e94d6f1be8d410a7a1570075ec4bfd8",
+      "marker_tail": "}"
+    },
+    {
+      "path": "config/pe_imports.1.27b.json",
+      "status": "ok",
+      "size": 322382,
+      "sha256": "1a3d2342a6e6748068452426fb614ae34eda703911ad9681437925cfd09bf3f5",
+      "marker_tail": "}"
+    },
+    {
+      "path": "config/hle_arity.1.27b.json",
+      "status": "ok",
+      "size": 63849,
+      "sha256": "337c1a9579a89efccaae4bf3371c7423a3c17d84a2e5ba423290eb6553ac39bc",
+      "marker_tail": "}"
+    },
+    {
+      "path": "config/cdecl_allowlist.1.27b.json",
+      "status": "ok",
+      "size": 13063,
+      "sha256": "c3b19ac70f40cb7a5a0ec95b5c6d8d6ec904582a2f5bb662dd3f0907f9fae397",
+      "marker_tail": "}"
+    },
+    {
+      "path": "config/hle_table.1.27b.tsv",
+      "status": "ok",
+      "size": 24309,
+      "sha256": "d3b30c346bdde3ffcb61cf4d0e7fa7be0d6c257398f0bc6bcf287a0f48c53423",
+      "marker_tail": "WINTRUST.dll\tWinVerifyTrust\t\t3\tstdcall\thle_android.c:8933"
+    },
+    {
+      "path": "docs/ARCHITECTURE_1.27B.md",
+      "status": "ok",
+      "size": 88701,
+      "sha256": "b2cb1d52dd8bc5e7fef9140fa7beea27b7bc9b8fdef8e618bb0585da44399da1",
+      "marker_tail": "* `E:\\projects\\warcraft3_recomp` — as-built реализация (источник кода до cutover)."
+    },
+    {
+      "path": "docs/THREAD_AUDIT.md",
+      "status": "ok",
+      "size": 9840,
+      "sha256": "0c2d7b331276e2c864d347f80fe6a9cbade15c9efbc7da087f3226aff822a784",
+      "marker_tail": "as-built поведение; гейт — T0 unit + T1 Windows oracle, device boot = T2."
+    },
+    {
+      "path": "runtime/hle/abi/hle_abi.h",
+      "status": "ok",
+      "size": 3861,
+      "sha256": "88dba4c080dc9151542c1210bf3d249fce791da4d46749270222e615033a6b01",
+      "marker_tail": "#endif /* WC3_HLE_ABI_H */"
+    },
+    {
+      "path": "runtime/hle/abi/hle_abi.c",
+      "status": "ok",
+      "size": 4911,
+      "sha256": "c0e0366d3d2b6cb2652168944e75ad794f71b0fcdca3ab5e6acf7ef566d9940d",
+      "marker_tail": "}"
+    },
+    {
+      "path": "runtime/guest/guest_layout.h",
+      "status": "ok",
+      "size": 2292,
+      "sha256": "c06b0738501c46de40651733b5e8ddbf411bc584d4f9b6379242a88fc22d4225",
+      "marker_tail": "#endif /* WC3_GUEST_LAYOUT_H */"
+    },
+    {
+      "path": "runtime/platform/platform.h",
+      "status": "ok",
+      "size": 9505,
+      "sha256": "0c4f5ac6b5774cbb8d5b9cfa98fd828f4211952f622bd05ed63232d3bea36beb",
+      "marker_tail": "#endif /* WC3_PLATFORM_H */"
+    }
+  ],
+  "unavailable": [
+    {
+      "id": "windows_reference_host",
+      "reason": "runtime/host_ref and wc3_host27.exe are not ported yet"
+    },
+    {
+      "id": "android_device",
+      "reason": "no adb device and no Android SDK/NDK in this workspace"
+    },
+    {
+      "id": "android_build",
+      "reason": "no Android SDK/NDK; host checks only"
+    }
+  ]
+}

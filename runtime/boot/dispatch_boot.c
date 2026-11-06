@@ -1,0 +1,125 @@
+/*
+ * dispatch_boot.c - first executable dispatcher in the canonical tree.
+ *
+ * The generated corpus names one C function per guest VA (L_<va>).  This file
+ * owns the mapping from a guest target to that function and the HLE window
+ * check.  It deliberately has no dependency on the old host tree: the only
+ * generated input is boot_dispatch_list.h, which is a list of guest VAs.
+ *
+ * The boot list contains war3.exe and Storm.dll only.  game.dll is the next
+ * corpus round; until it is linked, an unknown target is fatal instead of a
+ * fabricated return value.
+ */
+#include "legacy_shim.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+
+#define X(a) void L_##a(CPU *c);
+#include "boot_dispatch_list.h"
+LIFTED_FUNCS(X)
+#undef X
+
+uint32_t g_image_delta = 0;
+
+typedef struct {
+    uint32_t va;
+    void (*fn)(CPU *);
+} LiftEnt;
+
+static const LiftEnt g_lift[] = {
+#define X(a) { 0x##a##u, L_##a },
+    LIFTED_FUNCS(X)
+#undef X
+};
+
+#define LIFT_HASH_BITS 19
+#define LIFT_HASH_SIZE (1u << LIFT_HASH_BITS)
+static uint32_t g_lift_hash[LIFT_HASH_SIZE];
+
+void wc3_dispatch_init(void)
+{
+    size_t count = sizeof g_lift / sizeof g_lift[0];
+    for (size_t i = 0; i < count; i++) {
+        uint32_t h = (g_lift[i].va * 2654435761u) >> (32 - LIFT_HASH_BITS);
+        while (g_lift_hash[h])
+            h = (h + 1) & (LIFT_HASH_SIZE - 1);
+        g_lift_hash[h] = (uint32_t)(i + 1);
+    }
+}
+
+void wc3_dispatch_shutdown(void)
+{
+}
+
+static inline void (*find_lifted(uint32_t va))(CPU *)
+{
+    uint32_t h = (va * 2654435761u) >> (32 - LIFT_HASH_BITS);
+    for (unsigned n = 0; n < LIFT_HASH_SIZE; n++) {
+        uint32_t e = g_lift_hash[h];
+        if (!e)
+            return NULL;
+        if (g_lift[e - 1].va == va)
+            return g_lift[e - 1].fn;
+        h = (h + 1) & (LIFT_HASH_SIZE - 1);
+    }
+    return NULL;
+}
+
+static THREAD_LOCAL int g_disp_depth;
+static THREAD_LOCAL int g_tail_pending;
+static THREAD_LOCAL uint32_t g_tail_target;
+
+static void dispatch_unknown(CPU *c, uint32_t target, int tail)
+{
+    uint32_t *sp = (uint32_t *)(uintptr_t)c->esp;
+    fprintf(stderr,
+            "[dispatch] %s unknown guest target %08X (eip=%08X esp=%08X ra=%08X %s)\n",
+            tail ? "jmp" : "call", target, c->eip, c->esp,
+            sp ? sp[0] : 0, wc3_legacy_hle_describe(c->eip));
+    if (sp)
+        fprintf(stderr, "[dispatch]   stk: %08X %08X %08X %08X %08X %08X\n",
+                sp[0], sp[1], sp[2], sp[3], sp[4], sp[5]);
+    abort();
+}
+
+static void dispatch_common(CPU *c, uint32_t target, int tail)
+{
+    int chained = 0;
+    g_disp_depth++;
+    for (;;) {
+        g_tail_pending = 0;
+        if (target >= GUEST_HLE_BASE &&
+            target < GUEST_HLE_BASE + WC3_LEGACY_HLE_MAX *
+                                      WC3_LEGACY_HLE_STRIDE) {
+            wc3_legacy_hle_call(target, c);
+            break;
+        }
+        void (*fn)(CPU *) = find_lifted(target);
+        if (fn) {
+            fn(c);
+            if (!g_tail_pending)
+                break;
+            chained = 1;
+            target = g_tail_target;
+            continue;
+        }
+        dispatch_unknown(c, target, tail || chained);
+    }
+    g_disp_depth--;
+}
+
+void dispatch(CPU *c, uint32_t target)
+{
+    dispatch_common(c, target, 0);
+}
+
+void dispatch_jmp(CPU *c, uint32_t target)
+{
+    if (g_disp_depth > 0) {
+        g_tail_pending = 1;
+        g_tail_target = target;
+        return;
+    }
+    dispatch_common(c, target, 1);
+}

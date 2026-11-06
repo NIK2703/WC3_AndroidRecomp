@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.hardware.vulkan.version"
+                  android:version="0x400003" android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:hasCode="true"
+        android:label="WC3 recomp"
+        android:theme="@style/Wc3Theme">
+
+        <activity
+            android:name="com.wc3.recomp.Wc3GameActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode|density"
+            android:exported="true"
+            android:screenOrientation="userLandscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="wc3gameactivity" />
+        </activity>
+    </application>
+</manifest>

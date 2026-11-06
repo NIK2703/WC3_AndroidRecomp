@@ -1,0 +1,288 @@
+{
+  "schema": 1,
+  "corpus": "1.27b",
+  "note": "BP-4.2: pinned read-only upstream for the M5 toolchain migration. Verified by tools/lift/check_upstream.py.",
+  "upstream": {
+    "path": "E:/projects/warcraft3_recomp",
+    "revision": "791bdbaf313520f3fa2e1b49df87ebb354b9b340",
+    "sha256": "5302a3f58a5c1c2420f76519e267f1229c3a48b943388448b94665692f570375",
+    "allow_unpinned": false,
+    "role": "read-only input supply; never invoked as a build step (BP-3.3)"
+  },
+  "components": [
+    {
+      "label": "compiled lift tools (C)",
+      "path": "tools/lift/csrc",
+      "files": [
+        {
+          "name": "addr.c",
+          "bytes": 6271,
+          "sha256": "135c13fae665b92bd5b3e42c0e7858d2abdb990bdfa7e56c5c00a25d3e9c523e"
+        },
+        {
+          "name": "bmp2png.c",
+          "bytes": 8699,
+          "sha256": "5b9c6b1b59ce4375c118157280ee7672fa58c54c202bcec3b2e64a7a2de5d50b"
+        },
+        {
+          "name": "bmpinfo.c",
+          "bytes": 6291,
+          "sha256": "ad1ef6108103269ab4d27aedbb45c0b7b920e5f4bb7cbb284cccb30d69829f60"
+        },
+        {
+          "name": "closure.c",
+          "bytes": 12519,
+          "sha256": "d1a8d7ff913631f4fe19d06369fd052b7f5cdca5213de16f5f6a2b711d8c9ce0"
+        },
+        {
+          "name": "csglue.c",
+          "bytes": 3099,
+          "sha256": "085188607e0687e666f00cc3eb3595d663d98c6d3e44e73993cba066719cba55"
+        },
+        {
+          "name": "cstest.c",
+          "bytes": 1818,
+          "sha256": "46dd8d45d7239839fc648e4ecc8891e20aaf346366fdade4de247b70c4a56160"
+        },
+        {
+          "name": "entry.c",
+          "bytes": 11732,
+          "sha256": "45713162b517cab67fcdd3c0d7cefd52f7560c5672d6b9ac0b3413065c549020"
+        },
+        {
+          "name": "expand.c",
+          "bytes": 15947,
+          "sha256": "697e3f4cef83eb92e51032847b4f2c55c0a7c7a56d5c3862c402db2bd2147e45"
+        },
+        {
+          "name": "hle.c",
+          "bytes": 13036,
+          "sha256": "f376e69da800aee3b3fc844a846c7b22b611bfcd7de9e4f6c15dfa8349e1383f"
+        },
+        {
+          "name": "known.c",
+          "bytes": 6508,
+          "sha256": "309ff8bab25911f9e22bdb273063c4f05ed6d7378bc3e61d0be5088f21de485a"
+        },
+        {
+          "name": "ledger.c",
+          "bytes": 17633,
+          "sha256": "140b2b4d4d00fbf9363ae3c016d25626d17b1446c3d156de0316f5e071dd28d3"
+        },
+        {
+          "name": "lift.c",
+          "bytes": 25490,
+          "sha256": "0b7a24c57027f0a802d95316d391824555f5c236ecc07fda4bdebcf4373b40a7"
+        },
+        {
+          "name": "lift32.c",
+          "bytes": 6859,
+          "sha256": "5302a3f58a5c1c2420f76519e267f1229c3a48b943388448b94665692f570375"
+        },
+        {
+          "name": "liftcore.c",
+          "bytes": 42095,
+          "sha256": "7c239efdc755bd701b724daaa1fe1f3102121c50a5b5826c6a1db54f9a716966"
+        },
+        {
+          "name": "liftemit.c",
+          "bytes": 54015,
+          "sha256": "5df574920860a091293c6bab441466eb30c0fe1d9f77b69739a77bd3c7e02129"
+        },
+        {
+          "name": "liftutil.c",
+          "bytes": 15044,
+          "sha256": "57f8d0e8cab7bcfec88046ad09b92b8f51ac169de37255200049699211b5d7c5"
+        },
+        {
+          "name": "lint.c",
+          "bytes": 24849,
+          "sha256": "02b16ce40bb261ef493e996db8c9e82dc96a8c3a6dd3ee6f02617fd2af8219cc"
+        },
+        {
+          "name": "manifest.c",
+          "bytes": 13195,
+          "sha256": "7ad2599a09dbb9273528ed64cfb692a8ffc09e5c07f03619949e5e684da76257"
+        },
+        {
+          "name": "map.c",
+          "bytes": 14931,
+          "sha256": "01b3509f6ecf2d7f8213a2eb78308abe9afdb1b4bc67528c5795cf00d56de137"
+        },
+        {
+          "name": "probe.c",
+          "bytes": 11453,
+          "sha256": "cddd37fe24994a716d21c48398488b4475a58db0d6c28476c3ca252e57f996a5"
+        },
+        {
+          "name": "refs.c",
+          "bytes": 23869,
+          "sha256": "775a7040d601301d9acb970e9a1b9188cdefba4e695c8741ba5e1e1567f67465"
+        },
+        {
+          "name": "scan.c",
+          "bytes": 9527,
+          "sha256": "5b29f5fd27974010c0c0f3e6acf1952f3fda7c1836d679039964a390db1190f8"
+        },
+        {
+          "name": "seed.c",
+          "bytes": 8511,
+          "sha256": "f0bd41afec588c3bbb71d53b5e945be24c19f5ea904d9b8de6a9d1c6675117ec"
+        },
+        {
+          "name": "stack.c",
+          "bytes": 23457,
+          "sha256": "d50153263e4d7fd4f03837bb35f3907162b5d9e353f44578e9e2f4b3963c0800"
+        },
+        {
+          "name": "triage.c",
+          "bytes": 14174,
+          "sha256": "2c9bbe431579eba3476fe28415d46774ff2e1ba70e08c6b4e18d0af7e2f400cf"
+        },
+        {
+          "name": "watch.c",
+          "bytes": 14972,
+          "sha256": "6da82eb14f167a8098669a352c2121111acec288e31fad90553de2a0f8bd524e"
+        }
+      ]
+    },
+    {
+      "label": "compiled lift tools (headers)",
+      "path": "tools/lift/csrc",
+      "files": [
+        {
+          "name": "csglue.h",
+          "bytes": 1875,
+          "sha256": "6ac4ddc97f668dc0402510121a1c6354f07678cd98c99be057363cec868be0f9"
+        },
+        {
+          "name": "liftcore.h",
+          "bytes": 3706,
+          "sha256": "8f4c1615dc20941a8453f76c19fe0dead870c56cc5878b741ce3b937d9a092ed"
+        },
+        {
+          "name": "pe.h",
+          "bytes": 7520,
+          "sha256": "ab2973ffbaeb734436fd1700703ba9a45615fbf002b82184864aff8b7951e090"
+        }
+      ]
+    },
+    {
+      "label": "capstone headers (vendor)",
+      "path": "third_party/capstone/include/capstone",
+      "files": [
+        {
+          "name": "arm.h",
+          "bytes": 20872,
+          "sha256": "55b51767f8a9118eb73a34ed231eb6ffe3ace5df3326e42fee430778f5628d30"
+        },
+        {
+          "name": "arm64.h",
+          "bytes": 86980,
+          "sha256": "335cd0305922e852777cdcaa0e38479d07d1333d46cc8cde0fe90c03ce776c9b"
+        },
+        {
+          "name": "bpf.h",
+          "bytes": 4308,
+          "sha256": "864014559514848b914b26310c912eaf42a1c54ab30cb9f89d6edf6393a79eef"
+        },
+        {
+          "name": "capstone.h",
+          "bytes": 34908,
+          "sha256": "65bb5f0a7947ccf91d23a4db4584ed310663af9527fc4cbd179b1fa99d21f9fe"
+        },
+        {
+          "name": "evm.h",
+          "bytes": 4574,
+          "sha256": "1defbf3926651d481ae0fd9942f3811ceac6a79df28fbd5d58eb6b0423d8b34d"
+        },
+        {
+          "name": "m680x.h",
+          "bytes": 12857,
+          "sha256": "6d20cb54b1c882aa874ea364e98c880484fdee65e046d0a172a31b82400eb141"
+        },
+        {
+          "name": "m68k.h",
+          "bytes": 14468,
+          "sha256": "91f23e01a3addcb9b8b18de5d2fd2946134fac782cc7833144187b259f145a98"
+        },
+        {
+          "name": "mips.h",
+          "bytes": 18000,
+          "sha256": "8f806d3f8f86f84a36a6c2e586c10191c8494a8e6cb036db5ed020c5ae402158"
+        },
+        {
+          "name": "mos65xx.h",
+          "bytes": 5991,
+          "sha256": "7ef12404e03725a1d807f46bfac06de0c45981b353532ab67efb4e07e4e46ce9"
+        },
+        {
+          "name": "platform.h",
+          "bytes": 4132,
+          "sha256": "06ccad6778eea6a94930f10e20e24ae4287014a4dc87cc66b9f13198371d838c"
+        },
+        {
+          "name": "ppc.h",
+          "bytes": 40378,
+          "sha256": "d1d5bf90bf03ccf479262cf90d003ccd271f941a369e0e5556076afc3a55caba"
+        },
+        {
+          "name": "riscv.h",
+          "bytes": 13799,
+          "sha256": "6d112f486553896607746315340b69db991242d81e8c33b30f02e0c339ade25a"
+        },
+        {
+          "name": "sh.h",
+          "bytes": 8238,
+          "sha256": "a3be96c93a2b91682ff0bcd3ba0a1303a6f30fce8aa9105d52a84d0467b60aa4"
+        },
+        {
+          "name": "sparc.h",
+          "bytes": 11817,
+          "sha256": "59f988c98630a9c3f70282a1095861f48bfcfd58f6d104f24f378a17eaf767ca"
+        },
+        {
+          "name": "systemz.h",
+          "bytes": 47232,
+          "sha256": "32da6c63cd358ba7002814b2a0f77d0fd617347ead2c30cddc8e9f8075740b87"
+        },
+        {
+          "name": "tms320c64x.h",
+          "bytes": 8621,
+          "sha256": "e30f98590a301d65e413951a663ea6cd15f7f9992543bd52dcc6f1205ee0a061"
+        },
+        {
+          "name": "tricore.h",
+          "bytes": 13257,
+          "sha256": "c0bcc689644f0066cbae95d3b6e9370545336aa5415c329990f273f01e736c23"
+        },
+        {
+          "name": "wasm.h",
+          "bytes": 6441,
+          "sha256": "f2861adc7692734ddf9e955f6eba5c00ea5462eb30f8c2da2239b4718febff53"
+        },
+        {
+          "name": "x86.h",
+          "bytes": 45041,
+          "sha256": "e150421101a4467c7f1ff6418f16a97f7504df27af6f2d86c44b13b8f3f7b8a0"
+        },
+        {
+          "name": "xcore.h",
+          "bytes": 5154,
+          "sha256": "5f81adf0761c57cf61306e4f683f27cedcc9f50d7a308a374c389d16e490c297"
+        }
+      ]
+    },
+    {
+      "label": "capstone runtime DLL (vendor)",
+      "path": "third_party/capstone/bin",
+      "files": [
+        {
+          "name": "capstone.dll",
+          "bytes": 7576576,
+          "sha256": "76958e18380023a68fd1714fa2e01c594cc6db1955a07ad6937b66e66dc5d6c3"
+        }
+      ]
+    }
+  ]
+}

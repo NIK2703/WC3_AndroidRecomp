@@ -1,0 +1,15 @@
+# Patches must stay LF so `git apply` works on Windows checkouts with
+# core.autocrlf=true.
+*.patch text eol=lf
+*.diff text eol=lf
+
+# Generated C from the lifter is compared byte-for-byte against the Python
+# reference (modulo CRLF); keep it deterministic.
+/runtime/guest/generated/*.c text eol=lf
+/runtime/guest/generated/*.h text eol=lf
+
+# Markdown and tool sources are text; let git normalise them.
+*.md text
+*.py text
+*.json text
+*.tsv text

@@ -1,0 +1,235 @@
+# Build the canonical Android debug APK from this tree.
+#
+# Native code is built by build_app.ps1/CMake; Gradle only packages the Java
+# activity and the already-built libwc3gameactivity.so.  No script from the old
+# working tree is executed.  Exit codes: 0 built, 1 failure, 2 unavailable.
+
+[CmdletBinding()]
+param(
+    [switch]$Clean,
+    [switch]$Release,
+    [switch]$NativeDebug,
+    [switch]$Install,
+    [switch]$Launch,
+    [string]$Serial = '',
+    [string]$GamesActivityAar = ''
+)
+
+$ErrorActionPreference = 'Stop'
+if ($Release -and $NativeDebug) {
+    Write-Host '[apk] -NativeDebug is incompatible with -Release'
+    exit 1
+}
+$variant = if ($Release) { 'release' } else { 'debug' }
+$root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$projectDir = Join-Path $root 'apps\android_gameactivity'
+$outDir = Join-Path $root 'build\android_app'
+
+function Get-AndroidSdk {
+    $candidates = @()
+    if ($env:ANDROID_SDK_ROOT) { $candidates += $env:ANDROID_SDK_ROOT }
+    if ($env:ANDROID_HOME)     { $candidates += $env:ANDROID_HOME }
+    if ($env:LOCALAPPDATA)     { $candidates += (Join-Path $env:LOCALAPPDATA 'Android\Sdk') }
+    $candidates += 'E:\Android\Sdk'
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path (Join-Path $c 'platform-tools\adb.exe'))) {
+            return (Resolve-Path $c).Path
+        }
+    }
+    return $null
+}
+
+function Get-Jdk {
+    $candidates = @()
+    if ($env:JAVA_HOME) { $candidates += $env:JAVA_HOME }
+    if ($env:USERPROFILE) { $candidates += (Join-Path $env:USERPROFILE 'tools') }
+    foreach ($c in $candidates) {
+        if (-not $c -or -not (Test-Path $c)) { continue }
+        if (Test-Path (Join-Path $c 'bin\java.exe')) { return (Resolve-Path $c).Path }
+        $child = Get-ChildItem $c -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName 'bin\java.exe') } |
+            Sort-Object Name -Descending | Select-Object -First 1
+        if ($child) { return $child.FullName }
+    }
+    return $null
+}
+
+function Get-Gradle {
+    $roots = @(
+        (Join-Path $env:USERPROFILE '.gradle\wrapper\dists\gradle-8.10.2-all'),
+        (Join-Path $env:USERPROFILE 'tools\gradle-8.10.2')
+    )
+    foreach ($r in $roots) {
+        if (-not (Test-Path $r)) { continue }
+        $bat = Get-ChildItem $r -Recurse -File -Filter 'gradle.bat' -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
+        if ($bat) { return $bat }
+    }
+    return $null
+}
+
+function Get-BuildTools {
+    param([string]$Sdk)
+    $dirs = Get-ChildItem (Join-Path $Sdk 'build-tools') -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending
+    foreach ($d in $dirs) {
+        if (Test-Path (Join-Path $d.FullName 'aapt2.exe')) { return $d.FullName }
+    }
+    return $null
+}
+
+function Get-NdkRoot {
+    param([string]$Sdk)
+    $roots = @()
+    if ($env:ANDROID_NDK_HOME) { $roots += $env:ANDROID_NDK_HOME }
+    if ($env:ANDROID_NDK_ROOT) { $roots += $env:ANDROID_NDK_ROOT }
+    $parent = Join-Path $Sdk 'ndk'
+    if (Test-Path $parent) {
+        $roots += @(Get-ChildItem $parent -Directory |
+            Sort-Object Name -Descending |
+            ForEach-Object { $_.FullName })
+    }
+    foreach ($r in ($roots | Select-Object -Unique)) {
+        if (Test-Path (Join-Path $r 'toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe')) {
+            return (Resolve-Path $r).Path
+        }
+    }
+    return $null
+}
+
+$sdk = Get-AndroidSdk
+if (-not $sdk) { Write-Host '[apk] unavailable: Android SDK not found'; exit 2 }
+$jdk = Get-Jdk
+if (-not $jdk) { Write-Host '[apk] unavailable: JDK not found'; exit 2 }
+$gradle = Get-Gradle
+if (-not $gradle) { Write-Host '[apk] unavailable: Gradle 8.10.2 not found'; exit 2 }
+$buildTools = Get-BuildTools -Sdk $sdk
+if (-not $buildTools) { Write-Host '[apk] unavailable: aapt2 not found'; exit 2 }
+
+if ($Clean) { Remove-Item $outDir -Recurse -Force -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Force $outDir | Out-Null
+
+# Native library first; the APK must contain this exact build.
+$nativeScript = Join-Path $PSScriptRoot 'build_app.ps1'
+$ErrorActionPreference = 'Continue'
+if ($GamesActivityAar) {
+    & $nativeScript -Clean:$Clean -NativeDebug:$NativeDebug -GamesActivityAar $GamesActivityAar 2>&1 |
+        ForEach-Object { Write-Host $_ }
+} else {
+    & $nativeScript -Clean:$Clean -NativeDebug:$NativeDebug 2>&1 |
+        ForEach-Object { Write-Host $_ }
+}
+$nativeRc = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($nativeRc -ne 0) {
+    Write-Host "[apk] native build failed ($nativeRc)"
+    exit $nativeRc
+}
+
+$nativeSo = Join-Path $outDir 'cmake\libwc3gameactivity.so'
+if (-not (Test-Path $nativeSo)) {
+    $found = Get-ChildItem (Join-Path $outDir 'cmake') -Recurse -Filter 'libwc3gameactivity.so' |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($found) { $nativeSo = $found }
+}
+if (-not (Test-Path $nativeSo)) { Write-Host '[apk] native library missing'; exit 1 }
+
+$jniRoot = Join-Path $outDir 'jniLibs'
+$jniDir = Join-Path $jniRoot 'arm64-v8a'
+New-Item -ItemType Directory -Force $jniDir | Out-Null
+Copy-Item $nativeSo (Join-Path $jniDir 'libwc3gameactivity.so') -Force
+
+# The native host is linked against the NDK's shared C++ runtime.  Android
+# does not provide libc++_shared.so as a platform library, so it must ship in
+# the APK next to libwc3gameactivity.so.
+$ndkRoot = Get-NdkRoot -Sdk $sdk
+if (-not $ndkRoot) { Write-Host '[apk] unavailable: NDK not found'; exit 2 }
+$libcxx = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\lib\aarch64-linux-android\libc++_shared.so'
+if (-not (Test-Path $libcxx)) {
+    Write-Host '[apk] unavailable: NDK libc++_shared.so for arm64-v8a not found'
+    exit 2
+}
+Copy-Item $libcxx (Join-Path $jniDir 'libc++_shared.so') -Force
+
+# A local Maven repository keeps the build offline and independent of a
+# network cache descriptor.  games-activity has no POM dependencies, so this
+# is the only artifact Gradle needs for the app module.
+$localMaven = Join-Path $outDir 'local-maven'
+$cache = Join-Path $env:USERPROFILE '.gradle\caches\modules-2\files-2.1\androidx.games\games-activity\4.4.2'
+if (-not (Test-Path $cache)) { Write-Host '[apk] unavailable: games-activity cache missing'; exit 2 }
+$dest = Join-Path $localMaven 'androidx\games\games-activity\4.4.2'
+New-Item -ItemType Directory -Force $dest | Out-Null
+Get-ChildItem $cache -Recurse -File | Where-Object {
+    $_.Extension -in '.aar', '.pom', '.jar', '.module'
+} | ForEach-Object { Copy-Item $_.FullName (Join-Path $dest $_.Name) -Force }
+
+$env:JAVA_HOME = $jdk
+$env:ANDROID_HOME = $sdk
+$env:ANDROID_SDK_ROOT = $sdk
+$gradleApp = Join-Path $outDir 'gradle-app'
+$gradleCache = Join-Path $outDir 'gradle-cache'
+$aapt2 = Join-Path $buildTools 'aapt2.exe'
+$gradleTask = 'assemble' + $variant.Substring(0, 1).ToUpper() +
+    $variant.Substring(1)
+$gradleArgs = @(
+    '--offline',
+    '--no-daemon',
+    '--console=plain',
+    '--project-cache-dir', $gradleCache,
+    '-p', $projectDir,
+    "-Pwc3GameActivityBuildDir=$gradleApp",
+    "-Pwc3JniLibs=$jniRoot",
+    "-Pwc3LocalMaven=$localMaven",
+    "-Pandroid.aapt2FromMavenOverride=$aapt2",
+    $gradleTask
+)
+Write-Host "[apk] gradle  $gradle"
+Write-Host "[apk] jdk     $jdk"
+Write-Host "[apk] variant $variant"
+$ErrorActionPreference = 'Continue'
+& $gradle @gradleArgs 2>&1 | ForEach-Object { Write-Host $_ }
+$rc = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($rc -ne 0) { Write-Host "[apk] gradle failed ($rc)"; exit 1 }
+
+$apkDir = Join-Path $gradleApp "outputs\apk\$variant"
+$apk = Join-Path $apkDir "app-$variant.apk"
+if (-not (Test-Path $apk)) {
+    $apk = Get-ChildItem $apkDir -Filter '*.apk' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $apk -or -not (Test-Path $apk)) { Write-Host '[apk] no APK produced'; exit 1 }
+$final = Join-Path $outDir "wc3-$variant.apk"
+Copy-Item $apk $final -Force
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::OpenRead($final)
+try {
+    $required = @(
+        'lib/arm64-v8a/libwc3gameactivity.so',
+        'lib/arm64-v8a/libc++_shared.so'
+    )
+    foreach ($name in $required) {
+        $entry = $zip.Entries | Where-Object { $_.FullName -eq $name }
+        if (-not $entry) { Write-Host "[apk] APK lacks $name"; exit 1 }
+        Write-Host "[apk] lib     $($entry.FullName) ($($entry.Length) bytes)"
+    }
+    Write-Host "[apk] apk     $final ($((Get-Item $final).Length) bytes)"
+} finally {
+    $zip.Dispose()
+}
+
+if ($Install -or $Launch) {
+    $adb = Join-Path $sdk 'platform-tools\adb.exe'
+    $deviceArgs = @()
+    if ($Serial) { $deviceArgs = @('-s', $Serial) }
+    & $adb @deviceArgs install -r $final 2>&1 | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) { Write-Host '[apk] install failed'; exit 1 }
+    if ($Launch) {
+        & $adb @deviceArgs shell am start -n com.wc3.recomp/.Wc3GameActivity 2>&1 |
+            ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) { Write-Host '[apk] launch failed'; exit 1 }
+    }
+}
+Write-Host '[apk] built'
+exit 0

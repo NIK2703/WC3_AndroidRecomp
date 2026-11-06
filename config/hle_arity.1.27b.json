@@ -1,0 +1,2989 @@
+{
+  "schema": 1,
+  "corpus": "1.27b",
+  "generated_by": "tools/import_fixture.py",
+  "entries": [
+    {
+      "module": "ADVAPI32.dll",
+      "name": "GetUserNameA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "name": "RegCloseKey",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "name": "RegCreateKeyExA",
+      "ordinal": null,
+      "argc": 9,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "name": "RegOpenKeyExA",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "name": "RegQueryValueExA",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "name": "RegSetValueExA",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "blizzard.ax",
+      "name": "DllRegisterServer",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "blizzard.ax",
+      "name": "DllUnregisterServer",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "name": "CertCloseStore",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "name": "CertFindCertificateInStore",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "name": "CertFreeCertificateContext",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "name": "CertGetNameStringW",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "name": "CryptMsgClose",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "name": "CryptMsgGetParam",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "name": "CryptQueryObject",
+      "ordinal": null,
+      "argc": 11,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "d3d9.dll",
+      "name": "Direct3DCreate9",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "GDI32.dll",
+      "name": "CreateSolidBrush",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "GDI32.dll",
+      "name": "DeleteObject",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "GDI32.dll",
+      "name": "GetStockObject",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "GDI32.dll",
+      "name": "GetTextExtentPoint32A",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "GDI32.dll",
+      "name": "SelectObject",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "GDI32.dll",
+      "name": "SetBkMode",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "GDI32.dll",
+      "name": "SetTextColor",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "IMM32.dll",
+      "name": "ImmAssociateContext",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "IMM32.dll",
+      "name": "ImmAssociateContextEx",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "IMM32.dll",
+      "name": "ImmGetContext",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "IMM32.dll",
+      "name": "ImmReleaseContext",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CloseHandle",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CompareFileTime",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CopyFileA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateDirectoryA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateEventA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateEventW",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateFileA",
+      "ordinal": null,
+      "argc": 7,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateFileMappingA",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateIoCompletionPort",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateMutexA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateProcessA",
+      "ordinal": null,
+      "argc": 10,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateSemaphoreA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateThread",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "CreateToolhelp32Snapshot",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "DecodePointer",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "DeleteCriticalSection",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "DeleteFileA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "DisableThreadLibraryCalls",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "DuplicateHandle",
+      "ordinal": null,
+      "argc": 7,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "EncodePointer",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "EnterCriticalSection",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "ExitProcess",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "FileTimeToLocalFileTime",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "FileTimeToSystemTime",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "FindClose",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "FindFirstFileA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "FindNextFileA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "FlushFileBuffers",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "FormatMessageA",
+      "ordinal": null,
+      "argc": 7,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "FreeEnvironmentStringsA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "FreeEnvironmentStringsW",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "FreeLibrary",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetACP",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetCommandLineA",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetComputerNameA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetCPInfo",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetCurrentDirectoryA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetCurrentProcess",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetCurrentProcessId",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetCurrentThread",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetCurrentThreadId",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetDateFormatA",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetDiskFreeSpaceA",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetDiskFreeSpaceExA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetDriveTypeA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetEnvironmentStrings",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetEnvironmentStringsW",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetEnvironmentVariableA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetErrorMode",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetFileAttributesA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetFileSize",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetFileTime",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetFileType",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetFullPathNameA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetLastError",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetLocaleInfoA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetLocalTime",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetLogicalDriveStringsA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetModuleFileNameA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetModuleHandleA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetNativeSystemInfo",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetProcAddress",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetProcessHeap",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetProcessHeaps",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetProcessId",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetProfileIntA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetProfileStringA",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetQueuedCompletionStatus",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetStartupInfoA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetStdHandle",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetStringTypeA",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetStringTypeW",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetSystemDefaultLangID",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetSystemDefaultUILanguage",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetSystemDirectoryA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetSystemInfo",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetSystemTime",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetSystemTimeAsFileTime",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetThreadPriority",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetTickCount",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetTimeFormatA",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetTimeZoneInformation",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetUserDefaultLangID",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetUserDefaultLCID",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetUserDefaultUILanguage",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetVersion",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetVersionExA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetVolumeInformationA",
+      "ordinal": null,
+      "argc": 8,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GetWindowsDirectoryA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GlobalAlloc",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GlobalFree",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GlobalLock",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GlobalMemoryStatus",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GlobalSize",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "GlobalUnlock",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "HeapAlloc",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "HeapCreate",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "HeapDestroy",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "HeapFree",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "HeapLock",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "HeapReAlloc",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "HeapSize",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "HeapUnlock",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "HeapWalk",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "InitializeCriticalSection",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "InterlockedCompareExchange",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "InterlockedDecrement",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "InterlockedExchange",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "InterlockedIncrement",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "IsBadReadPtr",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "IsBadWritePtr",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "IsDebuggerPresent",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "IsProcessorFeaturePresent",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "LCMapStringA",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "LCMapStringW",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "LeaveCriticalSection",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "LoadLibraryA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "LocalAlloc",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "LocalFree",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "lstrcpynA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "lstrlenA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "MapViewOfFile",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "MoveFileA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "MultiByteToWideChar",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "OpenEventA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "OpenMutexA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "OutputDebugStringA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "PostQueuedCompletionStatus",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "Process32First",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "Process32Next",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "QueryPerformanceCounter",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "QueryPerformanceFrequency",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "RaiseException",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "ReadFile",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "ReleaseMutex",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "ReleaseSemaphore",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "RemoveDirectoryA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "ResetEvent",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "ResumeThread",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "RtlUnwind",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetCurrentDirectoryA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetEndOfFile",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetErrorMode",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetEvent",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetFileAttributesA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetFilePointer",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetFileTime",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetHandleCount",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetLastError",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetStdHandle",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetThreadPriority",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SetUnhandledExceptionFilter",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "Sleep",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SuspendThread",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "SystemTimeToFileTime",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "TerminateProcess",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "TerminateThread",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "TlsAlloc",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "TlsFree",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "TlsGetValue",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "TlsSetValue",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "UnhandledExceptionFilter",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "UnmapViewOfFile",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "VirtualAlloc",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "VirtualFree",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "VirtualProtect",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "VirtualQuery",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "WaitForMultipleObjects",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "WaitForSingleObject",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "WideCharToMultiByte",
+      "ordinal": null,
+      "argc": 8,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "name": "WriteFile",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "?_type_info_dtor_internal_method@type_info@@QAEXXZ",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "?terminate@@YAXXZ",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__crtGetShowWindowMode",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__crtSetUnhandledExceptionFilter",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__crtTerminateProcess",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__crtUnhandledException",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__CxxFrameHandler3",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__dllonexit",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__getmainargs",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__iob_func",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__set_app_type",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__setusermatherr",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_amsg_exit",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_beginthreadex",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_calloc_crt",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_cexit",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_CIatan2",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_CIfmod",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_CIlog10",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_CIpow",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_CIsqrt",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_clearfp",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_configthreadlocale",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_control87",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_controlfp_s",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_crt_debugger_hook",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_ctime64",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_decode_pointer",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_encode_pointer",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_except1",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_except_handler4_common",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_exit",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_fullpath",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_initterm",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_initterm_e",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_invoke_watson",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_ismbblead",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_ismbcspace",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_itoa",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_acos_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_asin_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_atan2_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_atan_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_cos_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_exp_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_log10_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_log_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_pow_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_sin_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_sqrt_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_tan_precise",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_lock",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_malloc_crt",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_onexit",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_purecall",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_snprintf",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_snprintf_s",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_strdup",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_strlwr",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_strnicmp",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_strupr",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_time64",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_unlock",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_vsnprintf",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_XcptFilter",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "acos",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "asin",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "atan",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "atan2",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "atof",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "atoi",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "atol",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "calloc",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "ceil",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "cos",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "exit",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "exp",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fabs",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fclose",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "feof",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "ferror",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fflush",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "floor",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fmod",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fopen",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fopen_s",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fprintf",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fread",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "free",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fseek",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "ftell",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fwrite",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "isalpha",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "isdigit",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "isspace",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "iswspace",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "log",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "log10",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "malloc",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "memcpy",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "memmove",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "memset",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "pow",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "qsort",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "rand",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "realloc",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "setvbuf",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "sin",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "sprintf",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "sqrt",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "srand",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "sscanf",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strchr",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strcpy_s",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strcspn",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strerror",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strncmp",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strncpy",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strnlen",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strpbrk",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strrchr",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strspn",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strstr",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strtol",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strtoul",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "tan",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "tolower",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "toupper",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "vfprintf",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "vsprintf",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "SHELL32.dll",
+      "name": "ShellExecuteA",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "SHELL32.dll",
+      "name": "SHGetFolderPathA",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "BeginPaint",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "CallWindowProcA",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "ChangeDisplaySettingsA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "ChangeDisplaySettingsExA",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "ClientToScreen",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "ClipCursor",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "CloseClipboard",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "CreateMenu",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "CreatePopupMenu",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "CreateWindowExA",
+      "ordinal": null,
+      "argc": 12,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "DefWindowProcA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "DestroyMenu",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "DestroyWindow",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "DispatchMessageA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "DrawTextA",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "EmptyClipboard",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "EnableWindow",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "EndPaint",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "EnumDisplayDevicesA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "EnumDisplaySettingsA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "EnumDisplaySettingsExA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "FillRect",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetActiveWindow",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetClassLongA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetClientRect",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetClipboardData",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetCursorPos",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetDC",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetDCEx",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetDesktopWindow",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetFocus",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetForegroundWindow",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetKeyState",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetMenu",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetMenuItemCount",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetMessageA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetParent",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetSysColor",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetSysColorBrush",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetSystemMetrics",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetWindow",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetWindowInfo",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetWindowLongA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetWindowRect",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetWindowTextA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "GetWindowTextLengthA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "InvalidateRect",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "IsWindowEnabled",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "IsWindowVisible",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "KillTimer",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "LoadCursorA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "LoadImageA",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "LoadStringA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "MessageBeep",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "MessageBoxA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "OpenClipboard",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "PeekMessageA",
+      "ordinal": null,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "PostMessageA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "RegisterClassA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "RegisterClassExA",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "ReleaseCapture",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "ReleaseDC",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "ScreenToClient",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SendMessageA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetActiveWindow",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetCapture",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetClassLongA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetClipboardData",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetCursor",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetCursorPos",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetFocus",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetForegroundWindow",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetTimer",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetWindowLongA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetWindowPos",
+      "ordinal": null,
+      "argc": 7,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SetWindowTextA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "ShowCursor",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "ShowWindow",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "SystemParametersInfoA",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "TranslateMessage",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "UpdateWindow",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "WindowFromPoint",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "USER32.dll",
+      "name": "wsprintfA",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "cdecl"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "timeGetTime",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutClose",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutGetDevCapsA",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutGetID",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutGetNumDevs",
+      "ordinal": null,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutGetVolume",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutOpen",
+      "ordinal": null,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutPrepareHeader",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutReset",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutSetVolume",
+      "ordinal": null,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutUnprepareHeader",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINMM.dll",
+      "name": "waveOutWrite",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WINTRUST.dll",
+      "name": "WinVerifyTrust",
+      "ordinal": null,
+      "argc": 3,
+      "callconv": "stdcall"
+    }
+  ]
+}

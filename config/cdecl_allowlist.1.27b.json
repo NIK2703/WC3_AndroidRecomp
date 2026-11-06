@@ -1,0 +1,662 @@
+{
+  "schema": 1,
+  "corpus": "1.27b",
+  "generated_by": "tools/import_fixture.py",
+  "entries": [
+    {
+      "module": "MSVCR80.dll",
+      "name": "?_type_info_dtor_internal_method@type_info@@QAEXXZ",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "?terminate@@YAXXZ",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__crtGetShowWindowMode",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__crtSetUnhandledExceptionFilter",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__crtTerminateProcess",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__crtUnhandledException",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__CxxFrameHandler3",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__dllonexit",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__getmainargs",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__iob_func",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__set_app_type",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "__setusermatherr",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_amsg_exit",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_beginthreadex",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_calloc_crt",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_cexit",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_CIatan2",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_CIfmod",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_CIlog10",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_CIpow",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_CIsqrt",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_clearfp",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_configthreadlocale",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_control87",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_controlfp_s",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_crt_debugger_hook",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_ctime64",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_decode_pointer",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_encode_pointer",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_except1",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_except_handler4_common",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_exit",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_fullpath",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_initterm",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_initterm_e",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_invoke_watson",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_ismbblead",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_ismbcspace",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_itoa",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_acos_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_asin_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_atan2_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_atan_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_cos_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_exp_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_log10_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_log_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_pow_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_sin_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_sqrt_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_libm_sse2_tan_precise",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_lock",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_malloc_crt",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_onexit",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_purecall",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_snprintf",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_snprintf_s",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_strdup",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_strlwr",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_strnicmp",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_strupr",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_time64",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_unlock",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_vsnprintf",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "_XcptFilter",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "acos",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "asin",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "atan",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "atan2",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "atof",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "atoi",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "atol",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "calloc",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "ceil",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "cos",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "exit",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "exp",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fabs",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fclose",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "feof",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "ferror",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fflush",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "floor",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fmod",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fopen",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fopen_s",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fprintf",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fread",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "free",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fseek",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "ftell",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "fwrite",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "isalpha",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "isdigit",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "isspace",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "iswspace",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "log",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "log10",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "malloc",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "memcpy",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "memmove",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "memset",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "pow",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "qsort",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "rand",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "realloc",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "setvbuf",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "sin",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "sprintf",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "sqrt",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "srand",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "sscanf",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strchr",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strcpy_s",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strcspn",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strerror",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strncmp",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strncpy",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strnlen",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strpbrk",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strrchr",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strspn",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strstr",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strtol",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "strtoul",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "tan",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "tolower",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "toupper",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "vfprintf",
+      "ordinal": null
+    },
+    {
+      "module": "MSVCR80.dll",
+      "name": "vsprintf",
+      "ordinal": null
+    },
+    {
+      "module": "USER32.dll",
+      "name": "wsprintfA",
+      "ordinal": null
+    }
+  ]
+}

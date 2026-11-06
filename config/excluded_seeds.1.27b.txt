@@ -1,0 +1,19 @@
+# Confirmed non-code starts in the 1.27b PE corpus.
+#
+# Format: 0xVA  # reason.  This is an evidence ledger, not a heuristic: every
+# address below was inspected with map.exe / lint.exe and proven to be data or
+# the middle of an instruction.  closure_pipeline.exe removes these VAs from
+# the entry.exe inventory BEFORE seed.exe recovers extents, so a data address
+# can neither be lifted as a function nor cap a real function's extent.
+# Removing an address requires adding the evidence here, never loosening a
+# liftpass detector (V5.4).
+#
+# ijl15.dll @ 0x60000000, .text+2590.  entry.exe reports it as a padded start.
+# map.exe bytes at 0x60003590:
+#   D3 7C DD 8B 84 24 90 05 00 00 8B 8C 24 84 05 00 00
+#   45 83 C0 20 3B E9 7C A4 8B EE 8B 4D 34 E9 A7
+# The block lift decodes it as "sar dword ptr [ebp+ebx*8-0x75], cl",
+# "add eax, 0x8c8b0000", "shl byte ptr [eax], 0x3b" and emits
+# "jmp 0x4E8BDA27" - an address outside the image (0x60000000..0x6005D000).
+# This is an inline data table, not a function prologue.
+0x60003590  # ijl15.dll inline data table, not a function prologue

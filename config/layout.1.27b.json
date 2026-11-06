@@ -1,0 +1,226 @@
+{
+  "schema": 1,
+  "corpus": "1.27b",
+  "layout_rev": 2,
+  "target": "android",
+  "identity_below_4g": true,
+  "android_reserved": [
+    {
+      "name": "art-region-space",
+      "base": 278396928,
+      "size": 536870912,
+      "reason": "Measured ART reservation in an app process; nothing may be mapped here."
+    }
+  ],
+  "images": [
+    {
+      "name": "war3.exe",
+      "base": 4194304,
+      "size": 565248,
+      "corpus_fixed": true,
+      "source": "E:\\Games\\Warcraft III\\war3.exe",
+      "sha256": "0ea3434d2bdfd9609eda5fce2a68febac2137af72846de52e0008b142297ffbd"
+    },
+    {
+      "name": "game.dll",
+      "base": 1862270976,
+      "size": 15130624,
+      "corpus_fixed": true,
+      "source": "E:\\Games\\Warcraft III\\game.dll",
+      "sha256": "d51e5680243fc90e19c9d6074f7fac433c466d3cf5f46e2364291725574d8236"
+    },
+    {
+      "name": "Storm.dll",
+      "base": 889192448,
+      "size": 397312,
+      "corpus_fixed": true,
+      "source": "E:\\Games\\Warcraft III\\Storm.dll",
+      "sha256": "36339f69727f0f3dcb4431a9567b84f56007c331cfa3b183862af43e8314eb72"
+    },
+    {
+      "name": "Mss32.dll",
+      "base": 890241024,
+      "size": 389120,
+      "corpus_fixed": true,
+      "source": "E:\\Games\\Warcraft III\\Mss32.dll",
+      "sha256": "cc142b9d8b5223e2720c6440cb7a124c0a80d2fb04ecf59ad7331dfd6e3cb51f"
+    },
+    {
+      "name": "Mssfast.m3d",
+      "base": 891289600,
+      "size": 90112,
+      "corpus_fixed": true,
+      "source": "E:\\Games\\Warcraft III\\redist\\miles\\Mssfast.m3d",
+      "sha256": "92dc46b5a48f259b7638d64eaa980019b94633f24933c59c7a25c4e14bd5253d"
+    },
+    {
+      "name": "Mp3dec.asi",
+      "base": 892338176,
+      "size": 172032,
+      "corpus_fixed": true,
+      "source": "E:\\Games\\Warcraft III\\redist\\miles\\Mp3dec.asi",
+      "sha256": "31bcb7cc08b5a9c0d856913f2879c93e175dc8eb7b3d1fb2a61f50a169efa66a"
+    },
+    {
+      "name": "ijl15.dll",
+      "base": 1610612736,
+      "size": 380928,
+      "corpus_fixed": true,
+      "source": "E:\\Games\\Warcraft III\\ijl15.dll",
+      "sha256": "d6d997c79a8c8c29b5485710ba97c7d27b4065297ed24929e30cab549269d755"
+    }
+  ],
+  "out_of_scope": [
+    {
+      "name": "blizzard.ax",
+      "base": 473956352,
+      "size": 614400,
+      "status": "excluded",
+      "reason": "No Android target base; the campaign-movie DirectShow path is outside the menu/map boot gate. Revisit before campaign movies are claimed."
+    }
+  ],
+  "arenas": [
+    {
+      "name": "heap",
+      "base": 905969664,
+      "size": 67108864,
+      "align": 65536,
+      "guard_before": 0,
+      "guard_after": 0,
+      "purpose": "Storm SMem heap; fixed blocks at 0x36000000."
+    },
+    {
+      "name": "hle_heap",
+      "base": 973078528,
+      "size": 67108864,
+      "align": 65536,
+      "guard_before": 0,
+      "guard_after": 0,
+      "purpose": "HLE allocations; must stay outside the Storm heap."
+    },
+    {
+      "name": "teb_main",
+      "base": 1056964608,
+      "size": 4096,
+      "align": 4096,
+      "guard_before": 0,
+      "guard_after": 0,
+      "purpose": "Main guest TEB page."
+    }
+  ],
+  "va_arenas": [
+    {
+      "name": "va1",
+      "base": 1627389952,
+      "size": 67108864,
+      "align": 65536,
+      "purpose": "First VirtualAlloc arena."
+    },
+    {
+      "name": "va2",
+      "base": 1073741824,
+      "size": 536870912,
+      "align": 65536,
+      "purpose": "Second VirtualAlloc arena."
+    },
+    {
+      "name": "va3",
+      "base": 2147483648,
+      "size": 268435456,
+      "align": 65536,
+      "purpose": "Third VirtualAlloc arena; 256 MiB reserve made during map load."
+    },
+    {
+      "name": "va4",
+      "base": 1879048192,
+      "size": 268435456,
+      "align": 65536,
+      "purpose": "Fourth VirtualAlloc arena; contains the synthetic HLE thunk window."
+    },
+    {
+      "name": "va5",
+      "base": 2701131776,
+      "size": 805306368,
+      "align": 65536,
+      "purpose": "Fifth VirtualAlloc arena."
+    },
+    {
+      "name": "va6",
+      "base": 3649044480,
+      "size": 268435456,
+      "align": 65536,
+      "purpose": "Sixth VirtualAlloc arena."
+    },
+    {
+      "name": "va7",
+      "base": 3954012160,
+      "size": 335544320,
+      "align": 4096,
+      "purpose": "Seventh VirtualAlloc arena; CDataRecycler growth."
+    }
+  ],
+  "stack": {
+    "name": "main_stack",
+    "base": 822083584,
+    "size": 8388608,
+    "align": 65536,
+    "guard_before": 4096,
+    "guard_after": 0
+  },
+  "thread_stacks": {
+    "base": 830472192,
+    "size": 2097152,
+    "stride": 2097152,
+    "count": 24,
+    "guard": 0
+  },
+  "thread_tebs": {
+    "base": 1058013184,
+    "size": 4096,
+    "stride": 4096,
+    "count": 24
+  },
+  "hle_thunks": {
+    "base": 2130706432,
+    "count": 65536,
+    "slot_size": 16
+  },
+  "overlaps": [
+    {
+      "a": "va4",
+      "b": "hle_thunks",
+      "kind": "synthetic_thunks",
+      "reason": "HLE thunk addresses are intercepted by dispatch() and are not committed guest memory. The VA allocator must not return a block that covers 0x7F000000..0x7F100000."
+    }
+  ],
+  "guard_pages": [
+    {
+      "name": "guard_below_main_stack",
+      "base": 822079488,
+      "size": 4096,
+      "policy": "no-access"
+    },
+    {
+      "name": "guard_above_thread_stacks",
+      "base": 880803840,
+      "size": 4096,
+      "policy": "no-access"
+    }
+  ],
+  "golden_sets": [
+    {
+      "name": "image_bases",
+      "addresses": [4194304, 1862270976, 889192448, 889257984, 889323520, 889389056, 1610612736]
+    },
+    {
+      "name": "hle_thunks",
+      "addresses": [2130706432, 2130706448, 2130771968]
+    }
+  ],
+  "corpus_manifest": {
+    "sha256": "37e4b45d71736bfed356a98b81fe60a4d46d7b11e72f4a1e8e2c6bc3250f3038", "inputs": 7, "generator": "wc3lift",
+    "status": "generated",
+    "lift_rev": 1,
+    "layout_rev": 2
+  }
+}
