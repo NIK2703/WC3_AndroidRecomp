@@ -30,7 +30,8 @@ The baseline checkpoints and the DUT run report share one checkpoint schema:
       "name": "boot",
       "markers": ["..."],
       "memory_hashes_normalized": {"war3.exe:0x0": "<hex>"},
-      "cpu": {"eax": 0, "x87_top": 0, "xmm0": "<hex>"},
+      "cpu": {"eax": 0, "eip": 0, "esp": 0, "x87_top": 0, "xmm0": "<hex>"},
+      "dispatch_targets": [0, ...],
       "d3d9_stream_sha256": "<hex>",
       "invariants": {
         "locked_range_written": "pass",
@@ -420,6 +421,7 @@ def compare_artifact(
     diagnostics: dict[str, Any] = {}
     paths: list[Path] = []
     actual_hashes: list[str] = []
+    sizes: list[int] = []
     for side, spec, base in (
         ("oracle", oracle_spec, oracle_dir),
         ("dut", run_spec, run_dir),
@@ -439,21 +441,24 @@ def compare_artifact(
         actual = sha256_file(path)
         paths.append(path)
         actual_hashes.append(actual)
+        sizes.append(path.stat().st_size)
         declared = spec.get("sha256")
-        if declared is not None and declared != actual:
-            failures.append(f"{label}: {side} declared sha256 does not match file")
+        diagnostics.setdefault(label, {})[f"{side}_sha256"] = actual
+        diagnostics[label][f"{side}_bytes"] = sizes[-1]
+        if declared is not None:
+            diagnostics[label][f"{side}_declared_sha256"] = declared
+            if declared != actual:
+                failures.append(f"{label}: {side} declared sha256 does not match file")
     if len(paths) == 2:
+        equal, offset, left_size, right_size = compare_file_bytes(paths[0], paths[1])
+        diagnostics[label]["first_diff_offset"] = offset
         if actual_hashes[0] != actual_hashes[1]:
             failures.append(f"{label}: file content differs (sha256)")
-        else:
-            equal, offset, left_size, right_size = compare_file_bytes(paths[0], paths[1])
-            if not equal:
-                failures.append(
-                    f"{label}: byte mismatch at offset {offset} "
-                    f"({left_size} vs {right_size} bytes)"
-                )
-            else:
-                diagnostics[label] = {"bytes": left_size}
+        if not equal:
+            failures.append(
+                f"{label}: byte mismatch at offset {offset} "
+                f"({left_size} vs {right_size} bytes)"
+            )
     if failures:
         return {"status": "fail", "reasons": failures, "diagnostics": diagnostics}
     if unavailable:
@@ -484,6 +489,7 @@ def compare_checkpoint(
         unavailable.append(f"{name}: markers are empty")
     elif oracle_markers != run_markers:
         failures.append(f"{name}: marker stream differs")
+        diagnostics["markers"] = {"oracle": oracle_markers, "dut": run_markers}
 
     oracle_memory = oracle.get("memory_hashes_normalized")
     run_memory = run.get("memory_hashes_normalized")
@@ -492,14 +498,23 @@ def compare_checkpoint(
     elif not oracle_memory or not run_memory:
         unavailable.append(f"{name}: normalized guest-memory hashes are empty")
     else:
+        memory_diagnostics: dict[str, Any] = {}
         for key, value in oracle_memory.items():
             if key not in run_memory:
                 unavailable.append(f"{name}: memory region {key} is missing")
+                memory_diagnostics[key] = {"oracle": value, "dut": None}
             elif run_memory[key] != value:
                 failures.append(f"{name}: memory region {key} differs")
+                memory_diagnostics[key] = {
+                    "oracle": value,
+                    "dut": run_memory[key],
+                }
         for key in run_memory:
             if key not in oracle_memory:
                 failures.append(f"{name}: unexpected memory region {key}")
+                memory_diagnostics[key] = {"oracle": None, "dut": run_memory[key]}
+        if memory_diagnostics:
+            diagnostics["memory_hashes_normalized"] = memory_diagnostics
 
     oracle_cpu = oracle.get("cpu")
     run_cpu = run.get("cpu")
@@ -509,6 +524,7 @@ def compare_checkpoint(
         unavailable.append(f"{name}: CPU snapshot is empty")
     elif not canonical_equal(oracle_cpu, run_cpu):
         failures.append(f"{name}: CPU snapshot differs")
+        diagnostics["cpu"] = {"oracle": oracle_cpu, "dut": run_cpu}
 
     oracle_stream = oracle.get("d3d9_stream_sha256")
     run_stream = run.get("d3d9_stream_sha256")
@@ -516,6 +532,10 @@ def compare_checkpoint(
         unavailable.append(f"{name}: canonical D3D9 stream hash is missing")
     elif oracle_stream != run_stream:
         failures.append(f"{name}: canonical D3D9 stream differs")
+        diagnostics["d3d9_stream_sha256"] = {
+            "oracle": oracle_stream,
+            "dut": run_stream,
+        }
 
     oracle_invariants = oracle.get("invariants")
     run_invariants = run.get("invariants")
@@ -532,7 +552,11 @@ def compare_checkpoint(
             elif "unavailable" in (oracle_value, run_value):
                 unavailable.append(f"{name}: invariant {invariant} is unavailable")
         diagnostics["invariants"] = {
-            key: run_invariants.get(key) for key in INVARIANTS
+            key: {
+                "oracle": oracle_invariants.get(key),
+                "dut": run_invariants.get(key),
+            }
+            for key in INVARIANTS
         }
 
     if name in ("save", "load", "exit"):
@@ -554,9 +578,12 @@ def compare_checkpoint(
 
     oracle_targets = oracle.get("dispatch_targets")
     run_targets = run.get("dispatch_targets")
-    if isinstance(oracle_targets, list) and isinstance(run_targets, list):
-        if oracle_targets != run_targets:
-            diagnostics["dispatch_targets"] = "differ (diagnostic; V5.3 artifact)"
+    if isinstance(oracle_targets, list) or isinstance(run_targets, list):
+        diagnostics["dispatch_targets"] = {
+            "oracle": oracle_targets,
+            "dut": run_targets,
+            "equal": oracle_targets == run_targets,
+        }
 
     status = "fail" if failures else "unavailable" if unavailable else "pass"
     return {
@@ -608,6 +635,11 @@ def write_report(
         "identity_sha256": identity_hash,
         "reasons": reasons,
         "checkpoints": checkpoints,
+        "artifacts": {
+            checkpoint["name"]: checkpoint.get("diagnostics", {})
+            for checkpoint in checkpoints
+            if checkpoint.get("status") == "fail" and checkpoint.get("diagnostics")
+        },
         "diagnostics": {
             "frame_hashes": "not compared in T1 (V4.3)",
             "verdict_owner": "docs/EXACTNESS.md E11",
@@ -847,9 +879,16 @@ def _fixture(
             "name": name,
             "markers": [f"capture:{name}"],
             "memory_hashes_normalized": {"war3.exe:0x00000000": "aa" * 32},
-            "cpu": {"eax": 0x12345678, "x87_top": 0, "xmm0": "00" * 16},
+            "cpu": {
+                "eax": 0x12345678,
+                "eip": 0x6F123456,
+                "esp": 0x0019FF00,
+                "x87_top": 0,
+                "xmm0": "00" * 16,
+            },
             "d3d9_stream_sha256": "ab" * 32,
             "invariants": {key: "pass" for key in INVARIANTS},
+            "dispatch_targets": [0x6F123456, 0x00401000],
         }
         if save:
             item["save"] = {"path": "save.bin"}
@@ -1084,6 +1123,24 @@ def self_test() -> int:
             run_compare(oracle, run, report, quiet=True)[0],
             2,
         )
+
+        oracle, run, report = _fixture(root / "cpu-artifact")
+        run_data = json.loads(run.read_text(encoding="utf-8"))
+        run_data["checkpoints"][0]["cpu"]["eax"] ^= 1
+        run_data["checkpoints"][0]["dispatch_targets"][-1] = 0xDEADBEEF
+        run.write_text(json.dumps(run_data, indent=2) + "\n", encoding="utf-8")
+        rc, result = run_compare(oracle, run, report, quiet=True)
+        expect("CPU mismatch", rc, 1)
+        report_data = json.loads(report.read_text(encoding="utf-8"))
+        if (
+            "boot" in report_data.get("artifacts", {})
+            and "cpu" in report_data["artifacts"]["boot"]
+            and "dispatch_targets" in result["checkpoints"][0]["diagnostics"]
+        ):
+            cases += 1
+        else:
+            print("FAIL CPU/dispatch artifacts were not recorded")
+            failures += 1
 
         oracle, run, report = _fixture(root / "schedule")
         run_data = json.loads(run.read_text(encoding="utf-8"))
