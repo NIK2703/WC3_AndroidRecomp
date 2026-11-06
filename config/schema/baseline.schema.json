@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-baseline",
+  "title": "config/baseline.*.json",
+  "type": "object",
+  "required": ["schema", "corpus", "phase", "captured_at", "artifacts", "unavailable"],
+  "properties": {
+    "schema": {
+      "$ref": "common.schema.json#/$defs/schema"
+    },
+    "corpus": {
+      "$ref": "common.schema.json#/$defs/corpus"
+    },
+    "phase": {
+      "type": "string",
+      "minLength": 1
+    },
+    "captured_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "status", "size", "sha256", "marker_tail"],
+        "properties": {
+          "path": {
+            "$ref": "common.schema.json#/$defs/relative_path"
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "$ref": "common.schema.json#/$defs/sha256"
+          },
+          "marker_tail": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "unavailable": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "reason"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

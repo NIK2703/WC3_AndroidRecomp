@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-migration",
+  "title": "config/migration.json",
+  "type": "object",
+  "required": ["schema", "corpus", "updated_at", "note", "steps", "rules"],
+  "properties": {
+    "schema": {
+      "$ref": "common.schema.json#/$defs/schema"
+    },
+    "corpus": {
+      "$ref": "common.schema.json#/$defs/corpus"
+    },
+    "updated_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "note": {
+      "type": "string"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "owner", "gate", "evidence", "updated_at"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^M[0-9]+$"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "in_progress", "done", "blocked"]
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1
+          },
+          "gate": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": ["string", "null"]
+          },
+          "updated_at": {
+            "$ref": "common.schema.json#/$defs/timestamp"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "owner", "check"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^R[0-9]+$"
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1
+          },
+          "check": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -89,6 +89,11 @@ def test_layout() -> int:
                 "--corpus", "1.27b", "--require-corpus"])
 
 
+def test_config_schema() -> int:
+    """R10: every config/*.json matches its config/schema/*.schema.json."""
+    return run([sys.executable, str(ROOT / "tools" / "check_config_schema.py")])
+
+
 def test_corpus_identity() -> int:
     """G-05: the sealed manifest digest must match the real input hash.
 
@@ -613,6 +618,7 @@ TESTS = {
     "docs": test_docs,
     "upstream_pin": test_upstream_pin,
     "layout": test_layout,
+    "config_schema": test_config_schema,
     "corpus_identity": test_corpus_identity,
     "posix_shim": test_posix_shim,
     "dispatch": test_dispatch,

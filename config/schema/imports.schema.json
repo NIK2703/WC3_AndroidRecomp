@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-imports",
+  "title": "config/imports.1.27b.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "corpus",
+    "generated_by",
+    "presence",
+    "pe_fixture_status",
+    "pe_imports_file",
+    "pe_files",
+    "total",
+    "hle_total",
+    "lifted_total",
+    "unresolved_total",
+    "forbidden_total",
+    "excluded_total",
+    "hle_table_total",
+    "hle_table_only_total",
+    "excluded_table",
+    "unresolved",
+    "forbidden",
+    "warnings",
+    "entries"
+  ],
+  "properties": {
+    "schema": {
+      "$ref": "common.schema.json#/$defs/schema"
+    },
+    "corpus": {
+      "$ref": "common.schema.json#/$defs/corpus"
+    },
+    "generated_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "presence": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pe_fixture_status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pe_imports_file": {
+      "$ref": "common.schema.json#/$defs/relative_path"
+    },
+    "pe_files": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/pe_file"
+      }
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "hle_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "lifted_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unresolved_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "forbidden_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "excluded_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "hle_table_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "hle_table_only_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "excluded_table": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/import_entry"
+      }
+    },
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/import_entry"
+      }
+    },
+    "forbidden": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/import_entry"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/import_entry"
+      }
+    }
+  },
+  "additionalProperties": true
+}

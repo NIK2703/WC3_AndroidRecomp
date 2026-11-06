@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-corpus",
+  "title": "config/corpus.1.27b.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "corpus",
+    "generator",
+    "lift_rev",
+    "layout_file",
+    "inputs_root",
+    "inputs"
+  ],
+  "properties": {
+    "schema": {
+      "$ref": "common.schema.json#/$defs/schema"
+    },
+    "corpus": {
+      "$ref": "common.schema.json#/$defs/corpus"
+    },
+    "generator": {
+      "type": "string",
+      "minLength": 1
+    },
+    "lift_rev": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "layout_file": {
+      "$ref": "common.schema.json#/$defs/relative_path"
+    },
+    "inputs_root": {
+      "$ref": "common.schema.json#/$defs/relative_path"
+    },
+    "note": {
+      "type": "string"
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "path",
+          "source",
+          "source_sha256",
+          "base",
+          "rebase"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "$ref": "common.schema.json#/$defs/relative_path"
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_sha256": {
+            "$ref": "common.schema.json#/$defs/sha256"
+          },
+          "base": {
+            "$ref": "common.schema.json#/$defs/va32"
+          },
+          "rebase": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

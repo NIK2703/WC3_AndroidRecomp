@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-hle-arity",
+  "title": "config/hle_arity.1.27b.json",
+  "type": "object",
+  "required": ["schema", "corpus", "generated_by", "entries"],
+  "properties": {
+    "schema": {
+      "$ref": "common.schema.json#/$defs/schema"
+    },
+    "corpus": {
+      "$ref": "common.schema.json#/$defs/corpus"
+    },
+    "generated_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["module", "name", "ordinal", "argc", "callconv"],
+        "properties": {
+          "module": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": ["string", "null"]
+          },
+          "ordinal": {
+            "$ref": "common.schema.json#/$defs/ordinal"
+          },
+          "argc": {
+            "$ref": "common.schema.json#/$defs/argc"
+          },
+          "callconv": {
+            "$ref": "common.schema.json#/$defs/callconv"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

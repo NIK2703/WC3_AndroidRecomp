@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-arity-overrides",
+  "title": "config/arity_overrides.1.27b.json",
+  "type": "object",
+  "required": ["schema", "corpus", "entries"],
+  "properties": {
+    "schema": {
+      "$ref": "common.schema.json#/$defs/schema"
+    },
+    "corpus": {
+      "$ref": "common.schema.json#/$defs/corpus"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["module", "name", "argc", "callconv", "source"],
+        "properties": {
+          "module": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "argc": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 64
+          },
+          "callconv": {
+            "type": "string",
+            "enum": ["cdecl", "stdcall"]
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

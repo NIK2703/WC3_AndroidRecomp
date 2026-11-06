@@ -1,0 +1,402 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-layout",
+  "title": "config/layout.1.27b.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "corpus",
+    "layout_rev",
+    "target",
+    "identity_below_4g",
+    "android_reserved",
+    "images",
+    "out_of_scope",
+    "arenas",
+    "va_arenas",
+    "stack",
+    "thread_stacks",
+    "thread_tebs",
+    "hle_thunks",
+    "overlaps",
+    "guard_pages",
+    "golden_sets",
+    "corpus_manifest"
+  ],
+  "properties": {
+    "schema": {
+      "$ref": "common.schema.json#/$defs/schema"
+    },
+    "corpus": {
+      "$ref": "common.schema.json#/$defs/corpus"
+    },
+    "layout_rev": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "identity_below_4g": {
+      "type": "boolean"
+    },
+    "android_reserved": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "base", "size", "reason"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base": {
+            "$ref": "common.schema.json#/$defs/va32"
+          },
+          "size": {
+            "$ref": "common.schema.json#/$defs/size32"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "images": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "base", "size", "corpus_fixed", "source", "sha256"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base": {
+            "$ref": "common.schema.json#/$defs/va32"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "corpus_fixed": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          },
+          "sha256": {
+            "$ref": "common.schema.json#/$defs/sha256"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "out_of_scope": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "base", "size", "status", "reason"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base": {
+            "$ref": "common.schema.json#/$defs/va32"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "arenas": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "base",
+          "size",
+          "align",
+          "guard_before",
+          "guard_after",
+          "purpose"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base": {
+            "$ref": "common.schema.json#/$defs/va32"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "align": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "guard_before": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "guard_after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "va_arenas": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "base", "size", "align", "purpose"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base": {
+            "$ref": "common.schema.json#/$defs/va32"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "align": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "stack": {
+      "type": "object",
+      "required": ["name", "base", "size", "align", "guard_before", "guard_after"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base": {
+          "$ref": "common.schema.json#/$defs/va32"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "align": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "guard_before": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "guard_after": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "thread_stacks": {
+      "type": "object",
+      "required": ["base", "size", "stride", "count", "guard"],
+      "properties": {
+        "base": {
+          "$ref": "common.schema.json#/$defs/va32"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stride": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "guard": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "thread_tebs": {
+      "type": "object",
+      "required": ["base", "size", "stride", "count"],
+      "properties": {
+        "base": {
+          "$ref": "common.schema.json#/$defs/va32"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stride": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "hle_thunks": {
+      "type": "object",
+      "required": ["base", "count", "slot_size"],
+      "properties": {
+        "base": {
+          "$ref": "common.schema.json#/$defs/va32"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "slot_size": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "overlaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["a", "b", "kind", "reason"],
+        "properties": {
+          "a": {
+            "type": "string",
+            "minLength": 1
+          },
+          "b": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "guard_pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "base", "size", "policy"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base": {
+            "$ref": "common.schema.json#/$defs/va32"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "policy": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "golden_sets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "addresses"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "addresses": {
+            "type": "array",
+            "items": {
+              "$ref": "common.schema.json#/$defs/va32"
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "corpus_manifest": {
+      "type": "object",
+      "required": [
+        "sha256",
+        "inputs",
+        "generator",
+        "status",
+        "lift_rev",
+        "layout_rev"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "common.schema.json#/$defs/sha256"
+        },
+        "inputs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "generator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lift_rev": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "layout_rev": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

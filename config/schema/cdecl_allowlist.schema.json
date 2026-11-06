@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-cdecl-allowlist",
+  "title": "config/cdecl_allowlist.1.27b.json",
+  "type": "object",
+  "required": ["schema", "corpus", "generated_by", "entries"],
+  "properties": {
+    "schema": {
+      "$ref": "common.schema.json#/$defs/schema"
+    },
+    "corpus": {
+      "$ref": "common.schema.json#/$defs/corpus"
+    },
+    "generated_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["module", "name", "ordinal"],
+        "properties": {
+          "module": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": ["string", "null"]
+          },
+          "ordinal": {
+            "$ref": "common.schema.json#/$defs/ordinal"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

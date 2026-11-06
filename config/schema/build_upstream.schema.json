@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-build-upstream",
+  "title": "config/build_upstream.json",
+  "type": "object",
+  "required": ["schema", "corpus", "note", "upstream", "components"],
+  "properties": {
+    "schema": {
+      "$ref": "common.schema.json#/$defs/schema"
+    },
+    "corpus": {
+      "$ref": "common.schema.json#/$defs/corpus"
+    },
+    "note": {
+      "type": "string"
+    },
+    "upstream": {
+      "type": "object",
+      "required": ["path", "revision", "sha256", "allow_unpinned", "role"],
+      "properties": {
+        "path": {
+          "$ref": "common.schema.json#/$defs/relative_path"
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,40}$"
+        },
+        "sha256": {
+          "$ref": "common.schema.json#/$defs/sha256"
+        },
+        "allow_unpinned": {
+          "type": "boolean"
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "path", "files"],
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "$ref": "common.schema.json#/$defs/relative_path"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "bytes", "sha256"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sha256": {
+                  "$ref": "common.schema.json#/$defs/sha256"
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-common",
+  "title": "Shared definitions for WC3 1.27b configuration files",
+  "description": "These definitions describe the machine-readable contract of config/*.json. They are intentionally structural: semantic checks (who owns an import, which HLE row is implemented) live in the owning tool, not here.",
+  "$defs": {
+    "schema": {
+      "const": 1
+    },
+    "corpus": {
+      "const": "1.27b"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "md5": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 1
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "va32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "size32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "ordinal": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "argc": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 64
+    },
+    "callconv": {
+      "type": ["string", "null"],
+      "enum": ["cdecl", "stdcall", null]
+    },
+    "import_entry": {
+      "type": "object",
+      "required": [
+        "file",
+        "va",
+        "module",
+        "name",
+        "ordinal",
+        "argc",
+        "callconv",
+        "status",
+        "reason",
+        "hle_source",
+        "source",
+        "presence"
+      ],
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "va": {
+          "$ref": "common.schema.json#/$defs/va32"
+        },
+        "module": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": ["string", "null"]
+        },
+        "ordinal": {
+          "$ref": "common.schema.json#/$defs/ordinal"
+        },
+        "argc": {
+          "$ref": "common.schema.json#/$defs/argc"
+        },
+        "callconv": {
+          "$ref": "common.schema.json#/$defs/callconv"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["hle", "lifted", "unresolved", "excluded", "forbidden"]
+        },
+        "reason": {
+          "type": ["string", "null"]
+        },
+        "hle_source": {
+          "type": ["string", "null"]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "presence": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "pe_file": {
+      "type": "object",
+      "required": [
+        "name",
+        "md5",
+        "sha256",
+        "size",
+        "preferred_base",
+        "image_size",
+        "target_base",
+        "rebased",
+        "target_in_scope",
+        "imports",
+        "exports",
+        "hash_pinned",
+        "hash_verified"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "md5": {
+          "$ref": "common.schema.json#/$defs/md5"
+        },
+        "sha256": {
+          "$ref": "common.schema.json#/$defs/sha256"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preferred_base": {
+          "$ref": "common.schema.json#/$defs/va32"
+        },
+        "image_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "target_base": {
+          "$ref": "common.schema.json#/$defs/va32"
+        },
+        "rebased": {
+          "type": "boolean"
+        },
+        "target_in_scope": {
+          "type": "boolean"
+        },
+        "imports": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "exports": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hash_pinned": {
+          "type": "boolean"
+        },
+        "hash_verified": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "export_table": {
+      "type": "object",
+      "required": ["names", "ordinals"],
+      "properties": {
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ordinals": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

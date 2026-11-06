@@ -33,6 +33,26 @@
   новых ошибок нет. POSIX-ветка на этом хосте не собиралась (нет
   Linux/WSL); это зафиксировано как `unavailable`, а не pass.
 
+## Config schemas (track A, M3/R10)
+
+- `config/schema/` — 10 JSON Schema (draft 2020-12): `common.schema.json`
+  с общими `$defs` (va32, sha256, ordinal, import entry, PE file, export
+  table) и отдельные схемы для `arity_overrides`, `baseline`,
+  `build_upstream`, `cdecl_allowlist`, `corpus`, `hle_arity`, `imports`,
+  `layout`, `migration`, `pe_imports`. `README.md` фиксирует mapping.
+- `tools/check_config_schema.py` — валидатор без внешних зависимостей:
+  type/required/properties/items/enum/const/pattern/min/max, локальные и
+  относительные `$ref` на `common.schema.json`; печатает JSON-path ошибки.
+  `--root` позволяет прогнать на другом checkout.
+- `tools/run_tests.py --test config_schema` — **OK** (10 файлов).
+  `check_file_layout.py --strict` больше не выдаёт R10 warning о
+  `config/schema/`; остаётся только `import_policy.1.27b.json` (track B) и
+  две предсуществующие R4-ошибки.
+- Схемы структурные, не семантические: принадлежность импорта, HLE-статус и
+  пересечения layout по-прежнему проверяют `hle_coverage.py`,
+  `check_layout.py` и C-тесты. `import_policy` намеренно не описан, пока его
+  не добавит владелец трека B.
+
 ## Cross-module import binding и аудит импорта (вечернее продолжение)
 
 - `runtime/guest/guest_modules.{h,c}` — каталог загруженных guest-модулей и

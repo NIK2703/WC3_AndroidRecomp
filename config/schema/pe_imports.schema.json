@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wc3-config-pe-imports",
+  "title": "config/pe_imports.1.27b.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "corpus",
+    "pe_fixture_status",
+    "game_dir_basename",
+    "files",
+    "exports",
+    "total",
+    "entries"
+  ],
+  "properties": {
+    "schema": {
+      "$ref": "common.schema.json#/$defs/schema"
+    },
+    "corpus": {
+      "$ref": "common.schema.json#/$defs/corpus"
+    },
+    "pe_fixture_status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "game_dir_basename": {
+      "type": "string",
+      "minLength": 1
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/pe_file"
+      }
+    },
+    "exports": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "common.schema.json#/$defs/export_table"
+      }
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "file",
+          "slot_va",
+          "pe_slot_va",
+          "module",
+          "name",
+          "ordinal",
+          "imported_by_ordinal"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "slot_va": {
+            "$ref": "common.schema.json#/$defs/va32"
+          },
+          "pe_slot_va": {
+            "$ref": "common.schema.json#/$defs/va32"
+          },
+          "module": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": ["string", "null"]
+          },
+          "ordinal": {
+            "$ref": "common.schema.json#/$defs/ordinal"
+          },
+          "imported_by_ordinal": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}
