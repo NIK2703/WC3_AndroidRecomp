@@ -282,6 +282,37 @@ def test_platform_headless() -> int:
     return 0
 
 
+def test_null_gfx() -> int:
+    """T0: canonical D3D9 stream and the three V5.9 invariants."""
+    cc = gcc()
+    if not cc:
+        print("null gfx: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I" + str(ROOT / "runtime" / "gfx" / "null"),
+        str(ROOT / "runtime" / "gfx" / "null" / "null_stream.c"),
+        str(ROOT / "runtime" / "gfx" / "null" / "null_invariants.c"),
+        str(ROOT / "tests" / "null_gfx_test.c"),
+    ]
+    for name, debug in (("null_gfx_test_debug.exe", 1),
+                        ("null_gfx_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_dispatch() -> int:
     cc = gcc()
     if not cc:
@@ -630,6 +661,7 @@ TESTS = {
     "asset_api": test_asset_api,
     "platform_contract": test_platform_contract,
     "platform_headless": test_platform_headless,
+    "null_gfx": test_null_gfx,
 }
 
 T0_TESTS = list(TESTS)

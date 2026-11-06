@@ -70,6 +70,31 @@
   --strict` — те же две R4-ошибки (`hle_android.c`, `platform_android.c`).
   Android/T2 не проверялись.
 
+## gfx/null: канонический поток и инварианты V5.9 (2026-11-07)
+
+- `runtime/gfx/null/` — верификационный frontend: не рисует пиксели, не
+  создаёт Vulkan/DXVK/GL и не входит в APK. `null_stream.c` пишет
+  host-независимый канонический поток `(iface, method, argc, args[8])` с
+  текущим digest состояния; host-указатели, host-время и порядок worker'ов в
+  него не входят. Хэш — FNV-1a 64 с явным little-endian, это identity потока,
+  а не SHA-256 и не замена identity oracle.
+- `null_invariants.c` реализует три инварианта V5.9 на ограниченных таблицах
+  ресурсов/интервалов: `locked_range_written` (ненулевая запись в покрытом
+  Lock/Unlock диапазоне), `declared_range_consistency` (размеры буферов,
+  `numVertices`/`startIndex`/`primitiveCount`, значения индексов и
+  `BaseVertexIndex`) и `degenerate_primitive_ratio` (порог в ppm из G).
+  Переполнение таблицы или отсутствие индексных данных даёт
+  `UNAVAILABLE`, а не `PASS`; пустая/нулевая запись и рассогласование дают
+  `FAIL`.
+- Проверки: `run_tests.py --test null_gfx` — **OK** (debug+release, 50
+  повторов release). Покрыты replay-хэш, изменённый аргумент, state digest,
+  zero/read-only lock, overrun/negative base/короткие индексы, degenerate
+  threshold, отсутствие данных и переполнение таблицы. `check_file_layout.py
+  --strict` — только те же две предсуществующие R4-ошибки.
+- **Не закрыто:** `gfx/null` пока не подключён к D3D9 HLE/thin bridge и не
+  входит в `wc3_headless`; `null_backend_sha256` не публикуется, G-09/T1
+  остаётся `missing`. Android/T2 не проверялись.
+
 ## Config schemas (track A, M3/R10)
 
 - `config/schema/` — 10 JSON Schema (draft 2020-12): `common.schema.json`
