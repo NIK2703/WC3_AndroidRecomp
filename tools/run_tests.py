@@ -351,10 +351,49 @@ def test_mailbox_set() -> int:
     return run([str(exe)])
 
 
+def test_hle_time() -> int:
+    """T0: kernel32/time handlers against fake platform and shim."""
+    cc = gcc()
+    if not cc:
+        print("hle time: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "time"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "time" / "time_hle.c"),
+        str(ROOT / "tests" / "hle_time_test.c"),
+    ]
+    for name, debug in (("hle_time_test_debug.exe", 1),
+                        ("hle_time_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 TESTS = {
     "hle_abi": test_hle_abi,
     "direct_call": test_direct_call,
     "mailbox_set": test_mailbox_set,
+    "hle_time": test_hle_time,
     "file_layout": test_file_layout,
     "docs": test_docs,
     "upstream_pin": test_upstream_pin,

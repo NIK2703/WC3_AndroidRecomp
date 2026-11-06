@@ -11,9 +11,14 @@
  * fabricated return value.
  */
 #include "legacy_shim.h"
+#include "time_hle.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+
+#ifndef WC3_DEBUG
+#define WC3_DEBUG 0
+#endif
 
 #define X(a) void L_##a(CPU *c);
 #include "boot_dispatch_list.h"
@@ -39,6 +44,16 @@ static uint32_t g_lift_hash[LIFT_HASH_SIZE];
 
 void wc3_dispatch_init(void)
 {
+    /* M5 order H6.2: the first target HLE module replaces its as-built rows
+     * before the dispatcher becomes visible to the guest.  A missing row is a
+     * startup configuration error, not a fallback to the quarantined handler. */
+    if (wc3_hle_kernel32_time_install() < 0) {
+#if WC3_DEBUG
+        fprintf(stderr, "[hle] kernel32/time module install failed\n");
+#endif
+        abort();
+    }
+
     size_t count = sizeof g_lift / sizeof g_lift[0];
     for (size_t i = 0; i < count; i++) {
         uint32_t h = (g_lift[i].va * 2654435761u) >> (32 - LIFT_HASH_BITS);

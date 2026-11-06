@@ -24,6 +24,74 @@ const char *wc3_legacy_hle_describe(uint32_t thunk)
     return hle_describe(thunk);
 }
 
+static int ascii_equal_ci(const char *a, const char *b)
+{
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        unsigned ca = (unsigned char)*a++;
+        unsigned cb = (unsigned char)*b++;
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb) return 0;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+int wc3_legacy_hle_override(const char *dll, const char *name,
+                            void (*impl)(CPU *c))
+{
+    if (!dll || !name || !impl) return -1;
+    for (unsigned i = 0; i < g_hle_count; i++) {
+        HleEnt *e = &g_hle[i];
+        if (!ascii_equal_ci(e->dll, dll)) continue;
+        if (!ascii_equal_ci(e->name, name)) continue;
+        e->fn = impl;
+        return 0;
+    }
+    return -1;
+}
+
+int wc3_legacy_guest_ok(uint32_t addr, uint32_t size)
+{
+    return hle_android_guest_ok(addr, size);
+}
+
+uint8_t wc3_legacy_rd8g(uint32_t addr)
+{
+    return *(volatile uint8_t *)(uintptr_t)addr;
+}
+
+uint16_t wc3_legacy_rd16g(uint32_t addr)
+{
+    return *(volatile uint16_t *)(uintptr_t)addr;
+}
+
+uint32_t wc3_legacy_rd32g(uint32_t addr)
+{
+    return rd32g(addr);
+}
+
+void wc3_legacy_wr8g(uint32_t addr, uint8_t value)
+{
+    *(volatile uint8_t *)(uintptr_t)addr = value;
+}
+
+void wc3_legacy_wr16g(uint32_t addr, uint16_t value)
+{
+    *(volatile uint16_t *)(uintptr_t)addr = value;
+}
+
+void wc3_legacy_wr32g(uint32_t addr, uint32_t value)
+{
+    wr32g(addr, value);
+}
+
+uint32_t wc3_legacy_arg32(const CPU *cpu, unsigned index)
+{
+    if (!cpu) return 0;
+    return rd32g(cpu->esp + 4u + index * 4u);
+}
+
 void wc3_legacy_set_screen_size(uint32_t width, uint32_t height)
 {
     hle_android_set_screen_size(width, height);

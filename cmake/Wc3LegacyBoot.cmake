@@ -45,6 +45,7 @@ add_dependencies(wc3_boot wc3_boot_dispatch_gen)
 target_include_directories(wc3_boot PRIVATE
     "${WC3_BOOT_GEN_DIR}"
     "${WC3_ROOT}/runtime/hle"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/time"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/third_party/softfloat/source/include"
@@ -85,6 +86,36 @@ target_compile_options(wc3_legacy_shim PRIVATE
     -U_FORTIFY_SOURCE
     -D_FORTIFY_SOURCE=0)
 set_target_properties(wc3_legacy_shim PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# --- target HLE modules (M5 migration, H6.2 order) -------------------------
+# Each module is a normal target translation unit: no legacy headers, OS
+# services only through Wc3Platform, and registration over the as-built table
+# through the shim.  The quarantine file itself is never edited.
+add_library(wc3_hle_modules STATIC
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/time/time_hle.c")
+target_include_directories(wc3_hle_modules PRIVATE
+    "${WC3_ROOT}/runtime/hle"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/time"
+    "${WC3_ROOT}/runtime/cpu"
+    "${WC3_ROOT}/runtime/guest"
+    "${WC3_ROOT}/runtime/platform"
+    "${WC3_ROOT}/third_party/softfloat/source/include"
+    "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
+target_compile_definitions(wc3_hle_modules PRIVATE
+    SOFTFLOAT_FAST_INT64
+    LITTLEENDIAN
+    THREAD_LOCAL=_Thread_local)
+if(WC3_DEBUG)
+    target_compile_definitions(wc3_hle_modules PRIVATE WC3_DEBUG=1)
+endif()
+target_compile_options(wc3_hle_modules PRIVATE
+    -fno-strict-aliasing
+    -fwrapv
+    -ffp-contract=off
+    -Wno-unused-parameter
+    -Wno-sign-compare)
+target_link_libraries(wc3_hle_modules PUBLIC wc3_legacy_shim wc3_platform)
+set_target_properties(wc3_hle_modules PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # --- quarantined as-built sources (read-only inputs) ----------------------
 add_library(wc3_legacy_boot STATIC
@@ -184,6 +215,7 @@ target_sources(wc3gameactivity PRIVATE
 
 target_link_libraries(wc3gameactivity PRIVATE
     wc3_boot
+    wc3_hle_modules
     wc3_legacy_shim
     wc3_legacy_boot
     wc3_dxvk_entry

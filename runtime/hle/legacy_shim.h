@@ -28,6 +28,26 @@ extern "C" {
 void        wc3_legacy_hle_call(uint32_t thunk, CPU *c);
 const char *wc3_legacy_hle_describe(uint32_t thunk);
 
+/* M5 strangler seam (H6.2/H6.3).  A target module installs its own handler over
+ * an as-built table row while the quarantined implementation is still linked.
+ * The as-built row keeps argc and call convention, so the replacement must
+ * match them.  Must run before the first guest thread; returns 0 on success,
+ * -1 when the row does not exist.  The legacy file stays read-only. */
+int wc3_legacy_hle_override(const char *dll, const char *name,
+                            void (*impl)(CPU *c));
+
+/* Guest memory and argument accessors, served by the quarantine until the
+ * guest layer moves into the target tree.  They keep one range table: a target
+ * module must not link a second copy of runtime/guest during the migration. */
+int      wc3_legacy_guest_ok(uint32_t addr, uint32_t size);
+uint8_t  wc3_legacy_rd8g(uint32_t addr);
+uint16_t wc3_legacy_rd16g(uint32_t addr);
+uint32_t wc3_legacy_rd32g(uint32_t addr);
+void     wc3_legacy_wr8g(uint32_t addr, uint8_t value);
+void     wc3_legacy_wr16g(uint32_t addr, uint16_t value);
+void     wc3_legacy_wr32g(uint32_t addr, uint32_t value);
+uint32_t wc3_legacy_arg32(const CPU *cpu, unsigned index);
+
 /* app_boot.c: device-relative display-mode selection. */
 void wc3_legacy_set_screen_size(uint32_t width, uint32_t height);
 int  wc3_legacy_default_display_mode(uint32_t *width, uint32_t *height);
