@@ -33,6 +33,43 @@
   новых ошибок нет. POSIX-ветка на этом хосте не собиралась (нет
   Linux/WSL); это зафиксировано как `unavailable`, а не pass.
 
+## Virtual clock и cooperative TA-12 schedule (2026-11-07)
+
+- `Wc3HeadlessScheduleConfig` — opt-in: без него платформа сохраняет host
+  monotonic/realtime и host scheduling. С расписанием monotonic начинается с
+  нуля, realtime считается от фиксированного epoch, `local_time()` использует
+  фиксированный UTC-offset. Host-путь контрактного теста не изменился.
+- Timed input script копируется при init, проверяется на порядок и валидность
+  kind, публикуется в SPSC mailbox по virtual time с `mailbox_delay_ns`;
+  `wc3_headless_clock_advance_ns()` и `wc3_headless_input_pop()` публикуют
+  созревшие события. Identity расписания — детерминированный FNV-1a 64 по
+  policy/seed/epoch/timezone/id/script; это не SHA-256 и не заменяет identity
+  Python-difftest.
+- `runtime/platform/headless/headless_sched.c` — cooperative token scheduler:
+  каждый guest thread остаётся реальным pthread, токен передаётся на
+  `yield`, `sleep_ns`, blocking wait/join. Реализованы ROUND_ROBIN, FIFO,
+  LIFO и WAKE_REORDER; virtual timers обслуживаются только когда нет
+  runnable-потока. Sync wait использует абсолютный deadline, поэтому
+  spurious wake не продлевает timeout.
+- Выход владельца освобождает mutex/CS до передачи токена
+  (`headless_sync_thread_exit`), иначе sync-waiter мог повторно заблокироваться
+  на объекте, который TLS-destructor освобождает уже после handoff. Join,
+  abandoned mutex, spurious wake, timeout и wake-order проверены под всеми
+  четырьмя policy.
+- **Ограничения TA-12:** приоритеты guest-потоков не моделируются, потому что
+  в замороженном `Wc3ThreadDesc` нет поля priority; FIFO/LIFO/WAKE_REORDER
+  меняют порядок создания/wake-up, а не приоритет. Scheduler кооперативный:
+  guest-код, не доходящий до platform blocking point, не вытесняется.
+  Поток, созданный не через `Wc3ThreadApi`, не может блокироваться на
+  guest-visible sync при активном расписании. Priority inversion/полный
+  TA-12 остаются `missing`, а не заявляются закрытыми.
+- Проверки: `run_tests.py --test platform_headless` — **OK** (debug+release,
+  30 повторов release); `config_schema`, `module_registry`, `corpus_binding`,
+  `imports`, `asset_api` — pass. `check_arch.py --concurrency --release` —
+  только предсуществующие ошибки `runtime/legacy/`; `check_file_layout.py
+  --strict` — те же две R4-ошибки (`hle_android.c`, `platform_android.c`).
+  Android/T2 не проверялись.
+
 ## Config schemas (track A, M3/R10)
 
 - `config/schema/` — 10 JSON Schema (draft 2020-12): `common.schema.json`

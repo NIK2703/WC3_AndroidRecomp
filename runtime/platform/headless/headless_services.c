@@ -162,14 +162,7 @@ void headless_config_free(HeadlessState *st)
 
 /* ------------------------------------------------------------------- input */
 
-static uint64_t input_now_ns(void)
-{
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0u;
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-static int input_kind_valid(uint32_t kind)
+int headless_input_kind_valid(uint32_t kind)
 {
     return kind >= WC3_INPUT_POINTER_DOWN && kind <= WC3_INPUT_FOCUS;
 }
@@ -177,30 +170,61 @@ static int input_kind_valid(uint32_t kind)
 void headless_input_reset(HeadlessState *st)
 {
     if (!st) return;
+    (void)pthread_mutex_lock(&st->input_push_lock);
     atomic_store_explicit(&st->input_head, 0u, memory_order_relaxed);
     atomic_store_explicit(&st->input_tail, 0u, memory_order_relaxed);
     atomic_store_explicit(&st->input_dropped, 0u, memory_order_relaxed);
     atomic_store_explicit(&st->input_focus, 0, memory_order_relaxed);
+    st->script_next = 0u;
+    (void)pthread_mutex_unlock(&st->input_push_lock);
+}
+
+int headless_input_ring_push(HeadlessState *st, const Wc3InputEvent *event)
+{
+    if (!st || !event || !headless_input_kind_valid(event->kind)) return -1;
+
+    (void)pthread_mutex_lock(&st->input_push_lock);
+    uint32_t head = atomic_load_explicit(&st->input_head, memory_order_relaxed);
+    uint32_t tail = atomic_load_explicit(&st->input_tail, memory_order_acquire);
+    if (head - tail >= HEADLESS_INPUT_RING) {
+        (void)pthread_mutex_unlock(&st->input_push_lock);
+        return -1;
+    }
+    st->input[head & HEADLESS_INPUT_MASK] = *event;
+    atomic_store_explicit(&st->input_head, head + 1u, memory_order_release);
+    (void)pthread_mutex_unlock(&st->input_push_lock);
+    return 0;
 }
 
 static int headless_input_push(void *ctx, const Wc3InputEvent *event)
 {
     HeadlessState *st = (HeadlessState *)ctx;
-    if (!st || !event || !input_kind_valid(event->kind)) return -1;
+    if (!st || !event || !headless_input_kind_valid(event->kind)) return -1;
 
-    uint32_t head = atomic_load_explicit(&st->input_head, memory_order_relaxed);
-    uint32_t tail = atomic_load_explicit(&st->input_tail, memory_order_acquire);
-    if (head - tail >= HEADLESS_INPUT_RING) {
+    Wc3InputEvent copy = *event;
+    if (copy.time_ns == 0u) copy.time_ns = headless_now_ns(st);
+    if (headless_input_ring_push(st, &copy) != 0) {
         atomic_fetch_add_explicit(&st->input_dropped, 1u,
                                   memory_order_relaxed);
         return -1;
     }
-
-    Wc3InputEvent copy = *event;
-    if (copy.time_ns == 0u) copy.time_ns = input_now_ns();
-    st->input[head & HEADLESS_INPUT_MASK] = copy;
-    atomic_store_explicit(&st->input_head, head + 1u, memory_order_release);
     return 0;
+}
+
+void headless_input_publish_due(HeadlessState *st)
+{
+    if (!st || st->script_count == 0u) return;
+
+    const uint64_t now = headless_now_ns(st);
+    (void)pthread_mutex_lock(&st->script_lock);
+    while (st->script_next < st->script_count &&
+           st->script[st->script_next].publish_ns <= now) {
+        if (headless_input_ring_push(
+                st, &st->script[st->script_next].event.event) != 0)
+            break; /* ring full: retry on the next poll/advance */
+        st->script_next++;
+    }
+    (void)pthread_mutex_unlock(&st->script_lock);
 }
 
 int wc3_headless_input_pop(Wc3InputEvent *event)
@@ -208,6 +232,7 @@ int wc3_headless_input_pop(Wc3InputEvent *event)
     HeadlessState *st = g_headless;
     if (!st || !event) return -1;
 
+    headless_input_publish_due(st);
     uint32_t tail = atomic_load_explicit(&st->input_tail, memory_order_relaxed);
     uint32_t head = atomic_load_explicit(&st->input_head, memory_order_acquire);
     if (tail == head) return 0;

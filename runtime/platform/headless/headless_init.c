@@ -9,8 +9,14 @@
 static void headless_state_free(HeadlessState *st)
 {
     if (!st) return;
+    headless_sched_free(st);
+    headless_schedule_free(st);
     headless_services_destroy(st);
     (void)pthread_mutex_destroy(&st->clipboard_lock);
+    (void)pthread_mutex_destroy(&st->script_lock);
+    (void)pthread_mutex_destroy(&st->input_push_lock);
+    (void)pthread_cond_destroy(&st->sched_cond);
+    (void)pthread_mutex_destroy(&st->sched_lock);
     free(st);
 }
 
@@ -26,6 +32,32 @@ int wc3_headless_platform_init(Wc3Platform *platform,
         free(st);
         return -1;
     }
+    if (pthread_mutex_init(&st->script_lock, NULL) != 0) {
+        (void)pthread_mutex_destroy(&st->clipboard_lock);
+        free(st);
+        return -1;
+    }
+    if (pthread_mutex_init(&st->input_push_lock, NULL) != 0) {
+        (void)pthread_mutex_destroy(&st->script_lock);
+        (void)pthread_mutex_destroy(&st->clipboard_lock);
+        free(st);
+        return -1;
+    }
+    if (pthread_mutex_init(&st->sched_lock, NULL) != 0) {
+        (void)pthread_mutex_destroy(&st->input_push_lock);
+        (void)pthread_mutex_destroy(&st->script_lock);
+        (void)pthread_mutex_destroy(&st->clipboard_lock);
+        free(st);
+        return -1;
+    }
+    if (pthread_cond_init(&st->sched_cond, NULL) != 0) {
+        (void)pthread_mutex_destroy(&st->sched_lock);
+        (void)pthread_mutex_destroy(&st->input_push_lock);
+        (void)pthread_mutex_destroy(&st->script_lock);
+        (void)pthread_mutex_destroy(&st->clipboard_lock);
+        free(st);
+        return -1;
+    }
 
     uint32_t width = config && config->width ? config->width : 1024u;
     uint32_t height = config && config->height ? config->height : 768u;
@@ -33,6 +65,16 @@ int wc3_headless_platform_init(Wc3Platform *platform,
     st->height = height;
     (void)headless_copy_string(st->window_title, sizeof st->window_title,
                                "wc3-headless");
+
+    if (headless_schedule_init(st, config ? config->schedule : NULL) != 0) {
+        headless_state_free(st);
+        return -1;
+    }
+    if (headless_sched_init(st) != 0) {
+        headless_state_free(st);
+        return -1;
+    }
+    headless_input_reset(st);
 
     const char *save_root =
         config && config->save_root && *config->save_root ? config->save_root
@@ -42,17 +84,14 @@ int wc3_headless_platform_init(Wc3Platform *platform,
             ? config->asset_root
             : NULL;
     if (headless_asset_roots(st, asset_root, save_root) != 0) {
-        (void)pthread_mutex_destroy(&st->clipboard_lock);
-        free(st);
+        headless_state_free(st);
         return -1;
     }
     if (headless_config_init(st, config ? config->entries : NULL,
                              config ? config->entry_count : 0u) != 0) {
-        (void)pthread_mutex_destroy(&st->clipboard_lock);
-        free(st);
+        headless_state_free(st);
         return -1;
     }
-    headless_input_reset(st);
 
     memset(platform, 0, sizeof *platform);
     headless_mem_install(platform, st);

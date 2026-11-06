@@ -99,6 +99,17 @@ static void headless_owner_remove(HeadlessSync *p)
     (void)pthread_setspecific(g_owner_key, head);
 }
 
+void headless_sync_thread_exit(void)
+{
+    if (!g_owner_key_ready) return;
+    void *list = pthread_getspecific(g_owner_key);
+    if (!list) return;
+    headless_owner_thread_exit(list);
+    /* Do not let the pthread TLS destructor visit the same records again:
+     * the next owner may already have acquired them. */
+    (void)pthread_setspecific(g_owner_key, NULL);
+}
+
 static void headless_sync_init(void)
 {
     pthread_mutex_init(&g_sync_lock, NULL);
@@ -148,7 +159,7 @@ static int headless_event_create(void *ctx, int manual_reset, int initial_state,
 
 static int headless_event_set(void *ctx, Wc3SyncHandle handle)
 {
-    (void)ctx;
+    HeadlessState *st = (HeadlessState *)ctx;
     (void)pthread_once(&g_sync_once, headless_sync_init);
     (void)pthread_mutex_lock(&g_sync_lock);
     HeadlessSync *p = headless_sync_lookup(handle);
@@ -158,6 +169,7 @@ static int headless_event_set(void *ctx, Wc3SyncHandle handle)
         (void)pthread_cond_broadcast(&g_sync_cond);
     }
     (void)pthread_mutex_unlock(&g_sync_lock);
+    if (ok) headless_sched_wake_sync(st);
     return ok ? 0 : -1;
 }
 
@@ -195,7 +207,7 @@ static int headless_mutex_create(void *ctx, int initial_owner,
 
 static int headless_mutex_release(void *ctx, Wc3SyncHandle handle)
 {
-    (void)ctx;
+    HeadlessState *st = (HeadlessState *)ctx;
     (void)pthread_once(&g_sync_once, headless_sync_init);
     (void)pthread_mutex_lock(&g_sync_lock);
     HeadlessSync *p = headless_sync_lookup(handle);
@@ -212,6 +224,7 @@ static int headless_mutex_release(void *ctx, Wc3SyncHandle handle)
         (void)pthread_cond_broadcast(&g_sync_cond);
     }
     (void)pthread_mutex_unlock(&g_sync_lock);
+    if (ok) headless_sched_wake_sync(st);
     return ok ? 0 : -1;
 }
 
@@ -235,7 +248,7 @@ static int headless_semaphore_create(void *ctx, int32_t initial,
 static int headless_semaphore_release(void *ctx, Wc3SyncHandle handle,
                                       int32_t count, int32_t *previous)
 {
-    (void)ctx;
+    HeadlessState *st = (HeadlessState *)ctx;
     if (count <= 0) return -1;
     (void)pthread_once(&g_sync_once, headless_sync_init);
     (void)pthread_mutex_lock(&g_sync_lock);
@@ -248,6 +261,7 @@ static int headless_semaphore_release(void *ctx, Wc3SyncHandle handle,
         (void)pthread_cond_broadcast(&g_sync_cond);
     }
     (void)pthread_mutex_unlock(&g_sync_lock);
+    if (ok) headless_sched_wake_sync(st);
     return ok ? 0 : -1;
 }
 
@@ -298,15 +312,142 @@ static int headless_sync_abandoned(const HeadlessSync *p)
     return p->kind == HEADLESS_SYNC_MUTEX && p->abandoned != 0;
 }
 
+static int headless_wait_sched(HeadlessState *st,
+                               const Wc3SyncHandle *objects, uint32_t count,
+                               int wait_all, uint32_t timeout_ms,
+                               uint32_t *index)
+{
+    HeadlessSync *p[HEADLESS_WAIT_MAX];
+    (void)pthread_mutex_lock(&g_sync_lock);
+    for (uint32_t i = 0; i < count; i++) {
+        p[i] = headless_sync_lookup(objects[i]);
+        if (!p[i]) {
+            (void)pthread_mutex_unlock(&g_sync_lock);
+            if (index) *index = 0u;
+            return (int)WC3_WAIT_FAILED;
+        }
+    }
+    for (uint32_t i = 0; i < count; i++) p[i]->waiters++;
+    (void)pthread_mutex_unlock(&g_sync_lock);
+
+    uint64_t deadline_ns = UINT64_MAX;
+    if (timeout_ms != UINT32_MAX) {
+        const uint64_t add = (uint64_t)timeout_ms * 1000000ull;
+        const uint64_t now = headless_now_ns(st);
+        if (UINT64_MAX - now >= add) deadline_ns = now + add;
+    }
+
+    int expired = 0;
+    for (;;) {
+        (void)pthread_mutex_lock(&g_sync_lock);
+        int ready = wait_all ? 1 : 0;
+        uint32_t first = 0u;
+        for (uint32_t i = 0; i < count; i++) {
+            const int r = headless_sync_ready(p[i]);
+            if (wait_all) {
+                if (!r) {
+                    ready = 0;
+                    break;
+                }
+            } else if (r) {
+                ready = 1;
+                first = i;
+                break;
+            }
+        }
+        if (ready) {
+            int abandoned = 0;
+            if (wait_all) {
+                for (uint32_t i = 0; i < count; i++) {
+                    if (headless_sync_abandoned(p[i])) abandoned = 1;
+                    headless_sync_consume(p[i]);
+                }
+            } else {
+                abandoned = headless_sync_abandoned(p[first]);
+                headless_sync_consume(p[first]);
+            }
+            for (uint32_t i = 0; i < count; i++) p[i]->waiters--;
+            (void)pthread_cond_broadcast(&g_sync_cond);
+            (void)pthread_mutex_unlock(&g_sync_lock);
+            if (index) *index = wait_all ? 0u : first;
+            if (abandoned)
+                return (int)WC3_WAIT_ABANDONED_0 +
+                       (int)(wait_all ? 0u : first);
+            return (int)WC3_WAIT_OBJECT_0 + (int)(wait_all ? 0u : first);
+        }
+        if (expired || timeout_ms == 0u ||
+            (deadline_ns != UINT64_MAX &&
+             headless_now_ns(st) >= deadline_ns)) {
+            for (uint32_t i = 0; i < count; i++) p[i]->waiters--;
+            (void)pthread_mutex_unlock(&g_sync_lock);
+            if (index) *index = 0u;
+            return (int)WC3_WAIT_TIMEOUT;
+        }
+        (void)pthread_mutex_unlock(&g_sync_lock);
+
+        if (headless_sched_block_until(st, deadline_ns, HEADLESS_BLOCK_SYNC,
+                                       &expired) != 0) {
+            (void)pthread_mutex_lock(&g_sync_lock);
+            for (uint32_t i = 0; i < count; i++) p[i]->waiters--;
+            (void)pthread_mutex_unlock(&g_sync_lock);
+            if (index) *index = 0u;
+            return (int)WC3_WAIT_FAILED;
+        }
+    }
+}
+
+static int headless_cs_enter_sched(HeadlessState *st, Wc3SyncHandle handle)
+{
+    int waiting = 0;
+    for (;;) {
+        (void)pthread_mutex_lock(&g_sync_lock);
+        HeadlessSync *p = headless_sync_lookup(handle);
+        if (!p || p->kind != HEADLESS_SYNC_CRITICAL) {
+            if (waiting && p) p->waiters--;
+            (void)pthread_mutex_unlock(&g_sync_lock);
+            return -1;
+        }
+        if (pthread_equal(p->owner, pthread_self())) {
+            if (waiting) p->waiters--;
+            p->recursion++;
+            (void)pthread_mutex_unlock(&g_sync_lock);
+            return 0;
+        }
+        if (!p->owner_dead && p->owner == 0) {
+            if (waiting) p->waiters--;
+            p->owner = pthread_self();
+            p->recursion = 1u;
+            headless_owner_add(p);
+            (void)pthread_mutex_unlock(&g_sync_lock);
+            return 0;
+        }
+        if (!waiting) {
+            p->waiters++;
+            waiting = 1;
+        }
+        (void)pthread_mutex_unlock(&g_sync_lock);
+        if (headless_sched_block(st, UINT32_MAX, HEADLESS_BLOCK_SYNC,
+                                 NULL) != 0) {
+            (void)pthread_mutex_lock(&g_sync_lock);
+            p->waiters--;
+            (void)pthread_mutex_unlock(&g_sync_lock);
+            return -1;
+        }
+    }
+}
+
 static int headless_wait(void *ctx, const Wc3SyncHandle *objects, uint32_t count,
                          int wait_all, uint32_t timeout_ms, uint32_t *index)
 {
-    (void)ctx;
     if (!objects || count == 0u || count > HEADLESS_WAIT_MAX) {
         if (index) *index = 0u;
         return (int)WC3_WAIT_FAILED;
     }
     (void)pthread_once(&g_sync_once, headless_sync_init);
+    HeadlessState *st = (HeadlessState *)ctx;
+    if (headless_sched_active(st))
+        return headless_wait_sched(st, objects, count, wait_all, timeout_ms,
+                                   index);
 
     struct timespec deadline;
     if (timeout_ms != UINT32_MAX) {
@@ -469,8 +610,10 @@ static int headless_cs_create(void *ctx, Wc3SyncHandle *out)
 
 static int headless_cs_enter(void *ctx, Wc3SyncHandle handle)
 {
-    (void)ctx;
+    HeadlessState *st = (HeadlessState *)ctx;
     (void)pthread_once(&g_sync_once, headless_sync_init);
+    if (headless_sched_active(st)) return headless_cs_enter_sched(st, handle);
+
     (void)pthread_mutex_lock(&g_sync_lock);
     HeadlessSync *p = headless_sync_lookup(handle);
     int ok = p && p->kind == HEADLESS_SYNC_CRITICAL;

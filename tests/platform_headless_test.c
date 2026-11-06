@@ -119,6 +119,10 @@ static void test_time(const Wc3TimeApi *t)
     uint64_t real = t->realtime_ns(t->ctx);
     check(mono != 0, "monotonic clock");
     check(real > 1700000000000000000ull, "realtime clock");
+    check(wc3_headless_clock_now_ns() != 0u, "host clock now");
+    check(wc3_headless_clock_advance_ns(1u) == -1, "host clock not virtual");
+    check(wc3_headless_schedule_id() == NULL, "host schedule id absent");
+    check(wc3_headless_schedule_hash() == 0u, "host schedule hash absent");
     int32_t y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
     check(t->local_time(t->ctx, real, &y, &mo, &d, &h, &mi, &s, &ms) == 0,
           "local time");
@@ -437,6 +441,474 @@ static void test_asset(const Wc3AssetApi *a)
     (void)remove("build/host/headless-assets/readme.txt");
 }
 
+typedef struct SchedCtx {
+    const Wc3ThreadApi *thread;
+    const Wc3SyncApi *sync;
+    const Wc3TimeApi *time;
+    Wc3SyncHandle event;
+    char *order;
+    uint32_t *count;
+    char first;
+    char second;
+    uint32_t timeout_ms;
+    uint64_t elapsed_ns;
+} SchedCtx;
+
+static int sched_yield_child(void *arg)
+{
+    SchedCtx *c = (SchedCtx *)arg;
+    c->order[(*c->count)++] = c->first;
+    c->thread->yield(c->thread->ctx);
+    c->order[(*c->count)++] = c->second;
+    return 0;
+}
+
+static int sched_wait_child(void *arg)
+{
+    SchedCtx *c = (SchedCtx *)arg;
+    const uint32_t rc = (uint32_t)c->sync->wait(
+        c->sync->ctx, &c->event, 1, 0, UINT32_MAX, NULL);
+    c->order[(*c->count)++] = rc == WC3_WAIT_OBJECT_0 ? 'w' : '!';
+    return 0;
+}
+
+static int sched_wait_char_child(void *arg)
+{
+    SchedCtx *c = (SchedCtx *)arg;
+    const uint32_t rc = (uint32_t)c->sync->wait(
+        c->sync->ctx, &c->event, 1, 0, UINT32_MAX, NULL);
+    c->order[(*c->count)++] = rc == WC3_WAIT_OBJECT_0 ? c->first : '!';
+    return 0;
+}
+
+static int sched_signal_child(void *arg)
+{
+    SchedCtx *c = (SchedCtx *)arg;
+    if (c->thread->sleep_ns(c->thread->ctx, 10000000ull) != 0) return -1;
+    return c->sync->event_set(c->sync->ctx, c->event);
+}
+
+static int sched_timeout_child(void *arg)
+{
+    SchedCtx *c = (SchedCtx *)arg;
+    const uint64_t start =
+        c->time ? c->time->monotonic_ns(c->time->ctx) : 0u;
+    const uint32_t rc = (uint32_t)c->sync->wait(
+        c->sync->ctx, &c->event, 1, 0, c->timeout_ms, NULL);
+    c->elapsed_ns =
+        (c->time ? c->time->monotonic_ns(c->time->ctx) : 0u) - start;
+    c->order[(*c->count)++] = rc == WC3_WAIT_TIMEOUT ? 't' : '!';
+    return 0;
+}
+
+static int sched_exit_child(void *arg)
+{
+    SchedCtx *c = (SchedCtx *)arg;
+    return c->thread->sleep_ns(c->thread->ctx, 2000000ull);
+}
+
+typedef struct SchedMutexCtx {
+    const Wc3ThreadApi *thread;
+    const Wc3SyncApi *sync;
+    Wc3SyncHandle mutex;
+    Wc3SyncHandle acquired;
+    char *order;
+    uint32_t *count;
+} SchedMutexCtx;
+
+static int sched_mutex_owner_child(void *arg)
+{
+    SchedMutexCtx *c = (SchedMutexCtx *)arg;
+    if (c->sync->wait(c->sync->ctx, &c->mutex, 1, 0, UINT32_MAX, NULL) !=
+        WC3_WAIT_OBJECT_0)
+        return -1;
+    if (c->sync->event_set(c->sync->ctx, c->acquired) != 0) return -1;
+    /* Keep ownership across a blocking point so the waiter is already
+     * parked on the mutex when this thread exits. */
+    return c->thread->sleep_ns(c->thread->ctx, 2000000ull);
+}
+
+static int sched_mutex_waiter_child(void *arg)
+{
+    SchedMutexCtx *c = (SchedMutexCtx *)arg;
+    const uint32_t rc = (uint32_t)c->sync->wait(
+        c->sync->ctx, &c->mutex, 1, 0, UINT32_MAX, NULL);
+    c->order[(*c->count)++] = rc == WC3_WAIT_ABANDONED_0 ? 'm' : '!';
+    if (rc == WC3_WAIT_ABANDONED_0 && c->sync->mutex_release(
+                                           c->sync->ctx, c->mutex) != 0)
+        return -1;
+    return 0;
+}
+
+static Wc3ThreadHandle sched_spawn(const Wc3ThreadApi *t, int (*entry)(void *),
+                                   void *arg, const char *name)
+{
+    Wc3ThreadDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.name = name;
+    desc.stack_size = 128u * 1024u;
+    desc.entry = entry;
+    desc.arg = arg;
+    Wc3ThreadHandle h = 0;
+    check(t->create(t->ctx, &desc, &h) == 0, name);
+    return h;
+}
+
+static void test_scheduler(Wc3Platform *p, const char *expected_yield,
+                           const char *expected_wake)
+{
+    char order[16];
+    uint32_t count = 0;
+    memset(order, 0, sizeof order);
+
+    SchedCtx a;
+    memset(&a, 0, sizeof a);
+    a.thread = &p->thread;
+    a.order = order;
+    a.count = &count;
+    a.first = 'A';
+    a.second = 'a';
+    SchedCtx b = a;
+    b.first = 'B';
+    b.second = 'b';
+
+    Wc3ThreadHandle ha = sched_spawn(&p->thread, sched_yield_child, &a, "sched-A");
+    Wc3ThreadHandle hb = sched_spawn(&p->thread, sched_yield_child, &b, "sched-B");
+    if (ha) {
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, ha, &exit_code) == 0,
+              "sched join A");
+        check(exit_code == 0u, "sched A exit");
+    }
+    if (hb) {
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, hb, &exit_code) == 0,
+              "sched join B");
+        check(exit_code == 0u, "sched B exit");
+    }
+    check(count == 4u && memcmp(order, expected_yield, 4) == 0,
+          "schedule yield order");
+
+    SchedCtx w;
+    memset(&w, 0, sizeof w);
+    w.thread = &p->thread;
+    w.sync = &p->sync;
+    w.order = order;
+    w.count = &count;
+    check(p->sync.event_create(p->sync.ctx, 0, 0, &w.event) == 0,
+          "sched wait event");
+    SchedCtx s = w;
+    Wc3ThreadHandle hw =
+        sched_spawn(&p->thread, sched_wait_child, &w, "sched-wait");
+    Wc3ThreadHandle hs =
+        sched_spawn(&p->thread, sched_signal_child, &s, "sched-signal");
+    count = 0;
+    memset(order, 0, sizeof order);
+    if (hw) {
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, hw, &exit_code) == 0,
+              "sched join wait");
+        check(exit_code == 0u, "sched wait exit");
+    }
+    if (hs) {
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, hs, &exit_code) == 0,
+              "sched join signal");
+        check(exit_code == 0u, "sched signal exit");
+    }
+    check(count == 1u && order[0] == 'w', "sched wake wait");
+    check(p->sync.close(p->sync.ctx, w.event) == 0, "sched wait close");
+
+    /* Both waiters park on the same manual event, then a third thread sets
+     * it.  LIFO/WAKE_REORDER must prefer the latest-created/latest-woken
+     * waiter; FIFO/ROUND_ROBIN keep creation order. */
+    SchedCtx w1;
+    memset(&w1, 0, sizeof w1);
+    w1.thread = &p->thread;
+    w1.sync = &p->sync;
+    w1.order = order;
+    w1.count = &count;
+    w1.first = '1';
+    check(p->sync.event_create(p->sync.ctx, 1, 0, &w1.event) == 0,
+          "sched wake order event");
+    SchedCtx w2 = w1;
+    w2.first = '2';
+    SchedCtx setter = w1;
+    Wc3ThreadHandle hw1 =
+        sched_spawn(&p->thread, sched_wait_char_child, &w1, "sched-w1");
+    Wc3ThreadHandle hw2 =
+        sched_spawn(&p->thread, sched_wait_char_child, &w2, "sched-w2");
+    Wc3ThreadHandle hset =
+        sched_spawn(&p->thread, sched_signal_child, &setter, "sched-setter");
+    count = 0;
+    memset(order, 0, sizeof order);
+    if (hw1) {
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, hw1, &exit_code) == 0,
+              "sched w1 join");
+        check(exit_code == 0u, "sched w1 exit");
+    }
+    if (hw2) {
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, hw2, &exit_code) == 0,
+              "sched w2 join");
+        check(exit_code == 0u, "sched w2 exit");
+    }
+    if (hset) {
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, hset, &exit_code) == 0,
+              "sched setter join");
+        check(exit_code == 0u, "sched setter exit");
+    }
+    check(count == 2u && memcmp(order, expected_wake, 2) == 0,
+          "sched wake order");
+    check(p->sync.close(p->sync.ctx, w1.event) == 0,
+          "sched wake order close");
+
+    SchedCtx to;
+    memset(&to, 0, sizeof to);
+    to.thread = &p->thread;
+    to.sync = &p->sync;
+    to.time = &p->time;
+    to.order = order;
+    to.count = &count;
+    to.timeout_ms = 5u;
+    check(p->sync.event_create(p->sync.ctx, 0, 0, &to.event) == 0,
+          "sched timeout event");
+    Wc3ThreadHandle ht =
+        sched_spawn(&p->thread, sched_timeout_child, &to, "sched-timeout");
+    count = 0;
+    memset(order, 0, sizeof order);
+    if (ht) {
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, ht, &exit_code) == 0,
+              "sched join timeout");
+        check(exit_code == 0u, "sched timeout exit");
+    }
+    check(count == 1u && order[0] == 't', "sched virtual timeout");
+    check(to.elapsed_ns == 5000000ull, "sched timeout duration");
+    check(p->sync.close(p->sync.ctx, to.event) == 0,
+          "sched timeout close");
+
+    /* A thread exit wakes sync waiters spuriously.  The timeout must keep its
+     * original deadline instead of restarting from the wake-up point. */
+    SchedCtx slow;
+    memset(&slow, 0, sizeof slow);
+    slow.thread = &p->thread;
+    slow.sync = &p->sync;
+    slow.time = &p->time;
+    slow.order = order;
+    slow.count = &count;
+    slow.timeout_ms = 10u;
+    check(p->sync.event_create(p->sync.ctx, 0, 0, &slow.event) == 0,
+          "sched deadline event");
+    Wc3ThreadHandle hslow =
+        sched_spawn(&p->thread, sched_timeout_child, &slow, "sched-deadline");
+    Wc3ThreadHandle hexit =
+        sched_spawn(&p->thread, sched_exit_child, &slow, "sched-exit");
+    count = 0;
+    memset(order, 0, sizeof order);
+    if (hslow) {
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, hslow, &exit_code) == 0,
+              "sched deadline join");
+        check(exit_code == 0u, "sched deadline exit");
+    }
+    if (hexit) {
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, hexit, &exit_code) == 0,
+              "sched exit join");
+        check(exit_code == 0u, "sched exit code");
+    }
+    check(count == 1u && order[0] == 't',
+          "sched timeout survives spurious wake");
+    check(slow.elapsed_ns == 10000000ull, "sched deadline not extended");
+    check(p->sync.close(p->sync.ctx, slow.event) == 0,
+          "sched deadline close");
+
+    /* A sync waiter must observe mutex abandonment before the exiting owner
+     * hands the token away.  Waiting for `acquired` first keeps this test
+     * independent of the selected schedule policy. */
+    SchedMutexCtx mx;
+    memset(&mx, 0, sizeof mx);
+    mx.thread = &p->thread;
+    mx.sync = &p->sync;
+    mx.order = order;
+    mx.count = &count;
+    check(p->sync.mutex_create(p->sync.ctx, 0, &mx.mutex) == 0,
+          "sched abandon mutex create");
+    check(p->sync.event_create(p->sync.ctx, 0, 0, &mx.acquired) == 0,
+          "sched abandon event create");
+    Wc3ThreadHandle ho =
+        sched_spawn(&p->thread, sched_mutex_owner_child, &mx, "sched-owner");
+    if (ho) {
+        check(p->sync.wait(p->sync.ctx, &mx.acquired, 1, 0, 100u, NULL) ==
+                  WC3_WAIT_OBJECT_0,
+              "sched owner acquired");
+        Wc3ThreadHandle hm = sched_spawn(
+            &p->thread, sched_mutex_waiter_child, &mx, "sched-waiter");
+        count = 0;
+        memset(order, 0, sizeof order);
+        if (hm) {
+            uint32_t exit_code = 1u;
+            check(p->thread.join(p->thread.ctx, hm, &exit_code) == 0,
+                  "sched waiter join");
+            check(exit_code == 0u, "sched waiter exit");
+        }
+        uint32_t exit_code = 1u;
+        check(p->thread.join(p->thread.ctx, ho, &exit_code) == 0,
+              "sched owner join");
+        check(exit_code == 0u, "sched owner exit");
+        check(count == 1u && order[0] == 'm',
+              "sched waiter sees abandoned mutex");
+    }
+    check(p->sync.close(p->sync.ctx, mx.acquired) == 0,
+          "sched abandon event close");
+    check(p->sync.close(p->sync.ctx, mx.mutex) == 0,
+          "sched abandon mutex close");
+}
+
+static uint64_t run_scheduler_policy(Wc3Platform *p,
+                                     const Wc3HeadlessScheduleConfig *base,
+                                     uint32_t policy, const char *id,
+                                     const char *expected_yield,
+                                     const char *expected_wake)
+{
+    Wc3HeadlessScheduleConfig schedule = *base;
+    schedule.policy = policy;
+    schedule.id = id;
+    schedule.mailbox_delay_ns = 0u;
+    schedule.input_script = NULL;
+    schedule.input_count = 0u;
+
+    Wc3HeadlessConfig config;
+    memset(&config, 0, sizeof config);
+    config.schedule = &schedule;
+    check(wc3_headless_platform_init(p, &config) == 0, id);
+    check(wc3_headless_schedule_policy() == (int)policy, "policy value");
+    const uint64_t hash = wc3_headless_schedule_hash();
+    check(hash != 0u, "policy hash");
+    test_scheduler(p, expected_yield, expected_wake);
+    wc3_headless_platform_shutdown(p);
+    check(wc3_headless_schedule_id() == NULL, "policy id cleared");
+    return hash;
+}
+
+static void test_virtual_schedule(void)
+{
+    static const Wc3HeadlessScriptEvent script[] = {
+        {100000000ull, {.kind = WC3_INPUT_KEY_DOWN, .key = 1u}},
+        {200000000ull, {.kind = WC3_INPUT_KEY_DOWN, .key = 2u}},
+    };
+    static const Wc3HeadlessConfigEntry entries[] = {
+        {"WC3_VIRTUAL", "1"},
+    };
+
+    Wc3HeadlessScheduleConfig schedule;
+    memset(&schedule, 0, sizeof schedule);
+    schedule.policy = WC3_HEADLESS_SCHED_ROUND_ROBIN;
+    schedule.seed = 0x12345678u;
+    schedule.id = "t1-rr-delay";
+    schedule.epoch_unix_ns = 1700000000000000000ull;
+    schedule.timezone_minutes = 180;
+    schedule.mailbox_delay_ns = 10000000u;
+    schedule.input_script = script;
+    schedule.input_count = (uint32_t)(sizeof script / sizeof script[0]);
+
+    Wc3HeadlessConfig config;
+    memset(&config, 0, sizeof config);
+    config.entries = entries;
+    config.entry_count = (uint32_t)(sizeof entries / sizeof entries[0]);
+    config.schedule = &schedule;
+
+    Wc3Platform p;
+    memset(&p, 0, sizeof p);
+    check(wc3_headless_platform_init(&p, &config) == 0,
+          "virtual platform init");
+    check(wc3_headless_schedule_policy() ==
+              WC3_HEADLESS_SCHED_ROUND_ROBIN,
+          "schedule policy");
+    check(wc3_headless_schedule_seed() == 0x12345678u, "schedule seed");
+    check(wc3_headless_schedule_id() &&
+              strcmp(wc3_headless_schedule_id(), "t1-rr-delay") == 0,
+          "schedule id");
+    const uint64_t hash = wc3_headless_schedule_hash();
+    check(hash != 0u, "schedule hash");
+    check(wc3_headless_schedule_hash() == hash, "schedule hash stable");
+
+    check(p.time.monotonic_ns(p.time.ctx) == 0u, "virtual monotonic zero");
+    check(p.time.realtime_ns(p.time.ctx) == 1700000000000000000ull,
+          "virtual realtime epoch");
+    int32_t y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
+    check(p.time.local_time(p.time.ctx, 1700000000000000000ull, &y, &mo, &d,
+                            &h, &mi, &s, &ms) == 0,
+          "virtual local time");
+    check(y == 2023 && mo == 11 && d == 15 && h == 1 && mi == 13 && s == 20 &&
+              ms == 0,
+          "virtual local time fixed offset");
+
+    Wc3InputEvent event;
+    check(wc3_headless_input_pop(&event) == 0, "script not due at zero");
+    check(wc3_headless_clock_advance_ns(105000000ull) == 0,
+          "advance below first release");
+    check(p.time.monotonic_ns(p.time.ctx) == 105000000ull,
+          "virtual monotonic value");
+    check(wc3_headless_input_pop(&event) == 0, "script delay holds event");
+    check(wc3_headless_clock_advance_ns(5000000ull) == 0,
+          "advance to first release");
+    check(wc3_headless_input_pop(&event) == 1, "script first event");
+    check(event.kind == WC3_INPUT_KEY_DOWN && event.key == 1u,
+          "script first event value");
+    check(event.time_ns == 110000000ull, "script first event timestamp");
+    check(wc3_headless_input_pop(&event) == 0, "script first consumed");
+
+    check(wc3_headless_clock_advance_ns(99000000ull) == 0,
+          "advance below second release");
+    check(wc3_headless_input_pop(&event) == 0, "script second holds");
+    check(wc3_headless_clock_advance_ns(1000000ull) == 0,
+          "advance to second release");
+    check(wc3_headless_input_pop(&event) == 1, "script second event");
+    check(event.kind == WC3_INPUT_KEY_DOWN && event.key == 2u,
+          "script second event value");
+    check(event.time_ns == 210000000ull, "script second event timestamp");
+
+    check(p.thread.sleep_ns(p.thread.ctx, 50000000ull) == 0,
+          "virtual sleep");
+    check(p.time.monotonic_ns(p.time.ctx) == 260000000ull,
+          "virtual sleep advanced clock");
+    const uint64_t before = p.time.monotonic_ns(p.time.ctx);
+    check(wc3_headless_clock_advance_ns(UINT64_MAX) == -1,
+          "virtual clock overflow rejected");
+    check(p.time.monotonic_ns(p.time.ctx) == before,
+          "clock unchanged after overflow");
+    check(wc3_headless_clock_advance_ns(0u) == 0, "zero advance");
+    check(p.config.get_int(p.config.ctx, "WC3_VIRTUAL", 0) == 1,
+          "virtual config entry");
+
+    test_scheduler(&p, "ABab", "12");
+
+    wc3_headless_platform_shutdown(&p);
+    check(wc3_headless_schedule_id() == NULL, "first schedule id cleared");
+
+    const uint64_t fifo_hash = run_scheduler_policy(
+        &p, &schedule, WC3_HEADLESS_SCHED_FIFO, "t1-fifo", "ABab", "12");
+    check(fifo_hash != hash, "fifo hash differs");
+    const uint64_t lifo_hash = run_scheduler_policy(
+        &p, &schedule, WC3_HEADLESS_SCHED_LIFO, "t1-lifo", "BAba", "21");
+    check(lifo_hash != hash && lifo_hash != fifo_hash,
+          "lifo hash differs");
+    const uint64_t wake_hash = run_scheduler_policy(
+        &p, &schedule, WC3_HEADLESS_SCHED_WAKE_REORDER, "t1-wake", "BAba",
+        "21");
+    check(wake_hash != hash && wake_hash != fifo_hash &&
+              wake_hash != lifo_hash,
+          "wake hash differs");
+
+    check(wc3_headless_schedule_id() == NULL, "schedule id cleared");
+    check(wc3_headless_schedule_hash() == 0u, "schedule hash cleared");
+    check(wc3_headless_clock_advance_ns(1u) == -1, "clock cleared");
+}
+
 int main(void)
 {
     static const Wc3HeadlessConfigEntry entries[] = {
@@ -486,6 +958,8 @@ int main(void)
     check(p.mem.reserve == NULL && p.file.open == NULL, "platform cleared");
     Wc3InputEvent event;
     check(wc3_headless_input_pop(&event) == -1, "input after shutdown");
+
+    test_virtual_schedule();
 
     static const Wc3HeadlessConfigEntry duplicate[] = {
         {"WC3_DUP", "1"},

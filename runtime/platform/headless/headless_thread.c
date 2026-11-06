@@ -30,6 +30,8 @@ typedef struct HeadlessThread {
     int exit_code;
     uint64_t id;
     char name[16];
+    HeadlessState *state;
+    HeadlessSchedThread *sched;
 } HeadlessThread;
 
 static pthread_key_t g_thread_key;
@@ -48,6 +50,7 @@ static void headless_thread_key_init(void)
 
 static void headless_thread_release(HeadlessThread *t)
 {
+    headless_sched_unregister(t->state, t->sched);
     pthread_cond_destroy(&t->cond);
     pthread_mutex_destroy(&t->lock);
     free(t);
@@ -58,6 +61,7 @@ static void *headless_thread_main(void *opaque)
     HeadlessThread *t = (HeadlessThread *)opaque;
     (void)pthread_setspecific(g_thread_key, t);
     t->id = headless_tid();
+    headless_sched_start(t->state, t->sched);
 
     int rc = t->entry(t->arg);
 
@@ -68,6 +72,11 @@ static void *headless_thread_main(void *opaque)
     t->refs--;
     int free_it = (t->refs == 0u);
     (void)pthread_mutex_unlock(&t->lock);
+    /* Release abandoned mutex/CS ownership before the scheduler lets a waiter
+     * run; otherwise the waiter can re-block on an object that the TLS
+     * destructor only clears after the token has already been handed over. */
+    headless_sync_thread_exit();
+    headless_sched_exit(t->state, t->sched);
     if (free_it) headless_thread_release(t);
     return NULL;
 }
@@ -75,12 +84,13 @@ static void *headless_thread_main(void *opaque)
 static int headless_thread_create(void *ctx, const Wc3ThreadDesc *desc,
                                   Wc3ThreadHandle *out)
 {
-    (void)ctx;
+    HeadlessState *st = (HeadlessState *)ctx;
     if (!desc || !desc->entry || !out) return -1;
     (void)pthread_once(&g_thread_once, headless_thread_key_init);
 
     HeadlessThread *t = (HeadlessThread *)calloc(1, sizeof *t);
     if (!t) return -1;
+    t->state = st;
     if (pthread_mutex_init(&t->lock, NULL) != 0) {
         free(t);
         return -1;
@@ -101,6 +111,14 @@ static int headless_thread_create(void *ctx, const Wc3ThreadDesc *desc,
         t->name[n] = '\0';
     }
 
+    t->sched = headless_sched_register(st, t);
+    if (headless_sched_active(st) && !t->sched) {
+        pthread_cond_destroy(&t->cond);
+        pthread_mutex_destroy(&t->lock);
+        free(t);
+        return -1;
+    }
+
     pthread_attr_t attr;
     (void)pthread_attr_init(&attr);
     if (desc->stack_size >= (uint32_t)PTHREAD_STACK_MIN)
@@ -108,6 +126,7 @@ static int headless_thread_create(void *ctx, const Wc3ThreadDesc *desc,
     int rc = pthread_create(&t->thread, &attr, headless_thread_main, t);
     (void)pthread_attr_destroy(&attr);
     if (rc != 0) {
+        headless_sched_unregister(st, t->sched);
         pthread_cond_destroy(&t->cond);
         pthread_mutex_destroy(&t->lock);
         free(t);
@@ -128,6 +147,17 @@ static int headless_thread_join(void *ctx, Wc3ThreadHandle handle,
     int detached = t->detached;
     (void)pthread_mutex_unlock(&t->lock);
     if (detached) return -1;
+
+    if (headless_sched_active(t->state)) {
+        for (;;) {
+            (void)pthread_mutex_lock(&t->lock);
+            int running = t->running;
+            (void)pthread_mutex_unlock(&t->lock);
+            if (!running) break;
+            if (headless_sched_wait_join(t->state, t->sched) != 0)
+                return -1;
+        }
+    }
 
     if (pthread_join(t->thread, NULL) != 0) return -1;
 
@@ -178,13 +208,20 @@ static uint64_t headless_thread_id(void *ctx, Wc3ThreadHandle handle)
 
 static void headless_thread_yield(void *ctx)
 {
-    (void)ctx;
+    HeadlessState *st = (HeadlessState *)ctx;
+    if (headless_sched_active(st)) {
+        headless_sched_yield(st);
+        return;
+    }
     sched_yield();
 }
 
 static int headless_thread_sleep_ns(void *ctx, uint64_t ns)
 {
-    (void)ctx;
+    HeadlessState *st = (HeadlessState *)ctx;
+    if (headless_sched_active(st)) return headless_sched_sleep(st, ns);
+    if (st && st->virtual_clock) return headless_clock_advance(st, ns);
+
     struct timespec ts;
     ts.tv_sec = (time_t)(ns / 1000000000ull);
     ts.tv_nsec = (long)(ns % 1000000000ull);

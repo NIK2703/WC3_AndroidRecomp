@@ -260,6 +260,8 @@ def test_platform_headless() -> int:
         str(headless / "headless_mem.c"),
         str(headless / "headless_file.c"),
         str(headless / "headless_time.c"),
+        str(headless / "headless_schedule.c"),
+        str(headless / "headless_sched.c"),
         str(headless / "headless_thread.c"),
         str(headless / "headless_sync.c"),
         str(headless / "headless_services.c"),
