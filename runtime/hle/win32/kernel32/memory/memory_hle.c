@@ -135,6 +135,27 @@ static void h_get_process_heaps(CPU *c)
     c->eax = 1;
 }
 
+static void h_virtual_lock(CPU *c)
+{
+    const uint32_t base = wc3_legacy_arg32(c, 0);
+    const uint32_t size = wc3_legacy_arg32(c, 1);
+    c->eax = (!size || (base && wc3_legacy_guest_ok(base, size))) ? 1u : 0u;
+}
+
+static void h_virtual_unlock(CPU *c)
+{
+    h_virtual_lock(c);
+}
+
+static void h_flush_instruction_cache(CPU *c)
+{
+    /* The lifted corpus is static and the target has coherent instruction
+     * fetch for the way guest code is executed; the Win32 call is a no-op
+     * success. */
+    (void)c;
+    c->eax = 1;
+}
+
 typedef struct MemoryOverride {
     const char *dll;
     const char *name;
@@ -157,6 +178,18 @@ static const MemoryOverride g_overrides[] = {
     { "KERNEL32.dll", "GetProcessHeaps", h_get_process_heaps },
 };
 
+typedef struct MemoryAddition {
+    const char *name;
+    uint16_t argc;
+    void (*impl)(CPU *c);
+} MemoryAddition;
+
+static const MemoryAddition g_additions[] = {
+    { "VirtualLock", 2, h_virtual_lock },
+    { "VirtualUnlock", 2, h_virtual_unlock },
+    { "FlushInstructionCache", 3, h_flush_instruction_cache },
+};
+
 int wc3_hle_kernel32_memory_install(void)
 {
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
@@ -164,5 +197,12 @@ int wc3_hle_kernel32_memory_install(void)
                                     g_overrides[i].impl) != 0)
             return -1;
     }
-    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+    for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
+        if (wc3_legacy_hle_add("KERNEL32.dll", g_additions[i].name,
+                               (int)g_additions[i].argc, 1,
+                               g_additions[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0] +
+                 sizeof g_additions / sizeof g_additions[0]);
 }

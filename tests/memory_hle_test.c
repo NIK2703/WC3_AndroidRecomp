@@ -124,6 +124,14 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
     return 0;
 }
 
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c))
+{
+    (void)argc;
+    (void)cdecl_abi;
+    return wc3_legacy_hle_override(dll, name, impl);
+}
+
 static void (*find(const char *name))(CPU *)
 {
     for (unsigned i = 0; i < g_override_count; i++)
@@ -164,7 +172,7 @@ static uint32_t call(const char *name, uint32_t a0, uint32_t a1, uint32_t a2,
 int main(void)
 {
     const int installed = wc3_hle_kernel32_memory_install();
-    CHECK(installed == 13, "install count");
+    CHECK(installed == 16, "install count");
     if (g_failed) return 1;
 
     CHECK(call("GetProcessHeap", 0, 0, 0, 0) == 0x00090000u, "GetProcessHeap");
