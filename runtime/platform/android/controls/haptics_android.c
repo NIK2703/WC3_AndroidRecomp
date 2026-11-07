@@ -196,7 +196,7 @@ static void perform_locked(JNIEnv *env, int effect)
     }
 }
 
-void wc3_haptics_android_attach_thread(void)
+void haptics_android_attach_thread(void)
 {
     if (g_env || !g_vm)
         return;
@@ -215,7 +215,7 @@ void wc3_haptics_android_attach_thread(void)
     g_thread_attached = 1;
 }
 
-void wc3_haptics_android_detach_thread(void)
+void haptics_android_detach_thread(void)
 {
     if (g_thread_attached && g_vm)
         (*g_vm)->DetachCurrentThread(g_vm);
@@ -223,13 +223,13 @@ void wc3_haptics_android_detach_thread(void)
     g_thread_attached = 0;
 }
 
-void wc3_haptics_android_perform(int effect)
+void haptics_android_perform(int effect)
 {
     if (!g_vibrator || effect <= 0 || !g_has_vibrator)
         return;
 
     if (!g_env)
-        wc3_haptics_android_attach_thread();
+        haptics_android_attach_thread();
     if (!g_env)
         return;
 
@@ -237,7 +237,7 @@ void wc3_haptics_android_perform(int effect)
     perform_locked(g_env, effect);
 }
 
-int wc3_haptics_android_init(JNIEnv *env, JavaVM *vm, jobject activity)
+int haptics_android_init(JNIEnv *env, JavaVM *vm, jobject activity)
 {
     if (!env || !vm || !activity)
         return -1;

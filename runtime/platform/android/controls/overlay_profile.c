@@ -1,4 +1,4 @@
-#include "wc3_overlay_profile.h"
+#include "overlay_profile.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -317,7 +317,7 @@ static int parse_icp_data(const char *data, size_t size, Wc3OverlayProfile *out,
         return -1;
     }
     memset(out, 0, sizeof(*out));
-    wc3_overlay_style_defaults(&out->style);
+    overlay_style_defaults(&out->style);
 
     const char *begin = data;
     const char *end = data + size;
@@ -455,13 +455,13 @@ static int parse_icp_data(const char *data, size_t size, Wc3OverlayProfile *out,
     return 0;
 }
 
-int wc3_overlay_profile_load_icp_text(const char *data, size_t size,
+int overlay_profile_load_icp_text(const char *data, size_t size,
                                       Wc3OverlayProfile *out, char *err,
                                       size_t err_cap) {
     return parse_icp_data(data, size, out, err, err_cap);
 }
 
-int wc3_overlay_profile_load_icp(const char *path, Wc3OverlayProfile *out,
+int overlay_profile_load_icp(const char *path, Wc3OverlayProfile *out,
                                  char *err, size_t err_cap) {
     if (!path || !out) {
         set_error(err, err_cap, "invalid argument");
@@ -475,12 +475,12 @@ int wc3_overlay_profile_load_icp(const char *path, Wc3OverlayProfile *out,
     return result;
 }
 
-void wc3_overlay_apply_profile(Wc3Overlay *overlay,
+void overlay_apply_profile(Wc3Overlay *overlay,
                                const Wc3OverlayProfile *profile,
                                int width, int height) {
     if (!overlay || !profile) return;
-    wc3_overlay_init(overlay, width, height, &profile->style);
+    overlay_init(overlay, width, height, &profile->style);
     for (int i = 0; i < profile->element_count; i++)
-        wc3_overlay_add_element(overlay, &profile->elements[i]);
-    wc3_overlay_commit(overlay);
+        overlay_add_element(overlay, &profile->elements[i]);
+    overlay_commit(overlay);
 }

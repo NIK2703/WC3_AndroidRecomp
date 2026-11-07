@@ -15,17 +15,17 @@ extern "C" {
 
 typedef struct Wc3InputWake Wc3InputWake;
 
-Wc3InputWake *wc3_input_wake_create(void);
-void wc3_input_wake_destroy(Wc3InputWake *wake);
+Wc3InputWake *input_wake_create(void);
+void input_wake_destroy(Wc3InputWake *wake);
 
 /* Safe to call from the touch callback. */
-void wc3_input_wake_signal(Wc3InputWake *wake);
+void input_wake_signal(Wc3InputWake *wake);
 
 /* 1 = signaled, 0 = timeout, -1 = error.  timeout_ms < 0 waits forever. */
-int wc3_input_wake_wait(Wc3InputWake *wake, int timeout_ms);
+int input_wake_wait(Wc3InputWake *wake, int timeout_ms);
 
 /* Consume a wake that is already pending, if any. */
-void wc3_input_wake_drain(Wc3InputWake *wake);
+void input_wake_drain(Wc3InputWake *wake);
 
 #ifdef __cplusplus
 }

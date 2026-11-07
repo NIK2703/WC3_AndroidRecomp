@@ -1,4 +1,4 @@
-﻿#include "wc3_overlay.h"
+#include "wc3_overlay.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -1014,7 +1014,7 @@ static void draw_dpad(Wc3Overlay *o, uint8_t *rgba, int stride,
 /* Public API.                                                               */
 /* ------------------------------------------------------------------------- */
 
-void wc3_overlay_style_defaults(Wc3OverlayStyle *style) {
+void overlay_style_defaults(Wc3OverlayStyle *style) {
     if (!style) return;
     memset(style, 0, sizeof(*style));
     style->primary = (Wc3OverlayColor){255, 255, 255, 255};
@@ -1025,19 +1025,19 @@ void wc3_overlay_style_defaults(Wc3OverlayStyle *style) {
     style->fill_alpha_inactive = 0;
 }
 
-void wc3_overlay_cache_clear(Wc3Overlay *overlay) {
+void overlay_cache_clear(Wc3Overlay *overlay) {
     if (!overlay) return;
     free(overlay->cache.pixels);
     memset(&overlay->cache, 0, sizeof(overlay->cache));
 }
 
-int wc3_overlay_cache_set_atlas(Wc3Overlay *overlay, uint8_t *pixels,
+int overlay_cache_set_atlas(Wc3Overlay *overlay, uint8_t *pixels,
                                 int width, int height, int stride_bytes,
                                 int element_count) {
     if (!overlay || !pixels || width <= 0 || height <= 0 ||
         stride_bytes < width * 4 || element_count < 0)
         return -1;
-    wc3_overlay_cache_clear(overlay);
+    overlay_cache_clear(overlay);
     overlay->cache.pixels = pixels;
     overlay->cache.width = width;
     overlay->cache.height = height;
@@ -1048,7 +1048,7 @@ int wc3_overlay_cache_set_atlas(Wc3Overlay *overlay, uint8_t *pixels,
     return 0;
 }
 
-int wc3_overlay_cache_add_layer(Wc3Overlay *overlay, int element, int slot,
+int overlay_cache_add_layer(Wc3Overlay *overlay, int element, int slot,
                                 int src_x, int src_y, int src_w, int src_h,
                                 int dst_x, int dst_y, int rotation) {
     if (!overlay || !overlay->cache.pixels || element < 0 ||
@@ -1080,37 +1080,37 @@ int wc3_overlay_cache_add_layer(Wc3Overlay *overlay, int element, int slot,
     return 0;
 }
 
-void wc3_overlay_destroy(Wc3Overlay *overlay) {
-    wc3_overlay_cache_clear(overlay);
+void overlay_destroy(Wc3Overlay *overlay) {
+    overlay_cache_clear(overlay);
 }
 
-void wc3_overlay_init(Wc3Overlay *overlay, int width, int height,
+void overlay_init(Wc3Overlay *overlay, int width, int height,
                       const Wc3OverlayStyle *style) {
     if (!overlay) return;
-    wc3_overlay_cache_clear(overlay);
+    overlay_cache_clear(overlay);
     memset(overlay, 0, sizeof(*overlay));
     if (style) overlay->style = *style;
-    else wc3_overlay_style_defaults(&overlay->style);
+    else overlay_style_defaults(&overlay->style);
     overlay->width = width;
     overlay->height = height;
-    wc3_overlay_commit(overlay);
+    overlay_commit(overlay);
 }
 
-void wc3_overlay_resize(Wc3Overlay *overlay, int width, int height) {
+void overlay_resize(Wc3Overlay *overlay, int width, int height) {
     if (!overlay) return;
     overlay->width = width;
     overlay->height = height;
-    wc3_overlay_commit(overlay);
+    overlay_commit(overlay);
 }
 
-void wc3_overlay_clear_elements(Wc3Overlay *overlay) {
+void overlay_clear_elements(Wc3Overlay *overlay) {
     if (!overlay) return;
-    wc3_overlay_cache_clear(overlay);
+    overlay_cache_clear(overlay);
     overlay->element_count = 0;
     memset(overlay->elements, 0, sizeof(overlay->elements));
 }
 
-int wc3_overlay_add_element(Wc3Overlay *overlay,
+int overlay_add_element(Wc3Overlay *overlay,
                             const Wc3OverlayElement *element) {
     if (!overlay || !element) return -1;
     if (overlay->element_count >= WC3_OVERLAY_MAX_ELEMENTS) return -1;
@@ -1130,14 +1130,14 @@ int wc3_overlay_add_element(Wc3Overlay *overlay,
 
     int index = overlay->element_count++;
     overlay->elements[index] = copy;
-    wc3_overlay_commit(overlay);
+    overlay_commit(overlay);
     return index;
 }
 
-void wc3_overlay_commit(Wc3Overlay *overlay) {
+void overlay_commit(Wc3Overlay *overlay) {
     if (!overlay) return;
     /* Geometry changed: cached layer rectangles no longer match. */
-    wc3_overlay_cache_clear(overlay);
+    overlay_cache_clear(overlay);
     int snap = overlay->width / 100;
     if (snap <= 0) snap = 10;
     overlay->snapping_size = (float)snap;
@@ -1167,23 +1167,23 @@ void wc3_overlay_commit(Wc3Overlay *overlay) {
     }
 }
 
-void wc3_overlay_set_layers(Wc3Overlay *overlay, int index, uint8_t layers) {
+void overlay_set_layers(Wc3Overlay *overlay, int index, uint8_t layers) {
     if (!overlay || index < 0 || index >= overlay->element_count) return;
     overlay->elements[index].visual_layers = layers;
 }
 
-void wc3_overlay_set_engaged(Wc3Overlay *overlay, int index, bool engaged) {
+void overlay_set_engaged(Wc3Overlay *overlay, int index, bool engaged) {
     if (!overlay || index < 0 || index >= overlay->element_count) return;
     overlay->elements[index].engaged = engaged;
 }
 
-void wc3_overlay_set_active_petals(Wc3Overlay *overlay, int index,
+void overlay_set_active_petals(Wc3Overlay *overlay, int index,
                                    uint8_t petal_mask) {
     if (!overlay || index < 0 || index >= overlay->element_count) return;
     overlay->elements[index].active_petals = petal_mask & 0x0F;
 }
 
-void wc3_overlay_clear_active(Wc3Overlay *overlay) {
+void overlay_clear_active(Wc3Overlay *overlay) {
     if (!overlay) return;
     for (int i = 0; i < overlay->element_count; i++) {
         overlay->elements[i].visual_layers = 0;
@@ -1195,7 +1195,7 @@ void wc3_overlay_clear_active(Wc3Overlay *overlay) {
     }
 }
 
-void wc3_overlay_render(Wc3Overlay *overlay, uint8_t *rgba, int stride_bytes) {
+void overlay_render(Wc3Overlay *overlay, uint8_t *rgba, int stride_bytes) {
     if (!overlay || !rgba || overlay->width <= 0 || overlay->height <= 0)
         return;
     if (stride_bytes < overlay->width * 4) return;

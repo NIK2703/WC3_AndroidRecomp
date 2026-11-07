@@ -50,16 +50,16 @@ typedef struct {
     Wc3InputAdapterStats stats;
 } Wc3InputAdapter;
 
-void wc3_input_adapter_init(Wc3InputAdapter *adapter, Wc3InputRing *ring);
+void input_adapter_init(Wc3InputAdapter *adapter, Wc3InputRing *ring);
 
 /* Process one wake batch and tick once after it.  now_ms is CLOCK_MONOTONIC
  * milliseconds at the input thread.  Returns 0 or -1 if a touch/tick failed. */
-int wc3_input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms);
+int input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms);
 
-uint64_t wc3_input_adapter_next_deadline_ms(const Wc3InputAdapter *adapter,
+uint64_t input_adapter_next_deadline_ms(const Wc3InputAdapter *adapter,
                                             uint64_t now_ms);
 
-const Wc3InputAdapterStats *wc3_input_adapter_stats(
+const Wc3InputAdapterStats *input_adapter_stats(
     const Wc3InputAdapter *adapter);
 
 #ifdef __cplusplus

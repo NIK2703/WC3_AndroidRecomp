@@ -57,19 +57,19 @@ typedef struct {
     uint64_t faults;
 } Wc3InputRing;
 
-void wc3_input_ring_init(Wc3InputRing *ring);
-void wc3_input_ring_destroy(Wc3InputRing *ring);
+void input_ring_init(Wc3InputRing *ring);
+void input_ring_destroy(Wc3InputRing *ring);
 
 /* 0 = accepted, 1 = a MOVE was dropped, -1 = a control event was dropped or
  * the arguments were invalid.  A dropped control also raises a fault. */
-int wc3_input_ring_push(Wc3InputRing *ring, const Wc3TouchEvent *event);
+int input_ring_push(Wc3InputRing *ring, const Wc3TouchEvent *event);
 
 /* Copies at most max events in FIFO order and returns the number copied. */
-int wc3_input_ring_pop_batch(Wc3InputRing *ring, Wc3TouchEvent *out, int max);
+int input_ring_pop_batch(Wc3InputRing *ring, Wc3TouchEvent *out, int max);
 
-void wc3_input_ring_clear(Wc3InputRing *ring);
-void wc3_input_ring_note_fault(Wc3InputRing *ring);
-void wc3_input_ring_get_stats(Wc3InputRing *ring, Wc3InputRingStats *out);
+void input_ring_clear(Wc3InputRing *ring);
+void input_ring_note_fault(Wc3InputRing *ring);
+void input_ring_get_stats(Wc3InputRing *ring, Wc3InputRingStats *out);
 
 #ifdef __cplusplus
 }

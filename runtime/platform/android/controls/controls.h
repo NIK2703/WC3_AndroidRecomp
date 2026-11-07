@@ -30,28 +30,28 @@ typedef void (*Wc3ActionSink)(const TouchAction *actions, int count,
                               void *user);
 
 /* Profile JSON must stay valid only for the duration of this call. */
-int wc3_controls_init(const char *profile_json, int width, int height);
-void wc3_controls_set_action_sink(Wc3ActionSink sink, void *user);
+int controls_init(const char *profile_json, int width, int height);
+void controls_set_action_sink(Wc3ActionSink sink, void *user);
 
-int wc3_controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
+int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
                        uint64_t event_time_ms);
-int wc3_controls_tick(uint64_t now_ms);
-uint64_t wc3_controls_next_deadline_ms(uint64_t now_ms);
-void wc3_controls_cancel_all(void);
+int controls_tick(uint64_t now_ms);
+uint64_t controls_next_deadline_ms(uint64_t now_ms);
+void controls_cancel_all(void);
 
-void wc3_controls_resize(int width, int height);
+void controls_resize(int width, int height);
 
 /*
  * Fill overlay metadata from the engine.  Call after init and after every
  * resize.  Returns 0 on success, -1 if the profile contains an unsupported
  * element type or more elements than the overlay can hold.
  */
-int wc3_controls_populate_overlay(Wc3Overlay *overlay);
+int controls_populate_overlay(Wc3Overlay *overlay);
 
 /* Copy only visual state; element count, geometry and text are unchanged. */
-void wc3_controls_sync_visuals(Wc3Overlay *overlay);
+void controls_sync_visuals(Wc3Overlay *overlay);
 
-const char *wc3_controls_last_error(void);
+const char *controls_last_error(void);
 
 #ifdef __cplusplus
 }

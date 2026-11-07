@@ -12,7 +12,7 @@ struct Wc3InputWake {
     HANDLE event;
 };
 
-Wc3InputWake *wc3_input_wake_create(void)
+Wc3InputWake *input_wake_create(void)
 {
     Wc3InputWake *wake = (Wc3InputWake *)calloc(1, sizeof(*wake));
     if (!wake) return NULL;
@@ -24,19 +24,19 @@ Wc3InputWake *wc3_input_wake_create(void)
     return wake;
 }
 
-void wc3_input_wake_destroy(Wc3InputWake *wake)
+void input_wake_destroy(Wc3InputWake *wake)
 {
     if (!wake) return;
     if (wake->event) CloseHandle(wake->event);
     free(wake);
 }
 
-void wc3_input_wake_signal(Wc3InputWake *wake)
+void input_wake_signal(Wc3InputWake *wake)
 {
     if (wake && wake->event) SetEvent(wake->event);
 }
 
-int wc3_input_wake_wait(Wc3InputWake *wake, int timeout_ms)
+int input_wake_wait(Wc3InputWake *wake, int timeout_ms)
 {
     if (!wake || !wake->event) return -1;
     DWORD timeout = timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms;
@@ -46,7 +46,7 @@ int wc3_input_wake_wait(Wc3InputWake *wake, int timeout_ms)
     return -1;
 }
 
-void wc3_input_wake_drain(Wc3InputWake *wake)
+void input_wake_drain(Wc3InputWake *wake)
 {
     /* The auto-reset event is consumed by a successful wait. */
     (void)wake;
@@ -64,7 +64,7 @@ struct Wc3InputWake {
     int fd;
 };
 
-Wc3InputWake *wc3_input_wake_create(void)
+Wc3InputWake *input_wake_create(void)
 {
     Wc3InputWake *wake = (Wc3InputWake *)calloc(1, sizeof(*wake));
     if (!wake) return NULL;
@@ -76,14 +76,14 @@ Wc3InputWake *wc3_input_wake_create(void)
     return wake;
 }
 
-void wc3_input_wake_destroy(Wc3InputWake *wake)
+void input_wake_destroy(Wc3InputWake *wake)
 {
     if (!wake) return;
     if (wake->fd >= 0) close(wake->fd);
     free(wake);
 }
 
-void wc3_input_wake_signal(Wc3InputWake *wake)
+void input_wake_signal(Wc3InputWake *wake)
 {
     if (!wake || wake->fd < 0) return;
     uint64_t one = 1;
@@ -91,7 +91,7 @@ void wc3_input_wake_signal(Wc3InputWake *wake)
     (void)n; /* EAGAIN means the counter is already nonzero. */
 }
 
-int wc3_input_wake_wait(Wc3InputWake *wake, int timeout_ms)
+int input_wake_wait(Wc3InputWake *wake, int timeout_ms)
 {
     if (!wake || wake->fd < 0) return -1;
     struct pollfd pfd;
@@ -100,14 +100,14 @@ int wc3_input_wake_wait(Wc3InputWake *wake, int timeout_ms)
     pfd.revents = 0;
     int rc = poll(&pfd, 1, timeout_ms);
     if (rc > 0) {
-        wc3_input_wake_drain(wake);
+        input_wake_drain(wake);
         return 1;
     }
     if (rc == 0) return 0;
     return -1;
 }
 
-void wc3_input_wake_drain(Wc3InputWake *wake)
+void input_wake_drain(Wc3InputWake *wake)
 {
     if (!wake || wake->fd < 0) return;
     uint64_t value;
@@ -123,19 +123,19 @@ struct Wc3InputWake {
     int unused;
 };
 
-Wc3InputWake *wc3_input_wake_create(void)
+Wc3InputWake *input_wake_create(void)
 {
     return (Wc3InputWake *)calloc(1, sizeof(Wc3InputWake));
 }
 
-void wc3_input_wake_destroy(Wc3InputWake *wake) { free(wake); }
-void wc3_input_wake_signal(Wc3InputWake *wake) { (void)wake; }
-int wc3_input_wake_wait(Wc3InputWake *wake, int timeout_ms)
+void input_wake_destroy(Wc3InputWake *wake) { free(wake); }
+void input_wake_signal(Wc3InputWake *wake) { (void)wake; }
+int input_wake_wait(Wc3InputWake *wake, int timeout_ms)
 {
     (void)wake;
     (void)timeout_ms;
     return 0;
 }
-void wc3_input_wake_drain(Wc3InputWake *wake) { (void)wake; }
+void input_wake_drain(Wc3InputWake *wake) { (void)wake; }
 
 #endif

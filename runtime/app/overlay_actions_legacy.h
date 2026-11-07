@@ -25,20 +25,20 @@ extern "C" {
  * a direct-JNI sink; the Windows action test installs a recorder. */
 typedef void (*Wc3OverlayHapticSink)(int effect, void *user);
 
-void wc3_overlay_actions_init(int screen_width, int screen_height);
+void overlay_actions_init(int screen_width, int screen_height);
 
 /* Set before the input thread starts and clear after it is joined. */
-void wc3_overlay_actions_set_haptic_sink(Wc3OverlayHapticSink sink, void *user);
+void overlay_actions_set_haptic_sink(Wc3OverlayHapticSink sink, void *user);
 
 /* Matches Wc3ActionSink from wc3_controls.h. */
-void wc3_overlay_actions_handle(const TouchAction *actions, int count, void *user);
+void overlay_actions_handle(const TouchAction *actions, int count, void *user);
 
-void wc3_overlay_actions_release_all(void);
+void overlay_actions_release_all(void);
 
 /* Returns 0 for a non-keyboard keycode.  Modifier keys return the specific
  * left/right VK; hle_key_message_vk() maps those to the generic WM_KEYDOWN
  * wParam. */
-int wc3_overlay_actions_keycode_to_vk(int keycode);
+int overlay_actions_keycode_to_vk(int keycode);
 
 #ifdef __cplusplus
 }

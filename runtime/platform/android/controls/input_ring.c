@@ -7,20 +7,20 @@ static int event_is_move(const Wc3TouchEvent *event)
     return event && event->phase == (uint8_t)WC3_TOUCH_MOVE;
 }
 
-void wc3_input_ring_init(Wc3InputRing *ring)
+void input_ring_init(Wc3InputRing *ring)
 {
     if (!ring) return;
     memset(ring, 0, sizeof(*ring));
     pthread_mutex_init(&ring->lock, NULL);
 }
 
-void wc3_input_ring_destroy(Wc3InputRing *ring)
+void input_ring_destroy(Wc3InputRing *ring)
 {
     if (!ring) return;
     pthread_mutex_destroy(&ring->lock);
 }
 
-int wc3_input_ring_push(Wc3InputRing *ring, const Wc3TouchEvent *event)
+int input_ring_push(Wc3InputRing *ring, const Wc3TouchEvent *event)
 {
     if (!ring || !event) return -1;
     if (event->phase > (uint8_t)WC3_TOUCH_CANCEL) return -1;
@@ -51,7 +51,7 @@ int wc3_input_ring_push(Wc3InputRing *ring, const Wc3TouchEvent *event)
     return 0;
 }
 
-int wc3_input_ring_pop_batch(Wc3InputRing *ring, Wc3TouchEvent *out, int max)
+int input_ring_pop_batch(Wc3InputRing *ring, Wc3TouchEvent *out, int max)
 {
     if (!ring || !out || max <= 0) return 0;
 
@@ -66,7 +66,7 @@ int wc3_input_ring_pop_batch(Wc3InputRing *ring, Wc3TouchEvent *out, int max)
     return n;
 }
 
-void wc3_input_ring_clear(Wc3InputRing *ring)
+void input_ring_clear(Wc3InputRing *ring)
 {
     if (!ring) return;
     pthread_mutex_lock(&ring->lock);
@@ -76,7 +76,7 @@ void wc3_input_ring_clear(Wc3InputRing *ring)
     pthread_mutex_unlock(&ring->lock);
 }
 
-void wc3_input_ring_note_fault(Wc3InputRing *ring)
+void input_ring_note_fault(Wc3InputRing *ring)
 {
     if (!ring) return;
     pthread_mutex_lock(&ring->lock);
@@ -84,7 +84,7 @@ void wc3_input_ring_note_fault(Wc3InputRing *ring)
     pthread_mutex_unlock(&ring->lock);
 }
 
-void wc3_input_ring_get_stats(Wc3InputRing *ring, Wc3InputRingStats *out)
+void input_ring_get_stats(Wc3InputRing *ring, Wc3InputRingStats *out)
 {
     if (!out) return;
     memset(out, 0, sizeof(*out));

@@ -16,13 +16,13 @@ extern "C" {
  */
 
 /* Configure the window for RGBA8.  Returns 0 on success. */
-int wc3_overlay_android_configure(ANativeWindow *window, int width, int height);
+int overlay_android_configure(ANativeWindow *window, int width, int height);
 
 /*
  * Lock the window, resize the overlay to the locked buffer if needed, render,
  * and post.  Returns 0 on success, -1 on a lock failure or a missing buffer.
  */
-int wc3_overlay_android_present(ANativeWindow *window, Wc3Overlay *overlay);
+int overlay_android_present(ANativeWindow *window, Wc3Overlay *overlay);
 
 #ifdef __cplusplus
 }

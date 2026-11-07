@@ -20,36 +20,36 @@ static void record_event(Wc3InputAdapter *adapter, const Wc3TouchEvent *event,
         stats->history_count++;
 }
 
-void wc3_input_adapter_init(Wc3InputAdapter *adapter, Wc3InputRing *ring)
+void input_adapter_init(Wc3InputAdapter *adapter, Wc3InputRing *ring)
 {
     if (!adapter) return;
     memset(adapter, 0, sizeof(*adapter));
     adapter->ring = ring;
     if (ring) {
         Wc3InputRingStats stats;
-        wc3_input_ring_get_stats(ring, &stats);
+        input_ring_get_stats(ring, &stats);
         adapter->last_faults = stats.faults;
     }
 }
 
-int wc3_input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms)
+int input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms)
 {
     if (!adapter || !adapter->ring) return -1;
 
     Wc3InputRingStats ring_stats;
-    wc3_input_ring_get_stats(adapter->ring, &ring_stats);
+    input_ring_get_stats(adapter->ring, &ring_stats);
     if (ring_stats.faults != adapter->last_faults) {
         /* A control was lost or the ring reported a fault.  Cancel every
          * engine-held action; the sink emits the synthetic UP. */
-        wc3_controls_cancel_all();
-        wc3_input_ring_clear(adapter->ring);
+        controls_cancel_all();
+        input_ring_clear(adapter->ring);
         adapter->last_faults = ring_stats.faults;
         adapter->stats.faults = ring_stats.faults;
         adapter->stats.recovered++;
     }
 
     Wc3TouchEvent batch[WC3_INPUT_BATCH_MAX];
-    int n = wc3_input_ring_pop_batch(adapter->ring, batch, WC3_INPUT_BATCH_MAX);
+    int n = input_ring_pop_batch(adapter->ring, batch, WC3_INPUT_BATCH_MAX);
     int rc = 0;
 
     for (int i = 0; i < n; i++) {
@@ -63,7 +63,7 @@ int wc3_input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms)
             event_ms = adapter->last_event_ms;
         adapter->last_event_ms = event_ms;
 
-        if (wc3_controls_touch((Wc3TouchPhase)batch[i].phase,
+        if (controls_touch((Wc3TouchPhase)batch[i].phase,
                                batch[i].pointer_id, batch[i].x, batch[i].y,
                                event_ms) != 0)
             rc = -1;
@@ -72,7 +72,7 @@ int wc3_input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms)
 
     /* Timer deadlines are not delivery polling: one tick after the whole
      * batch, using the input thread's monotonic clock. */
-    if (wc3_controls_tick(now_ms) != 0) rc = -1;
+    if (controls_tick(now_ms) != 0) rc = -1;
 
     Wc3InputAdapterStats *stats = &adapter->stats;
     stats->drains++;
@@ -84,14 +84,14 @@ int wc3_input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms)
     return rc;
 }
 
-uint64_t wc3_input_adapter_next_deadline_ms(const Wc3InputAdapter *adapter,
+uint64_t input_adapter_next_deadline_ms(const Wc3InputAdapter *adapter,
                                             uint64_t now_ms)
 {
     if (!adapter || !adapter->ring) return 0;
-    return wc3_controls_next_deadline_ms(now_ms);
+    return controls_next_deadline_ms(now_ms);
 }
 
-const Wc3InputAdapterStats *wc3_input_adapter_stats(
+const Wc3InputAdapterStats *input_adapter_stats(
     const Wc3InputAdapter *adapter)
 {
     return adapter ? &adapter->stats : NULL;

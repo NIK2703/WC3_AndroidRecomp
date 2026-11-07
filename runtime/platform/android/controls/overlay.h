@@ -1,4 +1,4 @@
-﻿#ifndef WC3_OVERLAY_H
+#ifndef WC3_OVERLAY_H
 #define WC3_OVERLAY_H
 
 /*
@@ -78,7 +78,7 @@ typedef enum {
 } Wc3OverlayShape;
 
 /*
- * Pixel format written by wc3_overlay_render().  Android SurfaceFlinger
+ * Pixel format written by overlay_render().  Android SurfaceFlinger
  * consumes premultiplied RGBA, while the detached preview/tests use straight
  * alpha.  The default (zero) is straight so old callers keep their format.
  */
@@ -151,7 +151,7 @@ typedef struct {
     uint8_t active_petals;
     bool selected;
 
-    /* Derived by wc3_overlay_commit(). */
+    /* Derived by overlay_commit(). */
     int x;
     int y;
     float hw;
@@ -179,48 +179,48 @@ typedef struct {
     Wc3OverlayAlphaMode alpha_mode;
 } Wc3Overlay;
 
-void wc3_overlay_style_defaults(Wc3OverlayStyle *style);
+void overlay_style_defaults(Wc3OverlayStyle *style);
 
 /* The caller must zero-initialise the overlay before the first init. */
-void wc3_overlay_init(Wc3Overlay *overlay, int width, int height,
+void overlay_init(Wc3Overlay *overlay, int width, int height,
                       const Wc3OverlayStyle *style);
 
-void wc3_overlay_resize(Wc3Overlay *overlay, int width, int height);
+void overlay_resize(Wc3Overlay *overlay, int width, int height);
 
-void wc3_overlay_clear_elements(Wc3Overlay *overlay);
+void overlay_clear_elements(Wc3Overlay *overlay);
 
-int wc3_overlay_add_element(Wc3Overlay *overlay,
+int overlay_add_element(Wc3Overlay *overlay,
                             const Wc3OverlayElement *element);
 
 /* Recompute snapping size, pixel centres and half-extents. */
-void wc3_overlay_commit(Wc3Overlay *overlay);
+void overlay_commit(Wc3Overlay *overlay);
 
-void wc3_overlay_set_layers(Wc3Overlay *overlay, int index, uint8_t layers);
-void wc3_overlay_set_engaged(Wc3Overlay *overlay, int index, bool engaged);
-void wc3_overlay_set_active_petals(Wc3Overlay *overlay, int index,
+void overlay_set_layers(Wc3Overlay *overlay, int index, uint8_t layers);
+void overlay_set_engaged(Wc3Overlay *overlay, int index, bool engaged);
+void overlay_set_active_petals(Wc3Overlay *overlay, int index,
                                    uint8_t petal_mask);
-void wc3_overlay_clear_active(Wc3Overlay *overlay);
+void overlay_clear_active(Wc3Overlay *overlay);
 
 /*
  * Optional cached-layer atlas.  Build it after populate/resize, not from
  * visual-state setters.  The overlay takes ownership of the pixel buffer.
  * Calls are single-threaded: Wc3Overlay is not internally locked.
  */
-int wc3_overlay_cache_set_atlas(Wc3Overlay *overlay, uint8_t *pixels,
+int overlay_cache_set_atlas(Wc3Overlay *overlay, uint8_t *pixels,
                                 int width, int height, int stride_bytes,
                                 int element_count);
-int wc3_overlay_cache_add_layer(Wc3Overlay *overlay, int element, int slot,
+int overlay_cache_add_layer(Wc3Overlay *overlay, int element, int slot,
                                 int src_x, int src_y, int src_w, int src_h,
                                 int dst_x, int dst_y, int rotation);
-void wc3_overlay_cache_clear(Wc3Overlay *overlay);
-void wc3_overlay_destroy(Wc3Overlay *overlay);
+void overlay_cache_clear(Wc3Overlay *overlay);
+void overlay_destroy(Wc3Overlay *overlay);
 
 /*
  * Render into an RGBA8 buffer.  The whole buffer is cleared to transparent
  * first.  stride_bytes is the row pitch in bytes and must be >= width * 4.
  * The caller owns the buffer.
  */
-void wc3_overlay_render(Wc3Overlay *overlay, uint8_t *rgba, int stride_bytes);
+void overlay_render(Wc3Overlay *overlay, uint8_t *rgba, int stride_bytes);
 
 #ifdef __cplusplus
 }

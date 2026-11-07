@@ -21,16 +21,16 @@ typedef struct {
  *
  * Returns 0 on success.  On failure writes a short message to err.
  */
-int wc3_overlay_profile_load_icp(const char *path, Wc3OverlayProfile *out,
+int overlay_profile_load_icp(const char *path, Wc3OverlayProfile *out,
                                  char *err, size_t err_cap);
 
 /* Parse a profile already resident in memory (Android asset, embedded copy). */
-int wc3_overlay_profile_load_icp_text(const char *data, size_t size,
+int overlay_profile_load_icp_text(const char *data, size_t size,
                                       Wc3OverlayProfile *out, char *err,
                                       size_t err_cap);
 
 /* Copy a loaded profile into an overlay and compute its pixel geometry. */
-void wc3_overlay_apply_profile(Wc3Overlay *overlay,
+void overlay_apply_profile(Wc3Overlay *overlay,
                                const Wc3OverlayProfile *profile,
                                int width, int height);
 

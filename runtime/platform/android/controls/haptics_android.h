@@ -15,12 +15,12 @@ extern "C" {
  * draining actions and detach_thread() before it exits.  perform() is cold:
  * it only runs when the touch engine emits ACT_HAPTIC.
  */
-int wc3_haptics_android_init(JNIEnv *env, JavaVM *vm, jobject activity);
+int haptics_android_init(JNIEnv *env, JavaVM *vm, jobject activity);
 
-void wc3_haptics_android_attach_thread(void);
-void wc3_haptics_android_detach_thread(void);
+void haptics_android_attach_thread(void);
+void haptics_android_detach_thread(void);
 
-void wc3_haptics_android_perform(int effect);
+void haptics_android_perform(int effect);
 
 #ifdef __cplusplus
 }

@@ -193,7 +193,7 @@ int main(void)
     CHECK(memcmp(guest_ptr(dst, 4), "abc\0", 4) == 0, "lstrcatA empty src text");
 
     CHECK(invoke("lstrcatA", 0, src, 0) == 0u, "lstrcatA NULL dst");
-    memset(guest_ptr(dst, 4), "abc", 4);
+    memcpy(guest_ptr(dst, 4), "abc", 4);
     CHECK(invoke("lstrcatA", dst, 0, 0) == dst, "lstrcatA NULL src");
     CHECK(memcmp(guest_ptr(dst, 4), "abc\0", 4) == 0,
           "lstrcatA NULL src terminator");

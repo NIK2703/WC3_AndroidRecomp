@@ -84,19 +84,19 @@ static int g_screen_height = 1;
 static Wc3OverlayHapticSink g_haptic_sink;
 static void *g_haptic_user;
 
-void wc3_overlay_actions_init(int screen_width, int screen_height)
+void overlay_actions_init(int screen_width, int screen_height)
 {
     g_screen_width = screen_width > 0 ? screen_width : 1;
     g_screen_height = screen_height > 0 ? screen_height : 1;
 }
 
-void wc3_overlay_actions_set_haptic_sink(Wc3OverlayHapticSink sink, void *user)
+void overlay_actions_set_haptic_sink(Wc3OverlayHapticSink sink, void *user)
 {
     g_haptic_sink = sink;
     g_haptic_user = user;
 }
 
-int wc3_overlay_actions_keycode_to_vk(int keycode)
+int overlay_actions_keycode_to_vk(int keycode)
 {
     switch (keycode) {
     /* Modifiers use the specific left/right VK.  The HLE maps them to the
@@ -238,11 +238,11 @@ static void handle_action(const TouchAction *action)
         wc3_legacy_mouse_button_ex(action->pointer_button.button, 0);
         break;
     case ACT_KEY_PRESS:
-        vk = wc3_overlay_actions_keycode_to_vk(action->key.keycode);
+        vk = overlay_actions_keycode_to_vk(action->key.keycode);
         if (vk) wc3_legacy_key_event(vk, 1);
         break;
     case ACT_KEY_RELEASE:
-        vk = wc3_overlay_actions_keycode_to_vk(action->key.keycode);
+        vk = overlay_actions_keycode_to_vk(action->key.keycode);
         if (vk) wc3_legacy_key_event(vk, 0);
         break;
     case ACT_MOUSE_EVENT:
@@ -272,7 +272,7 @@ static void handle_action(const TouchAction *action)
     }
 }
 
-void wc3_overlay_actions_handle(const TouchAction *actions, int count, void *user)
+void overlay_actions_handle(const TouchAction *actions, int count, void *user)
 {
     (void)user;
     if (!actions || count <= 0) return;
@@ -280,7 +280,7 @@ void wc3_overlay_actions_handle(const TouchAction *actions, int count, void *use
         handle_action(&actions[i]);
 }
 
-void wc3_overlay_actions_release_all(void)
+void overlay_actions_release_all(void)
 {
     wc3_legacy_release_all();
 }

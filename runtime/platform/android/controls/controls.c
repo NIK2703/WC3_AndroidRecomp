@@ -317,7 +317,7 @@ out:
     return rc;
 }
 
-int wc3_controls_init(const char *profile_json, int width, int height) {
+int controls_init(const char *profile_json, int width, int height) {
     if (!profile_json || width <= 0 || height <= 0) {
         set_error("invalid init arguments");
         return -1;
@@ -331,7 +331,7 @@ int wc3_controls_init(const char *profile_json, int width, int height) {
     strcpy(copy, profile_json);
 
     if (g_initialized) {
-        wc3_controls_cancel_all();
+        controls_cancel_all();
     }
 
     if (controls_init_internal(profile_json, width, height) != 0) {
@@ -344,7 +344,7 @@ int wc3_controls_init(const char *profile_json, int width, int height) {
     return 0;
 }
 
-void wc3_controls_set_action_sink(Wc3ActionSink sink, void *user) {
+void controls_set_action_sink(Wc3ActionSink sink, void *user) {
     g_sink = sink;
     g_sink_user = user;
 }
@@ -356,10 +356,10 @@ static uint64_t engine_tick_from_ms(uint64_t time_ms) {
     return tick;
 }
 
-int wc3_controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
+int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
                        uint64_t event_time_ms) {
     if (phase == WC3_TOUCH_CANCEL) {
-        wc3_controls_cancel_all();
+        controls_cancel_all();
         return 0;
     }
     if (!g_initialized) {
@@ -397,7 +397,7 @@ int wc3_controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
     return 0;
 }
 
-int wc3_controls_tick(uint64_t now_ms) {
+int controls_tick(uint64_t now_ms) {
     if (!g_initialized) {
         set_error("tick before init");
         return -1;
@@ -420,14 +420,14 @@ int wc3_controls_tick(uint64_t now_ms) {
     return 0;
 }
 
-uint64_t wc3_controls_next_deadline_ms(uint64_t now_ms) {
+uint64_t controls_next_deadline_ms(uint64_t now_ms) {
     int interval = g_timer_interval_ms > 0 ? g_timer_interval_ms : 16;
     uint64_t from_last = (g_last_engine_tick + 1u) * (uint64_t)interval;
     uint64_t from_now = (now_ms / (uint64_t)interval + 1u) * (uint64_t)interval;
     return from_last > from_now ? from_last : from_now;
 }
 
-void wc3_controls_cancel_all(void) {
+void controls_cancel_all(void) {
     if (!g_initialized) return;
 
     TouchActionResult result;
@@ -441,12 +441,12 @@ void wc3_controls_cancel_all(void) {
     emit_actions(&result);
 }
 
-void wc3_controls_resize(int width, int height) {
+void controls_resize(int width, int height) {
     if (!g_initialized || !g_profile_json || width <= 0 || height <= 0) {
         return;
     }
 
-    wc3_controls_cancel_all();
+    controls_cancel_all();
     if (controls_init_internal(g_profile_json, width, height) != 0) {
         g_initialized = false;
     }
@@ -468,13 +468,13 @@ static uint8_t active_petals_from_engine(const TouchElement *element) {
     return mask;
 }
 
-int wc3_controls_populate_overlay(Wc3Overlay *overlay) {
+int controls_populate_overlay(Wc3Overlay *overlay) {
     if (!overlay || !g_initialized) {
         set_error("populate_overlay before init");
         return -1;
     }
     if (overlay->width <= 0 || overlay->height <= 0) {
-        wc3_overlay_init(overlay, g_width, g_height, NULL);
+        overlay_init(overlay, g_width, g_height, NULL);
     }
 
     int n = 0;
@@ -490,7 +490,7 @@ int wc3_controls_populate_overlay(Wc3Overlay *overlay) {
         return -1;
     }
 
-    wc3_overlay_clear_elements(overlay);
+    overlay_clear_elements(overlay);
     for (int i = 0; i < n; i++) {
         const TouchElement *src = &g_state.elements[i];
         if (src->type != BUTTON && src->type != D_PAD) {
@@ -523,12 +523,12 @@ int wc3_controls_populate_overlay(Wc3Overlay *overlay) {
         dst.selected = (src->flags & TOUCH_BIT_SELECTED) != 0;
         dst.active_petals = active_petals_from_engine(src);
 
-        if (wc3_overlay_add_element(overlay, &dst) < 0) {
+        if (overlay_add_element(overlay, &dst) < 0) {
             set_error("overlay add failed at index %d", i);
             goto out_locked;
         }
     }
-    wc3_overlay_commit(overlay);
+    overlay_commit(overlay);
     rc = 0;
 
 out_locked:
@@ -537,13 +537,13 @@ out_locked:
 
     if (rc == 0) {
         /* add_element() promotes zero alphas to 255; restore engine values. */
-        wc3_controls_sync_visuals(overlay);
+        controls_sync_visuals(overlay);
         clear_error();
     }
     return rc;
 }
 
-void wc3_controls_sync_visuals(Wc3Overlay *overlay) {
+void controls_sync_visuals(Wc3Overlay *overlay) {
     if (!overlay || !g_initialized) return;
 
     Wc3OverlayElement snapshot[WC3_OVERLAY_MAX_ELEMENTS];
@@ -604,6 +604,6 @@ void wc3_controls_sync_visuals(Wc3Overlay *overlay) {
     }
 }
 
-const char *wc3_controls_last_error(void) {
+const char *controls_last_error(void) {
     return g_error[0] ? g_error : "no error";
 }
