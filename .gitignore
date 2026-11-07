@@ -39,6 +39,11 @@ __pycache__/
 # --- generated reports (regenerate with the tools) --------------------------
 /reports/generated/
 
+# --- local-only documentation and assistant state --------------------------
+/docs/
+/.workbuddy-ai/
+/.wokbuddy/
+
 # --- game assets must never be committed -----------------------------------
 *.mpq
 *.mix
