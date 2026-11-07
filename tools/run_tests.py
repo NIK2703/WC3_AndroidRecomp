@@ -1003,6 +1003,43 @@ def test_msvcr80_convert() -> int:
     return 0
 
 
+def test_msvcr80_sort() -> int:
+    """T0: MSVCR80 qsort over a fake guest dispatcher."""
+    cc = gcc()
+    if not cc:
+        print("msvcr80 sort: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "sort"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "msvcr80" / "sort" / "sort_hle.c"),
+        str(ROOT / "tests" / "msvcr80_sort_test.c"),
+    ]
+    for name, debug in (("msvcr80_sort_test_debug.exe", 1),
+                        ("msvcr80_sort_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_msvcr80_time() -> int:
     """T0: MSVCR80 _time64/_ctime64 over fake platform and shim."""
     cc = gcc()
@@ -1192,6 +1229,7 @@ TESTS = {
     "msvcr80_heap": test_msvcr80_heap,
     "msvcr80_math": test_msvcr80_math,
     "msvcr80_convert": test_msvcr80_convert,
+    "msvcr80_sort": test_msvcr80_sort,
     "msvcr80_time": test_msvcr80_time,
     "msvcr80_string": test_msvcr80_string,
     "msvcr80_rand": test_msvcr80_rand,

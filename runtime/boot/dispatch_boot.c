@@ -21,6 +21,7 @@
 #include "memory_hle.h"
 #include "process_hle.h"
 #include "rand_hle.h"
+#include "sort_hle.h"
 #include "string_hle.h"
 #include "system_hle.h"
 #include "time_hle.h"
@@ -74,11 +75,12 @@ void wc3_dispatch_init(void)
         wc3_hle_msvcr80_heap_install() < 0 ||
         wc3_hle_msvcr80_math_install() < 0 ||
         wc3_hle_msvcr80_rand_install() < 0 ||
+        msvcr80_sort_install() < 0 ||
         wc3_hle_msvcr80_string_install() < 0 ||
         msvcr80_convert_install() < 0 ||
         wc3_hle_msvcr80_time_install() < 0) {
 #if WC3_DEBUG
-        fprintf(stderr, "[hle] kernel32 time/process/system/memory/string, user32 display/window, or CRT convert/heap/math/rand/string/time install failed\n");
+        fprintf(stderr, "[hle] kernel32 time/process/system/memory/string, user32 display/window, or CRT convert/heap/math/rand/sort/string/time install failed\n");
 #endif
         abort();
     }
