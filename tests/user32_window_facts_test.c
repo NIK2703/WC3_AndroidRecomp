@@ -38,6 +38,7 @@ static unsigned g_old_create_calls;
 static unsigned g_old_destroy_calls;
 static unsigned g_old_show_calls;
 static unsigned g_old_setpos_calls;
+static uint32_t g_last_error;
 
 static void old_register_class(CPU *c)
 {
@@ -113,6 +114,29 @@ uint32_t wc3_legacy_arg32(const CPU *c, unsigned index)
 {
     (void)c;
     return index < 12u ? g_args[index] : 0u;
+}
+
+int wc3_legacy_current_display_mode(uint32_t *width, uint32_t *height)
+{
+    if (!width || !height) return 0;
+    *width = 1024u;
+    *height = 768u;
+    return 1;
+}
+
+int wc3_legacy_default_display_mode(uint32_t *width, uint32_t *height)
+{
+    return wc3_legacy_current_display_mode(width, height);
+}
+
+void wc3_legacy_set_last_error(uint32_t code)
+{
+    g_last_error = code;
+}
+
+uint32_t wc3_legacy_get_last_error(void)
+{
+    return g_last_error;
 }
 
 int wc3_legacy_guest_ok(uint32_t address, uint32_t size)
@@ -231,9 +255,9 @@ static uint32_t invoke(const char *name, const uint32_t *args, unsigned count)
 int main(void)
 {
     const int installed = wc3_hle_user32_window_facts_install();
-    CHECK(installed == 12, "install count");
+    CHECK(installed == 16, "install count");
     CHECK(g_chain_count == 5u, "chain count");
-    CHECK(g_addition_count == 7u, "addition count");
+    CHECK(g_addition_count == 11u, "addition count");
 
     const char *chain_names[] = {
         "RegisterClassExA", "CreateWindowExA", "DestroyWindow",
@@ -253,6 +277,10 @@ int main(void)
         { "IsIconic", 1 },
         { "AdjustWindowRectEx", 4 },
         { "UnregisterClassA", 2 },
+        { "IsDialogMessageA", 2 },
+        { "MapWindowPoints", 4 },
+        { "MonitorFromWindow", 2 },
+        { "GetMonitorInfoA", 2 },
     };
     for (unsigned i = 0; i < sizeof expected / sizeof expected[0]; i++) {
         int argc = -1;
@@ -285,6 +313,122 @@ int main(void)
     CHECK(invoke("IsWindow", is_desktop, 1u) == 1u, "desktop is window");
     const uint32_t is_zero[1] = { 0u };
     CHECK(invoke("IsWindow", is_zero, 1u) == 0u, "zero is not window");
+
+    const uint32_t dialog_message[2] = { main_handle, guest(0x7000u) };
+    CHECK(invoke("IsDialogMessageA", dialog_message, 2u) == 0u,
+          "main window is not a dialog");
+    const uint32_t dialog_message_null[2] = { 0u, 0u };
+    CHECK(invoke("IsDialogMessageA", dialog_message_null, 2u) == 0u,
+          "null dialog message");
+
+    put_u32(0x7000u, 10u);
+    put_u32(0x7004u, 20u);
+    const uint32_t map_to_screen[4] = {
+        main_handle, 0u, guest(0x7000u), 1u,
+    };
+    g_last_error = 0u;
+    CHECK(invoke("MapWindowPoints", map_to_screen, 4u) == 1u,
+          "map point to screen");
+    CHECK(get_u32(0x7000u) == 20u && get_u32(0x7004u) == 40u,
+          "mapped screen point");
+    const uint32_t map_to_client[4] = {
+        0u, main_handle, guest(0x7000u), 1u,
+    };
+    CHECK(invoke("MapWindowPoints", map_to_client, 4u) == 1u,
+          "map point to client");
+    CHECK(get_u32(0x7000u) == 10u && get_u32(0x7004u) == 20u,
+          "mapped client point");
+    put_u32(0x7008u, 0u);
+    put_u32(0x700Cu, 0u);
+    const uint32_t map_two[4] = {
+        main_handle, 0u, guest(0x7000u), 2u,
+    };
+    CHECK(invoke("MapWindowPoints", map_two, 4u) == 2u,
+          "map two points");
+    CHECK(get_u32(0x7008u) == 10u && get_u32(0x700Cu) == 20u,
+          "mapped second point");
+    const uint32_t map_bad[4] = {
+        0x000200FFu, 0u, guest(0x7000u), 1u,
+    };
+    g_last_error = 0u;
+    CHECK(invoke("MapWindowPoints", map_bad, 4u) == 0u,
+          "map bad window");
+    CHECK(g_last_error == 1400u, "map bad window error");
+    const uint32_t map_null[4] = {
+        main_handle, 0u, 0u, 1u,
+    };
+    g_last_error = 0u;
+    CHECK(invoke("MapWindowPoints", map_null, 4u) == 0u,
+          "map null points");
+    CHECK(g_last_error == 87u, "map null points error");
+    const uint32_t map_none[4] = {
+        main_handle, 0u, 0u, 0u,
+    };
+    CHECK(invoke("MapWindowPoints", map_none, 4u) == 0u,
+          "map zero points");
+
+    const uint32_t monitor_handle = 0x00190000u;
+    const uint32_t monitor_from_null[2] = { 0u, 0u };
+    CHECK(invoke("MonitorFromWindow", monitor_from_null, 2u) == 0u,
+          "null window default-to-null");
+    const uint32_t monitor_from_null_primary[2] = { 0u, 1u };
+    CHECK(invoke("MonitorFromWindow", monitor_from_null_primary, 2u) ==
+              monitor_handle,
+          "null window primary");
+    const uint32_t monitor_from_main[2] = { main_handle, 0u };
+    CHECK(invoke("MonitorFromWindow", monitor_from_main, 2u) == monitor_handle,
+          "main window monitor");
+    const uint32_t monitor_from_unknown[2] = { 0x000200FFu, 0u };
+    CHECK(invoke("MonitorFromWindow", monitor_from_unknown, 2u) == 0u,
+          "unknown window default-to-null");
+    const uint32_t monitor_from_unknown_nearest[2] = { 0x000200FFu, 2u };
+    CHECK(invoke("MonitorFromWindow", monitor_from_unknown_nearest, 2u) ==
+              monitor_handle,
+          "unknown window nearest");
+    const uint32_t monitor_from_desktop[2] = { desktop, 1u };
+    CHECK(invoke("MonitorFromWindow", monitor_from_desktop, 2u) ==
+              monitor_handle,
+          "desktop monitor");
+
+    put_u32(0x6000u, 40u);
+    const uint32_t get_monitor[2] = { monitor_handle, guest(0x6000u) };
+    g_last_error = 99u;
+    CHECK(invoke("GetMonitorInfoA", get_monitor, 2u) == 1u,
+          "get monitor info");
+    CHECK(get_u32(0x6000u) == 40u, "monitor info size");
+    CHECK(get_u32(0x6004u) == 0u && get_u32(0x6008u) == 0u,
+          "monitor origin");
+    CHECK(get_u32(0x600Cu) == 1024u && get_u32(0x6010u) == 768u,
+          "monitor rect");
+    CHECK(get_u32(0x6014u) == 0u && get_u32(0x6018u) == 0u,
+          "work origin");
+    CHECK(get_u32(0x601Cu) == 1024u && get_u32(0x6020u) == 768u,
+          "work rect");
+    CHECK(get_u32(0x6024u) == 1u, "primary monitor flag");
+    CHECK(g_last_error == 99u, "successful monitor info keeps error");
+
+    put_u32(0x6000u, 72u);
+    g_last_error = 0u;
+    CHECK(invoke("GetMonitorInfoA", get_monitor, 2u) == 1u,
+          "get monitor info ex");
+    CHECK(strcmp((char *)(g_memory + 0x6028u), "\\\\.\\DISPLAY1") == 0,
+          "monitor device name");
+
+    const uint32_t get_bad_monitor[2] = { 0x00180000u, guest(0x6000u) };
+    g_last_error = 0u;
+    CHECK(invoke("GetMonitorInfoA", get_bad_monitor, 2u) == 0u,
+          "bad monitor handle");
+    CHECK(g_last_error == 1461u, "bad monitor error");
+    const uint32_t get_null_monitor[2] = { monitor_handle, 0u };
+    g_last_error = 0u;
+    CHECK(invoke("GetMonitorInfoA", get_null_monitor, 2u) == 0u,
+          "null monitor info");
+    CHECK(g_last_error == 87u, "null monitor info error");
+    put_u32(0x6000u, 41u);
+    g_last_error = 0u;
+    CHECK(invoke("GetMonitorInfoA", get_monitor, 2u) == 0u,
+          "bad monitor info size");
+    CHECK(g_last_error == 87u, "bad monitor info size error");
 
     put_string(0x3000u, "unused");
     const uint32_t get_name[3] = { main_handle, guest(0x3000u), 64u };

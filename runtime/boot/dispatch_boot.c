@@ -24,6 +24,7 @@
 #include "strerror_hle.h"
 #include "crt_time_hle.h"
 #include "display_hle.h"
+#include "dragdrop_hle.h"
 #include "heap_hle.h"
 #include "imagelist_hle.h"
 #include "math_hle.h"
@@ -94,6 +95,7 @@ void wc3_dispatch_init(void)
     } while (0)
     WC3_INSTALL_STEP(wc3_hle_kernel32_time_install());
     WC3_INSTALL_STEP(wc3_hle_comctl32_imagelist_install());
+    WC3_INSTALL_STEP(wc3_hle_shell32_dragdrop_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_process_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_system_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_memory_install());

@@ -17,10 +17,23 @@
 #include "legacy_shim.h"
 
 #define DESKTOP_WINDOW_HANDLE 0x00010000u
+#define MONITOR_HANDLE 0x00190000u
 #define WINDOW_MAX 32u
 #define WINDOW_CLASS_MAX 16u
 #define WINDOW_TEXT_MAX 128u
 #define WINDOW_PLACEMENT_SIZE 44u
+#define MONITORINFO_SIZE 40u
+#define MONITORINFOEXA_SIZE 72u
+#define MONITORINFOF_PRIMARY 1u
+#define MONITOR_DEVICE_NAME "\\\\.\\DISPLAY1"
+
+#define MONITOR_DEFAULTTONULL 0u
+#define MONITOR_DEFAULTTOPRIMARY 1u
+#define MONITOR_DEFAULTTONEAREST 2u
+
+#define ERROR_INVALID_PARAMETER 87u
+#define ERROR_INVALID_WINDOW_HANDLE 1400u
+#define ERROR_INVALID_MONITOR_HANDLE 1461u
 
 #define SW_HIDE 0u
 #define SW_SHOWNORMAL 1u
@@ -195,6 +208,26 @@ static uint32_t normalize_show_cmd(uint32_t command)
 static int is_top_parent(uint32_t parent)
 {
     return parent == 0u || parent == DESKTOP_WINDOW_HANDLE;
+}
+
+static int monitor_size(uint32_t *width, uint32_t *height)
+{
+    if (!width || !height) return 0;
+    if (wc3_legacy_current_display_mode(width, height)) return 1;
+    return wc3_legacy_default_display_mode(width, height);
+}
+
+static int window_intersects_monitor(const WindowFact *window,
+                                     uint32_t monitor_width,
+                                     uint32_t monitor_height)
+{
+    const int64_t left = window->x;
+    const int64_t top = window->y;
+    const int64_t right = left + (int64_t)window->width;
+    const int64_t bottom = top + (int64_t)window->height;
+    return right > 0 && bottom > 0 &&
+           left < (int64_t)monitor_width &&
+           top < (int64_t)monitor_height;
 }
 
 static void h_register_class_ex(CPU *c)
@@ -471,6 +504,154 @@ static void h_unregister_class(CPU *c)
     c->eax = fact ? 1u : 0u;
 }
 
+static int window_origin(uint32_t handle, int32_t *x, int32_t *y)
+{
+    if (handle == 0u || handle == DESKTOP_WINDOW_HANDLE) {
+        *x = 0;
+        *y = 0;
+        return 1;
+    }
+
+    pthread_mutex_lock(&g_lock);
+    const WindowFact *window = find_window(handle);
+    if (window) {
+        *x = window->x;
+        *y = window->y;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return window != NULL;
+}
+
+static void h_map_window_points(CPU *c)
+{
+    const uint32_t from = wc3_legacy_arg32(c, 0u);
+    const uint32_t to = wc3_legacy_arg32(c, 1u);
+    const uint32_t points = wc3_legacy_arg32(c, 2u);
+    const uint32_t count = wc3_legacy_arg32(c, 3u);
+
+    if (count == 0u) {
+        c->eax = 0u;
+        return;
+    }
+    if (!points || count > UINT32_MAX / 8u ||
+        !wc3_legacy_guest_ok(points, count * 8u)) {
+        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        c->eax = 0u;
+        return;
+    }
+
+    int32_t from_x = 0, from_y = 0, to_x = 0, to_y = 0;
+    if (!window_origin(from, &from_x, &from_y) ||
+        !window_origin(to, &to_x, &to_y)) {
+        wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        c->eax = 0u;
+        return;
+    }
+
+    const int32_t dx = from_x - to_x;
+    const int32_t dy = from_y - to_y;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t at = points + i * 8u;
+        const int32_t x = (int32_t)wc3_legacy_rd32g(at);
+        const int32_t y = (int32_t)wc3_legacy_rd32g(at + 4u);
+        wc3_legacy_wr32g(at, (uint32_t)(x + dx));
+        wc3_legacy_wr32g(at + 4u, (uint32_t)(y + dy));
+    }
+    c->eax = count;
+}
+
+static void h_is_dialog_message(CPU *c)
+{
+    /* The target creates no dialog windows (CreateDialog*Param* is not part of
+     * this slice), so no message can belong to a dialog.  Win32 returns FALSE
+     * for a non-dialog window, and the caller then dispatches the message. */
+    (void)wc3_legacy_arg32(c, 0u);
+    (void)wc3_legacy_arg32(c, 1u);
+    c->eax = 0u;
+}
+
+static void h_monitor_from_window(CPU *c)
+{
+    const uint32_t handle = wc3_legacy_arg32(c, 0u);
+    const uint32_t flags = wc3_legacy_arg32(c, 1u);
+    uint32_t width = 0, height = 0;
+    int intersects = 0;
+
+    if (!monitor_size(&width, &height)) {
+        c->eax = 0u;
+        return;
+    }
+
+    if (handle == DESKTOP_WINDOW_HANDLE) {
+        intersects = 1;
+    } else if (handle) {
+        pthread_mutex_lock(&g_lock);
+        const WindowFact *window = find_window(handle);
+        if (window)
+            intersects = window_intersects_monitor(window, width, height);
+        pthread_mutex_unlock(&g_lock);
+    }
+
+    /* Android exposes one monitor.  A valid window on that monitor maps to it;
+     * the default flags also select the primary monitor for an unknown or
+     * off-screen window, while MONITOR_DEFAULTTONULL reports no monitor. */
+    if (intersects || flags != MONITOR_DEFAULTTONULL)
+        c->eax = MONITOR_HANDLE;
+    else
+        c->eax = 0u;
+}
+
+static void h_get_monitor_info(CPU *c)
+{
+    const uint32_t monitor = wc3_legacy_arg32(c, 0u);
+    const uint32_t info = wc3_legacy_arg32(c, 1u);
+    uint32_t width = 0, height = 0;
+
+    if (monitor != MONITOR_HANDLE) {
+        wc3_legacy_set_last_error(ERROR_INVALID_MONITOR_HANDLE);
+        c->eax = 0u;
+        return;
+    }
+    if (!info || !wc3_legacy_guest_ok(info, 4u)) {
+        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        c->eax = 0u;
+        return;
+    }
+
+    const uint32_t size = wc3_legacy_rd32g(info);
+    if ((size != MONITORINFO_SIZE && size != MONITORINFOEXA_SIZE) ||
+        !wc3_legacy_guest_ok(info, size)) {
+        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        c->eax = 0u;
+        return;
+    }
+    if (!monitor_size(&width, &height)) {
+        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        c->eax = 0u;
+        return;
+    }
+
+    wc3_legacy_guest_zero(info, size);
+    wc3_legacy_wr32g(info + 0u, size);
+    wc3_legacy_wr32g(info + 4u, 0u);
+    wc3_legacy_wr32g(info + 8u, 0u);
+    wc3_legacy_wr32g(info + 12u, width);
+    wc3_legacy_wr32g(info + 16u, height);
+    /* Android has no taskbar or separate work area; the game window covers the
+     * full display. */
+    wc3_legacy_wr32g(info + 20u, 0u);
+    wc3_legacy_wr32g(info + 24u, 0u);
+    wc3_legacy_wr32g(info + 28u, width);
+    wc3_legacy_wr32g(info + 32u, height);
+    wc3_legacy_wr32g(info + 36u, MONITORINFOF_PRIMARY);
+    if (size == MONITORINFOEXA_SIZE) {
+        for (unsigned i = 0; i < sizeof MONITOR_DEVICE_NAME; i++)
+            wc3_legacy_wr8g(info + 40u + i,
+                            (uint8_t)MONITOR_DEVICE_NAME[i]);
+    }
+    c->eax = 1u;
+}
+
 typedef struct WindowFactChain {
     const char *name;
     void (*impl)(CPU *c);
@@ -499,6 +680,10 @@ static const WindowFactAddition g_additions[] = {
     { "IsIconic", 1, h_is_iconic },
     { "AdjustWindowRectEx", 4, h_adjust_window_rect_ex },
     { "UnregisterClassA", 2, h_unregister_class },
+    { "IsDialogMessageA", 2, h_is_dialog_message },
+    { "MapWindowPoints", 4, h_map_window_points },
+    { "MonitorFromWindow", 2, h_monitor_from_window },
+    { "GetMonitorInfoA", 2, h_get_monitor_info },
 };
 
 int wc3_hle_user32_window_facts_install(void)

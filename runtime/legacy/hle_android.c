@@ -1447,6 +1447,7 @@ static void h_create_file(CPU *c)
 static void ev_close(uint32_t h);   /* defined with the sync objects below */
 static int ev_close_if_used(uint32_t h);
 static int mutex_close(uint32_t h);
+static int iocp_close(uint32_t h);  /* defined with the completion ports below */
 static void file_view_release(GHandle *m);
 
 static void h_close_handle(CPU *c)
@@ -1454,6 +1455,10 @@ static void h_close_handle(CPU *c)
     uint32_t h = arg32(c, 0);
     if (mutex_close(h)) { c->eax = 1; return; }
     if (ev_close_if_used(h)) { c->eax = 1; return; }
+    /* Completion ports are handed out from the stateless range too, but they
+     * own a queue and blocked waiters; close has to wake those waiters before
+     * the generic "nothing to free" branch below swallows the handle. */
+    if (iocp_close(h)) { c->eax = 1; return; }
     /* Semaphore and thread handles share the stateless range and have no
      * state to free here. */
     if (h >= SYNC_BASE && h < SYNC_MID && ((h - SYNC_BASE) % 4u) == 0) {
@@ -1477,6 +1482,7 @@ static void iocp_complete_file(uint32_t file, uint32_t bytes, uint32_t ov);
 static void h_read_file(CPU *c)
 {
     uint32_t h = arg32(c, 0), buf = arg32(c, 1), n = arg32(c, 2), got = arg32(c, 3);
+    uint32_t ov = arg32(c, 4);
     GHandle *g = gh_get(h);
     if (got && guest_ok(got, 4)) wr32g(got, 0);
     if (!g || g->fd < 0 || !guest_ok(buf, n)) { g_last_error = 6; c->eax = 0; return; }
@@ -1486,20 +1492,24 @@ static void h_read_file(CPU *c)
 #ifdef WC3_DEBUG
     if (g_io_trace < 400) { g_io_trace++; fprintf(stderr, "[file] read h=%08X n=%u -> %d\n", h, n, (int)r); }
 #endif
-    iocp_complete_file(h, (uint32_t)r, arg32(c, 4));
+    /* Win32 queues a completion packet only for an overlapped request.  A
+     * synchronous ReadFile on a port-associated handle completes in place and
+     * must not put an unexpected key into the worker's queue. */
+    if (ov) iocp_complete_file(h, (uint32_t)r, ov);
     c->eax = 1;
 }
 
 static void h_write_file(CPU *c)
 {
     uint32_t h = arg32(c, 0), buf = arg32(c, 1), n = arg32(c, 2), put = arg32(c, 3);
+    uint32_t ov = arg32(c, 4);
     GHandle *g = gh_get(h);
     if (put && guest_ok(put, 4)) wr32g(put, 0);
     if (!g || g->fd < 0 || !guest_ok(buf, n)) { c->eax = 0; return; }
     ssize_t r = write(g->fd, (void *)(uintptr_t)buf, n);
     if (r < 0) { c->eax = 0; return; }
     if (put && guest_ok(put, 4)) wr32g(put, (uint32_t)r);
-    iocp_complete_file(h, (uint32_t)r, arg32(c, 4));
+    if (ov) iocp_complete_file(h, (uint32_t)r, ov);
     c->eax = 1;
 }
 
@@ -2896,17 +2906,30 @@ static void h_sleep(CPU *c)
 #define WAVE_DEV_MAX       4
 #define WAVE_HDR_MAX       128
 #define WAVE_DONE_MAX      256
+/* The ring is an elastic jitter buffer again.  Pacing the guest by BLOCKING
+ * waveOutWrite() until d->tail advanced (64 KiB ring + half-full target)
+ * stalled the guest threads and made the entire game lag: waveOut is
+ * asynchronous in Win32 and Miles must never wait inside the call.
+ * Guest pacing is now wait-free: WM_TIMER is driven by the AAudio device
+ * clock (g_wave_clock_frames), so the mixer produces exactly as much PCM as
+ * the device has played, and each WOM_DONE is addressed to the submitting
+ * guest thread.  The ring only absorbs jitter; it no longer defines the
+ * timing relationship between guest and sink. */
 #define WAVE_RING_BYTES    (8u * 1024u * 1024u)
+#define WAVE_RING_TARGET   WAVE_RING_BYTES
 #define WOM_DONE_MSG       0x3BDu
-/* A completion belongs to a fixed guest thread (by default the thread that
- * opened the device), but it must be DELIVERED without an artificial delay:
- * winmm sets WHDR_DONE and calls the callback in the same breath.  Any gap
- * between the two lets Miles re-submit the same WAVEHDR while its WOM_DONE is
- * still queued.  WC3_WAVEOUT_DONE_HANDOFF_MS restores a wait for A/B,
- * WC3_WAVEOUT_DONE_ROUTE=submitter switches affinity to the submitting
- * thread, WC3_WAVEOUT_DONE_EARLY_FLAG=1 restores the legacy RT-thread flag
- * (raised before the callback, which lets Miles rewrite the PCM mid-copy). */
-#define WAVE_DONE_HANDOFF_MS 10u
+/* Each WOM_DONE is addressed to the guest thread that submitted its header;
+ * that thread is paced by the device clock and pumps on every write, so the
+ * callback lands in a stable guest context with no artificial delay.
+ * A/B switches: WC3_WAVEOUT_DONE_ROUTE=owner, WC3_WAVEOUT_DONE_HANDOFF_MS,
+ * WC3_WAVEOUT_DONE_EARLY_FLAG=1 (legacy: flag raised on the RT thread before
+ * the callback, which lets Miles rewrite PCM mid-copy). */
+/* A completion is addressed to the guest thread that submitted its WAVEHDR.
+ * Because that same thread is now paced by back-pressure in waveOutWrite(),
+ * it pumps on every buffer and collects its own completion immediately.
+ * 250 ms is only an emergency escape for a submitter that died; it is not a
+ * normal scheduling path and is counted/diagnosed as `foreign`. */
+#define WAVE_DONE_HANDOFF_MS 250u
 #define WAVE_DONE_ROUTE_OWNER     0
 #define WAVE_DONE_ROUTE_SUBMITTER 1
 /* waveOutOpen leaves the AAudio stream paused until the ring holds at least
@@ -2991,6 +3014,23 @@ static uint32_t g_wave_ret_thunk;
  * ONLY the completion loop; per-thread timers are serviced before it is taken,
  * and a busy peer returns immediately instead of blocking or spinning. */
 static volatile int g_wave_service_lock;
+
+/* THE device clock.  Frames actually handed to AAudio, monotonic across
+ * waveOutReset()/open/close.  Only the AAudio RT callback writes it (under
+ * g_wave_lock); guest pump points read it lock-free.  This is the single
+ * source of timing for WM_TIMER and WOM_DONE -- the guest must never again
+ * be paced by wall-clock pump points while the sink runs on real time. */
+static volatile uint64_t g_wave_clock_frames;
+static volatile int g_wave_clock_active;
+
+static uint64_t wave_clock_frames(void)
+{
+    return __atomic_load_n(&g_wave_clock_frames, __ATOMIC_ACQUIRE);
+}
+static int wave_clock_active(void)
+{
+    return __atomic_load_n(&g_wave_clock_active, __ATOMIC_ACQUIRE);
+}
 #ifdef WC3_DEBUG
 static int g_wave_trace = -1;
 static unsigned g_wave_write_log, g_wave_cb_log;
@@ -3029,8 +3069,10 @@ static void wave_done_tuning_from_env(WaveDev *d)
     const char *route = getenv("WC3_WAVEOUT_DONE_ROUTE");
     const char *wait = getenv("WC3_WAVEOUT_DONE_HANDOFF_MS");
     const char *early = getenv("WC3_WAVEOUT_DONE_EARLY_FLAG");
-    d->done_route = (route && !strcmp(route, "submitter"))
-                        ? WAVE_DONE_ROUTE_SUBMITTER : WAVE_DONE_ROUTE_OWNER;
+    /* Default: each WAVEHDR is completed on the thread that submitted it.
+     * WC3_WAVEOUT_DONE_ROUTE=owner restores the waveOutOpen-thread affinity. */
+    d->done_route = (route && !strcmp(route, "owner"))
+                        ? WAVE_DONE_ROUTE_OWNER : WAVE_DONE_ROUTE_SUBMITTER;
     d->done_handoff_ms = WAVE_DONE_HANDOFF_MS;
     if (wait) {
         long v = strtol(wait, NULL, 10);
@@ -3059,7 +3101,8 @@ typedef struct {
     uint32_t id;
     uint32_t elapse;
     uint32_t callback;
-    uint32_t due_ms;
+    uint32_t due_ms;      /* wall-clock fallback before AAudio starts */
+    uint64_t due_frame;   /* device clock deadline, 0 = not armed yet */
 } GuestTimer;
 
 static GuestTimer g_timers[TIMER_MAX];
@@ -3077,21 +3120,54 @@ static void timer_service(CPU *c)
     if (!c || !g_wave_ret_thunk) return;
 
     uint32_t now = wave_now_ms();
+    const uint64_t played = wave_clock_frames();
+    const int device_clock = wave_clock_active();
     pthread_t self = pthread_self();
-    struct { uint32_t hwnd, id, callback; } due[TIMER_MAX];
+    /* Up to four catch-up ticks per timer per pump, so a long render stall
+     * cannot fire 24 callbacks in one burst.  The remaining debt stays in
+     * due_frame and is repaid on the following pumps, keeping phase. */
+    struct { uint32_t hwnd, id, callback; } due[TIMER_MAX * 4];
     int ndue = 0;
+
+    uint32_t rate = 44100u;
+    for (int i = 0; i < WAVE_DEV_MAX; i++) {
+        if (g_wave_dev[i].used && g_wave_dev[i].rate) {
+            rate = (uint32_t)g_wave_dev[i].rate;
+            break;
+        }
+    }
 
     pthread_mutex_lock(&g_timer_lock);
     for (int i = 0; i < TIMER_MAX; i++) {
         GuestTimer *t = &g_timers[i];
         if (!t->used || !t->callback) continue;
         if (!pthread_equal(t->owner, self)) continue;
-        if ((int32_t)(now - t->due_ms) < 0) continue;
-        t->due_ms = now + t->elapse;      /* do not burst after a stall */
-        due[ndue].hwnd = t->hwnd;
-        due[ndue].id = t->id;
-        due[ndue].callback = t->callback;
-        ndue++;
+        int ticks = 0;
+        if (device_clock) {
+            uint64_t period = (uint64_t)rate * t->elapse / 1000u;
+            if (period < 1u) period = 1u;
+            if (!t->due_frame) t->due_frame = played + period;
+            if (played >= t->due_frame) {
+                uint64_t owed = (played - t->due_frame) / period + 1u;
+                ticks = owed > 4u ? 4 : (int)owed;
+                t->due_frame += (uint64_t)ticks * period;
+                /* Never let an unbounded debt accumulate. */
+                if (played > t->due_frame + 8u * period)
+                    t->due_frame = played + period;
+            }
+            t->due_ms = now + t->elapse;
+        } else if ((int32_t)(now - t->due_ms) >= 0) {
+            /* Before AAudio starts (and for the timed silent sink) there is
+             * no device clock yet; keep the old wall-clock behaviour. */
+            ticks = 1;
+            t->due_ms = now + t->elapse;
+        }
+        for (int k = 0; k < ticks && ndue < TIMER_MAX * 4; k++) {
+            due[ndue].hwnd = t->hwnd;
+            due[ndue].id = t->id;
+            due[ndue].callback = t->callback;
+            ndue++;
+        }
     }
     pthread_mutex_unlock(&g_timer_lock);
 
@@ -3164,6 +3240,7 @@ static void timer_set(CPU *c)
     t->elapse = elapse;
     t->callback = callback;
     t->due_ms = wave_now_ms() + elapse;
+    t->due_frame = 0;        /* re-arm from the current device clock */
 #if WC3_DEBUG && WC3_DEBUG_HLE
     fprintf(stderr, "[timer] set tid=%lu gid=%u hwnd=%u id=%u elapse=%u cb=%08X\n",
             (unsigned long)pthread_self(),
@@ -3438,6 +3515,16 @@ static aaudio_data_callback_result_t wave_aaudio_cb(AAudioStream *stream,
     memcpy(out, d->ring + idx, first);
     if (take > first) memcpy(out + first, d->ring, take - first);
     d->tail += take;
+    /* Advance the one true audio clock by the frames the DEVICE played,
+     * which is `want`, not `take`: on an underrun AAudio still emits the
+     * remaining frames as silence, so wall time passed for them too.  This
+     * counter is monotonic across waveOutReset()/open/close; guest WM_TIMER
+     * and WOM_DONE deadlines are expressed in these frames. */
+    {
+        uint32_t fb = d->out_align ? d->out_align : 4u;
+        __atomic_add_fetch(&g_wave_clock_frames,
+                           (uint64_t)(want / fb), __ATOMIC_RELEASE);
+    }
 
     uint32_t left = take;
     while (left && d->blk_count > 0) {
@@ -3576,12 +3663,13 @@ static void wave_audio_stats_report(void)
             (unsigned long long)g_aa_max_gap_us, gap5, gap20, (int)xruns,
             (unsigned long long)g_aa_lock_max_us);
     fprintf(stderr, "[wave] done late=%u foreign=%u maxage_ms=%u started=%d "
-                    "handoff_ms=%u early_flag=%d\n",
+                    "handoff_ms=%u early_flag=%d clock=%llu active=%d\n",
             g_wave_done_late, g_wave_done_fallback,
             (unsigned)g_wave_done_max_age,
             (int)(g_wave_dev[0].used ? g_wave_dev[0].started : -1),
             g_wave_dev[0].used ? g_wave_dev[0].done_handoff_ms : 0u,
-            g_wave_dev[0].used ? g_wave_dev[0].done_early_flag : -1);
+            g_wave_dev[0].used ? g_wave_dev[0].done_early_flag : -1,
+            (unsigned long long)wave_clock_frames(), wave_clock_active());
     if (errs != g_aa_error_reported) {
         g_aa_error_reported = errs;
         fprintf(stderr, "[wave] AAudio error %d on dev %d count=%u\n",
@@ -3907,6 +3995,8 @@ static void h_wave_out_open(CPU *c)
     WaveDev *d = &g_wave_dev[slot];
     memset(d, 0, sizeof *d);
     d->used = 1;
+    /* The device clock is (re)armed only when requestStart() succeeds. */
+    __atomic_store_n(&g_wave_clock_active, 0, __ATOMIC_RELEASE);
     /* Win32 CALLBACK_FUNCTION delivers WOM_DONE on the thread that opened
      * the device (winmm owns a hidden window on that thread).  Miles' handler
      * keeps driver state per guest thread; dispatching it on unrelated worker
@@ -3943,10 +4033,12 @@ static void h_wave_out_open(CPU *c)
 #ifdef WC3_DEBUG
     if (wave_trace())
         fprintf(stderr, "[wave] Open ok ghwo=%u fake=%d route=%s "
-                        "handoff_ms=%u early_flag=%d prefill_bursts=%u\n",
+                        "handoff_ms=%u early_flag=%d prefill_bursts=%u "
+                        "ring=%u target=%u\n",
                 gh, d->fake,
                 d->done_route == WAVE_DONE_ROUTE_SUBMITTER ? "submitter" : "owner",
-                d->done_handoff_ms, d->done_early_flag, WAVE_PREFILL_BURSTS);
+                d->done_handoff_ms, d->done_early_flag, WAVE_PREFILL_BURSTS,
+                WAVE_RING_BYTES, WAVE_RING_TARGET);
 #endif
 #if WC3_DEBUG && WC3_DEBUG_HLE
     fprintf(stderr, "[wave] open ok ghwo=%u fake=%d gid=%u tid=%lu\n",
@@ -3965,6 +4057,7 @@ static void h_wave_out_close(CPU *c)
     d->closing = 1;
     AAudioStream *stream = d->stream;
     int was_started = d->started;
+    __atomic_store_n(&g_wave_clock_active, 0, __ATOMIC_RELEASE);
     d->stream = NULL;
     pthread_mutex_unlock(&g_wave_lock);
 
@@ -4162,24 +4255,19 @@ static void h_wave_out_write(CPU *c)
         return;
     }
 
-    /* Wait for the ring to drain.  Miles queues a handful of small buffers;
-     * this only blocks if the AAudio stream itself has stalled. */
-    for (int spins = 0; ; spins++) {
-        uint32_t used = d->head - d->tail;
-        if (WAVE_RING_BYTES - used >= need) break;
+    /* NO WAIT HERE.  waveOutWrite() is asynchronous: Miles must return to its
+     * own loop immediately.  The earlier "device-clock back-pressure" build
+     * blocked this call on d->tail and stalled the whole game (user report:
+     * "игра сильно лагает").  Timing coherence is provided by the device-clock
+     * WM_TIMER above, not by blocking the writer.  This check only guards the
+     * pathological case of a physically full 8 MiB ring. */
+    if (d->head - d->tail + need > WAVE_RING_BYTES) {
         pthread_mutex_unlock(&g_wave_lock);
-        if (spins > 5000) { c->eax = MMSYSERR_NOMEM; return; }
-        usleep(1000);
-        pthread_mutex_lock(&g_wave_lock);
-        d = wave_dev_from_guest(gh);
-        if (!d || d->closing) {
-            pthread_mutex_unlock(&g_wave_lock);
-            c->eax = MMSYSERR_INVALHANDLE;
-            return;
-        }
+        c->eax = MMSYSERR_NOMEM;
+        return;
     }
 
-    /* Another guest thread may have appended while the lock was dropped. */
+    /* Another guest thread may have appended while the lock was last dropped. */
     if (d->blk_count >= WAVE_HDR_MAX) {
         pthread_mutex_unlock(&g_wave_lock);
         c->eax = MMSYSERR_NOMEM;
@@ -4258,13 +4346,18 @@ static void h_wave_out_write(CPU *c)
 
     if (start_now) {
         aaudio_result_t sr = AAudioStream_requestStart(start_stream);
-        if (sr != AAUDIO_OK)
+        if (sr != AAUDIO_OK) {
             fprintf(stderr, "[wave] AAudio deferred start failed %d\n", (int)sr);
+        } else {
+            /* From here on the device clock, not wall-clock pump points,
+             * paces the guest mixer. */
+            __atomic_store_n(&g_wave_clock_active, 1, __ATOMIC_RELEASE);
 #if WC3_DEBUG && WC3_DEBUG_AUDIO
-        else if (wave_trace())
-            fprintf(stderr, "[wave] AAudio deferred start ring=%u t=%u\n",
-                    (unsigned)log_ring, wave_now_ms());
+            if (wave_trace())
+                fprintf(stderr, "[wave] AAudio deferred start ring=%u t=%u\n",
+                        (unsigned)log_ring, wave_now_ms());
 #endif
+        }
     }
 
 #ifdef WC3_DEBUG
@@ -5117,12 +5210,15 @@ static void h_unmap_view_of_file(CPU *c)
  * which is exactly the packet an overlapped read would have produced.
  */
 #define IOCP_MAX 8
-#define IOCP_Q   256
+#define IOCP_Q   1024
 
 typedef struct { uint32_t bytes, key, ov; } IocpItem;
 
 typedef struct {
     int used;
+    int initialized;
+    int closing;
+    int refs;
     uint32_t handle;
     pthread_mutex_t m;
     pthread_cond_t cv;
@@ -5131,6 +5227,7 @@ typedef struct {
 } Iocp;
 
 static Iocp g_iocp[IOCP_MAX];
+static pthread_mutex_t g_iocp_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* File handle -> port binding lives on the GHandle.  A side table keyed by the
  * guest handle value goes stale when the handle is closed and its slot is
@@ -5138,26 +5235,66 @@ static Iocp g_iocp[IOCP_MAX];
  * worker dereferences a released object.  Keeping the association on the
  * handle also removes the 32-association ceiling.  With the old table full,
  * CreateIoCompletionPort still reported success, no completion was posted, and
- * the worker's Sleep(INFINITE) on the port never returned. */
-static Iocp *iocp_find(uint32_t handle)
+ * the worker's Sleep(INFINITE) on the port never returned.
+ *
+ * A port outlives its guest handle while a worker is still inside
+ * GetQueuedCompletionStatus.  The table lock protects lookup and the reference
+ * count; the per-port mutex protects the queue.  CloseHandle marks the port
+ * closing and broadcasts, but the slot is not reused until the last waiter has
+ * dropped its reference. */
+static Iocp *iocp_get(uint32_t handle)
 {
-    for (int i = 0; i < IOCP_MAX; i++)
-        if (g_iocp[i].used && g_iocp[i].handle == handle) return &g_iocp[i];
-    return NULL;
+    Iocp *found = NULL;
+    Iocp *closing = NULL;
+    pthread_mutex_lock(&g_iocp_lock);
+    for (int i = 0; i < IOCP_MAX; i++) {
+        Iocp *p = &g_iocp[i];
+        if (!p->used || p->handle != handle) continue;
+        if (!p->closing) { found = p; break; }
+        if (!closing) closing = p;
+    }
+    if (!found) found = closing;
+    if (found) found->refs++;
+    pthread_mutex_unlock(&g_iocp_lock);
+    return found;
 }
 
-static void iocp_push(Iocp *p, uint32_t bytes, uint32_t key, uint32_t ov)
+static void iocp_put(Iocp *p)
 {
+    if (!p) return;
+    pthread_mutex_lock(&g_iocp_lock);
+    if (p->refs > 0) p->refs--;
+    pthread_mutex_unlock(&g_iocp_lock);
+}
+
+/* Returns 1 when queued, 0 when the port is closing, -1 when the ring is full.
+ * A completion is never silently dropped: the caller reports the full queue
+ * and the stream worker's shutdown packet remains visible in the log. */
+static int iocp_push(Iocp *p, uint32_t bytes, uint32_t key, uint32_t ov)
+{
+    int rc = 1;
     pthread_mutex_lock(&p->m);
-    if (p->n < IOCP_Q) {
+    if (p->closing) {
+        rc = 0;
+    } else if (p->n >= IOCP_Q) {
+        rc = -1;
+    } else {
         p->q[p->tail].bytes = bytes;
         p->q[p->tail].key = key;
         p->q[p->tail].ov = ov;
         p->tail = (p->tail + 1) % IOCP_Q;
         p->n++;
+        pthread_cond_signal(&p->cv);
     }
-    pthread_cond_signal(&p->cv);
     pthread_mutex_unlock(&p->m);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (rc < 0) {
+        static unsigned full_trace;
+        if (full_trace++ < 16)
+            fprintf(stderr, "[iocp] queue full port=%08X\n", p->handle);
+    }
+#endif
+    return rc;
 }
 
 /* Called from ReadFile/WriteFile: complete the overlapped operation the way an
@@ -5166,8 +5303,34 @@ static void iocp_complete_file(uint32_t file, uint32_t bytes, uint32_t ov)
 {
     GHandle *g = gh_get(file);
     if (!g || !g->iocp_port) return;
-    Iocp *p = iocp_find(g->iocp_port);
-    if (p) iocp_push(p, bytes, g->iocp_key, ov);
+    Iocp *p = iocp_get(g->iocp_port);
+    if (!p) return;
+    iocp_push(p, bytes, g->iocp_key, ov);
+    iocp_put(p);
+}
+
+/* CloseHandle on a port wakes every blocked GetQueuedCompletionStatus so the
+ * stream worker can leave its wait before the object that owns it is freed. */
+static int iocp_close(uint32_t handle)
+{
+    Iocp *p = iocp_get(handle);
+    if (!p) return 0;
+    pthread_mutex_lock(&g_iocp_lock);
+    pthread_mutex_lock(&p->m);
+    p->closing = 1;
+    pthread_cond_broadcast(&p->cv);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    unsigned pending = p->n;
+#endif
+    pthread_mutex_unlock(&p->m);
+    pthread_mutex_unlock(&g_iocp_lock);
+    iocp_put(p);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    static unsigned close_trace;
+    if (close_trace++ < 16)
+        fprintf(stderr, "[iocp] close port=%08X pending=%u\n", handle, pending);
+#endif
+    return 1;
 }
 
 static void h_create_iocp(CPU *c)
@@ -5184,22 +5347,48 @@ static void h_create_iocp(CPU *c)
         g->iocp_key = key;
         g_last_error = 0;
         c->eax = port;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+        static unsigned assoc_trace;
+        if (assoc_trace++ < 128)
+            fprintf(stderr, "[iocp] assoc file=%08X port=%08X key=%08X\n",
+                    file, port, key);
+#endif
         return;
     }
+
+    pthread_mutex_lock(&g_iocp_lock);
+    Iocp *p = NULL;
     for (int i = 0; i < IOCP_MAX; i++) {
-        if (g_iocp[i].used) continue;
-        Iocp *p = &g_iocp[i];
-        memset(p, 0, sizeof *p);
+        Iocp *q = &g_iocp[i];
+        if (!q->used || (q->closing && q->refs == 0)) { p = q; break; }
+    }
+    if (!p) {
+        pthread_mutex_unlock(&g_iocp_lock);
+        g_last_error = 6;
+        c->eax = 0;
+        return;
+    }
+    if (!p->initialized) {
         pthread_mutex_init(&p->m, NULL);
         pthread_cond_init(&p->cv, NULL);
-        p->used = 1;
-        p->handle = gh_new_sync();
-        g_last_error = 0;
-        c->eax = p->handle;
-        return;
+        p->initialized = 1;
+    } else {
+        /* The old handle was closed and no waiter holds a reference. */
+        p->head = p->tail = p->n = 0;
     }
-    g_last_error = 6;
-    c->eax = 0;
+    p->used = 1;
+    p->closing = 0;
+    p->refs = 0;
+    p->handle = gh_new_sync();
+    pthread_mutex_unlock(&g_iocp_lock);
+    g_last_error = 0;
+    c->eax = p->handle;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    static unsigned create_trace;
+    if (create_trace++ < 16)
+        fprintf(stderr, "[iocp] create port=%08X slot=%d\n",
+                p->handle, (int)(p - g_iocp));
+#endif
 }
 
 /* The engine's stream worker calls GetQueuedCompletionStatus with a finite
@@ -5216,18 +5405,40 @@ static void iocp_clear_out(uint32_t pb, uint32_t pk, uint32_t pov)
     if (pov && guest_ok(pov, 4)) wr32g(pov, 0);
 }
 
+#if WC3_DEBUG && WC3_DEBUG_HLE
+/* One bounded line per failed wait is enough to tell the three FALSE returns
+ * apart: a bad/closed port, a zero timeout, and a timed wait that expired. */
+static void iocp_trace_false(uint32_t h, uint32_t ms, const char *why)
+{
+    static unsigned n;
+    if (n++ < 24)
+        fprintf(stderr, "[iocp] get port=%08X ms=%u -> FALSE (%s)\n", h, ms, why);
+}
+#endif
+
 static void h_get_queued(CPU *c)
 {
     uint32_t h = arg32(c, 0), pb = arg32(c, 1), pk = arg32(c, 2),
              pov = arg32(c, 3), ms = arg32(c, 4);
     iocp_clear_out(pb, pk, pov);
-    Iocp *p = iocp_find(h);
-    if (!p) { g_last_error = 6; c->eax = 0; return; }
+    Iocp *p = iocp_get(h);
+    if (!p) {
+#if WC3_DEBUG && WC3_DEBUG_HLE
+        iocp_trace_false(h, ms, "invalid");
+#endif
+        g_last_error = 6;
+        c->eax = 0;
+        return;
+    }
 
     pthread_mutex_lock(&p->m);
-    while (p->n == 0) {
+    while (p->n == 0 && !p->closing) {
         if (ms == 0) {
             pthread_mutex_unlock(&p->m);
+            iocp_put(p);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+            iocp_trace_false(h, ms, "timeout");
+#endif
             g_last_error = 258;             /* WAIT_TIMEOUT */
             c->eax = 0;
             return;
@@ -5242,16 +5453,31 @@ static void h_get_queued(CPU *c)
             if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
             if (pthread_cond_timedwait(&p->cv, &p->m, &ts) == ETIMEDOUT && p->n == 0) {
                 pthread_mutex_unlock(&p->m);
+                iocp_put(p);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+                iocp_trace_false(h, ms, "timeout");
+#endif
                 g_last_error = 258;
                 c->eax = 0;
                 return;
             }
         }
     }
+    if (p->closing) {
+        pthread_mutex_unlock(&p->m);
+        iocp_put(p);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+        iocp_trace_false(h, ms, "closing");
+#endif
+        g_last_error = 6;
+        c->eax = 0;
+        return;
+    }
     IocpItem it = p->q[p->head];
     p->head = (p->head + 1) % IOCP_Q;
     p->n--;
     pthread_mutex_unlock(&p->m);
+    iocp_put(p);
 
     if (pb && guest_ok(pb, 4)) wr32g(pb, it.bytes);
     if (pk && guest_ok(pk, 4)) wr32g(pk, it.key);
@@ -5262,11 +5488,17 @@ static void h_get_queued(CPU *c)
 
 static void h_post_queued(CPU *c)
 {
-    Iocp *p = iocp_find(arg32(c, 0));
+    Iocp *p = iocp_get(arg32(c, 0));
     if (!p) { g_last_error = 6; c->eax = 0; return; }
-    iocp_push(p, arg32(c, 1), arg32(c, 2), arg32(c, 3));
-    g_last_error = 0;
-    c->eax = 1;
+    int rc = iocp_push(p, arg32(c, 1), arg32(c, 2), arg32(c, 3));
+    iocp_put(p);
+    if (rc == 1) {
+        g_last_error = 0;
+        c->eax = 1;
+    } else {
+        g_last_error = rc == 0 ? 6 : 8;     /* invalid handle / no memory */
+        c->eax = 0;
+    }
 }
 
 /* ------------------------------------------------------------------ */

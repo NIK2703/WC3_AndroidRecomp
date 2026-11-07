@@ -1180,6 +1180,44 @@ def test_gdi_device() -> int:
     return 0
 
 
+def test_dragdrop() -> int:
+    """T0: SHELL32 drag/drop reports the empty Android drop list."""
+    cc = gcc()
+    if not cc:
+        print("drag/drop: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "shell32" / "dragdrop"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "shell32" / "dragdrop" / "dragdrop_hle.c"),
+        str(ROOT / "tests" / "dragdrop_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("dragdrop_test_debug.exe", 1),
+                        ("dragdrop_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_gdi_palette() -> int:
     """T0: GDI32 palette handles, selection and system-palette entries."""
     cc = gcc()
@@ -1875,6 +1913,7 @@ TESTS = {
     "gdi_objects": test_gdi_objects,
     "gdi_device": test_gdi_device,
     "gdi_palette": test_gdi_palette,
+    "dragdrop": test_dragdrop,
     "scroll_hle": test_scroll_hle,
     "user32_menu": test_user32_menu,
     "registry_hle": test_registry_hle,
