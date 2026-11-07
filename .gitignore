@@ -41,6 +41,7 @@ __pycache__/
 
 # --- local-only documentation and assistant state --------------------------
 /docs/
+/AGENTS.md
 /.workbuddy-ai/
 /.wokbuddy/
 
