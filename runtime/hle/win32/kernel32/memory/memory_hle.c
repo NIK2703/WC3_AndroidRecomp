@@ -57,6 +57,14 @@ static void h_global_size(CPU *c)
     c->eax = wc3_legacy_guest_size(wc3_legacy_arg32(c, 0));
 }
 
+static void h_global_handle(CPU *c)
+{
+    const uint32_t p = wc3_legacy_arg32(c, 0);
+    /* GlobalAlloc only produces GMEM_FIXED blocks here, so the handle and the
+     * pointer are the same value.  Reject a pointer without a live block. */
+    c->eax = (p && wc3_legacy_guest_size(p)) ? p : 0;
+}
+
 static void h_heap_alloc(CPU *c)
 {
     const uint32_t flags = wc3_legacy_arg32(c, 1);
@@ -185,6 +193,7 @@ typedef struct MemoryAddition {
 } MemoryAddition;
 
 static const MemoryAddition g_additions[] = {
+    { "GlobalHandle", 1, h_global_handle },
     { "VirtualLock", 2, h_virtual_lock },
     { "VirtualUnlock", 2, h_virtual_unlock },
     { "FlushInstructionCache", 3, h_flush_instruction_cache },

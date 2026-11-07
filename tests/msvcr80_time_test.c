@@ -68,6 +68,20 @@ void wc3_legacy_wr8g(uint32_t addr, uint8_t value)
     if (p) memcpy(p, &value, 1);
 }
 
+void wc3_legacy_wr16g(uint32_t addr, uint16_t value)
+{
+    void *p = guest_ptr(addr, 2);
+    if (p) memcpy(p, &value, 2);
+}
+
+uint16_t wc3_legacy_rd16g(uint32_t addr)
+{
+    uint16_t value = 0;
+    void *p = guest_ptr(addr, 2);
+    if (p) memcpy(&value, p, 2);
+    return value;
+}
+
 uint32_t wc3_legacy_guest_alloc(uint32_t size)
 {
     if (g_alloc_fail) return 0;
@@ -213,11 +227,12 @@ int main(void)
     g_platform.time.realtime_ns = fake_realtime_ns;
     CHECK(wc3_hle_msvcr80_time_install() == -1, "install without local_time");
     g_platform.time.local_time = fake_local_time;
-    CHECK(wc3_hle_msvcr80_time_install() == 5, "install count");
-    CHECK(g_override_count == 5, "recorded row count");
+    CHECK(wc3_hle_msvcr80_time_install() == 6, "install count");
+    CHECK(g_override_count == 6, "recorded row count");
     CHECK(strcmp(g_overrides[0].dll, "MSVCR80.dll") == 0, "DLL name");
     CHECK(find_override("_time64") != NULL, "_time64 row");
     CHECK(find_override("_ctime64") != NULL, "_ctime64 row");
+    CHECK(find_override("_ftime64") != NULL, "_ftime64 row");
     CHECK(find_override("_gmtime64") != NULL, "_gmtime64 row");
     CHECK(find_override("_localtime64") != NULL, "_localtime64 row");
     CHECK(find_override("_localtime64_s") != NULL, "_localtime64_s row");
@@ -246,6 +261,32 @@ int main(void)
     if (call("_time64", &c)) return 1;
     CHECK(c.eax == (uint32_t)(epoch_sec + 1u), "_time64 null eax");
     CHECK(c.edx == 0, "_time64 null edx");
+
+    /* __timeb64 is 16 bytes: 64-bit seconds, millitm, timezone minutes west
+     * of UTC, dstflag, and two padding bytes. */
+    const uint32_t ftime = GUEST_BASE + 0x700u;
+    g_real_ns = epoch_ns;
+    g_year = 2024;
+    g_month = 2;
+    g_day = 29;
+    g_hour = 15;
+    g_minute = 34;
+    g_second = 56;
+    args[0] = ftime;
+    put_args(&c, args, 1);
+    if (call("_ftime64", &c)) return 1;
+    CHECK(c.eax == 0, "_ftime64 return");
+    CHECK(read_u64(ftime) == epoch_sec, "_ftime64 seconds");
+    CHECK(wc3_legacy_rd16g(ftime + 8u) == 789u, "_ftime64 millitm");
+    CHECK((int16_t)wc3_legacy_rd16g(ftime + 10u) == -180,
+          "_ftime64 timezone");
+    CHECK(wc3_legacy_rd16g(ftime + 12u) == 0u, "_ftime64 dstflag");
+    CHECK(wc3_legacy_rd16g(ftime + 14u) == 0u, "_ftime64 padding");
+
+    args[0] = 0xFFFFFFFFu;
+    put_args(&c, args, 1);
+    if (call("_ftime64", &c)) return 1;
+    CHECK(c.eax == 0, "_ftime64 bad pointer");
 
     write_u64(timer, epoch_sec);
     g_year = 2024;
@@ -375,6 +416,6 @@ int main(void)
     if (call("_localtime64_s", &c)) return 1;
     CHECK(c.eax == 22u, "_localtime64_s null source");
 
-    printf("msvcr80 time OK (5 handlers)\n");
+    printf("msvcr80 time OK (6 handlers)\n");
     return 0;
 }

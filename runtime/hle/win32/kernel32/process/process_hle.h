@@ -4,7 +4,8 @@
  * Second target HLE module after kernel32/time (M5, H6.2 order).  The
  * pseudo-handle values are fixed by Win32; the two IDs come from Wc3ThreadApi
  * instead of the as-built constants (1234/5678), which made every guest thread
- * look like the same thread.
+ * look like the same thread.  SleepEx uses the same thread API for real
+ * yielding and sleeping; alertable waits have no APC queue to drain.
  */
 #ifndef WC3_HLE_WIN32_KERNEL32_PROCESS_H
 #define WC3_HLE_WIN32_KERNEL32_PROCESS_H

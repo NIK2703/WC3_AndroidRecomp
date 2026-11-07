@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 
 #if defined(_WIN32)
@@ -143,6 +144,25 @@ static int headless_file_size(void *ctx, uintptr_t handle, uint64_t *size_out)
     return 0;
 }
 
+static int headless_file_stat(void *ctx, const char *path, Wc3FileStat *out)
+{
+    (void)ctx;
+    if (!path || !out) return -1;
+#if defined(_WIN32)
+    struct _stat64 st;
+    if (_stat64(path, &st) != 0) return -1;
+    const int directory = (st.st_mode & _S_IFDIR) != 0;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    const int directory = S_ISDIR(st.st_mode) != 0;
+#endif
+    out->size = (uint64_t)st.st_size;
+    out->mtime_seconds = (int64_t)st.st_mtime;
+    out->mode = directory ? WC3_FILE_STAT_DIRECTORY : WC3_FILE_STAT_REGULAR;
+    return 0;
+}
+
 static int headless_file_close(void *ctx, uintptr_t handle)
 {
     (void)ctx;
@@ -162,5 +182,6 @@ void headless_file_install(Wc3Platform *platform, HeadlessState *st)
     platform->file.write = headless_file_write;
     platform->file.seek = headless_file_seek;
     platform->file.size = headless_file_size;
+    platform->file.stat = headless_file_stat;
     platform->file.close = headless_file_close;
 }

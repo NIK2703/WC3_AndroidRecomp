@@ -172,7 +172,7 @@ static uint32_t call(const char *name, uint32_t a0, uint32_t a1, uint32_t a2,
 int main(void)
 {
     const int installed = wc3_hle_kernel32_memory_install();
-    CHECK(installed == 16, "install count");
+    CHECK(installed == 17, "install count");
     if (g_failed) return 1;
 
     CHECK(call("GetProcessHeap", 0, 0, 0, 0) == 0x00090000u, "GetProcessHeap");
@@ -184,8 +184,13 @@ int main(void)
     CHECK(call("GlobalLock", p, 0, 0, 0) == p, "GlobalLock");
     CHECK(call("GlobalUnlock", p, 0, 0, 0) == 0, "GlobalUnlock is FALSE for fixed");
     CHECK(call("GlobalSize", p, 0, 0, 0) >= 16, "GlobalSize");
+    CHECK(call("GlobalHandle", p, 0, 0, 0) == p, "GlobalHandle fixed");
+    CHECK(call("GlobalHandle", 0, 0, 0, 0) == 0, "GlobalHandle NULL");
+    CHECK(call("GlobalHandle", GUEST_BASE + 0x40u, 0, 0, 0) == 0,
+          "GlobalHandle rejects a stale pointer");
     CHECK(call("GlobalFree", p, 0, 0, 0) == 0, "GlobalFree");
     CHECK(call("GlobalSize", p, 0, 0, 0) == 0, "GlobalSize after free");
+    CHECK(call("GlobalHandle", p, 0, 0, 0) == 0, "GlobalHandle after free");
     CHECK(call("GlobalFree", 0, 0, 0, 0) == 0, "GlobalFree(NULL)");
 
     uint32_t z = call("GlobalAlloc", 0x0040u, 24, 0, 0);

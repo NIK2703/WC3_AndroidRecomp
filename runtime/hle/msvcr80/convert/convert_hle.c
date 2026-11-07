@@ -21,6 +21,14 @@
  * into guest memory, and there is no target seam for the guest CRT's errno,
  * so this slice preserves the value-only behaviour rather than inventing a
  * guest errno write.
+ *
+ * wcstombs runs in the default "C" locale, where MSVCRT maps each wide unit
+ * 0x00..0xFF to the same byte and fails on anything above 0xFF.  The count
+ * form returns the required length with a null destination, stops after n
+ * produced bytes without a terminator when the buffer is exactly full, and
+ * returns (size_t)-1 without a terminator on the first unrepresentable unit.
+ * The guest's 16-bit units are read with the wide parser boundary checks, so
+ * a bad range fails the conversion instead of faulting the host.
  */
 #include "convert_hle.h"
 
@@ -32,6 +40,13 @@
 
 #define ATOF_BUFFER 1024u
 
+/* Wide numeric strings are ASCII in the C locale.  Convert guest UTF-16LE
+ * units into a host buffer, mapping anything above 0x7F to a byte the parser
+ * cannot consume, so the conversion stops at the first non-ASCII unit. */
+#define WIDE_BUFFER 1024u
+
+#define WIDE_FAIL UINT32_MAX
+
 typedef struct ParsedInteger {
     uint32_t end;       /* first byte that was not part of the number */
     uint64_t magnitude; /* valid when overflow is clear */
@@ -39,6 +54,8 @@ typedef struct ParsedInteger {
     int overflow;
     int digits;
 } ParsedInteger;
+
+static void set_edx_eax(CPU *c, uint64_t value);
 
 static int byte_at(uint32_t base, uint32_t offset, uint8_t *out)
 {
@@ -136,6 +153,163 @@ static uint32_t copy_guest_text(uint32_t text, char *buffer, uint32_t capacity)
     }
     buffer[length] = 0;
     return length;
+}
+
+static uint32_t copy_guest_wide(uint32_t text, char *buffer, uint32_t capacity)
+{
+    uint32_t units = 0;
+
+    if (!text || !capacity) {
+        if (capacity) buffer[0] = 0;
+        return 0;
+    }
+    while (units + 1u < capacity) {
+        const uint32_t off = units * 2u;
+        if (text > UINT32_MAX - off || !wc3_legacy_guest_ok(text + off, 2))
+            break;
+        const uint16_t ch = wc3_legacy_rd16g(text + off);
+        if (!ch) break;
+        buffer[units] = ch <= 0x7Fu ? (char)ch : (char)0xFF;
+        units++;
+    }
+    buffer[units] = 0;
+    return units;
+}
+
+/* Copy the ASCII form into the guest heap so the existing byte parser can
+ * return an end pointer in guest address space.  The conversion is capped at
+ * WIDE_BUFFER units; a longer number stops at the same boundary as strtod. */
+static int parse_wide_integer(uint32_t text, int base, ParsedInteger *parsed)
+{
+    char buffer[WIDE_BUFFER];
+    const uint32_t units = copy_guest_wide(text, buffer, WIDE_BUFFER);
+    const uint32_t scratch = wc3_legacy_guest_alloc(units + 1u);
+    if (!scratch) {
+        parsed->end = text;
+        parsed->digits = 0;
+        return 0;
+    }
+    for (uint32_t i = 0; i <= units; i++)
+        wc3_legacy_wr8g(scratch + i, (uint8_t)buffer[i]);
+
+    *parsed = parse_integer(scratch, base);
+    if (parsed->digits) {
+        const uint32_t consumed = parsed->end - scratch;
+        parsed->end = text + consumed * 2u;
+    } else {
+        parsed->end = text;
+    }
+    wc3_legacy_guest_free(scratch);
+    return 1;
+}
+
+static void h_wcstol(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t endptr = wc3_legacy_arg32(c, 1);
+    ParsedInteger r;
+
+    (void)parse_wide_integer(text, (int)wc3_legacy_arg32(c, 2), &r);
+    if (endptr && wc3_legacy_guest_ok(endptr, 4))
+        wc3_legacy_wr32g(endptr, r.end);
+    if (!r.digits) {
+        c->eax = 0;
+        return;
+    }
+
+    const uint32_t limit = r.negative ? 0x80000000u : 0x7FFFFFFFu;
+    if (r.overflow || r.magnitude > limit) {
+        c->eax = r.negative ? 0x80000000u : 0x7FFFFFFFu;
+        return;
+    }
+    c->eax = r.negative ? (uint32_t)(-(int64_t)(uint32_t)r.magnitude)
+                        : (uint32_t)r.magnitude;
+}
+
+static void h_wcstoul(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t endptr = wc3_legacy_arg32(c, 1);
+    ParsedInteger r;
+
+    (void)parse_wide_integer(text, (int)wc3_legacy_arg32(c, 2), &r);
+    if (endptr && wc3_legacy_guest_ok(endptr, 4))
+        wc3_legacy_wr32g(endptr, r.end);
+    if (!r.digits) {
+        c->eax = 0;
+        return;
+    }
+    if (r.overflow || r.magnitude > 0xFFFFFFFFull) {
+        c->eax = 0xFFFFFFFFu;
+        return;
+    }
+    c->eax = r.negative ? (uint32_t)(0u - r.magnitude) : (uint32_t)r.magnitude;
+}
+
+static void h_wcstoll(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t endptr = wc3_legacy_arg32(c, 1);
+    ParsedInteger r;
+
+    (void)parse_wide_integer(text, (int)wc3_legacy_arg32(c, 2), &r);
+    if (endptr && wc3_legacy_guest_ok(endptr, 4))
+        wc3_legacy_wr32g(endptr, r.end);
+    if (!r.digits) {
+        set_edx_eax(c, 0u);
+        return;
+    }
+
+    const uint64_t limit = r.negative ? 0x8000000000000000ull
+                                      : 0x7FFFFFFFFFFFFFFFull;
+    if (r.overflow || r.magnitude > limit) {
+        set_edx_eax(c, r.negative ? 0x8000000000000000ull
+                                  : 0x7FFFFFFFFFFFFFFFull);
+        return;
+    }
+    set_edx_eax(c, r.negative ? 0u - r.magnitude : r.magnitude);
+}
+
+static void h_wcstoull(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t endptr = wc3_legacy_arg32(c, 1);
+    ParsedInteger r;
+
+    (void)parse_wide_integer(text, (int)wc3_legacy_arg32(c, 2), &r);
+    if (endptr && wc3_legacy_guest_ok(endptr, 4))
+        wc3_legacy_wr32g(endptr, r.end);
+    if (!r.digits) {
+        set_edx_eax(c, 0u);
+        return;
+    }
+    if (r.overflow) {
+        set_edx_eax(c, UINT64_MAX);
+        return;
+    }
+    set_edx_eax(c, r.negative ? 0u - r.magnitude : r.magnitude);
+}
+
+static void h_wcstod(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t endptr = wc3_legacy_arg32(c, 1);
+    char buffer[WIDE_BUFFER];
+    char *host_end = NULL;
+
+    const uint32_t units = copy_guest_wide(text, buffer, WIDE_BUFFER);
+    const double value = strtod(buffer, &host_end);
+
+    if (endptr && wc3_legacy_guest_ok(endptr, 4)) {
+        uint32_t consumed = 0;
+        if (host_end && host_end >= buffer) {
+            const size_t offset = (size_t)(host_end - buffer);
+            if (offset > units) consumed = units;
+            else consumed = (uint32_t)offset;
+        }
+        wc3_legacy_wr32g(endptr, text + consumed * 2u);
+    }
+    fpush(c, x87_from_f64(value));
 }
 
 static void h_atof(CPU *c)
@@ -267,6 +441,62 @@ static void h_strtoul(CPU *c)
     c->eax = r.negative ? (uint32_t)(0u - r.magnitude) : (uint32_t)r.magnitude;
 }
 
+static void h_wcstombs(CPU *c)
+{
+    const uint32_t dst = wc3_legacy_arg32(c, 0);
+    const uint32_t src = wc3_legacy_arg32(c, 1);
+    const uint32_t count = wc3_legacy_arg32(c, 2);
+
+    /* A null destination asks only for the C-locale length.  The count is
+     * ignored in that form, matching the CRT. */
+    if (!dst) {
+        uint32_t units = 0;
+        for (;;) {
+            const uint32_t off = units * 2u;
+            if (units > 0x7FFFFFFFu || src > UINT32_MAX - off ||
+                !wc3_legacy_guest_ok(src + off, 2)) {
+                c->eax = WIDE_FAIL;
+                return;
+            }
+            const uint16_t wc = wc3_legacy_rd16g(src + off);
+            if (!wc) {
+                c->eax = units;
+                return;
+            }
+            if (wc > 0xFFu) {
+                c->eax = WIDE_FAIL;
+                return;
+            }
+            units++;
+        }
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t off = i * 2u;
+        if (i > 0x7FFFFFFFu || src > UINT32_MAX - off ||
+            !wc3_legacy_guest_ok(src + off, 2)) {
+            c->eax = WIDE_FAIL;
+            return;
+        }
+        const uint16_t wc = wc3_legacy_rd16g(src + off);
+        if (wc > 0xFFu) {
+            c->eax = WIDE_FAIL;
+            return;
+        }
+        if (dst > UINT32_MAX - i || !wc3_legacy_guest_ok(dst + i, 1)) {
+            c->eax = WIDE_FAIL;
+            return;
+        }
+        if (!wc) {
+            wc3_legacy_wr8g(dst + i, 0u);
+            c->eax = i;
+            return;
+        }
+        wc3_legacy_wr8g(dst + i, (uint8_t)wc);
+    }
+    c->eax = count;
+}
+
 static void h_ismbblead(CPU *c)
 {
     /* CP1251 is SBCS; every byte stands alone. */
@@ -304,6 +534,12 @@ static const ConvertAddition g_additions[] = {
     { "strtoll", 3, h_strtoll },
     { "strtoull", 3, h_strtoull },
     { "_strtoi64", 3, h_strtoll },
+    { "wcstod", 2, h_wcstod },
+    { "wcstol", 3, h_wcstol },
+    { "wcstoul", 3, h_wcstoul },
+    { "wcstoll", 3, h_wcstoll },
+    { "wcstoull", 3, h_wcstoull },
+    { "wcstombs", 3, h_wcstombs },
 };
 
 int msvcr80_convert_install(void)

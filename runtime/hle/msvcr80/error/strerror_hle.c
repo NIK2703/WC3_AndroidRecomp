@@ -12,6 +12,10 @@
  * thread's host thread, so a host-TLS guest buffer has the same lifetime.  If
  * the guest heap cannot provide that buffer, the as-built observable result
  * (NULL) is kept instead of inventing a guest address.
+ *
+ * _errno is an addition.  It returns a per-thread four-byte guest cell; the
+ * resolver previously bound it as an ordinary zero-returning call, so any
+ * guest code that wrote through the result dereferenced NULL.
  */
 #include "strerror_hle.h"
 
@@ -73,6 +77,16 @@ static const char *const g_messages[] = {
 };
 
 static THREAD_LOCAL uint32_t g_message_buffer;
+static THREAD_LOCAL uint32_t g_errno_cell;
+
+static void h_errno(CPU *c)
+{
+    if (!g_errno_cell) g_errno_cell = wc3_legacy_guest_alloc0(4);
+    c->eax = g_errno_cell &&
+                     wc3_legacy_guest_ok(g_errno_cell, 4)
+                 ? g_errno_cell
+                 : 0;
+}
 
 static void h_strerror(CPU *c)
 {
@@ -108,6 +122,14 @@ static const struct {
     { "strerror", h_strerror },
 };
 
+static const struct {
+    const char *name;
+    uint16_t argc;
+    void (*impl)(CPU *c);
+} g_additions[] = {
+    { "_errno", 0, h_errno },
+};
+
 int msvcr80_error_install(void)
 {
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
@@ -115,5 +137,12 @@ int msvcr80_error_install(void)
                                     g_overrides[i].impl) != 0)
             return -1;
     }
-    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+    for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
+        if (wc3_legacy_hle_add("MSVCR80.dll", g_additions[i].name,
+                               (int)g_additions[i].argc, 1,
+                               g_additions[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0] +
+                 sizeof g_additions / sizeof g_additions[0]);
 }

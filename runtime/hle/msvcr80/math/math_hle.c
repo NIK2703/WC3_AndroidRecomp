@@ -16,6 +16,12 @@
  * bit identity with the Windows CRT for transcendental functions.  It does
  * remove the shared integer default and keeps the x87 stack balanced for every
  * call, which is the T0 contract this slice can prove.
+ *
+ * _dtest is the CRT's internal double classifier used by isnan/isinf-style
+ * checks in the game.  It reads the 64-bit value through a guest pointer and
+ * returns _FINITE (-1), _DENORM (-2), _INFCODE (1) or _NANCODE (2), with zero
+ * reported as 0.  The value is classified from its raw IEEE-754 bits so the
+ * host's floating-point environment cannot change the answer.
  */
 #include "math_hle.h"
 
@@ -139,6 +145,34 @@ static void h_frexp(CPU *c)
     push_f64(c, fraction);
 }
 
+/* _dtest receives a guest pointer to a double, not the value itself.  The
+ * CRT returns a short; EAX is sign-extended here to match the way MSVC callers
+ * observe a negative short result. */
+static void h__dtest(CPU *c)
+{
+    const uint32_t address = wc3_legacy_arg32(c, 0u);
+    if (!address || !wc3_legacy_guest_ok(address, 8u)) {
+        c->eax = 0u;
+        return;
+    }
+
+    const uint32_t low = wc3_legacy_rd32g(address);
+    const uint32_t high = wc3_legacy_rd32g(address + 4u);
+    const uint32_t exponent = (high >> 20) & 0x7FFu;
+    const uint64_t fraction =
+        ((uint64_t)(high & 0x000FFFFFu) << 32) | (uint64_t)low;
+
+    int32_t code;
+    if (exponent == 0x7FFu)
+        code = fraction ? 2 : 1;
+    else if (exponent == 0u)
+        code = fraction ? -2 : 0;
+    else
+        code = -1;
+
+    c->eax = (uint32_t)code;
+}
+
 /* ---- SSE2 ABI --------------------------------------------------------- */
 
 #define SSE2_1(name, expr)                                                 \
@@ -223,6 +257,7 @@ typedef struct MathAddition {
 static const MathAddition g_additions[] = {
     { "_hypot", 4, h__hypot },
     { "frexp", 3, h_frexp },
+    { "_dtest", 1, h__dtest },
 };
 
 int wc3_hle_msvcr80_math_install(void)

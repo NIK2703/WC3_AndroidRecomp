@@ -128,11 +128,12 @@ static uint32_t invoke(const char *name, uint32_t a0, uint32_t a1, uint32_t a2)
 int main(void)
 {
     const int installed = wc3_hle_kernel32_string_install();
-    CHECK(installed == 5, "install count");
-    CHECK(g_row_count == 5u, "row count");
+    CHECK(installed == 6, "install count");
+    CHECK(g_row_count == 6u, "row count");
     CHECK(find_impl("lstrlenA") != NULL, "lstrlenA row");
     CHECK(find_impl("lstrcpynA") != NULL, "lstrcpynA row");
     CHECK(find_impl("lstrcatA") != NULL, "lstrcatA row");
+    CHECK(find_impl("IsBadStringPtrA") != NULL, "IsBadStringPtrA row");
     CHECK(find_impl("GetACP") != NULL, "GetACP row");
     CHECK(find_impl("GetCPInfo") != NULL, "GetCPInfo row");
 
@@ -197,6 +198,18 @@ int main(void)
     CHECK(invoke("lstrcatA", dst, 0, 0) == dst, "lstrcatA NULL src");
     CHECK(memcmp(guest_ptr(dst, 4), "abc\0", 4) == 0,
           "lstrcatA NULL src terminator");
+
+    CHECK(invoke("IsBadStringPtrA", text, 7, 0) == 0u,
+          "IsBadStringPtrA valid");
+    CHECK(invoke("IsBadStringPtrA", text, 3, 0) == 0u,
+          "IsBadStringPtrA prefix");
+    CHECK(invoke("IsBadStringPtrA", text, 0, 0) == 0u,
+          "IsBadStringPtrA zero length");
+    CHECK(invoke("IsBadStringPtrA", 0, 7, 0) == 1u,
+          "IsBadStringPtrA NULL");
+    ((uint8_t *)guest_ptr(GUEST_BASE + GUEST_SIZE - 1u, 1))[0] = 'A';
+    CHECK(invoke("IsBadStringPtrA", GUEST_BASE + GUEST_SIZE - 1u, 2, 0) == 1u,
+          "IsBadStringPtrA short range");
 
     CHECK(invoke("GetACP", 0, 0, 0) == 1251u, "GetACP value");
     const uint32_t cpinfo = GUEST_BASE + 0x300u;

@@ -56,6 +56,24 @@ else()
     set(WC3_DEBUG_DEFINE 0)
 endif()
 
+# BV-5.3: WC3_DEBUG_TAGS is the single source of subsystem tags.  A tag is a
+# compile definition only in a debug build; release never activates one even
+# if a caller passes a non-empty list.
+set(WC3_DEBUG_TAG_DEFINITIONS)
+if(WC3_DEBUG)
+    foreach(_wc3_tag IN LISTS WC3_DEBUG_TAGS)
+        string(STRIP "${_wc3_tag}" _wc3_tag)
+        if(_wc3_tag)
+            string(TOUPPER "${_wc3_tag}" _wc3_tag)
+            list(APPEND WC3_DEBUG_TAG_DEFINITIONS "WC3_DEBUG_${_wc3_tag}=1")
+        endif()
+    endforeach()
+endif()
+if(WC3_DEBUG_TAG_DEFINITIONS)
+    list(REMOVE_DUPLICATES WC3_DEBUG_TAG_DEFINITIONS)
+    add_compile_definitions(${WC3_DEBUG_TAG_DEFINITIONS})
+endif()
+
 set(WC3_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 include("${WC3_ROOT}/cmake/Wc3CompilerCache.cmake")
 set(WC3_INCLUDES
@@ -135,12 +153,14 @@ if(WC3_BUILD_APP)
         "${WC3_ROOT}/runtime/platform/android/controls/input_wake.c"
         "${WC3_ROOT}/runtime/platform/android/controls/overlay.c"
         "${WC3_ROOT}/runtime/platform/android/controls/overlay_android.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/overlay_canvas.c"
         "${WC3_ROOT}/runtime/platform/android/controls/overlay_profile.c")
     target_include_directories(wc3_overlay PUBLIC
         "${WC3_ROOT}/runtime/platform/android/controls"
         "${WC3_ROOT}/runtime/diag"
         "${WC3_ROOT}/third_party/winlator-input")
-    target_link_libraries(wc3_overlay PUBLIC winlator_input android log m)
+    target_link_libraries(wc3_overlay PUBLIC winlator_input android log
+        jnigraphics m)
     target_compile_definitions(wc3_overlay PUBLIC
         WC3_DEBUG=${WC3_DEBUG_DEFINE})
     target_compile_options(wc3_overlay PRIVATE -Wall -Wextra -O2)

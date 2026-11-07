@@ -2,13 +2,13 @@
 #define WC3_OVERLAY_H
 
 /*
- * Detached Warcraft III touch-control overlay renderer.
+ * Warcraft III touch-control overlay model and C compositor.
  *
- * This module is deliberately self-contained: it has no Android, JNI, game or
- * HLE dependency.  It renders a Warcraft 3.icp-style element set into RGBA8
- * memory.  The Android integration will later lock the overlay SurfaceView and
- * pass its buffer here; the existing recompiler build does not reference this
- * file yet.
+ * The module has no Android, JNI, game or HLE dependency.  Control visuals are
+ * rasterised once by the app's Canvas helper into a Wc3OverlayCache; the hot
+ * path here only blits those cached layers into an RGBA8 buffer.  There is no
+ * second software-rasteriser path.  The Android SurfaceView adapter locks the
+ * window and passes its buffer to overlay_render().
  */
 
 #include <stdbool.h>
@@ -216,9 +216,11 @@ void overlay_cache_clear(Wc3Overlay *overlay);
 void overlay_destroy(Wc3Overlay *overlay);
 
 /*
- * Render into an RGBA8 buffer.  The whole buffer is cleared to transparent
- * first.  stride_bytes is the row pitch in bytes and must be >= width * 4.
- * The caller owns the buffer.
+ * Composite the cached Canvas atlas into an RGBA8 buffer.  The whole buffer is
+ * cleared to transparent first, then every element is drawn from its cached
+ * layers.  Without a usable cache the frame stays transparent.  stride_bytes
+ * is the row pitch in bytes and must be >= width * 4.  The caller owns the
+ * buffer.
  */
 void overlay_render(Wc3Overlay *overlay, uint8_t *rgba, int stride_bytes);
 

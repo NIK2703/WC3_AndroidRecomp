@@ -211,8 +211,8 @@ static int32_t as_i32(uint32_t v) { return (int32_t)v; }
 int main(void)
 {
     const int installed = wc3_hle_msvcr80_string_install();
-    CHECK(installed == 36, "install count");
-    CHECK(g_row_count == 36u, "row count");
+    CHECK(installed == 37, "install count");
+    CHECK(g_row_count == 37u, "row count");
     CHECK(find_impl("memcpy") != NULL, "memcpy row");
     CHECK(find_impl("_strdup") != NULL, "_strdup row");
     CHECK(find_impl("strcmp") != NULL, "strcmp row");
@@ -220,6 +220,7 @@ int main(void)
     CHECK(find_impl("isxdigit") != NULL, "isxdigit row");
     CHECK(find_impl("wcsrchr") != NULL, "wcsrchr row");
     CHECK(find_impl("wcsstr") != NULL, "wcsstr row");
+    CHECK(find_impl("_mbsstr") != NULL, "_mbsstr row");
     CHECK(strcmp(g_rows[0].dll, "MSVCR80.dll") == 0, "DLL name");
 
     put_string(0x100, "abcdef");
@@ -380,6 +381,11 @@ int main(void)
     CHECK(invoke("strstr", 0x1E0, 0x1C0, 0) == 0x1E0u,
           "strstr empty haystack and needle");
     CHECK(invoke("strstr", 0, 0x1B0, 0) == 0u, "strstr NULL haystack");
+
+    CHECK(invoke("_mbsstr", 0x1A0, 0x1B0, 0) == 0x1A6u, "_mbsstr match");
+    CHECK(invoke("_mbsstr", 0x1A0, 0x1C0, 0) == 0x1A0u,
+          "_mbsstr empty needle");
+    CHECK(invoke("_mbsstr", 0x1A0, 0x1D0, 0) == 0u, "_mbsstr missing");
 
     CHECK(invoke("strpbrk", 0x1F0, 0x200, 0) == 0x1F3u, "strpbrk match");
     CHECK(invoke("strpbrk", 0x1F0, 0x1D0, 0) == 0u, "strpbrk missing");

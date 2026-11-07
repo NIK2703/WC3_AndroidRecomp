@@ -13,7 +13,9 @@
  */
 #include "legacy_shim.h"
 #include "convert_hle.h"
+#include "crt_hle.h"
 #include "crt_string_hle.h"
+#include "file_hle.h"
 #include "strerror_hle.h"
 #include "crt_time_hle.h"
 #include "display_hle.h"
@@ -34,6 +36,11 @@
 
 #ifndef WC3_DEBUG
 #define WC3_DEBUG 0
+#endif
+
+#if WC3_DEBUG && WC3_DEBUG_HLE
+/* Temporary hang watchdog hook; see wc3_watch_dispatch() in hle_android.c. */
+void wc3_watch_dispatch(CPU *c, uint32_t target);
 #endif
 
 #define X(a) void L_##a(CPU *c);
@@ -67,27 +74,30 @@ void wc3_dispatch_init(void)
      * the math slice owns the x87/SSE2 return conventions, and the time slice
      * reads both clocks through Wc3TimeApi.  The rest of msvcr80 remains
      * quarantined for its later H6.2 step. */
-    if (wc3_hle_kernel32_time_install() < 0 ||
-        wc3_hle_kernel32_process_install() < 0 ||
-        wc3_hle_kernel32_system_install() < 0 ||
-        wc3_hle_kernel32_memory_install() < 0 ||
-        wc3_hle_kernel32_string_install() < 0 ||
-        user32_display_install() < 0 ||
-        wc3_hle_user32_window_install() < 0 ||
-        wc3_hle_msvcr80_heap_install() < 0 ||
-        wc3_hle_msvcr80_math_install() < 0 ||
-        wc3_hle_msvcr80_rand_install() < 0 ||
-        msvcr80_secure_install() < 0 ||
-        msvcr80_error_install() < 0 ||
-        msvcr80_sort_install() < 0 ||
-        wc3_hle_msvcr80_string_install() < 0 ||
-        msvcr80_convert_install() < 0 ||
-        wc3_hle_msvcr80_time_install() < 0) {
-#if WC3_DEBUG
-        fprintf(stderr, "[hle] kernel32 time/process/system/memory/string, user32 display/window, or CRT convert/error/heap/math/rand/secure/sort/string/time install failed\n");
-#endif
-        abort();
-    }
+#define WC3_INSTALL_STEP(fn) do { \
+        int _r = (fn); \
+        fprintf(stderr, "[hle] install %s -> %d\n", #fn, _r); \
+        if (_r < 0) abort(); \
+    } while (0)
+    WC3_INSTALL_STEP(wc3_hle_kernel32_time_install());
+    WC3_INSTALL_STEP(wc3_hle_kernel32_process_install());
+    WC3_INSTALL_STEP(wc3_hle_kernel32_system_install());
+    WC3_INSTALL_STEP(wc3_hle_kernel32_memory_install());
+    WC3_INSTALL_STEP(wc3_hle_kernel32_string_install());
+    WC3_INSTALL_STEP(user32_display_install());
+    WC3_INSTALL_STEP(wc3_hle_user32_window_install());
+    WC3_INSTALL_STEP(wc3_hle_msvcr80_heap_install());
+    WC3_INSTALL_STEP(wc3_hle_msvcr80_math_install());
+    WC3_INSTALL_STEP(wc3_hle_msvcr80_crt_install());
+    WC3_INSTALL_STEP(wc3_hle_msvcr80_file_install());
+    WC3_INSTALL_STEP(wc3_hle_msvcr80_rand_install());
+    WC3_INSTALL_STEP(msvcr80_secure_install());
+    WC3_INSTALL_STEP(msvcr80_error_install());
+    WC3_INSTALL_STEP(msvcr80_sort_install());
+    WC3_INSTALL_STEP(wc3_hle_msvcr80_string_install());
+    WC3_INSTALL_STEP(msvcr80_convert_install());
+    WC3_INSTALL_STEP(wc3_hle_msvcr80_time_install());
+#undef WC3_INSTALL_STEP
 
     size_t count = sizeof g_lift / sizeof g_lift[0];
     for (size_t i = 0; i < count; i++) {
@@ -139,6 +149,9 @@ static void dispatch_common(CPU *c, uint32_t target, int tail)
     g_disp_depth++;
     for (;;) {
         g_tail_pending = 0;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+        wc3_watch_dispatch(c, target);
+#endif
         if (target >= GUEST_HLE_BASE &&
             target < GUEST_HLE_BASE + WC3_LEGACY_HLE_MAX *
                                       WC3_LEGACY_HLE_STRIDE) {

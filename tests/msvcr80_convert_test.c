@@ -18,6 +18,8 @@
 #define GUEST_SIZE 0x10000u
 #define TEXT_ADDR (GUEST_BASE + 0x100u)
 #define ENDP_ADDR (GUEST_BASE + 0x1000u)
+#define OUT_ADDR (GUEST_BASE + 0x2000u)
+#define SCRATCH_ADDR (GUEST_BASE + 0xF000u)
 
 typedef struct Row {
     const char *dll;
@@ -50,10 +52,41 @@ uint8_t wc3_legacy_rd8g(uint32_t addr)
     return p ? *(const uint8_t *)p : 0u;
 }
 
+uint16_t wc3_legacy_rd16g(uint32_t addr)
+{
+    const void *p = guest_ptr(addr, 2);
+    if (!p) return 0u;
+    uint16_t value;
+    memcpy(&value, p, 2);
+    return value;
+}
+
+void wc3_legacy_wr8g(uint32_t addr, uint8_t value)
+{
+    void *p = guest_ptr(addr, 1);
+    if (p) *(uint8_t *)p = value;
+}
+
+void wc3_legacy_wr16g(uint32_t addr, uint16_t value)
+{
+    void *p = guest_ptr(addr, 2);
+    if (p) memcpy(p, &value, 2);
+}
+
 void wc3_legacy_wr32g(uint32_t addr, uint32_t value)
 {
     void *p = guest_ptr(addr, 4);
     if (p) memcpy(p, &value, 4);
+}
+
+uint32_t wc3_legacy_guest_alloc(uint32_t size)
+{
+    return size <= 0x1000u ? SCRATCH_ADDR : 0u;
+}
+
+void wc3_legacy_guest_free(uint32_t addr)
+{
+    (void)addr;
 }
 
 uint32_t wc3_legacy_arg32(const CPU *cpu, unsigned index)
@@ -121,6 +154,27 @@ static void place_string(const char *text)
     }
     memset(guest_ptr(TEXT_ADDR, 512), 0, 512);
     memcpy(guest_ptr(TEXT_ADDR, (uint32_t)length + 1u), text, length + 1u);
+}
+
+static void place_wide(const char *text)
+{
+    const size_t length = strlen(text);
+    if (length + 1u > 512u) {
+        check(0, "test wide string too long");
+        return;
+    }
+    for (size_t i = 0; i <= length; i++)
+        wc3_legacy_wr16g(TEXT_ADDR + (uint32_t)i * 2u, (uint16_t)text[i]);
+}
+
+static void place_wide_units(const uint16_t *units, size_t count)
+{
+    if (count > 512u) {
+        check(0, "test wide unit list too long");
+        return;
+    }
+    for (size_t i = 0; i < count; i++)
+        wc3_legacy_wr16g(TEXT_ADDR + (uint32_t)i * 2u, units[i]);
 }
 
 static uint32_t read_u32(uint32_t addr)
@@ -260,6 +314,73 @@ static double call_strtod(const char *text, uint32_t *end_out)
     return value;
 }
 
+static uint64_t call_wide_integer(const char *name, const char *text, int base,
+                                  uint32_t *end_out)
+{
+    void (*impl)(CPU *c) = find_impl(name);
+    if (!impl) {
+        check(0, "missing wide integer handler");
+        return 0;
+    }
+    place_wide(text);
+    wc3_legacy_wr32g(ENDP_ADDR, 0xDEADBEEFu);
+    memset(g_args, 0, sizeof g_args);
+    g_args[0] = TEXT_ADDR;
+    g_args[1] = ENDP_ADDR;
+    g_args[2] = (uint32_t)base;
+    CPU c;
+    memset(&c, 0, sizeof c);
+    impl(&c);
+    if (end_out) *end_out = read_u32(ENDP_ADDR);
+    return ((uint64_t)c.edx << 32) | c.eax;
+}
+
+static double call_wcstod(const char *text, uint32_t *end_out)
+{
+    void (*impl)(CPU *c) = find_impl("wcstod");
+    if (!impl) {
+        check(0, "missing wcstod");
+        return 0.0;
+    }
+    place_wide(text);
+    wc3_legacy_wr32g(ENDP_ADDR, 0xDEADBEEFu);
+    memset(g_args, 0, sizeof g_args);
+    g_args[0] = TEXT_ADDR;
+    g_args[1] = ENDP_ADDR;
+    CPU c;
+    memset(&c, 0, sizeof c);
+    cpu_x87_init(&c);
+    impl(&c);
+    if (end_out) *end_out = read_u32(ENDP_ADDR);
+    const double value = pop_x87(&c);
+    check(c.fpu_top == 0, "x87 stack not balanced after wcstod");
+    return value;
+}
+
+static uint32_t call_wcstombs_at(uint32_t dst, uint32_t src, uint32_t count)
+{
+    void (*impl)(CPU *c) = find_impl("wcstombs");
+    if (!impl) {
+        check(0, "missing wcstombs");
+        return 0;
+    }
+    memset(g_args, 0, sizeof g_args);
+    g_args[0] = dst;
+    g_args[1] = src;
+    g_args[2] = count;
+    CPU c;
+    memset(&c, 0, sizeof c);
+    impl(&c);
+    return c.eax;
+}
+
+static uint32_t call_wcstombs(uint32_t dst, const uint16_t *units,
+                              size_t unit_count, uint32_t count)
+{
+    place_wide_units(units, unit_count);
+    return call_wcstombs_at(dst, TEXT_ADDR, count);
+}
+
 static uint32_t call_one(const char *name, uint32_t arg)
 {
     void (*impl)(CPU *c) = find_impl(name);
@@ -283,8 +404,8 @@ static uint32_t end_offset(uint32_t end)
 int main(void)
 {
     const int installed = msvcr80_convert_install();
-    check(installed == 9, "install count");
-    check(g_row_count == 9u, "row count");
+    check(installed == 15, "install count");
+    check(g_row_count == 15u, "row count");
     for (unsigned i = 0; i < g_row_count; i++)
         check(strcmp(g_rows[i].dll, "MSVCR80.dll") == 0, "DLL name");
     check(find_impl("atof") != NULL, "atof row");
@@ -297,6 +418,12 @@ int main(void)
     check(find_impl("strtoull") != NULL, "strtoull row");
     check(find_impl("_strtoi64") != NULL, "_strtoi64 row");
     check(find_impl("_strtoi64") == find_impl("strtoll"), "_strtoi64 alias");
+    check(find_impl("wcstod") != NULL, "wcstod row");
+    check(find_impl("wcstol") != NULL, "wcstol row");
+    check(find_impl("wcstoul") != NULL, "wcstoul row");
+    check(find_impl("wcstoll") != NULL, "wcstoll row");
+    check(find_impl("wcstoull") != NULL, "wcstoull row");
+    check(find_impl("wcstombs") != NULL, "wcstombs row");
 
     eqd("atof zero", call_atof("0"), 0.0);
     eqd("atof fraction", call_atof("1.5"), 1.5);
@@ -536,6 +663,178 @@ int main(void)
     }
 
     check(call_strtod("88", NULL) == 88.0, "strtod null endptr");
+
+    {
+        uint32_t end = 0;
+
+        check((uint32_t)call_wide_integer("wcstol", "123", 10, &end) == 123u,
+              "wcstol decimal");
+        check(end_offset(end) == 6u, "wcstol decimal end");
+
+        check((uint32_t)call_wide_integer("wcstol", "-2147483648", 10, &end) ==
+                  0x80000000u,
+              "wcstol LONG_MIN");
+        check((uint32_t)call_wide_integer("wcstol", "0x1A", 0, &end) == 26u,
+              "wcstol auto hex");
+        check(end_offset(end) == 8u, "wcstol auto hex end");
+
+        check((uint32_t)call_wide_integer("wcstol", "xyz", 10, &end) == 0u,
+              "wcstol no digits");
+        check(end_offset(end) == 0u, "wcstol no digits end");
+        check((uint32_t)call_wide_integer("wcstol", "", 10, &end) == 0u,
+              "wcstol empty");
+
+        check((uint32_t)call_wide_integer("wcstoul", "4294967295", 10, &end) ==
+                  0xFFFFFFFFu,
+              "wcstoul max");
+        check(end_offset(end) == 20u, "wcstoul max end");
+        check((uint32_t)call_wide_integer("wcstoul", "-1", 10, &end) ==
+                  0xFFFFFFFFu,
+              "wcstoul negative one");
+
+        check(call_wide_integer("wcstoll", "9223372036854775807", 10, &end) ==
+                  (uint64_t)INT64_MAX,
+              "wcstoll INT64_MAX");
+        check(end_offset(end) == 38u, "wcstoll INT64_MAX end");
+        check(call_wide_integer("wcstoll", "-9223372036854775808", 10, &end) ==
+                  (uint64_t)INT64_MIN,
+              "wcstoll INT64_MIN");
+
+        check(call_wide_integer("wcstoull", "18446744073709551615", 10,
+                                &end) == UINT64_MAX,
+              "wcstoull UINT64_MAX");
+        check(call_wide_integer("wcstoull", "-1", 10, &end) == UINT64_MAX,
+              "wcstoull negative one");
+
+        eqd("wcstod fraction", call_wcstod("1.5", &end), 1.5);
+        check(end_offset(end) == 6u, "wcstod fraction end");
+
+        eqd("wcstod trailing", call_wcstod("  3.5abc", &end), 3.5);
+        check(end_offset(end) == 10u, "wcstod trailing end");
+
+        eqd("wcstod invalid", call_wcstod("abc", &end), 0.0);
+        check(end_offset(end) == 0u, "wcstod invalid end");
+    }
+
+    {
+        static const uint16_t hello_w[] = {'h', 'e', 'l', 'l', 'o', 0};
+        static const uint16_t invalid_first[] = {0x041F, 0};
+        static const uint16_t invalid_mid[] = {'A', 0x0416, 'B', 0};
+        static const uint16_t latin1[] = {0x00E9, 0};
+        static const uint16_t ff[] = {0x00FF, 0};
+        static const uint16_t over[] = {0x0100, 0};
+        static const uint16_t surrogate[] = {0xD800, 0};
+        static const uint16_t empty_w[] = {0};
+        static const uint16_t one_w[] = {'A', 0};
+
+        check(call_wcstombs(0u, hello_w, 6u, 0u) == 5u,
+              "wcstombs null dst length");
+        check(call_wcstombs(0u, hello_w, 6u, 8u) == 5u,
+              "wcstombs null dst ignores count");
+        check(call_wcstombs(0u, invalid_first, 2u, 8u) == 0xFFFFFFFFu,
+              "wcstombs null dst invalid");
+        check(call_wcstombs(0u, empty_w, 1u, 0u) == 0u,
+              "wcstombs null dst empty");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(OUT_ADDR, hello_w, 6u, 0u) == 0u,
+              "wcstombs count zero return");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 0xAAu,
+              "wcstombs count zero no write");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(OUT_ADDR, hello_w, 6u, 5u) == 5u,
+              "wcstombs exact count return");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 'h' &&
+                  wc3_legacy_rd8g(OUT_ADDR + 4u) == 'o' &&
+                  wc3_legacy_rd8g(OUT_ADDR + 5u) == 0xAAu,
+              "wcstombs exact count bytes");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(OUT_ADDR, hello_w, 6u, 6u) == 5u,
+              "wcstombs terminated return");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 'h' &&
+                  wc3_legacy_rd8g(OUT_ADDR + 4u) == 'o' &&
+                  wc3_legacy_rd8g(OUT_ADDR + 5u) == 0u &&
+                  wc3_legacy_rd8g(OUT_ADDR + 6u) == 0xAAu,
+              "wcstombs terminated bytes");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(OUT_ADDR, hello_w, 6u, 0xFFFFFFFFu) == 5u,
+              "wcstombs max count return");
+        check(wc3_legacy_rd8g(OUT_ADDR + 5u) == 0u,
+              "wcstombs max count terminator");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(OUT_ADDR, invalid_first, 2u, 8u) ==
+                  0xFFFFFFFFu,
+              "wcstombs invalid first return");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 0xAAu,
+              "wcstombs invalid first no write");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(OUT_ADDR, invalid_mid, 4u, 8u) == 0xFFFFFFFFu,
+              "wcstombs invalid mid return");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 'A' &&
+                  wc3_legacy_rd8g(OUT_ADDR + 1u) == 0xAAu,
+              "wcstombs invalid mid partial write");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(OUT_ADDR, latin1, 2u, 8u) == 1u,
+              "wcstombs latin1 return");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 0xE9u &&
+                  wc3_legacy_rd8g(OUT_ADDR + 1u) == 0u,
+              "wcstombs latin1 bytes");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(OUT_ADDR, ff, 2u, 8u) == 1u,
+              "wcstombs ff return");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 0xFFu,
+              "wcstombs ff byte");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(OUT_ADDR, over, 2u, 8u) == 0xFFFFFFFFu,
+              "wcstombs over return");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 0xAAu,
+              "wcstombs over no write");
+        check(call_wcstombs(OUT_ADDR, surrogate, 2u, 8u) == 0xFFFFFFFFu,
+              "wcstombs surrogate return");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(OUT_ADDR, empty_w, 1u, 0u) == 0u,
+              "wcstombs empty count zero");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 0xAAu,
+              "wcstombs empty count zero no write");
+        check(call_wcstombs(OUT_ADDR, empty_w, 1u, 1u) == 0u,
+              "wcstombs empty terminated");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 0u,
+              "wcstombs empty terminator");
+
+        const uint32_t last = GUEST_BASE + GUEST_SIZE - 1u;
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        check(call_wcstombs(last, one_w, 2u, 1u) == 1u,
+              "wcstombs last dst return");
+        check(wc3_legacy_rd8g(last) == 'A',
+              "wcstombs last dst byte");
+        check(call_wcstombs(last, one_w, 2u, 2u) == 0xFFFFFFFFu,
+              "wcstombs last dst terminator return");
+        check(wc3_legacy_rd8g(last) == 'A',
+              "wcstombs last dst terminator no overrun");
+
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        wc3_legacy_wr16g(last - 1u, 0u);
+        check(call_wcstombs_at(OUT_ADDR, last - 1u, 1u) == 0u,
+              "wcstombs last source return");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 0u,
+              "wcstombs last source terminator");
+        memset(guest_ptr(OUT_ADDR, 16u), 0xAA, 16u);
+        wc3_legacy_wr16g(last - 1u, 'A');
+        check(call_wcstombs_at(OUT_ADDR, last - 1u, 2u) == 0xFFFFFFFFu,
+              "wcstombs source overrun return");
+        check(wc3_legacy_rd8g(OUT_ADDR) == 'A' &&
+                  wc3_legacy_rd8g(OUT_ADDR + 1u) == 0xAAu,
+              "wcstombs source overrun partial");
+    }
 
     check(call_one("_ismbcspace", 0x20u) == 1u, "ismbcspace space");
     check(call_one("_ismbcspace", 0x09u) == 1u, "ismbcspace tab");

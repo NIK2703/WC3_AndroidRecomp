@@ -12,7 +12,8 @@ param(
     [switch]$Install,
     [switch]$Launch,
     [string]$Serial = '',
-    [string]$GamesActivityAar = ''
+    [string]$GamesActivityAar = '',
+    [string]$DebugTags = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -111,14 +112,12 @@ New-Item -ItemType Directory -Force $outDir | Out-Null
 
 # Native library first; the APK must contain this exact build.
 $nativeScript = Join-Path $PSScriptRoot 'build_app.ps1'
+$nativeParams = @{ Variant = $variant }
+if ($Clean) { $nativeParams['Clean'] = $true }
+if ($GamesActivityAar) { $nativeParams['GamesActivityAar'] = $GamesActivityAar }
+if ($DebugTags) { $nativeParams['DebugTags'] = $DebugTags }
 $ErrorActionPreference = 'Continue'
-if ($GamesActivityAar) {
-    & $nativeScript -Clean:$Clean -NativeDebug:$NativeDebug -GamesActivityAar $GamesActivityAar 2>&1 |
-        ForEach-Object { Write-Host $_ }
-} else {
-    & $nativeScript -Clean:$Clean -NativeDebug:$NativeDebug 2>&1 |
-        ForEach-Object { Write-Host $_ }
-}
+& $nativeScript @nativeParams 2>&1 | ForEach-Object { Write-Host $_ }
 $nativeRc = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 if ($nativeRc -ne 0) {
@@ -126,9 +125,10 @@ if ($nativeRc -ne 0) {
     exit $nativeRc
 }
 
-$nativeSo = Join-Path $outDir 'cmake\libwc3gameactivity.so'
+$nativeSo = Join-Path $outDir "$variant\cmake\libwc3gameactivity.so"
 if (-not (Test-Path $nativeSo)) {
-    $found = Get-ChildItem (Join-Path $outDir 'cmake') -Recurse -Filter 'libwc3gameactivity.so' |
+    $found = Get-ChildItem (Join-Path $outDir "$variant\cmake") `
+        -Recurse -Filter 'libwc3gameactivity.so' -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty FullName
     if ($found) { $nativeSo = $found }
 }
@@ -226,7 +226,8 @@ if ($Install -or $Launch) {
     & $adb @deviceArgs install -r $final 2>&1 | ForEach-Object { Write-Host $_ }
     if ($LASTEXITCODE -ne 0) { Write-Host '[apk] install failed'; exit 1 }
     if ($Launch) {
-        & $adb @deviceArgs shell am start -n com.wc3.recomp/.Wc3GameActivity 2>&1 |
+        $package = if ($variant -eq 'debug') { 'wc3.recomp.debug' } else { 'wc3.recomp' }
+        & $adb @deviceArgs shell am start -n "$package/wc3.recomp.Wc3GameActivity" 2>&1 |
             ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { Write-Host '[apk] launch failed'; exit 1 }
     }

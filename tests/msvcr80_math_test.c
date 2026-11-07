@@ -21,8 +21,9 @@
 #include "legacy_shim.h"
 
 #define MAX_ROWS 64u
-#define EXPECTED_ROWS 35u
+#define EXPECTED_ROWS 36u
 #define EXP_ADDR 0x1000u
+#define DTEST_ADDR 0x2000u
 
 typedef struct Row {
     const char *dll;
@@ -34,6 +35,7 @@ static Row g_rows[MAX_ROWS];
 static unsigned g_row_count;
 static uint32_t g_args[16];
 static uint32_t g_exponent;
+static uint32_t g_dtest_bits[2];
 static int g_failures;
 
 int wc3_legacy_hle_override(const char *dll, const char *name,
@@ -64,12 +66,21 @@ int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
 
 int wc3_legacy_guest_ok(uint32_t addr, uint32_t size)
 {
-    return addr == EXP_ADDR && size <= 4u;
+    if (addr == EXP_ADDR && size <= 4u) return 1;
+    if (addr == DTEST_ADDR && size <= 8u) return 1;
+    return 0;
 }
 
 void wc3_legacy_wr32g(uint32_t addr, uint32_t value)
 {
     if (addr == EXP_ADDR) g_exponent = value;
+}
+
+uint32_t wc3_legacy_rd32g(uint32_t addr)
+{
+    if (addr == DTEST_ADDR) return g_dtest_bits[0];
+    if (addr == DTEST_ADDR + 4u) return g_dtest_bits[1];
+    return 0;
 }
 
 uint32_t wc3_legacy_arg32(const CPU *c, unsigned index)
@@ -222,6 +233,24 @@ static double call_frexp(double x, uint32_t exponent_addr)
     return pop_x87(&c);
 }
 
+static uint32_t call_dtest(uint64_t bits)
+{
+    void (*impl)(CPU *c) = find_impl("_dtest");
+    if (!impl) {
+        printf("FAIL: missing handler _dtest\n");
+        g_failures++;
+        return 0xDEADBEEFu;
+    }
+    g_dtest_bits[0] = (uint32_t)bits;
+    g_dtest_bits[1] = (uint32_t)(bits >> 32);
+    clear_args();
+    g_args[0] = DTEST_ADDR;
+    CPU c;
+    init_cpu(&c);
+    impl(&c);
+    return c.eax;
+}
+
 static double call_sse2_1(const char *name, double x)
 {
     void (*impl)(CPU *c) = find_impl(name);
@@ -266,7 +295,7 @@ int main(void)
         "_libm_sse2_cos_precise", "_libm_sse2_atan_precise",
         "_libm_sse2_asin_precise", "_libm_sse2_acos_precise",
         "_libm_sse2_pow_precise", "_libm_sse2_atan2_precise",
-        "_hypot", "frexp",
+        "_hypot", "frexp", "_dtest",
     };
 
     const int installed = wc3_hle_msvcr80_math_install();
@@ -327,6 +356,35 @@ int main(void)
         g_exponent = 0xDEADBEEFu;
         eqd("frexp bad pointer", call_frexp(6.25, 0xFFFFu), 0.78125);
         check(g_exponent == 0xDEADBEEFu, "frexp bad pointer untouched");
+    }
+
+    /* _dtest classifies the double pointed to by the guest argument. */
+    check(call_dtest(0x0000000000000000ULL) == 0u, "_dtest +0");
+    check(call_dtest(0x8000000000000000ULL) == 0u, "_dtest -0");
+    check(call_dtest(0x3FF0000000000000ULL) == 0xFFFFFFFFu,
+          "_dtest finite");
+    check(call_dtest(0x7FEFFFFFFFFFFFFFULL) == 0xFFFFFFFFu,
+          "_dtest dbl_max");
+    check(call_dtest(0x0010000000000000ULL) == 0xFFFFFFFFu,
+          "_dtest dbl_min");
+    check(call_dtest(0x000FFFFFFFFFFFFFULL) == 0xFFFFFFFEu,
+          "_dtest largest subnormal");
+    check(call_dtest(0x0000000000000001ULL) == 0xFFFFFFFEu,
+          "_dtest smallest subnormal");
+    check(call_dtest(0x7FF0000000000000ULL) == 1u, "_dtest +inf");
+    check(call_dtest(0xFFF0000000000000ULL) == 1u, "_dtest -inf");
+    check(call_dtest(0x7FF8000000000000ULL) == 2u, "_dtest qnan");
+    check(call_dtest(0xFFF8000000000000ULL) == 2u, "_dtest -qnan");
+    check(call_dtest(0x7FF0000000000001ULL) == 2u, "_dtest snan");
+
+    clear_args();
+    g_args[0] = 0xFFFFu;
+    {
+        void (*impl)(CPU *c) = find_impl("_dtest");
+        CPU c;
+        init_cpu(&c);
+        impl(&c);
+        check(c.eax == 0u, "_dtest bad pointer");
     }
 
     /* SSE2 helpers: xmm0 (and xmm1) in, xmm0 out. */

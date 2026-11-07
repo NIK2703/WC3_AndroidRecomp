@@ -1003,6 +1003,84 @@ def test_msvcr80_convert() -> int:
     return 0
 
 
+def test_msvcr80_crt() -> int:
+    """T0: MSVCR80 CRT va_list copy and fatal runtime helpers."""
+    cc = gcc()
+    if not cc:
+        print("msvcr80 crt: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "diag"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "crt"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "msvcr80" / "crt" / "crt_hle.c"),
+        str(ROOT / "tests" / "msvcr80_crt_test.c"),
+    ]
+    for name, debug in (("msvcr80_crt_test_debug.exe", 1),
+                        ("msvcr80_crt_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}",
+                  f"-DWC3_DEBUG_HLE={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_msvcr80_file() -> int:
+    """T0: MSVCR80 low-level file descriptors over Wc3FileApi."""
+    cc = gcc()
+    if not cc:
+        print("msvcr80 file: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "file"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "msvcr80" / "file" / "file_hle.c"),
+        str(ROOT / "tests" / "msvcr80_file_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("msvcr80_file_test_debug.exe", 1),
+                        ("msvcr80_file_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_msvcr80_sort() -> int:
     """T0: MSVCR80 qsort over a fake guest dispatcher."""
     cc = gcc()
@@ -1287,6 +1365,36 @@ def test_hle_time() -> int:
     return 0
 
 
+def test_overlay() -> int:
+    """T0: cached overlay compositor has no software-rasteriser fallback."""
+    cc = gcc()
+    if not cc:
+        print("overlay: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I" + str(ROOT / "runtime" / "platform" / "android" / "controls"),
+        str(ROOT / "runtime" / "platform" / "android" / "controls" / "overlay.c"),
+        str(ROOT / "tests" / "overlay_test.c"),
+    ]
+    for name, debug in (("overlay_test_debug.exe", 1),
+                        ("overlay_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 TESTS = {
     "hle_abi": test_hle_abi,
     "direct_call": test_direct_call,
@@ -1302,7 +1410,9 @@ TESTS = {
     "hle_string": test_hle_string,
     "msvcr80_heap": test_msvcr80_heap,
     "msvcr80_math": test_msvcr80_math,
+    "msvcr80_file": test_msvcr80_file,
     "msvcr80_convert": test_msvcr80_convert,
+    "msvcr80_crt": test_msvcr80_crt,
     "msvcr80_secure": test_msvcr80_secure,
     "msvcr80_error": test_msvcr80_error,
     "msvcr80_sort": test_msvcr80_sort,
@@ -1310,6 +1420,7 @@ TESTS = {
     "msvcr80_string": test_msvcr80_string,
     "msvcr80_rand": test_msvcr80_rand,
     "legacy_shim": test_legacy_shim,
+    "overlay": test_overlay,
     "file_layout": test_file_layout,
     "docs": test_docs,
     "upstream_pin": test_upstream_pin,

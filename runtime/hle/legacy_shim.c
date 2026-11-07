@@ -8,6 +8,7 @@
 
 #include "hle_registry.h"
 #include "hle_android.h"
+#include "hle_input_state.h"
 
 #include "legacy_shim.h"
 
@@ -253,4 +254,48 @@ void wc3_legacy_key_event(int vk, int down)
 void wc3_legacy_release_all(void)
 {
     hle_android_release_all();
+}
+
+void wc3_legacy_set_keyboard_bridge(void (*show)(void), void (*hide)(void))
+{
+    hle_android_set_keyboard_bridge(show, hide);
+}
+
+void wc3_legacy_set_keyboard_visible(int visible)
+{
+    hle_android_set_keyboard_visible(visible);
+}
+
+void wc3_legacy_post_char(uint32_t ch)
+{
+    hle_android_post_char(ch);
+}
+
+void wc3_legacy_post_backspace(void)
+{
+    hle_android_post_backspace();
+}
+
+void wc3_legacy_post_enter(void)
+{
+    hle_android_post_enter();
+}
+
+int wc3_legacy_mutf8_next(const char *text, int length, int offset,
+                          uint16_t *unit)
+{
+    return hle_mutf8_next(text, length, offset, unit);
+}
+
+void wc3_legacy_text_diff(const char *old_text, int old_length,
+                          const char *new_text, int new_length,
+                          Wc3LegacyTextDiff *diff)
+{
+    if (!diff) return;
+    HleTextDiff legacy;
+    hle_text_diff(old_text, old_length, new_text, new_length, &legacy);
+    diff->old_start = legacy.old_start;
+    diff->new_start = legacy.new_start;
+    diff->removed = legacy.removed;
+    diff->added = legacy.added;
 }

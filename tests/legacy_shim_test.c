@@ -48,6 +48,12 @@ static int g_mouse_button_ex;
 static int g_mouse_wheel;
 static int g_key_vk, g_key_down;
 static int g_release_all;
+static void (*g_keyboard_show)(void);
+static void (*g_keyboard_hide)(void);
+static int g_keyboard_visible;
+static uint32_t g_post_char;
+static int g_post_backspace;
+static int g_post_enter;
 
 static void *guest_ptr(uint32_t addr, uint32_t size)
 {
@@ -209,6 +215,35 @@ void hle_android_release_all(void)
     g_release_all++;
 }
 
+void hle_android_set_keyboard_bridge(void (*show)(void), void (*hide)(void))
+{
+    g_keyboard_show = show;
+    g_keyboard_hide = hide;
+}
+
+void hle_android_set_keyboard_visible(int visible)
+{
+    g_keyboard_visible = visible;
+}
+
+void hle_android_post_char(uint32_t ch)
+{
+    g_post_char = ch;
+}
+
+void hle_android_post_backspace(void)
+{
+    g_post_backspace++;
+}
+
+void hle_android_post_enter(void)
+{
+    g_post_enter++;
+}
+
+static void fake_show(void) {}
+static void fake_hide(void) {}
+
 static void fn_a(CPU *c) { c->eax = 0xAAAAu; }
 static void fn_b(CPU *c) { c->eax = 0xBBBBu; }
 
@@ -312,6 +347,52 @@ int main(void)
     CHECK(g_mouse_wheel == -120, "mouse wheel forwarding");
     CHECK(g_key_vk == 0x41 && g_key_down == 1, "key forwarding");
     CHECK(g_release_all == 1, "release_all forwarding");
+
+    wc3_legacy_set_keyboard_bridge(fake_show, fake_hide);
+    wc3_legacy_set_keyboard_visible(1);
+    wc3_legacy_post_char(0x20ACu);
+    wc3_legacy_post_backspace();
+    wc3_legacy_post_enter();
+    CHECK(g_keyboard_show == fake_show && g_keyboard_hide == fake_hide,
+          "keyboard bridge forwarding");
+    CHECK(g_keyboard_visible == 1, "keyboard visibility forwarding");
+    CHECK(g_post_char == 0x20ACu, "post char forwarding");
+    CHECK(g_post_backspace == 1 && g_post_enter == 1,
+          "post editing forwarding");
+
+    {
+        uint16_t unit = 0;
+        CHECK(wc3_legacy_mutf8_next("A", 1, 0, &unit) == 1 && unit == 'A',
+              "mutf8 ASCII");
+        const char nul[] = {(char)0xC0, (char)0x80};
+        CHECK(wc3_legacy_mutf8_next(nul, 2, 0, &unit) == 2 && unit == 0,
+              "mutf8 encoded NUL");
+        const char euro[] = {(char)0xE2, (char)0x82, (char)0xAC};
+        CHECK(wc3_legacy_mutf8_next(euro, 3, 0, &unit) == 3 &&
+                  unit == 0x20ACu,
+              "mutf8 BMP character");
+        CHECK(wc3_legacy_mutf8_next(euro, 3, 3, &unit) == 0,
+              "mutf8 end of text");
+    }
+
+    {
+        Wc3LegacyTextDiff diff;
+        wc3_legacy_text_diff("abc", 3, "abd", 3, &diff);
+        CHECK(diff.old_start == 2 && diff.new_start == 2 &&
+                  diff.removed == 1 && diff.added == 1,
+              "text diff replaces suffix");
+        wc3_legacy_text_diff("ab", 2, "abcd", 4, &diff);
+        CHECK(diff.old_start == 2 && diff.new_start == 2 &&
+                  diff.removed == 0 && diff.added == 2,
+              "text diff appends");
+        wc3_legacy_text_diff("abcd", 4, "ab", 2, &diff);
+        CHECK(diff.old_start == 2 && diff.new_start == 2 &&
+                  diff.removed == 2 && diff.added == 0,
+              "text diff removes suffix");
+        const char old_euro[] = {(char)0xE2, (char)0x82, (char)0xAC};
+        wc3_legacy_text_diff(old_euro, 3, "", 0, &diff);
+        CHECK(diff.removed == 1, "text diff counts code units");
+    }
 
     if (map_guest() != 0) {
         printf("legacy shim OK (registry only; no low guest mapping)\n");

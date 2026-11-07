@@ -125,16 +125,20 @@ As-built (2026-11-07) рассогласован:
   `apps/android_gameactivity/src/main/cpp/host_shell.c`.
 
 ## BV-4. Сосуществование и изоляция данных
-**BV-4 (два UID, никакой общей файловой памяти).** Разные `applicationId`
-дают разные UID, app-private и external-каталоги; оба варианта ставятся
-одновременно и не влияют друг на друга.
+**BV-4 (два UID, общая лицензионная установка).** Разные `applicationId`
+дают разные UID и app-private каталоги; оба варианта ставятся одновременно.
+Лицензированные файлы игры намеренно читаются из одного каталога
+`/storage/emulated/0/Warcraft 3`, поэтому `MANAGE_EXTERNAL_STORAGE` обязателен
+на API 30+. Пока доступ не выдан, нативный host откатывается на app-private
+каталог; `wc3.cfg`, `run.txt` и диагностика остаются app-private.
 
 | Ресурс | Правило |
 |---|---|
-| MPQ/PE/`wc3.cfg` | `internalDataPath` / `externalDataPath` из `android_app->activity`, SAF-каталог по ADR-021; путь не хардкодится |
-| saves/replays/registry | только app-private dir своего варианта |
+| MPQ/PE | общий лицензионный каталог `/storage/emulated/0/Warcraft 3`, выведенный из `externalDataPath`; app-private fallback, пока доступ не выдан |
+| `wc3.cfg` | app-private state dir своего варианта |
+| saves/replays | созданные игрой `Save/` и `Replay/` остаются в общем лицензионном каталоге, как в старом host; оба варианта видят одну установку |
 | SAF URI-пермиссии | выдаются на UID: debug обязан запросить доступ заново, разрешение release не наследуется |
-| trace/dump/crash-файлы | только app-private dir debug-варианта; общих `/sdcard/wc3*` путей нет |
+| trace/dump/crash-файлы | только app-private dir debug-варианта; `run.txt` и `WC3_DATA_DIR` указывают туда, а не в общий каталог |
 | SharedPreferences/БД | app-private, автоматически разделены |
 | logcat | общий системный буфер, поэтому тег обязан нести вариант и цель: `wc3/<variant>/<tag>` |
 | `android:allowBackup` | `false` в обоих вариантах |

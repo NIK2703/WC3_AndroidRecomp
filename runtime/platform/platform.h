@@ -43,6 +43,17 @@ enum {
     WC3_FILE_EXCLUSIVE = 1u << 5
 };
 
+enum {
+    WC3_FILE_STAT_REGULAR = 1u << 0,
+    WC3_FILE_STAT_DIRECTORY = 1u << 1
+};
+
+typedef struct Wc3FileStat {
+    uint64_t size;
+    int64_t mtime_seconds;
+    uint32_t mode; /* WC3_FILE_STAT_REGULAR or WC3_FILE_STAT_DIRECTORY */
+} Wc3FileStat;
+
 typedef struct Wc3FileApi {
     void *ctx;
     /* Paths here are host-visible paths after the HLE path mapper has run. */
@@ -51,6 +62,7 @@ typedef struct Wc3FileApi {
     int (*write)(void *ctx, uintptr_t file, const void *buf, uint32_t len, uint32_t *written);
     int (*seek)(void *ctx, uintptr_t file, int64_t offset, int whence, uint64_t *pos);
     int (*size)(void *ctx, uintptr_t file, uint64_t *size);
+    int (*stat)(void *ctx, const char *path, Wc3FileStat *out);
     int (*close)(void *ctx, uintptr_t file);
 } Wc3FileApi;
 

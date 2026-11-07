@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "legacy_shim.h"
@@ -46,10 +47,10 @@ static void set_default(const char *name, const char *value)
         setenv(name, value, 1);
 }
 
-static void redirect_output(const char *data_dir)
+static void redirect_output(const char *state_dir)
 {
     char path[1024];
-    int n = snprintf(path, sizeof path, "%s/run.txt", data_dir);
+    int n = snprintf(path, sizeof path, "%s/run.txt", state_dir);
     if (n <= 0 || (size_t)n >= sizeof path)
         return;
     FILE *f = freopen(path, "w", stdout);
@@ -60,28 +61,32 @@ static void redirect_output(const char *data_dir)
         setvbuf(stderr, NULL, _IOLBF, 0);
 }
 
-int wc3_app_boot_start(const char *data_dir, ANativeWindow *window,
-                       uint32_t width, uint32_t height)
+int wc3_app_boot_start(const char *data_dir, const char *state_dir,
+                       ANativeWindow *window, uint32_t width, uint32_t height)
 {
-    if (!data_dir || !*data_dir || !window || !width || !height)
+    if (!data_dir || !*data_dir || !state_dir || !*state_dir || !window ||
+        !width || !height)
         return -EINVAL;
+    /* The shared game directory is also the guest's working directory.  Let
+     * the game create saves, replays and logs without inheriting a restrictive
+     * umask; Android's FUSE may still present 0660. */
+    umask(0);
     if (chdir(data_dir) != 0) {
         LOGE("cannot enter data dir %s: %s", data_dir, strerror(errno));
         return -errno;
     }
 
-    redirect_output(data_dir);
+    redirect_output(state_dir);
 
     /* These are the product defaults, not diagnostics: the shipped APK has no
-     * shell to pass arguments and must load the game and use DXVK.  A pushed
-     * wc3.env can still override them because set_default only fills unset
-     * variables. */
-    set_default("WC3_DATA_DIR", data_dir);
+     * shell to pass arguments and must load the game and use DXVK.  Sound is
+     * part of the product: never seed -nosound here.  A diagnostic run can
+     * still opt out through WC3_ARGS or WC3_NOSOUND=1. */
+    set_default("WC3_DATA_DIR", state_dir);
     set_default("WC3_LOAD_GAME", "1");
     set_default("WC3_D3D9", "dxvk");
     set_default("DXVK_STATE_CACHE", "0");
     set_default("WC3_HIDDEN", "1");
-    set_default("WC3_ARGS", "-nosound");
     set_default("WC3_VULKAN_DRIVER_DIR", data_dir);
 
     wc3_legacy_set_screen_size(width, height);

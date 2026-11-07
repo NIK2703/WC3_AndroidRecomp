@@ -206,6 +206,24 @@ static uint32_t g_mss_ret_watch;
 static const char *g_mss_ret_name;
 #endif
 
+/* Guest thread state is defined later; the dispatcher and the hang watchdog
+ * need the current thread before that definition is visible. */
+struct GThread;
+static __thread struct GThread *g_self_thread;
+static uint32_t hle_current_guest_id(void);
+
+#if WC3_DEBUG && WC3_DEBUG_HLE
+/* Hang watchdog: the last guest target and HLE wait state per thread.  This is
+ * deliberately read-only and lock-free; it must never perturb a hung guest. */
+static volatile uint32_t g_main_last_target, g_main_last_eip;
+static volatile uint32_t g_main_last_esp, g_main_last_ebp;
+static volatile uint32_t g_main_dispatch_count;
+static volatile uint32_t g_main_wait_ra, g_main_wait_h0, g_main_wait_h1;
+static volatile int g_main_wait_active;
+static void watch_note_wait(uint32_t ra, uint32_t h0, uint32_t h1, int active);
+static void hang_watch_start(void);
+#endif
+
 static void h_mss_trace(CPU *c)
 {
     MssTrace *t = NULL;
@@ -2470,6 +2488,9 @@ static void h_wait_one(CPU *c)
     uint32_t h = arg32(c, 0);
     int32_t  ms = (int32_t)arg32(c, 1);
     uint32_t ra = guest_ok(c->esp, 4) ? rd32g(c->esp) : 0;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    watch_note_wait(ra, h, 0, 1);
+#endif
     GMutex *mx = mutex_get(h);
     if (mx) {
         h_wait_mutex(c, mx, ms, ra);
@@ -2667,6 +2688,10 @@ static void h_wait_many(CPU *c)
         it[i].kind = it[i].e ? WK_EVENT : (it[i].mx ? WK_MUTEX : WK_OTHER);
     }
 
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    watch_note_wait(ra, n > 0 ? it[0].h : 0, n > 1 ? it[1].h : 0, 1);
+#endif
+
 #ifdef WC3_DEBUG_HLE_SYNC
     if (g_sync_trace && g_sync_trace_log < SYNC_TRACE_LIMIT) {
         int interesting = 0;
@@ -2699,6 +2724,14 @@ static void h_wait_many(CPU *c)
         deadline = (uint64_t)wave_now_ms() + (uint32_t)ms;
 
     for (;;) {
+        /* Miles' digital-driver thread waits on [completion event, mutex].
+         * The mutex is normally free, so the wait would return index 1
+         * immediately and never reach the service calls below.  Deliver any
+         * pending waveOut callback first: that callback signals the
+         * completion event, which must win the wait when both are ready. */
+        timer_service(c);
+        if (g_wave_pending) waveout_service(c);
+
         if (!wait_all) {
             for (uint32_t i = 0; i < n; i++) {
                 if (wait_item_acquire(&it[i])) {
@@ -2915,12 +2948,23 @@ static uint32_t g_wave_ret_thunk;
 static volatile int g_wave_service_lock;
 #ifdef WC3_DEBUG
 static int g_wave_trace = -1;
-static unsigned g_wave_write_log, g_wave_done_log, g_wave_cb_log;
+static unsigned g_wave_write_log, g_wave_cb_log;
 static unsigned g_wave_service_log, g_wave_pump_log;
 
 static int wave_trace(void)
 {
-    if (g_wave_trace < 0) g_wave_trace = getenv("WC3_WAVEOUT_TRACE") ? 1 : 0;
+    if (g_wave_trace < 0) {
+        g_wave_trace = getenv("WC3_WAVEOUT_TRACE") ? 1 : 0;
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+        if (!g_wave_trace) {
+            const char *dir = getenv("WC3_DATA_DIR");
+            char trigger[1200];
+            snprintf(trigger, sizeof trigger, "%s/audio_trace_on",
+                     (dir && *dir) ? dir : ".");
+            g_wave_trace = access(trigger, F_OK) == 0 ? 1 : 0;
+        }
+#endif
+    }
     return g_wave_trace;
 }
 #endif
@@ -2958,6 +3002,9 @@ static uint32_t g_timer_next_id = 0xA000;
 #ifdef WC3_DEBUG
 static unsigned g_timer_cb_log;
 #endif
+#if WC3_DEBUG && WC3_DEBUG_HLE
+static unsigned g_timer_hle_log;
+#endif
 
 static void timer_service(CPU *c)
 {
@@ -2987,6 +3034,13 @@ static void timer_service(CPU *c)
         if (wave_trace() && g_timer_cb_log++ < 16)
             fprintf(stderr, "[wave] timer t=%u cb=%08X id=%u\n",
                     now, due[i].callback, due[i].id);
+#endif
+#if WC3_DEBUG && WC3_DEBUG_HLE
+        if (g_timer_hle_log++ < 240)
+            fprintf(stderr, "[timer] fire t=%u tid=%lu gid=%u cb=%08X id=%u\n",
+                    now, (unsigned long)pthread_self(),
+                    hle_current_guest_id(),
+                    due[i].callback, due[i].id);
 #endif
         uint32_t sa = c->esp, sbx = c->ebx, ssi = c->esi;
         uint32_t sdi = c->edi, sbp = c->ebp;
@@ -3042,6 +3096,12 @@ static void timer_set(CPU *c)
     t->elapse = elapse;
     t->callback = callback;
     t->due_ms = wave_now_ms() + elapse;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    fprintf(stderr, "[timer] set tid=%lu gid=%u hwnd=%u id=%u elapse=%u cb=%08X\n",
+            (unsigned long)pthread_self(),
+            hle_current_guest_id(),
+            hwnd, id, elapse, callback);
+#endif
     pthread_mutex_unlock(&g_timer_lock);
     c->eax = id;
 }
@@ -3169,11 +3229,7 @@ static void wave_queue_done_locked(WaveDev *d, uint32_t hdr, const char *why)
     d->done[i] = hdr;
     d->done_count++;
     g_wave_pending = 1;
-#ifdef WC3_DEBUG
-    if (wave_trace() && g_wave_done_log++ < 32)
-        fprintf(stderr, "[wave] done src=%s ghwo=%u hdr=%08X q=%d\n",
-                why, d->gh, hdr, d->done_count);
-#endif
+    (void)why;
 }
 
 static void wave_signal_guest_event(uint32_t h)
@@ -3189,10 +3245,24 @@ static void wave_signal_guest_event(uint32_t h)
 #ifdef WC3_DEBUG
 /* Sink-side health counters: a short callback means the ring ran dry, a busy
  * callback means the guest held g_wave_lock, and the gap catches a callback
- * that arrived late even when the ring had data. */
-static unsigned g_aa_cb, g_aa_short, g_aa_busy;
-static uint32_t g_aa_min_avail = 0xFFFFFFFFu;
-static uint64_t g_aa_last_us, g_aa_max_gap_us;
+ * that arrived late even when the ring had data.  The AAudio callback only
+ * updates these fields; all formatting and file I/O happens on the guest
+ * thread in wave_audio_stats_report(). */
+static volatile unsigned g_aa_cb, g_aa_short, g_aa_silent;
+static volatile uint32_t g_aa_min_avail = 0xFFFFFFFFu;
+static volatile uint64_t g_aa_last_us, g_aa_max_gap_us;
+static volatile int g_aa_error, g_aa_error_dev;
+static volatile unsigned g_aa_error_count;
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+static volatile unsigned g_aa_slow;
+static volatile uint64_t g_aa_lock_max_us;
+static volatile uint32_t g_aa_short_want, g_aa_short_avail;
+static volatile uint32_t g_aa_want, g_aa_take, g_aa_ring, g_aa_blocks;
+static volatile uint32_t g_aa_fake, g_aa_peak, g_aa_nonzero, g_aa_samples;
+static volatile uint64_t g_aa_energy_us, g_aa_energy_cb;
+static unsigned g_aa_energy_reported, g_aa_short_reported, g_aa_error_reported;
+static uint64_t g_aa_report_us;
+#endif
 static uint64_t aa_now_us(void)
 {
     struct timespec ts;
@@ -3201,9 +3271,9 @@ static uint64_t aa_now_us(void)
 }
 #endif
 
-/* AAudio real-time callback.  trylock keeps the audio thread out of a lock
- * held by a guest that is copying a buffer; a missed callback period becomes
- * silence, not a priority inversion. */
+/* AAudio real-time callback.  The guest side never dispatches or blocks while
+ * holding g_wave_lock, so the callback may wait for the short copy instead of
+ * turning a lock collision into a silent period. */
 static aaudio_data_callback_result_t wave_aaudio_cb(AAudioStream *stream,
                                                      void *user,
                                                      void *audio,
@@ -3221,14 +3291,23 @@ static aaudio_data_callback_result_t wave_aaudio_cb(AAudioStream *stream,
     g_aa_cb++;
 #endif
 
-    if (pthread_mutex_trylock(&g_wave_lock) != 0) {
-#ifdef WC3_DEBUG
-        g_aa_busy++;
+    /* Every retained g_wave_lock section is short: no dispatch, no logging,
+     * no file I/O and no unbounded wait happens under it.  Waiting for it is
+     * therefore better than dropping a callback period, which is audible as
+     * a click.  The wait is measured under the AUDIO debug tag. */
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+    const uint64_t lock_t0 = aa_now_us();
 #endif
-        memset(out, 0, want);
-        return AAUDIO_CALLBACK_RESULT_CONTINUE;
-    }
+    pthread_mutex_lock(&g_wave_lock);
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+    const uint64_t lock_wait = aa_now_us() - lock_t0;
+    if (lock_wait > g_aa_lock_max_us) g_aa_lock_max_us = lock_wait;
+    if (lock_wait >= 500u) g_aa_slow++;
+#endif
     if (!d->used || d->closing || !d->ring) {
+#ifdef WC3_DEBUG
+        g_aa_silent++;
+#endif
         pthread_mutex_unlock(&g_wave_lock);
         memset(out, 0, want);
         return AAUDIO_CALLBACK_RESULT_CONTINUE;
@@ -3236,9 +3315,13 @@ static aaudio_data_callback_result_t wave_aaudio_cb(AAudioStream *stream,
 
     uint32_t avail = d->head - d->tail;
     uint32_t take = want < avail ? want : avail;
-#ifdef WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
     if (avail < g_aa_min_avail) g_aa_min_avail = avail;
-    if (take < want) g_aa_short++;
+    if (take < want) {
+        g_aa_short++;
+        g_aa_short_want = want;
+        g_aa_short_avail = avail;
+    }
 #endif
     uint32_t idx = d->tail % WAVE_RING_BYTES;
     uint32_t first = WAVE_RING_BYTES - idx;
@@ -3259,15 +3342,32 @@ static aaudio_data_callback_result_t wave_aaudio_cb(AAudioStream *stream,
             d->blk_count--;
         }
     }
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+    if (now_us - g_aa_energy_us >= 2000000u) {
+        uint32_t peak = 0, nonzero = 0;
+        const int16_t *s = (const int16_t *)(const void *)out;
+        uint32_t ns = take / 2u;
+        for (uint32_t i = 0; i < ns; i++) {
+            int v = s[i];
+            if (v < 0) v = -v;
+            if (v > peak) peak = (uint32_t)v;
+            if (v) nonzero++;
+        }
+        g_aa_want = want;
+        g_aa_take = take;
+        g_aa_ring = d->head - d->tail;
+        g_aa_blocks = (uint32_t)d->blk_count;
+        g_aa_fake = (uint32_t)d->fake;
+        g_aa_peak = peak;
+        g_aa_nonzero = nonzero;
+        g_aa_samples = ns;
+        g_aa_energy_us = now_us;
+        g_aa_energy_cb = g_aa_cb;
+    }
+#endif
     pthread_mutex_unlock(&g_wave_lock);
 
-#ifdef WC3_DEBUG
-    if ((g_aa_cb % 512u) == 0)
-        fprintf(stderr, "[wave] aa cb=%u short=%u busy=%u min=%u "
-                        "maxgap_us=%llu\n",
-                g_aa_cb, g_aa_short, g_aa_busy, g_aa_min_avail,
-                (unsigned long long)g_aa_max_gap_us);
-#endif
+    /* No logging, allocation or file access on the real-time path. */
     if (take < want) memset(out + take, 0, want - take);
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
@@ -3277,9 +3377,68 @@ static void wave_aaudio_error(AAudioStream *stream, void *user,
 {
     (void)stream;
     WaveDev *d = (WaveDev *)user;
-    fprintf(stderr, "[wave] AAudio error %d on dev %u\n",
-            (int)error, d ? d->devid : 0);
+#ifdef WC3_DEBUG
+    /* Error callbacks may run on a real-time or binder thread.  Record the
+     * event here and let the guest thread print it. */
+    g_aa_error = (int)error;
+    g_aa_error_dev = d ? (int)d->devid : 0;
+    g_aa_error_count++;
+#else
+    (void)d;
+    (void)error;
+#endif
 }
+
+#ifdef WC3_DEBUG
+/* Print the counters collected by wave_aaudio_cb().  This runs on the guest
+ * thread, never on the AAudio real-time thread, so formatting and flash I/O
+ * cannot delay an audio callback. */
+static void wave_audio_stats_report(void)
+{
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+    if (!wave_trace()) return;
+    const uint64_t now = aa_now_us();
+    if (g_aa_report_us && now - g_aa_report_us < 2000000u) return;
+    g_aa_report_us = now;
+
+    const unsigned cb = g_aa_cb;
+    const unsigned shortc = g_aa_short;
+    const unsigned slow = g_aa_slow;
+    const unsigned silent = g_aa_silent;
+    const unsigned errs = g_aa_error_count;
+    fprintf(stderr, "[wave] aa cb=%u short=%u slow=%u silent=%u min=%u "
+                    "maxgap_us=%llu lockmax_us=%llu\n",
+            cb, shortc, slow, silent, (unsigned)g_aa_min_avail,
+            (unsigned long long)g_aa_max_gap_us,
+            (unsigned long long)g_aa_lock_max_us);
+    if (errs != g_aa_error_reported) {
+        g_aa_error_reported = errs;
+        fprintf(stderr, "[wave] AAudio error %d on dev %d count=%u\n",
+                (int)g_aa_error, (int)g_aa_error_dev, errs);
+    }
+    if (shortc != g_aa_short_reported) {
+        g_aa_short_reported = shortc;
+        fprintf(stderr, "[wave] cb underrun cb=%u want=%u avail=%u\n",
+                cb, (unsigned)g_aa_short_want,
+                (unsigned)g_aa_short_avail);
+    }
+    const unsigned energy_cb = (unsigned)g_aa_energy_cb;
+    if (energy_cb && energy_cb != g_aa_energy_reported) {
+        g_aa_energy_reported = energy_cb;
+        fprintf(stderr, "[wave] cb energy t=%llu cb=%u want=%u take=%u "
+                        "ring=%u blocks=%u fake=%u peak=%u nonzero=%u/%u\n",
+                (unsigned long long)g_aa_energy_us, energy_cb,
+                (unsigned)g_aa_want, (unsigned)g_aa_take,
+                (unsigned)g_aa_ring, (unsigned)g_aa_blocks,
+                (unsigned)g_aa_fake, (unsigned)g_aa_peak,
+                (unsigned)g_aa_nonzero, (unsigned)g_aa_samples);
+    }
+    fflush(stderr);
+#else
+    (void)0;
+#endif
+}
+#endif
 
 static int wave_open_aaudio(WaveDev *d)
 {
@@ -3434,6 +3593,9 @@ static void waveout_service(CPU *c)
         fprintf(stderr, "[wave] service exit pending=%d\n", g_wave_pending);
 #endif
     __atomic_store_n(&g_wave_service_lock, 0, __ATOMIC_RELEASE);
+#ifdef WC3_DEBUG
+    wave_audio_stats_report();
+#endif
 }
 
 static void h_wave_out_get_num_devs(CPU *c)
@@ -3483,6 +3645,13 @@ static void h_wave_out_open(CPU *c)
     int rate = (int)rd32g(pwfx + 4);
     int bits = (int)rd16g(pwfx + 14);
     uint32_t type = flags & CALLBACK_TYPEMASK;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    fprintf(stderr, "[wave] open owner tid=%lu gid=%u dev=%u cb=%08X "
+                    "inst=%08X flags=%08X fmt=%d ch=%d rate=%d bits=%d\n",
+            (unsigned long)pthread_self(),
+            hle_current_guest_id(),
+            devid, cb, inst, flags, tag, ch, rate, bits);
+#endif
 #ifdef WC3_DEBUG
     if (wave_trace())
         fprintf(stderr, "[wave] Open dev=%u cb=%08X inst=%08X flags=%08X "
@@ -3539,6 +3708,11 @@ static void h_wave_out_open(CPU *c)
     if (wave_trace())
         fprintf(stderr, "[wave] Open ok ghwo=%u fake=%d\n", gh, d->fake);
 #endif
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    fprintf(stderr, "[wave] open ok ghwo=%u fake=%d gid=%u tid=%lu\n",
+            gh, d->fake, hle_current_guest_id(),
+            (unsigned long)pthread_self());
+#endif
     c->eax = MMSYSERR_NOERROR;
 }
 
@@ -3554,8 +3728,18 @@ static void h_wave_out_close(CPU *c)
     pthread_mutex_unlock(&g_wave_lock);
 
     if (stream) {
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+        if (wave_trace())
+            fprintf(stderr, "[wave] Close begin ghwo=%u t=%u\n",
+                    gh, wave_now_ms());
+#endif
         AAudioStream_requestStop(stream);
         AAudioStream_close(stream);
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+        if (wave_trace())
+            fprintf(stderr, "[wave] Close stream done ghwo=%u t=%u\n",
+                    gh, wave_now_ms());
+#endif
     }
 
     pthread_mutex_lock(&g_wave_lock);
@@ -3709,21 +3893,6 @@ static void h_wave_out_write(CPU *c)
         return;
     }
 
-#ifdef WC3_DEBUG
-    if (!d->fake && d->tag == WAVE_FORMAT_PCM && d->bits == 16)
-        wave_dump_pcm((const uint8_t *)(uintptr_t)data, len);
-#endif
-
-#ifdef WC3_DEBUG
-    if (wave_trace() &&
-        (g_wave_write_log < 32u || (g_wave_write_log % 64u) == 0))
-        fprintf(stderr, "[wave] Write t=%u ghwo=%u hdr=%08X len=%u need=%u "
-                        "blk=%d ring=%u fake=%d\n",
-                wave_now_ms(), gh, hdr, len, need, d->blk_count,
-                d->head - d->tail, d->fake);
-    g_wave_write_log++;
-#endif
-
     if (d->fake) {
         /* Duration of the guest buffer at its own byte rate. */
         uint32_t bytes_per_ms = (uint32_t)d->rate * d->out_align / 1000u;
@@ -3775,7 +3944,30 @@ static void h_wave_out_write(CPU *c)
     d->head += need;
     b->remaining = need;
     d->blk_count++;
+#ifdef WC3_DEBUG
+    const int log_blk = d->blk_count;
+    const uint32_t log_ring = d->head - d->tail;
+    const int log_fake = d->fake;
+    const int dump_pcm = !d->fake && d->tag == WAVE_FORMAT_PCM && d->bits == 16;
+#else
+    const int dump_pcm = 0;
+#endif
     pthread_mutex_unlock(&g_wave_lock);
+
+#ifdef WC3_DEBUG
+    /* Guest-thread diagnostics: never format or write while g_wave_lock is
+     * held, otherwise the AAudio callback can miss a period. */
+    if (dump_pcm)
+        wave_dump_pcm((const uint8_t *)(uintptr_t)data, len);
+    if (wave_trace() &&
+        (g_wave_write_log < 32u || (g_wave_write_log % 64u) == 0))
+        fprintf(stderr, "[wave] Write t=%u ghwo=%u hdr=%08X len=%u need=%u "
+                        "blk=%d ring=%u fake=%d\n",
+                wave_now_ms(), gh, hdr, len, need, log_blk, log_ring, log_fake);
+    g_wave_write_log++;
+#else
+    (void)dump_pcm;
+#endif
     c->eax = MMSYSERR_NOERROR;
     wave_probe_pump(c, need, 0);
 }
@@ -3786,6 +3978,10 @@ static void h_wave_out_reset(CPU *c)
     pthread_mutex_lock(&g_wave_lock);
     WaveDev *d = wave_dev_from_guest(gh);
     if (!d) { pthread_mutex_unlock(&g_wave_lock); c->eax = MMSYSERR_INVALHANDLE; return; }
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+    const uint32_t reset_ring = d->head - d->tail;
+    const int reset_blocks = d->blk_count;
+#endif
     while (d->blk_count > 0) {
         WaveBlock *b = &d->blk[d->blk_head];
         wave_queue_done_locked(d, b->guest, "reset");
@@ -3794,6 +3990,11 @@ static void h_wave_out_reset(CPU *c)
     }
     d->head = d->tail = 0;
     pthread_mutex_unlock(&g_wave_lock);
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+    if (wave_trace())
+        fprintf(stderr, "[wave] Reset ghwo=%u ring=%u blocks=%d t=%u\n",
+                gh, reset_ring, reset_blocks, wave_now_ms());
+#endif
     c->eax = MMSYSERR_NOERROR;
 }
 
@@ -5470,7 +5671,7 @@ static void cr_ctime64(CPU *c)
  * lifted code through the same dispatcher as the main thread.
  */
 
-typedef struct {
+typedef struct GThread {
     int          used;
     uint32_t     guest_id;
     uint32_t     teb, stack_base, stack_size;
@@ -5479,14 +5680,24 @@ typedef struct {
     volatile int running;
     uint32_t     exit_code;
     uint32_t     tls[64];
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    volatile uint32_t last_target, last_eip, last_esp, last_ebp;
+    volatile uint32_t dispatch_count;
+    volatile uint32_t wait_ra, wait_h0, wait_h1;
+    volatile int wait_active;
+#endif
 } GThread;
 
 static GThread g_threads[GUEST_THREAD_MAX];
 static pthread_mutex_t g_thread_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_next_thread_id = 0x1000;
 
+static uint32_t hle_current_guest_id(void)
+{
+    return g_self_thread ? g_self_thread->guest_id : 0;
+}
+
 /* The main thread has no GThread slot; its TLS lives here. */
-static __thread GThread *g_self_thread;
 static __thread uint32_t  g_main_tls[64];
 
 static uint32_t *tls_slot(void)
@@ -5510,6 +5721,91 @@ static void teb_init_local(CPU *c, uint32_t teb, uint32_t stack_base,
     c->ds = c->es = c->ss = 0x2B;
     c->cs = 0x23;
 }
+
+#if WC3_DEBUG && WC3_DEBUG_HLE
+/* Called by the active boot dispatcher for every guest target.  Keep this
+ * separate from wc3_dispatch_watch(), whose old-tree probes are far too heavy
+ * to run on every dispatch. */
+void wc3_watch_dispatch(CPU *c, uint32_t target)
+{
+    if (g_self_thread) {
+        g_self_thread->last_target = target;
+        g_self_thread->last_eip = c->eip;
+        g_self_thread->last_esp = c->esp;
+        g_self_thread->last_ebp = c->ebp;
+        g_self_thread->dispatch_count++;
+    } else {
+        g_main_last_target = target;
+        g_main_last_eip = c->eip;
+        g_main_last_esp = c->esp;
+        g_main_last_ebp = c->ebp;
+        g_main_dispatch_count++;
+    }
+}
+
+static void watch_note_wait(uint32_t ra, uint32_t h0, uint32_t h1, int active)
+{
+    if (g_self_thread) {
+        g_self_thread->wait_ra = ra;
+        g_self_thread->wait_h0 = h0;
+        g_self_thread->wait_h1 = h1;
+        g_self_thread->wait_active = active;
+    } else {
+        g_main_wait_ra = ra;
+        g_main_wait_h0 = h0;
+        g_main_wait_h1 = h1;
+        g_main_wait_active = active;
+    }
+}
+
+static int hang_watch_enabled(void)
+{
+    if (getenv("WC3_HANG_WATCH")) return 1;
+    const char *dir = getenv("WC3_DATA_DIR");
+    char trigger[1200];
+    snprintf(trigger, sizeof trigger, "%s/hang_watch_on",
+             (dir && *dir) ? dir : ".");
+    return access(trigger, F_OK) == 0;
+}
+
+static void *hang_watch_proc(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 90; i++) {
+        usleep(2000000);
+        fprintf(stderr, "[watch] t=%u main last=%08X eip=%08X esp=%08X "
+                        "ebp=%08X n=%u wait=%d ra=%08X h0=%08X h1=%08X\n",
+                wave_now_ms(), g_main_last_target, g_main_last_eip,
+                g_main_last_esp, g_main_last_ebp, g_main_dispatch_count,
+                g_main_wait_active, g_main_wait_ra, g_main_wait_h0,
+                g_main_wait_h1);
+        for (int j = 0; j < GUEST_THREAD_MAX; j++) {
+            GThread *t = &g_threads[j];
+            if (!t->used) continue;
+            fprintf(stderr, "[watch] gid=%u run=%d last=%08X eip=%08X "
+                            "esp=%08X ebp=%08X n=%u wait=%d ra=%08X "
+                            "h0=%08X h1=%08X\n",
+                    t->guest_id, t->running, t->last_target, t->last_eip,
+                    t->last_esp, t->last_ebp, t->dispatch_count,
+                    t->wait_active, t->wait_ra, t->wait_h0, t->wait_h1);
+        }
+    }
+    return NULL;
+}
+
+static void hang_watch_start(void)
+{
+    static int started;
+    if (started || !hang_watch_enabled()) return;
+    started = 1;
+    /* The generated dispatcher only calls wc3_dispatch_watch() when this is
+     * set.  Without it the watchdog cannot see a guest EIP at all. */
+    g_dispatch_diag = 1;
+    pthread_t th;
+    if (pthread_create(&th, NULL, hang_watch_proc, NULL) == 0)
+        pthread_detach(th);
+}
+#endif
 
 static void *guest_thread_proc(void *p)
 {
@@ -5585,8 +5881,8 @@ static uint32_t guest_thread_spawn(uint32_t start, uint32_t arg, uint32_t flags,
                "tid=%lu\n", who, start, arg, h, t->guest_id, SYNC_TID);
 #endif
 #ifdef WC3_DEBUG
-    fprintf(stderr, "[hle] %s(start=%08X arg=%08X) -> h=%08X gid=%u\n",
-            who, start, arg, h, t->guest_id);
+    fprintf(stderr, "[hle] %s(start=%08X arg=%08X) -> h=%08X gid=%u tid=%lu\n",
+            who, start, arg, h, t->guest_id, (unsigned long)t->host);
 #endif
     return h;
 }
@@ -9129,6 +9425,9 @@ void hle_android_start(const char *exe_path, const char *cmdline)
                       g_tex_trace || g_fn_probe_n != 0;
 #endif
     heap_init();
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    hang_watch_start();
+#endif
     if (!g_screen_known) {
         uint32_t sw = 800, sh = 600;
         const char *ew = getenv("WC3_DXVK_WIDTH");
@@ -9786,6 +10085,20 @@ void wc3_trace_dispatch(uint32_t target, uint32_t esp, uint32_t ebp){
     g_disp_ring[g_disp_pos++ & 63] = target;
     if (g_disp_len < 64) g_disp_len++;
 
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (g_self_thread) {
+        g_self_thread->last_target = target;
+        g_self_thread->last_esp = esp;
+        g_self_thread->last_ebp = ebp;
+        g_self_thread->dispatch_count++;
+    } else {
+        g_main_last_target = target;
+        g_main_last_esp = esp;
+        g_main_last_ebp = ebp;
+        g_main_dispatch_count++;
+    }
+#endif
+
 #ifdef WC3_DEBUG
     /* Temporary stream-start diagnostics.  The game's sound object methods are
      * 0x6F0AD5A0 (open) and 0x6F0AFEF0 (play).  Watching them together with the
@@ -9945,6 +10258,21 @@ void wc3_host_stack_guard(uint32_t target, uint32_t esp)
 #ifdef WC3_DEBUG
 void wc3_dispatch_watch(CPU *c, uint32_t target)
 {
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (g_self_thread) {
+        g_self_thread->last_target = target;
+        g_self_thread->last_eip = c->eip;
+        g_self_thread->last_esp = c->esp;
+        g_self_thread->last_ebp = c->ebp;
+        g_self_thread->dispatch_count++;
+    } else {
+        g_main_last_target = target;
+        g_main_last_eip = c->eip;
+        g_main_last_esp = c->esp;
+        g_main_last_ebp = c->ebp;
+        g_main_dispatch_count++;
+    }
+#endif
 #ifdef WC3_DEBUG
     if (g_mss_ret_watch && target == g_mss_ret_watch) {
         fprintf(stderr, "[mss-api] %s returned eax=%08X\n",

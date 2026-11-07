@@ -237,6 +237,19 @@ static int android_file_size(void *ctx, uintptr_t file, uint64_t *size_out)
     return 0;
 }
 
+static int android_file_stat(void *ctx, const char *path, Wc3FileStat *out)
+{
+    (void)ctx;
+    if (!path || !out) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    out->size = (uint64_t)st.st_size;
+    out->mtime_seconds = (int64_t)st.st_mtime;
+    out->mode = S_ISDIR(st.st_mode) ? WC3_FILE_STAT_DIRECTORY
+                                    : WC3_FILE_STAT_REGULAR;
+    return 0;
+}
+
 static int android_file_close(void *ctx, uintptr_t file)
 {
     (void)ctx;
@@ -1965,6 +1978,7 @@ int wc3_android_platform_init(Wc3Platform *platform)
     platform->file.write = android_file_write;
     platform->file.seek = android_file_seek;
     platform->file.size = android_file_size;
+    platform->file.stat = android_file_stat;
     platform->file.close = android_file_close;
 
     platform->time.ctx = NULL;

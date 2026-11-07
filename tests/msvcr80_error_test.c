@@ -14,7 +14,7 @@
 #include "legacy_shim.h"
 #include "strerror_hle.h"
 
-#define MAX_ROWS 2u
+#define MAX_ROWS 4u
 #define GUEST_BASE 0x20000u
 #define GUEST_SIZE 0x10000u
 #define BUFFER_ADDR (GUEST_BASE + 0x1000u)
@@ -79,6 +79,7 @@ static int g_failures;
 static int g_fail_alloc;
 static unsigned g_alloc_count;
 static uint32_t g_alloc_size;
+static uint32_t g_alloc_cursor;
 
 static void *guest_ptr(uint32_t addr, uint32_t size)
 {
@@ -97,18 +98,35 @@ uint32_t wc3_legacy_guest_alloc0(uint32_t size)
 {
     if (g_fail_alloc) return 0;
     if (size > GUEST_SIZE) return 0;
-    void *p = guest_ptr(BUFFER_ADDR, size);
+    const uint32_t addr = g_alloc_cursor;
+    void *p = guest_ptr(addr, size);
     if (!p) return 0;
     memset(p, 0, size);
+    g_alloc_cursor += (size + 7u) & ~7u;
     g_alloc_count++;
     g_alloc_size = size;
-    return BUFFER_ADDR;
+    return addr;
 }
 
 void wc3_legacy_wr8g(uint32_t addr, uint8_t value)
 {
     uint8_t *p = guest_ptr(addr, 1);
     if (p) *p = value;
+}
+
+void wc3_legacy_wr32g(uint32_t addr, uint32_t value)
+{
+    void *p = guest_ptr(addr, 4);
+    if (p) memcpy(p, &value, 4);
+}
+
+uint32_t wc3_legacy_rd32g(uint32_t addr)
+{
+    const void *p = guest_ptr(addr, 4);
+    if (!p) return 0;
+    uint32_t value;
+    memcpy(&value, p, 4);
+    return value;
 }
 
 uint32_t wc3_legacy_arg32(const CPU *cpu, unsigned index)
@@ -126,6 +144,14 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
     g_rows[g_row_count].impl = impl;
     g_row_count++;
     return 0;
+}
+
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c))
+{
+    (void)argc;
+    (void)cdecl_abi;
+    return wc3_legacy_hle_override(dll, name, impl);
 }
 
 static void check(int condition, const char *message)
@@ -146,6 +172,22 @@ static uint32_t call_strerror(void (*impl)(CPU *c), int32_t errnum)
     return c.eax;
 }
 
+static void (*find_row(const char *name))(CPU *c)
+{
+    for (unsigned i = 0; i < g_row_count; i++)
+        if (strcmp(g_rows[i].name, name) == 0) return g_rows[i].impl;
+    return NULL;
+}
+
+static uint32_t call_errno(void (*impl)(CPU *c))
+{
+    CPU c;
+    memset(&c, 0, sizeof c);
+    c.eax = 0xDEADBEEFu;
+    impl(&c);
+    return c.eax;
+}
+
 static int guest_string_is(uint32_t addr, const char *expected)
 {
     const size_t length = strlen(expected);
@@ -158,12 +200,14 @@ int main(void)
 {
     memset(g_mem, 0, sizeof g_mem);
     memset(g_args, 0, sizeof g_args);
+    g_alloc_cursor = BUFFER_ADDR;
 
-    check(msvcr80_error_install() == 1, "install returns one row");
-    check(g_row_count == 1u, "install row count");
-    if (g_row_count != 1u) return 1;
+    check(msvcr80_error_install() == 2, "install returns two rows");
+    check(g_row_count == 2u, "install row count");
+    if (g_row_count != 2u) return 1;
     check(strcmp(g_rows[0].dll, "MSVCR80.dll") == 0, "install dll");
     check(strcmp(g_rows[0].name, "strerror") == 0, "install name");
+    check(find_row("_errno") != NULL, "install _errno");
     void (*impl)(CPU *c) = g_rows[0].impl;
 
     g_fail_alloc = 1;
@@ -192,10 +236,30 @@ int main(void)
     }
     check(g_alloc_count == 1u, "unknown messages allocate only once");
 
+    void (*errno_impl)(CPU *c) = find_row("_errno");
+    g_fail_alloc = 1;
+    check(call_errno(errno_impl) == 0u, "_errno allocation failure");
+    g_fail_alloc = 0;
+
+    const uint32_t errno_cell = call_errno(errno_impl);
+    check(errno_cell != 0u, "_errno returns a cell");
+    check(errno_cell != first, "_errno cell is separate from strerror");
+    check(g_alloc_count == 2u, "_errno allocates once");
+    check(g_alloc_size == 4u, "_errno cell size");
+    check(wc3_legacy_rd32g(errno_cell) == 0u, "_errno starts at zero");
+
+    wc3_legacy_wr32g(errno_cell, 22u);
+    check(call_errno(errno_impl) == errno_cell, "_errno reuses the thread cell");
+    check(wc3_legacy_rd32g(errno_cell) == 22u, "_errno keeps the guest value");
+    check(g_alloc_count == 2u, "_errno allocates only once");
+    check(call_strerror(impl, 0) == first, "strerror reuses its own buffer");
+    check(guest_string_is(first, "No error"),
+          "_errno does not disturb the strerror buffer");
+
     if (g_failures) {
         printf("msvcr80 error: %d failure(s)\n", g_failures);
         return 1;
     }
-    printf("msvcr80 error OK (1 handler)\n");
+    printf("msvcr80 error OK (2 handlers)\n");
     return 0;
 }

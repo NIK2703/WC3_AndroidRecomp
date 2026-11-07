@@ -111,6 +111,97 @@ static void h_get_startup_info(CPU *c)
     c->eax = 0;
 }
 
+static int wide_unit_ok(uint32_t base, uint32_t index)
+{
+    if (index > UINT32_MAX / 2u) return 0;
+    const uint32_t off = index * 2u;
+    return base <= UINT32_MAX - off &&
+           wc3_legacy_guest_ok(base + off, 2);
+}
+
+static uint16_t wide_unit(uint32_t base, uint32_t index)
+{
+    return wide_unit_ok(base, index) ? wc3_legacy_rd16g(base + index * 2u) : 0;
+}
+
+static int wide_name_equals(uint32_t name, const char *ascii)
+{
+    for (uint32_t i = 0;; i++) {
+        if (!wide_unit_ok(name, i)) return 0;
+        uint16_t w = wide_unit(name, i);
+        uint8_t a = (uint8_t)ascii[i];
+        if (w >= 'A' && w <= 'Z') w = (uint16_t)(w + 32u);
+        if (a >= 'A' && a <= 'Z') a = (uint8_t)(a + 32u);
+        if (w != a) return 0;
+        if (!w) return 1;
+    }
+}
+
+static uint32_t wide_basename(uint32_t name)
+{
+    uint32_t base = name;
+    for (uint32_t i = 0; wide_unit_ok(name, i); i++) {
+        const uint16_t ch = wide_unit(name, i);
+        if (!ch) break;
+        if (ch == '\\' || ch == '/') base = name + (i + 1u) * 2u;
+    }
+    return base;
+}
+
+static void h_mul_div(CPU *c)
+{
+    const int32_t number = (int32_t)wc3_legacy_arg32(c, 0);
+    const int32_t numerator = (int32_t)wc3_legacy_arg32(c, 1);
+    const int32_t denominator = (int32_t)wc3_legacy_arg32(c, 2);
+
+    if (!denominator) {
+        c->eax = 0xFFFFFFFFu;
+        return;
+    }
+    const int64_t product = (int64_t)number * (int64_t)numerator;
+    const int64_t half = (int64_t)denominator / 2;
+    const int64_t result =
+        product >= 0 ? (product + half) / denominator
+                     : (product - half) / denominator;
+    if (result > INT32_MAX || result < INT32_MIN) {
+        c->eax = 0xFFFFFFFFu;
+        return;
+    }
+    c->eax = (uint32_t)(int32_t)result;
+}
+
+static void h_get_module_handle_w(CPU *c)
+{
+    const uint32_t name = wc3_legacy_arg32(c, 0);
+
+    if (!name) {
+        c->eax = GUEST_IMAGE_WAR3;
+        return;
+    }
+    if (!wide_unit_ok(name, 0)) {
+        c->eax = 0;
+        return;
+    }
+
+    const uint32_t base = wide_basename(name);
+    uint32_t module = 0;
+    if (wide_name_equals(base, "war3.exe"))
+        module = GUEST_IMAGE_WAR3;
+    else if (wide_name_equals(base, "game.dll"))
+        module = GUEST_IMAGE_GAME;
+    else if (wide_name_equals(base, "storm.dll"))
+        module = GUEST_IMAGE_STORM;
+    else if (wide_name_equals(base, "mss32.dll"))
+        module = GUEST_IMAGE_MSS;
+    else if (wide_name_equals(base, "mssfast.dll"))
+        module = GUEST_IMAGE_MSSFAST;
+    else if (wide_name_equals(base, "mp3dec.asi"))
+        module = GUEST_IMAGE_MP3DEC;
+    else if (wide_name_equals(base, "ijl15.dll"))
+        module = GUEST_IMAGE_IJL;
+    c->eax = module;
+}
+
 typedef struct SystemOverride {
     const char *name;
     void (*impl)(CPU *c);
@@ -125,6 +216,17 @@ static const SystemOverride g_overrides[] = {
     { "GetStartupInfoA", h_get_startup_info },
 };
 
+typedef struct SystemAddition {
+    const char *name;
+    uint16_t argc;
+    void (*impl)(CPU *c);
+} SystemAddition;
+
+static const SystemAddition g_additions[] = {
+    { "GetModuleHandleW", 1, h_get_module_handle_w },
+    { "MulDiv", 3, h_mul_div },
+};
+
 int wc3_hle_kernel32_system_install(void)
 {
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
@@ -132,5 +234,12 @@ int wc3_hle_kernel32_system_install(void)
                                     g_overrides[i].impl) != 0)
             return -1;
     }
-    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+    for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
+        if (wc3_legacy_hle_add("KERNEL32.dll", g_additions[i].name,
+                               (int)g_additions[i].argc, 1,
+                               g_additions[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0] +
+                 sizeof g_additions / sizeof g_additions[0]);
 }

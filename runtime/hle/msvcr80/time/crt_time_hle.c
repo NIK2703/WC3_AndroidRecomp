@@ -10,7 +10,9 @@
  * _time64 returns a 64-bit value in edx:eax.  _ctime64 always emits the C
  * locale form "Www Mmm dd hh:mm:ss yyyy\n"; the platform supplies the local
  * calendar fields, and the weekday is derived from the civil date rather than
- * from the host locale.
+ * from the host locale.  _ftime64 is an addition: it fills the 16-byte
+ * __timeb64 record, deriving the timezone field from the same local calendar
+ * and reporting dstflag as zero because the platform has no DST state.
  */
 #include "crt_time_hle.h"
 
@@ -325,6 +327,51 @@ static void h_ctime64(CPU *c)
     c->eax = g_ctime_buffer;
 }
 
+static void h_ftime64(CPU *c)
+{
+    const uint32_t out = wc3_legacy_arg32(c, 0);
+    if (!out || !wc3_legacy_guest_ok(out, 16)) {
+        c->eax = 0;
+        return;
+    }
+
+    const uint64_t now_ns = g_time->realtime_ns(g_time->ctx);
+    const uint64_t seconds = now_ns / NS_PER_SEC;
+    const uint16_t millitm =
+        (uint16_t)((now_ns % NS_PER_SEC) / 1000000ull);
+
+    /* Wc3TimeApi gives the local wall-clock fields but not the UTC offset.
+     * Derive it by comparing the local civil fields with the UTC epoch.  The
+     * Win32 field is minutes west of UTC; dstflag stays zero because the
+     * platform does not expose DST state. */
+    int32_t year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    int32_t millisecond = 0;
+    if (seconds > UINT64_MAX / NS_PER_SEC ||
+        g_time->local_time(g_time->ctx, seconds * NS_PER_SEC, &year, &month,
+                           &day, &hour, &minute, &second,
+                           &millisecond) != 0 ||
+        month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 ||
+        hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
+        c->eax = 0;
+        return;
+    }
+
+    const int64_t local_seconds =
+        days_from_civil(year, (unsigned)month, (unsigned)day) * 86400 +
+        (int64_t)hour * 3600 + (int64_t)minute * 60 + (int64_t)second;
+    int64_t timezone_minutes = -((local_seconds - (int64_t)seconds) / 60);
+    if (timezone_minutes < INT16_MIN) timezone_minutes = INT16_MIN;
+    if (timezone_minutes > INT16_MAX) timezone_minutes = INT16_MAX;
+
+    wc3_legacy_wr32g(out, (uint32_t)seconds);
+    wc3_legacy_wr32g(out + 4u, (uint32_t)(seconds >> 32));
+    wc3_legacy_wr16g(out + 8u, millitm);
+    wc3_legacy_wr16g(out + 10u, (uint16_t)(int16_t)timezone_minutes);
+    wc3_legacy_wr16g(out + 12u, 0u);
+    wc3_legacy_wr16g(out + 14u, 0u);
+    c->eax = 0;
+}
+
 static void h_gmtime64(CPU *c)
 {
     int64_t seconds = 0;
@@ -393,6 +440,7 @@ typedef struct CrtTimeAddition {
 } CrtTimeAddition;
 
 static const CrtTimeAddition g_additions[] = {
+    { "_ftime64", 1, h_ftime64 },
     { "_gmtime64", 1, h_gmtime64 },
     { "_localtime64", 1, h_localtime64 },
     { "_localtime64_s", 2, h_localtime64_s },

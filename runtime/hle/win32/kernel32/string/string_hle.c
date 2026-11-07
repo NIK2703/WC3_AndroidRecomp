@@ -95,6 +95,32 @@ static void h_lstrcat_a(CPU *c)
     c->eax = dst;
 }
 
+static void h_is_bad_string_ptr_a(CPU *c)
+{
+    const uint32_t p = wc3_legacy_arg32(c, 0);
+    const uint32_t max = wc3_legacy_arg32(c, 1);
+
+    if (!p) {
+        c->eax = 1;
+        return;
+    }
+    if (!max) {
+        c->eax = 0;
+        return;
+    }
+    for (uint32_t i = 0; i < max; i++) {
+        if (p > UINT32_MAX - i || !wc3_legacy_guest_ok(p + i, 1)) {
+            c->eax = 1;
+            return;
+        }
+        if (!wc3_legacy_rd8g(p + i)) {
+            c->eax = 0;
+            return;
+        }
+    }
+    c->eax = 0;
+}
+
 static void h_get_acp(CPU *c)
 {
     c->eax = 1251;
@@ -136,6 +162,7 @@ typedef struct StringAddition {
 
 static const StringAddition g_additions[] = {
     { "lstrcatA", 2, h_lstrcat_a },
+    { "IsBadStringPtrA", 2, h_is_bad_string_ptr_a },
 };
 
 int wc3_hle_kernel32_string_install(void)

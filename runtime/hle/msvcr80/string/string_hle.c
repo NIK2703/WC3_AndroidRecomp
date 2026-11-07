@@ -10,7 +10,8 @@
  *
  * Both are fixed here and covered by T0.  The character classifiers are
  * explicit ASCII predicates, not host-locale libc calls: CP1251 bytes above
- * 0x7F are neither letters nor whitespace in the CRT's C locale.
+ * 0x7F are neither letters nor whitespace in the CRT's C locale.  _mbsstr is
+ * the byte search because the guest code page has no lead bytes.
  */
 #include "crt_string_hle.h"
 
@@ -655,6 +656,9 @@ static const CrtStringAddition g_additions[] = {
     { "isxdigit", 1, h_isxdigit },
     { "wcsrchr", 2, h_wcsrchr },
     { "wcsstr", 2, h_wcsstr },
+    /* _mbsstr only differs from strstr on a code page with lead bytes.  The
+     * guest runs CP1251, which is SBCS, so the byte search is exact. */
+    { "_mbsstr", 2, h_strstr },
 };
 
 int wc3_hle_msvcr80_string_install(void)

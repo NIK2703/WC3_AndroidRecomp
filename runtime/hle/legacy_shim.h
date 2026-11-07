@@ -93,6 +93,34 @@ void wc3_legacy_mouse_wheel(int delta);
 void wc3_legacy_key_event(int vk, int down);
 void wc3_legacy_release_all(void);
 
+/*
+ * Soft-keyboard/text-field bridge.  The as-built HLE turns IMM focus into
+ * show/hide callbacks and turns GameActivity text-state edits into guest
+ * WM_CHAR/WM_KEYDOWN messages.  The host installs the callbacks and forwards
+ * the platform's IME events; it never reaches into runtime/legacy directly.
+ */
+void wc3_legacy_set_keyboard_bridge(void (*show)(void), void (*hide)(void));
+void wc3_legacy_set_keyboard_visible(int visible);
+void wc3_legacy_post_char(uint32_t ch);
+void wc3_legacy_post_backspace(void);
+void wc3_legacy_post_enter(void);
+
+/* One decoded UTF-16 unit of Java modified UTF-8.  Returns consumed bytes. */
+int wc3_legacy_mutf8_next(const char *text, int length, int offset,
+                          uint16_t *unit);
+
+typedef struct {
+    int old_start;
+    int new_start;
+    int removed;
+    int added;
+} Wc3LegacyTextDiff;
+
+/* Same suffix-diff rule as the as-built hidden EditText bridge. */
+void wc3_legacy_text_diff(const char *old_text, int old_length,
+                          const char *new_text, int new_length,
+                          Wc3LegacyTextDiff *diff);
+
 #ifdef __cplusplus
 }
 #endif

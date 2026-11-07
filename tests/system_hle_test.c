@@ -16,7 +16,7 @@
 
 #define GUEST_BASE 0x10000u
 #define ARENA_SIZE 0x10000u
-#define MAX_ROWS 8u
+#define MAX_ROWS 16u
 
 static uint8_t g_mem[ARENA_SIZE];
 static uint32_t g_args[4];
@@ -48,6 +48,14 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
     g_rows[g_row_count].impl = impl;
     g_row_count++;
     return 0;
+}
+
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c))
+{
+    (void)argc;
+    (void)cdecl_abi;
+    return wc3_legacy_hle_override(dll, name, impl);
 }
 
 uint32_t wc3_legacy_arg32(const CPU *c, unsigned index)
@@ -129,9 +137,35 @@ static uint32_t invoke(const char *name, uint32_t arg)
     return c.eax;
 }
 
+static uint32_t invoke3(const char *name, uint32_t a0, uint32_t a1,
+                        uint32_t a2)
+{
+    void (*impl)(CPU *c) = find_impl(name);
+    if (!impl) {
+        printf("missing handler: %s\n", name);
+        return 0xFFFFFFFFu;
+    }
+    memset(g_args, 0, sizeof g_args);
+    g_args[0] = a0;
+    g_args[1] = a1;
+    g_args[2] = a2;
+    CPU c;
+    memset(&c, 0, sizeof c);
+    impl(&c);
+    return c.eax;
+}
+
 static uint32_t peek32(uint32_t addr) { return wc3_legacy_rd32g(addr); }
 static uint16_t peek16(uint32_t addr) { return wc3_legacy_rd16g(addr); }
 static uint8_t peek8(uint32_t addr) { return wc3_legacy_rd8g(addr); }
+
+static void put_wide(uint32_t addr, const uint16_t *text)
+{
+    for (uint32_t i = 0;; i++) {
+        wc3_legacy_wr16g(addr + i * 2u, text[i]);
+        if (!text[i]) break;
+    }
+}
 
 #define CHECK(condition, message)                                         \
     do {                                                                  \
@@ -144,11 +178,13 @@ static uint8_t peek8(uint32_t addr) { return wc3_legacy_rd8g(addr); }
 int main(void)
 {
     const int installed = wc3_hle_kernel32_system_install();
-    CHECK(installed == 6, "install count");
-    CHECK(g_row_count == 6u, "row count");
+    CHECK(installed == 8, "install count");
+    CHECK(g_row_count == 8u, "row count");
     CHECK(find_impl("GetVersion") != NULL, "GetVersion row");
     CHECK(find_impl("GetNativeSystemInfo") != NULL, "GetNativeSystemInfo row");
     CHECK(find_impl("GlobalMemoryStatus") != NULL, "GlobalMemoryStatus row");
+    CHECK(find_impl("GetModuleHandleW") != NULL, "GetModuleHandleW row");
+    CHECK(find_impl("MulDiv") != NULL, "MulDiv row");
     CHECK(strcmp(g_rows[0].dll, "KERNEL32.dll") == 0, "DLL name");
 
     CHECK(invoke("GetVersion", 0) == 0x0A280105u, "GetVersion");
@@ -230,6 +266,89 @@ int main(void)
         CHECK(peek8(startup + i) == 0u, "STARTUPINFOA zero");
     CHECK(peek8(startup + 68) == 0xAAu, "STARTUPINFOA tail untouched");
     CHECK(invoke("GetStartupInfoA", 0) == 0u, "NULL startup buffer");
+
+    CHECK((int32_t)invoke3("MulDiv", 10, 3, 2) == 15, "MulDiv exact");
+    CHECK((int32_t)invoke3("MulDiv", 1, 1, 2) == 1, "MulDiv half up");
+    CHECK((int32_t)invoke3("MulDiv", 1, 1, 3) == 0, "MulDiv down");
+    CHECK((int32_t)invoke3("MulDiv", 2, 1, 3) == 1, "MulDiv up");
+    CHECK((int32_t)invoke3("MulDiv", 1, 0, 2) == 0, "MulDiv zero product");
+    CHECK((int32_t)invoke3("MulDiv", (uint32_t)-1, 1, 2) == -1,
+          "MulDiv negative half");
+    CHECK((int32_t)invoke3("MulDiv", 1, 1, 0) == -1,
+          "MulDiv zero denominator");
+    CHECK((int32_t)invoke3("MulDiv", 0x7FFFFFFFu, 2, 1) == -1,
+          "MulDiv overflow");
+    CHECK((int32_t)invoke3("MulDiv", 0x80000000u, 1, 1) == INT32_MIN,
+          "MulDiv INT32_MIN");
+    CHECK((int32_t)invoke3("MulDiv", 0x7FFFFFFFu, 1, 1) == INT32_MAX,
+          "MulDiv INT32_MAX");
+
+    static const uint16_t war3[] =
+        { 'w', 'a', 'r', '3', '.', 'e', 'x', 'e', 0 };
+    static const uint16_t game[] =
+        { 'G', 'a', 'm', 'e', '.', 'd', 'l', 'l', 0 };
+    static const uint16_t game_path[] =
+        { 'C', ':', '\\', 'g', 'a', 'm', 'e', 's', '\\', 'G', 'a', 'm', 'e',
+          '.', 'D', 'L', 'L', 0 };
+    static const uint16_t storm[] =
+        { 'S', 't', 'o', 'r', 'm', '.', 'd', 'l', 'l', 0 };
+    static const uint16_t mss[] =
+        { 'm', 's', 's', '3', '2', '.', 'd', 'l', 'l', 0 };
+    static const uint16_t mssfast[] =
+        { 'm', 's', 's', 'f', 'a', 's', 't', '.', 'd', 'l', 'l', 0 };
+    static const uint16_t mp3dec[] =
+        { 'm', 'p', '3', 'd', 'e', 'c', '.', 'a', 's', 'i', 0 };
+    static const uint16_t ijl[] =
+        { 'i', 'j', 'l', '1', '5', '.', 'd', 'l', 'l', 0 };
+    static const uint16_t unknown[] =
+        { 'f', 'o', 'g', '.', 'd', 'l', 'l', 0 };
+    static const uint16_t empty[] = { 0 };
+
+    const uint32_t name_war3 = GUEST_BASE + 0xA00u;
+    const uint32_t name_game = GUEST_BASE + 0xA20u;
+    const uint32_t name_path = GUEST_BASE + 0xA40u;
+    const uint32_t name_storm = GUEST_BASE + 0xA80u;
+    const uint32_t name_mss = GUEST_BASE + 0xAA0u;
+    const uint32_t name_mssfast = GUEST_BASE + 0xAC0u;
+    const uint32_t name_mp3dec = GUEST_BASE + 0xAE0u;
+    const uint32_t name_ijl = GUEST_BASE + 0xB00u;
+    const uint32_t name_unknown = GUEST_BASE + 0xB20u;
+    const uint32_t name_empty = GUEST_BASE + 0xB40u;
+    put_wide(name_war3, war3);
+    put_wide(name_game, game);
+    put_wide(name_path, game_path);
+    put_wide(name_storm, storm);
+    put_wide(name_mss, mss);
+    put_wide(name_mssfast, mssfast);
+    put_wide(name_mp3dec, mp3dec);
+    put_wide(name_ijl, ijl);
+    put_wide(name_unknown, unknown);
+    put_wide(name_empty, empty);
+
+    CHECK(invoke("GetModuleHandleW", 0) == 0x00400000u,
+          "GetModuleHandleW NULL");
+    CHECK(invoke("GetModuleHandleW", name_war3) == 0x00400000u,
+          "GetModuleHandleW war3");
+    CHECK(invoke("GetModuleHandleW", name_game) == 0x6F000000u,
+          "GetModuleHandleW game");
+    CHECK(invoke("GetModuleHandleW", name_path) == 0x6F000000u,
+          "GetModuleHandleW path");
+    CHECK(invoke("GetModuleHandleW", name_storm) == 0x35000000u,
+          "GetModuleHandleW storm");
+    CHECK(invoke("GetModuleHandleW", name_mss) == 0x35100000u,
+          "GetModuleHandleW mss");
+    CHECK(invoke("GetModuleHandleW", name_mssfast) == 0x35200000u,
+          "GetModuleHandleW mssfast");
+    CHECK(invoke("GetModuleHandleW", name_mp3dec) == 0x35300000u,
+          "GetModuleHandleW mp3dec");
+    CHECK(invoke("GetModuleHandleW", name_ijl) == 0x60000000u,
+          "GetModuleHandleW ijl");
+    CHECK(invoke("GetModuleHandleW", name_unknown) == 0u,
+          "GetModuleHandleW unknown");
+    CHECK(invoke("GetModuleHandleW", name_empty) == 0u,
+          "GetModuleHandleW empty");
+    CHECK(invoke("GetModuleHandleW", 0xFFFFu) == 0u,
+          "GetModuleHandleW bad pointer");
 
     printf("kernel32 system OK (%d handlers)\n", installed);
     return 0;

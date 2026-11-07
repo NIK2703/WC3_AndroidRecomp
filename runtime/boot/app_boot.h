@@ -20,12 +20,15 @@ extern "C" {
 
 /*
  * Runs on a dedicated thread.  data_dir must contain war3.exe, Storm.dll,
- * game.dll, ijl15.dll, Mss32.dll and the four MPQs.  Returns a negative errno
- * before guest start; after the guest starts the function does not return
- * while the game is alive.
+ * game.dll, ijl15.dll, Mss32.dll and the four MPQs; it becomes the guest's
+ * working directory.  state_dir is the app-private directory for run.txt,
+ * audio dumps and other diagnostic state.  Returns a negative errno before
+ * guest start; after the guest starts the function does not return while the
+ * game is alive.
  */
-int wc3_app_boot_start(const char *data_dir, struct ANativeWindow *window,
-                       uint32_t width, uint32_t height);
+int wc3_app_boot_start(const char *data_dir, const char *state_dir,
+                       struct ANativeWindow *window, uint32_t width,
+                       uint32_t height);
 
 #ifdef __cplusplus
 }

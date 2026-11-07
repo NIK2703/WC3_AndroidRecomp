@@ -1,12 +1,19 @@
 package wc3.recomp;
 
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.Settings;
+import android.text.InputType;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
 
 import com.google.androidgamesdk.GameActivity;
 
@@ -39,7 +46,41 @@ public final class Wc3GameActivity extends GameActivity {
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        ensureSharedDataAccess();
+
+        // Visible-password commits every key instead of leaving a composing
+        // word in the IME strip.  The guest owns the real field and receives
+        // only forward/backspace edits through the native text bridge.
+        setImeEditorInfoFields(
+                InputType.TYPE_CLASS_TEXT
+                        | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
+                EditorInfo.IME_ACTION_DONE,
+                EditorInfo.IME_ACTION_DONE
+                        | EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                        | EditorInfo.IME_FLAG_NO_FULLSCREEN);
+
         installOverlaySurface();
+    }
+
+    /**
+     * The native host reads the licensed game files with POSIX calls from the
+     * shared {@code Warcraft 3} directory, so scoped-storage media permissions
+     * are not enough on API 30+.  The user grants All files access once; the
+     * native side falls back to the package directory until then.
+     */
+    private void ensureSharedDataAccess() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
+        if (Environment.isExternalStorageManager()) return;
+
+        final Intent appIntent = new Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:" + getPackageName()));
+        try {
+            startActivity(appIntent);
+        } catch (Exception ignored) {
+            startActivity(new Intent(
+                    Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+        }
     }
 
     private void installOverlaySurface() {

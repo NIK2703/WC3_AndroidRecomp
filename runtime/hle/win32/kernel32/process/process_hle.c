@@ -11,6 +11,11 @@
  * On Linux the main thread's TID is the process ID, and wc3_dispatch_init()
  * runs on that thread before any guest thread is created.  The two pseudo
  * handles keep their documented Win32 values; they are not real objects.
+ *
+ * SleepEx is an addition.  The old resolver left a guessed-arity stub that
+ * returned zero without sleeping, which made every guest wait a spin.  The
+ * target has no APC queue yet, so an alertable wait sleeps for the full
+ * timeout and returns zero; an INFINITE wait really blocks.
  */
 #include "process_hle.h"
 
@@ -60,6 +65,26 @@ static void h_is_debugger_present(CPU *c)
     c->eax = 0;
 }
 
+static void h_sleep_ex(CPU *c)
+{
+    const uint32_t ms = wc3_legacy_arg32(c, 0);
+
+    if (ms == 0u) {
+        g_thread->yield(g_thread->ctx);
+        c->eax = 0;
+        return;
+    }
+    if (ms == 0xFFFFFFFFu) {
+        /* No APC queue exists, so an INFINITE alertable wait can only end when
+         * the process is torn down.  Sleep in bounded chunks so a virtual-time
+         * platform does not have to represent a 584-year timestep. */
+        for (;;)
+            (void)g_thread->sleep_ns(g_thread->ctx, 3600ull * 1000000000ull);
+    }
+    (void)g_thread->sleep_ns(g_thread->ctx, (uint64_t)ms * 1000000ull);
+    c->eax = 0;
+}
+
 typedef struct ProcessOverride {
     const char *dll;
     const char *name;
@@ -75,10 +100,21 @@ static const ProcessOverride g_overrides[] = {
     { "KERNEL32.dll", "IsDebuggerPresent", h_is_debugger_present },
 };
 
+typedef struct ProcessAddition {
+    const char *name;
+    uint16_t argc;
+    void (*impl)(CPU *c);
+} ProcessAddition;
+
+static const ProcessAddition g_additions[] = {
+    { "SleepEx", 2, h_sleep_ex },
+};
+
 int wc3_hle_kernel32_process_install(void)
 {
     const Wc3Platform *platform = wc3_platform();
-    if (!platform || !platform->thread.self || !platform->thread.id)
+    if (!platform || !platform->thread.self || !platform->thread.id ||
+        !platform->thread.yield || !platform->thread.sleep_ns)
         return -1;
     g_thread = &platform->thread;
     g_process_id = (uint32_t)g_thread->id(g_thread->ctx,
@@ -89,5 +125,12 @@ int wc3_hle_kernel32_process_install(void)
                                     g_overrides[i].impl) != 0)
             return -1;
     }
-    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+    for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
+        if (wc3_legacy_hle_add("KERNEL32.dll", g_additions[i].name,
+                               (int)g_additions[i].argc, 1,
+                               g_additions[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0] +
+                 sizeof g_additions / sizeof g_additions[0]);
 }
