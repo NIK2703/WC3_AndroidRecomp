@@ -22,12 +22,8 @@ FEX в готовой сборке: x86-32 код переводится в C н
 
 * Warcraft III: The Frozen Throne **1.27.1.7085**, PE32/x86, MSVC 12.0.
 * Android 8+ (API 26), arm64-v8a, Vulkan.
-* Продукт — `libwc3gameactivity.so`. **Рекомпиляция только под Android**
-  (ADR-026/027): под Windows не собирается ни один рекомпилированный бинарь.
-  Исключение — верификационный `--target headless` (`wc3_headless`, CI-хост,
-  не APK, не продукт), дающий T1 исполняемый DUT (`docs/VERIFICATION.md` V4.7).
-  Эталон — оригинальная лицензионная игра 1.27.1.7085 на Windows и её
-  зафиксированные захваты (difftest, быстрый цикл без adb).
+* Продукт — `libwc3gameactivity.so`. **Рекомпиляция под Android**
+  (ADR-026/027).
 * Guest: `war3.exe` `0x00400000`, `game.dll` `0x6F000000`, `Storm.dll`
   `0x35000000`, `Mss32.dll`/`Mssfast`/`Mp3dec` `0x351..0x35300000`,
   `ijl15.dll` `0x60000000` — фиксированный Android-layout, `corpus_fixed`.
@@ -38,11 +34,7 @@ FEX в готовой сборке: x86-32 код переводится в C н
   device; только один бэкенд создаёт Vulkan instance/device.
 * `VulkanDriverApi` (`system` | `turnip`): adrenotools/Turnip — разрешённый и
   документированный путь выбора Vulkan ICD, не подмена D3D-провайдера.
-* Запрещены OpenGL/GLES, `native_vk`, `hle_gl`, `hle_d3d9_vk`, `D9VkApi`,
-  legacy `hle_d3d9.cpp`/`hle_d3d9_dxvk.cpp`, самописный Vulkan-транслятор,
-  `win32_d3d9`, внешние `d3d9.dll`/`d3d8.dll`/PATH.
 * LAN/Battle.net — out of scope.
-* 1.26/D3D8 — исторический legacy-путь, не активная цель.
 
 ## Runtime
 
@@ -88,19 +80,6 @@ FEX в готовой сборке: x86-32 код переводится в C н
   отсутствует. Release hygiene — на нашем коде, DXVK/third_party по allowlist.
 * В горячем пути нет `if (debug)`, лишних аллокаций, копирований, повторных
   lookup и debug env. HLE-таблицы compile-time; registry immutable.
-
-## Документы
-
-| Путь | Назначение |
-|---|---|
-| `docs/ARCHITECTURE_1.27B.md` | Архитектура rev 2: as-built → target, ADR, риски |
-| `docs/THREAD_AUDIT.md` | Аудит thread/sync с as-built evidence и гейтами |
-| `docs/DXVK_THREADS.md` | Dual-DXVK, symbol isolation, ICD, потоки vendor-кода |
-| `PLAN_REFACTOR_1.27B.md` | План миграции и acceptance checks |
-| `AGENTS.md` | Обязательные правила проекта |
-| `reports/CRITIQUE_FILTER_THREADING.md` | Отфильтрованная критика (история решения по потокам) |
-| `reports/REFACTOR_PLAN_CRITIQUE_2.md`, `..._FOLLOWUP.md` | critique-pass'ы |
-| `E:\projects\warcraft3_recomp\PROGRESS.md` | As-built состояние порта (включая историю исправления) |
 
 ## Правовая рамка
 
