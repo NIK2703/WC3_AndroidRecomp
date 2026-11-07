@@ -134,17 +134,27 @@ static int is_code_target(Pe *pe, uint32_t va)
     return pe_code_section_for_va(pe, va) >= 0;
 }
 
-static int code_run_at(Pe *pe, const uint8_t *buf, uint32_t i, uint32_t rawsize)
+static int code_run_at(Pe *pe, const uint8_t *buf, uint32_t i,
+                       uint32_t rawsize, int *zero_neighbor)
 {
     int run = 1;
     uint32_t k;
+    *zero_neighbor = 0;
     if (i + 4 > rawsize) return 0;
     for (k = 4; i >= k; k += 4) {
-        if (!is_code_target(pe, pe_rd32(buf + i - k))) break;
+        uint32_t v = pe_rd32(buf + i - k);
+        if (!is_code_target(pe, v)) {
+            if (v == 0) *zero_neighbor = 1;
+            break;
+        }
         run++;
     }
     for (k = 4; i + k + 4 <= rawsize; k += 4) {
-        if (!is_code_target(pe, pe_rd32(buf + i + k))) break;
+        uint32_t v = pe_rd32(buf + i + k);
+        if (!is_code_target(pe, v)) {
+            if (v == 0) *zero_neighbor = 1;
+            break;
+        }
         run++;
     }
     return run;
@@ -222,15 +232,20 @@ static int epilogue_or_fpu_entry(Pe *pe, long long off)
  * up a frame.  A target is accepted only when the preceding instruction is a
  * complete one-byte `ret` (C3) or `ret imm16` (C2 xx xx). */
 static int unaligned_address_taken_start(Pe *pe, long long off,
-                                         const PeSec *sec, int source_run)
+                                         const PeSec *sec, int source_run,
+                                         int zero_neighbor)
 {
     uint8_t first, before[3];
+    int max_run = 7;
     if (sec->chars & 0x20000000u) return 0;
     if (off < 1) return 0;
-    /* Large runs are jump tables of internal case blocks.  A small run (up
-     * to seven entries) can be a real callback table, as in ijl15
-     * 0x60050C70 and Mss32 0x3514E628. */
-    if (source_run < 1 || source_run > 7) return 0;
+    /* Large runs are usually jump tables of internal case blocks.  A
+     * zero-delimited table in read-only data is a function-pointer table
+     * instead: war3 0x45C800 is the CRT's 87-entry initializer list, whose
+     * first entry 0x404599 follows a ret without alignment padding.  Keep
+     * writable-data runs small, where Mssfast/Mp3dec switch tables live. */
+    if ((sec->chars & 0x40000000u) && zero_neighbor) max_run = 256;
+    if (source_run < 1 || source_run > max_run) return 0;
     if (!pe_read_at(pe, off, &first, 1) || !plausible_start(first)) return 0;
     if (epilogue_or_fpu_entry(pe, off)) return 0;
     if (frame_dependent_start(pe, off)) return 0;
@@ -369,7 +384,7 @@ static int scan_section(Pe *pe, const PeSec *sec, U32Vec *out, const U32Vec *kno
         uint32_t v = pe_rd32(buf + i);
         uint8_t before[6], first;
         long long off;
-        int jmp_tail = 0;
+        int jmp_tail = 0, zero_neighbor = 0;
         int source_exec = (sec->chars & PE_SCN_MEM_EXECUTE) != 0;
         if (!v) continue;
         if (!is_code_target(pe, v)) continue;
@@ -408,8 +423,10 @@ static int scan_section(Pe *pe, const PeSec *sec, U32Vec *out, const U32Vec *kno
             jmp_tail = before[0] == 0xFF && before[1] == 0x25;
         if (!jmp_tail) {
             if ((v & 15u) != 0) {
-                if (!unaligned_address_taken_start(pe, off, sec,
-                        code_run_at(pe, buf, i, sec->rawsize)))
+                int run = code_run_at(pe, buf, i, sec->rawsize,
+                                      &zero_neighbor);
+                if (!unaligned_address_taken_start(pe, off, sec, run,
+                                                   zero_neighbor))
                     continue;
             } else {
                 if (source_exec && text_table_base(buf, i)) continue;
