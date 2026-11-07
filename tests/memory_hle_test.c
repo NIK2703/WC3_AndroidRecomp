@@ -233,6 +233,15 @@ int main(void)
     CHECK(call("GetProcessHeaps", 1, heap_arr, 0, 0) == 1, "GetProcessHeaps");
     CHECK(wc3_legacy_rd32g(heap_arr) == 0x00090000u, "GetProcessHeaps value");
 
+    CHECK(call("VirtualLock", heap_arr, 16, 0, 0) == 1, "VirtualLock");
+    CHECK(call("VirtualLock", heap_arr, 0, 0, 0) == 1, "VirtualLock zero");
+    CHECK(call("VirtualLock", 0, 16, 0, 0) == 0, "VirtualLock bad base");
+    CHECK(call("VirtualLock", GUEST_BASE + GUEST_SIZE - 4u, 16, 0, 0) == 0,
+          "VirtualLock short range");
+    CHECK(call("VirtualUnlock", heap_arr, 16, 0, 0) == 1, "VirtualUnlock");
+    CHECK(call("FlushInstructionCache", 0xFFFFFFFFu, heap_arr, 16, 0) == 1,
+          "FlushInstructionCache");
+
     if (g_failed) return 1;
     printf("hle memory OK (%d handlers)\n", installed);
     return 0;

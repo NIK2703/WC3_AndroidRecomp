@@ -7,27 +7,45 @@
  * the dispatcher are deliberately not linked yet: the shell reports the exact
  * missing stage instead of pretending to run the game.
  */
+#include <android/asset_manager.h>
 #include <android/log.h>
 #include <android/native_window.h>
+#include <android/native_window_jni.h>
 #include <jni.h>
 
+#include <errno.h>
 #include <game-activity/GameActivity.h>
 #include <game-activity/native_app_glue/android_native_app_glue.h>
 
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "app_boot.h"
+#include "controls.h"
 #include "guest_layout.h"
 #include "guest_memory.h"
+#include "haptics_android.h"
+#include "input_adapter.h"
+#include "input_ring.h"
+#include "input_wake.h"
 #include "legacy_shim.h"
+#include "overlay.h"
+#include "overlay_android.h"
 #include "pe.h"
 #include "platform.h"
 #include "platform_android.h"
+#include "wc3_debug.h"
+
+#if WC3_WITH_LEGACY_BOOT
+#include "overlay_actions_legacy.h"
+#endif
 
 #ifndef WC3_DEBUG
 #define WC3_DEBUG 0
