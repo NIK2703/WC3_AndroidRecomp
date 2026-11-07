@@ -8,9 +8,47 @@
 # Set WC3_WITH_LEGACY_BOOT=OFF for configurations that only build platform
 # targets; the product path in this milestone needs the corpus.
 
-if(NOT EXISTS "${WC3_LEGACY_ROOT}/build/android/boot_probe/probe_list.h")
-    message(FATAL_ERROR
-        "legacy corpus manifest missing: ${WC3_LEGACY_ROOT}/build/android/boot_probe/probe_list.h")
+if(WC3_RELIFTED_CORPUS_ROOT)
+    get_filename_component(WC3_RELIFTED_ROOT_ABS "${WC3_RELIFTED_CORPUS_ROOT}"
+                           ABSOLUTE BASE_DIR "${WC3_ROOT}")
+    set(WC3_BOOT_LIST "${WC3_RELIFTED_ROOT_ABS}/wc3_all_list.h")
+    set(WC3_RELIFTED_MANIFEST "${WC3_RELIFTED_ROOT_ABS}/corpus_manifest.json")
+    if(NOT EXISTS "${WC3_BOOT_LIST}")
+        message(FATAL_ERROR "relifted corpus list missing: ${WC3_BOOT_LIST}")
+    endif()
+    if(NOT EXISTS "${WC3_RELIFTED_MANIFEST}")
+        message(FATAL_ERROR "relifted corpus manifest missing: ${WC3_RELIFTED_MANIFEST}")
+    endif()
+    file(READ "${WC3_RELIFTED_MANIFEST}" _wc3_manifest)
+    string(JSON _wc3_verdict GET "${_wc3_manifest}" verdict)
+    string(JSON _wc3_merged_sha GET "${_wc3_manifest}" merged sha256)
+    string(JSON _wc3_merged_entries GET "${_wc3_manifest}" merged entries)
+    if(NOT _wc3_verdict STREQUAL "pass")
+        message(FATAL_ERROR "relifted corpus manifest verdict is ${_wc3_verdict}, not pass")
+    endif()
+    file(SHA256 "${WC3_BOOT_LIST}" _wc3_list_sha)
+    if(NOT _wc3_list_sha STREQUAL _wc3_merged_sha)
+        message(FATAL_ERROR
+            "relifted list hash ${_wc3_list_sha} does not match manifest ${_wc3_merged_sha}")
+    endif()
+    string(JSON _wc3_npref LENGTH "${_wc3_manifest}" merged prefixes)
+    set(WC3_RELIFTED_PREFIXES)
+    if(_wc3_npref GREATER 0)
+        math(EXPR _wc3_last "${_wc3_npref} - 1")
+        foreach(_i RANGE 0 ${_wc3_last})
+            string(JSON _p GET "${_wc3_manifest}" merged prefixes ${_i})
+            list(APPEND WC3_RELIFTED_PREFIXES "${_p}")
+        endforeach()
+    endif()
+    if(NOT WC3_RELIFTED_PREFIXES)
+        message(FATAL_ERROR "relifted corpus manifest has no dispatch prefixes")
+    endif()
+    message(STATUS "relifted corpus: ${_wc3_merged_entries} definitions, list sha256 ${_wc3_list_sha}")
+else()
+    set(WC3_BOOT_LIST "${WC3_LEGACY_ROOT}/build/android/boot_probe/probe_list.h")
+    if(NOT EXISTS "${WC3_BOOT_LIST}")
+        message(FATAL_ERROR "legacy corpus manifest missing: ${WC3_BOOT_LIST}")
+    endif()
 endif()
 if(NOT EXISTS "${WC3_LEGACY_ROOT}/build/android/libsoftfloat.a")
     message(FATAL_ERROR
@@ -23,16 +61,29 @@ set(WC3_BOOT_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/legacy_boot_generated")
 set(WC3_BOOT_DISPATCH_LIST "${WC3_BOOT_GEN_DIR}/boot_dispatch_list.h")
 file(MAKE_DIRECTORY "${WC3_BOOT_GEN_DIR}")
 
+set(_wc3_prefix_args)
+set(_wc3_expect_args)
+if(WC3_RELIFTED_CORPUS_ROOT)
+    foreach(_p IN LISTS WC3_RELIFTED_PREFIXES)
+        list(APPEND _wc3_prefix_args --prefix "${_p}")
+    endforeach()
+    list(APPEND _wc3_expect_args --expect-count "${_wc3_merged_entries}")
+else()
+    list(APPEND _wc3_prefix_args
+         --prefix 004 --prefix 350 --prefix 351 --prefix 352
+         --prefix 353 --prefix 600 --prefix 6F)
+endif()
+
 add_custom_command(
     OUTPUT "${WC3_BOOT_DISPATCH_LIST}"
     COMMAND "${Python3_EXECUTABLE}" "${WC3_ROOT}/tools/gen_boot_dispatch.py"
-            --list "${WC3_LEGACY_ROOT}/build/android/boot_probe/probe_list.h"
+            --list "${WC3_BOOT_LIST}"
             --out "${WC3_BOOT_DISPATCH_LIST}"
-            --prefix 004 --prefix 350 --prefix 351 --prefix 352
-            --prefix 353 --prefix 600 --prefix 6F
+            ${_wc3_prefix_args}
+            ${_wc3_expect_args}
     DEPENDS
         "${WC3_ROOT}/tools/gen_boot_dispatch.py"
-        "${WC3_LEGACY_ROOT}/build/android/boot_probe/probe_list.h"
+        "${WC3_BOOT_LIST}"
     COMMENT "Generating boot dispatcher VA list"
     VERBATIM)
 add_custom_target(wc3_boot_dispatch_gen DEPENDS "${WC3_BOOT_DISPATCH_LIST}")
@@ -45,7 +96,17 @@ add_dependencies(wc3_boot wc3_boot_dispatch_gen)
 target_include_directories(wc3_boot PRIVATE
     "${WC3_BOOT_GEN_DIR}"
     "${WC3_ROOT}/runtime/hle"
+    "${WC3_ROOT}/runtime/hle/msvcr80/heap"
+    "${WC3_ROOT}/runtime/hle/msvcr80/math"
+    "${WC3_ROOT}/runtime/hle/msvcr80/rand"
+    "${WC3_ROOT}/runtime/hle/msvcr80/string"
+    "${WC3_ROOT}/runtime/hle/msvcr80/time"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/memory"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/process"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/string"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/time"
+    "${WC3_ROOT}/runtime/hle/win32/user32/display"
+    "${WC3_ROOT}/runtime/hle/win32/user32/window"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/third_party/softfloat/source/include"
@@ -92,10 +153,31 @@ set_target_properties(wc3_legacy_shim PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # services only through Wc3Platform, and registration over the as-built table
 # through the shim.  The quarantine file itself is never edited.
 add_library(wc3_hle_modules STATIC
-    "${WC3_ROOT}/runtime/hle/win32/kernel32/time/time_hle.c")
+    "${WC3_ROOT}/runtime/hle/msvcr80/heap/heap_hle.c"
+    "${WC3_ROOT}/runtime/hle/msvcr80/math/math_hle.c"
+    "${WC3_ROOT}/runtime/hle/msvcr80/rand/rand_hle.c"
+    "${WC3_ROOT}/runtime/hle/msvcr80/string/string_hle.c"
+    "${WC3_ROOT}/runtime/hle/msvcr80/time/crt_time_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/memory/memory_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/process/process_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/process/system_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/string/string_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/time/time_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/user32/display/display_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/user32/window/window_hle.c")
 target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle"
+    "${WC3_ROOT}/runtime/hle/msvcr80/heap"
+    "${WC3_ROOT}/runtime/hle/msvcr80/math"
+    "${WC3_ROOT}/runtime/hle/msvcr80/rand"
+    "${WC3_ROOT}/runtime/hle/msvcr80/string"
+    "${WC3_ROOT}/runtime/hle/msvcr80/time"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/memory"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/process"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/string"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/time"
+    "${WC3_ROOT}/runtime/hle/win32/user32/display"
+    "${WC3_ROOT}/runtime/hle/win32/user32/window"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/runtime/platform"
@@ -178,20 +260,26 @@ target_compile_options(wc3_dxvk_entry PRIVATE
     -D_FORTIFY_SOURCE=0)
 set_target_properties(wc3_dxvk_entry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# --- pinned lifted corpus and the thin D3D9 -> DXVK bridge -----------------
-set(WC3_CORPUS_DIRS
-    war3 war3_closure storm_a35
-    game game_extra game_vt game_vtc
-    ijl mss_a35 mssfast_a35 mp3dec_a35)
+# --- lifted corpus and the thin D3D9 -> DXVK bridge ------------------------
 set(WC3_CORPUS_OBJECTS)
-foreach(dir IN LISTS WC3_CORPUS_DIRS)
-    file(GLOB _chunk_objects
-        "${WC3_LEGACY_ROOT}/build/android/chunks/${dir}/*.o")
-    list(APPEND WC3_CORPUS_OBJECTS ${_chunk_objects})
-endforeach()
-list(APPEND WC3_CORPUS_OBJECTS
-    "${WC3_LEGACY_ROOT}/build/android/boot_probe/war3_27_extra2.o"
-    "${WC3_LEGACY_ROOT}/build/android/boot_probe/storm_27_extra2_a35.o")
+set(WC3_CORPUS_LIBS)
+if(WC3_RELIFTED_CORPUS_ROOT)
+    include("${WC3_ROOT}/cmake/Wc3ReliftedCorpus.cmake")
+    list(APPEND WC3_CORPUS_LIBS wc3_corpus_relifted)
+else()
+    set(WC3_CORPUS_DIRS
+        war3 war3_closure storm_a35
+        game game_extra game_vt game_vtc
+        ijl mss_a35 mssfast_a35 mp3dec_a35)
+    foreach(dir IN LISTS WC3_CORPUS_DIRS)
+        file(GLOB _chunk_objects
+            "${WC3_LEGACY_ROOT}/build/android/chunks/${dir}/*.o")
+        list(APPEND WC3_CORPUS_OBJECTS ${_chunk_objects})
+    endforeach()
+    list(APPEND WC3_CORPUS_OBJECTS
+        "${WC3_LEGACY_ROOT}/build/android/boot_probe/war3_27_extra2.o"
+        "${WC3_LEGACY_ROOT}/build/android/boot_probe/storm_27_extra2_a35.o")
+endif()
 
 set(WC3_D3D9_OBJECTS
     "${WC3_LEGACY_ROOT}/build/android/boot_probe/hle_d3d9_thin.o"
@@ -218,6 +306,7 @@ target_link_libraries(wc3gameactivity PRIVATE
     wc3_hle_modules
     wc3_legacy_shim
     wc3_legacy_boot
+    ${WC3_CORPUS_LIBS}
     wc3_dxvk_entry
     "${WC3_LEGACY_ROOT}/build/android/libsoftfloat.a"
     -Wl,--whole-archive

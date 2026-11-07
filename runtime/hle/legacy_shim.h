@@ -48,10 +48,30 @@ void     wc3_legacy_wr16g(uint32_t addr, uint16_t value);
 void     wc3_legacy_wr32g(uint32_t addr, uint32_t value);
 uint32_t wc3_legacy_arg32(const CPU *cpu, unsigned index);
 
+/* Guest heap boundary (kernel32/memory).  The as-built heap already owns a
+ * block header before every payload; these wrappers keep the header format in
+ * one place instead of leaking `addr - 8` into target modules. */
+uint32_t wc3_legacy_guest_alloc(uint32_t size);
+uint32_t wc3_legacy_guest_alloc0(uint32_t size);
+void     wc3_legacy_guest_free(uint32_t addr);
+uint32_t wc3_legacy_guest_size(uint32_t addr);
+void     wc3_legacy_guest_copy(uint32_t dst, uint32_t src, uint32_t size);
+void     wc3_legacy_guest_move(uint32_t dst, uint32_t src, uint32_t size);
+void     wc3_legacy_guest_fill(uint32_t dst, uint8_t value, uint32_t size);
+void     wc3_legacy_guest_zero(uint32_t dst, uint32_t size);
+
 /* app_boot.c: device-relative display-mode selection. */
 void wc3_legacy_set_screen_size(uint32_t width, uint32_t height);
+int  wc3_legacy_current_display_mode(uint32_t *width, uint32_t *height);
 int  wc3_legacy_default_display_mode(uint32_t *width, uint32_t *height);
 int  wc3_legacy_select_display_mode(uint32_t width, uint32_t height);
+
+/* The as-built mode table, for USER32 display enumeration.  `display_mode_at`
+ * returns the width/height of one entry; `display_mode_supported` says whether
+ * a pair is in the same table; refresh is the fixed panel rate the guest sees. */
+int      display_mode_at(uint32_t index, uint32_t *width, uint32_t *height);
+int      display_mode_supported(uint32_t width, uint32_t height);
+uint32_t display_refresh_hz(void);
 
 /* host_shell.c: the virtual cursor consumed by the guest. */
 void wc3_legacy_mouse_move(float nx, float ny);

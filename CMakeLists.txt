@@ -30,12 +30,19 @@ set(WC3_LEGACY_ROOT "${WC3_UPSTREAM_ROOT}" CACHE PATH
     "Read-only legacy tree (pinned upstream.path, rev ${WC3_UPSTREAM_REV})")
 message(STATUS "pinned upstream: ${WC3_LEGACY_ROOT} @ ${WC3_UPSTREAM_REV}")
 
+# The boot link graph can consume either the pinned legacy corpus or the
+# relifted multi-module corpus produced by corpusclosure.  The relifted root
+# contains corpus_manifest.json and wc3_all_list.h; see cmake/Wc3ReliftedCorpus.cmake.
+set(WC3_RELIFTED_CORPUS_ROOT "" CACHE PATH
+    "Generated multi-module corpus root (e.g. build/corpus-full); empty uses the legacy corpus")
+
 # This default was computed but never used before, so a platform-only build
-# without the pinned corpus failed instead of skipping the legacy link graph.
-if(NOT EXISTS "${WC3_LEGACY_ROOT}/build/android/boot_probe/probe_list.h")
-    set(WC3_WITH_LEGACY_BOOT_DEFAULT OFF)
-else()
+# without the pinned corpus failed instead of skipping the boot link graph.
+if(WC3_RELIFTED_CORPUS_ROOT OR
+   EXISTS "${WC3_LEGACY_ROOT}/build/android/boot_probe/probe_list.h")
     set(WC3_WITH_LEGACY_BOOT_DEFAULT ON)
+else()
+    set(WC3_WITH_LEGACY_BOOT_DEFAULT OFF)
 endif()
 
 option(WC3_BUILD_PLATFORM_TEST "Build the arm64 device platform test" ON)
@@ -50,6 +57,7 @@ else()
 endif()
 
 set(WC3_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+include("${WC3_ROOT}/cmake/Wc3CompilerCache.cmake")
 set(WC3_INCLUDES
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"

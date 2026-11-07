@@ -115,6 +115,16 @@ P0-1 имеет статус `specified`; G-14/G-15 — диагностика, 
 * В горячем пути нет `if (debug)`, лишних аллокаций, копирований, повторных
   lookup и runtime-проверок ради диагностики.
 * HLE-таблицы прямые/compile-time; registry immutable после bootstrap.
+* Все C/C++ компиляции идут через `ccache` (BP-12). CMake-путь
+  (`cmake/Wc3CompilerCache.cmake`) выставляет compiler launcher; host T0,
+  lift-инструменты, boot probe и platform test используют
+  `tools/run_tests.py`/`tools/ccache.ps1`. Каноническая Android-сборка
+  (`tools/android/build_app.ps1`) задаёт `WC3_USE_CCACHE=ON` и
+  `WC3_REQUIRE_CCACHE=ON`, поэтому отсутствие ccache — ошибка, а не тихий
+  обход. Прямой вызов gcc/clang в сборочных путях без launcher запрещён;
+  одношаговый compile+link разбивается на `-c` и link, иначе ccache не
+  кэширует вызов. На Windows `tools/ccache_wrapper.py` нормализует путь
+  компилятора для MSYS2 ccache.
 * Оптимизации желательно принимать перемешанной серией A/B (PM-19) при
   зелёном G-10 (PM-1…PM-24): бюджеты без замеров, привязанных к артефакту,
   не объявлять; статические числа снимать по всем модулям и взвешивать

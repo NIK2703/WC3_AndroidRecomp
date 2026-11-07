@@ -6,12 +6,24 @@
  * check.  It deliberately has no dependency on the old host tree: the only
  * generated input is boot_dispatch_list.h, which is a list of guest VAs.
  *
- * The boot list contains war3.exe and Storm.dll only.  game.dll is the next
- * corpus round; until it is linked, an unknown target is fatal instead of a
+ * The boot list is generated from the active corpus manifest: the legacy
+ * probe list in transitional mode, or the merged multi-module list when
+ * WC3_RELIFTED_CORPUS_ROOT is set.  An unknown target is fatal instead of a
  * fabricated return value.
  */
 #include "legacy_shim.h"
+#include "crt_string_hle.h"
+#include "crt_time_hle.h"
+#include "display_hle.h"
+#include "heap_hle.h"
+#include "math_hle.h"
+#include "memory_hle.h"
+#include "process_hle.h"
+#include "rand_hle.h"
+#include "string_hle.h"
+#include "system_hle.h"
 #include "time_hle.h"
+#include "window_hle.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,10 +58,25 @@ void wc3_dispatch_init(void)
 {
     /* M5 order H6.2: the first target HLE module replaces its as-built rows
      * before the dispatcher becomes visible to the guest.  A missing row is a
-     * startup configuration error, not a fallback to the quarantined handler. */
-    if (wc3_hle_kernel32_time_install() < 0) {
+     * startup configuration error, not a fallback to the quarantined handler.
+     * The CRT heap subset is installed here because it shares the guest heap;
+     * the math slice owns the x87/SSE2 return conventions, and the time slice
+     * reads both clocks through Wc3TimeApi.  The rest of msvcr80 remains
+     * quarantined for its later H6.2 step. */
+    if (wc3_hle_kernel32_time_install() < 0 ||
+        wc3_hle_kernel32_process_install() < 0 ||
+        wc3_hle_kernel32_system_install() < 0 ||
+        wc3_hle_kernel32_memory_install() < 0 ||
+        wc3_hle_kernel32_string_install() < 0 ||
+        user32_display_install() < 0 ||
+        wc3_hle_user32_window_install() < 0 ||
+        wc3_hle_msvcr80_heap_install() < 0 ||
+        wc3_hle_msvcr80_math_install() < 0 ||
+        wc3_hle_msvcr80_rand_install() < 0 ||
+        wc3_hle_msvcr80_string_install() < 0 ||
+        wc3_hle_msvcr80_time_install() < 0) {
 #if WC3_DEBUG
-        fprintf(stderr, "[hle] kernel32/time module install failed\n");
+        fprintf(stderr, "[hle] kernel32 time/process/system/memory/string, user32 display/window, or CRT heap/math/rand/string/time install failed\n");
 #endif
         abort();
     }

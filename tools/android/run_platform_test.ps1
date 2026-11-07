@@ -7,11 +7,17 @@
 param(
     [switch]$Run,
     [string]$Serial = '',
-    [string]$PeDir = ''
+    [string]$PeDir = '',
+    [string]$Ccache = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+. (Join-Path $root 'tools\ccache.ps1')
+$ccache = Get-Wc3Ccache -Explicit $Ccache
+if (-not $ccache) {
+    Write-Warning 'ccache not found; platform test will build without a compiler cache'
+}
 
 function Get-AndroidSdk {
     $candidates = @()
@@ -67,33 +73,56 @@ $outDir = Join-Path $root 'build\android_platform'
 New-Item -ItemType Directory -Force $outDir | Out-Null
 $binary = Join-Path $outDir 'wc3_platform_test'
 
-$clangArgs = @(
+$commonArgs = @(
     '--target=aarch64-linux-android26',
     '-std=c11',
     '-O2',
     '-fPIE',
-    '-pie',
     '-Wall',
     '-Wextra',
     '-I' + (Join-Path $root 'runtime\cpu'),
     '-I' + (Join-Path $root 'runtime\guest'),
     '-I' + (Join-Path $root 'runtime\platform'),
     '-I' + (Join-Path $root 'runtime\platform\android'),
-    '-I' + (Join-Path $root 'third_party\softfloat\source\include'),
+    '-I' + (Join-Path $root 'third_party\softfloat\source\include')
+)
+$sources = @(
     (Join-Path $root 'tests\platform_android_test.c'),
     (Join-Path $root 'runtime\platform\android\platform_android.c'),
     (Join-Path $root 'runtime\platform\platform.c'),
     (Join-Path $root 'runtime\guest\guest_memory.c'),
-    (Join-Path $root 'runtime\guest\pe.c'),
-    '-landroid',
-    '-llog',
-    '-laaudio',
-    '-o', $binary
+    (Join-Path $root 'runtime\guest\pe.c')
 )
+$linkArgs = @('-pie', '-landroid', '-llog', '-laaudio')
+$objDir = Join-Path $outDir 'obj'
+New-Item -ItemType Directory -Force $objDir | Out-Null
+function Invoke-Wc3Compiler {
+    param([string[]]$Arguments)
+    if ($ccache) {
+        & $ccache $ndk.Clang.Replace('\', '/') @Arguments 2>&1 |
+            ForEach-Object { Write-Host $_ }
+    } else {
+        & $ndk.Clang @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+    }
+}
 Write-Host "[platform] ndk   $($ndk.Root)"
 Write-Host "[platform] build $binary"
 $ErrorActionPreference = 'Continue'
-& $ndk.Clang @clangArgs 2>&1 | ForEach-Object { Write-Host $_ }
+$objects = @()
+foreach ($src in $sources) {
+    $obj = Join-Path $objDir `
+        ([IO.Path]::GetFileNameWithoutExtension($src) + '.o')
+    Invoke-Wc3Compiler ($commonArgs + @('-c', $src, '-o', $obj))
+    if ($LASTEXITCODE -ne 0) {
+        $ErrorActionPreference = 'Stop'
+        Write-Host "[platform] build failed ($LASTEXITCODE)"
+        exit 1
+    }
+    $objects += $obj
+}
+# ccache cannot cache a compile+link invocation, so link the objects
+# separately; the compile stage above remains cacheable (BP-12).
+Invoke-Wc3Compiler ($commonArgs + $objects + $linkArgs + @('-o', $binary))
 $rc = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 if ($rc -ne 0) {

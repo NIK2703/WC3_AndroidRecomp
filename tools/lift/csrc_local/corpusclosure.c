@@ -51,6 +51,12 @@ typedef struct {
     char path[DIR_MAX_PATH];
     char sha[65];
     char report[DIR_MAX_PATH];
+    char seed_c[DIR_MAX_PATH];
+    char closed_c[DIR_MAX_PATH];
+    char list_h[DIR_MAX_PATH];
+    char seed_sha[65];
+    char closed_sha[65];
+    char list_sha[65];
     int present;
     int verdict_pass;
     int seed_entries;
@@ -74,6 +80,16 @@ typedef struct {
     char corpus_hash[DIR_MAX_PATH];
     char layout_file[DIR_MAX_PATH];
     char report[DIR_MAX_PATH];
+    char merged_list[DIR_MAX_PATH];
+    char merged_funcs[DIR_MAX_PATH];
+    char manifest[DIR_MAX_PATH];
+    char merged_sha[65];
+    char prefixes[32][8];
+    int nprefix;
+    int merged_entries;
+    int merged_dups;
+    int merged_ok;
+    int merge_only;
     long max_functions;
     Module mod[MAX_MODULES];
     int nmod;
@@ -152,6 +168,42 @@ static int json_string(const char *t, const char *key, char *out, size_t cap)
     }
     out[n] = 0;
     return 0;
+}
+
+static int is_hex8(const char *p)
+{
+    int i;
+    for (i = 0; i < 8; i++)
+        if (!isxdigit((unsigned char)p[i])) return 0;
+    return p[8] == ')';
+}
+
+/* Count X(XXXXXXXX) entries in a list header and collect the distinct 3-hex
+ * image prefixes.  This is the same shape gen_boot_dispatch.py consumes, so a
+ * malformed list is rejected here instead of producing a partial dispatcher. */
+static int scan_list(const char *path, char prefixes[][8], int *nprefix)
+{
+    char *t = read_text(path);
+    const char *p;
+    int count = 0;
+    if (!t) return -1;
+    *nprefix = 0;
+    for (p = t; (p = strstr(p, "X(")) != NULL; p += 2) {
+        char pre[4];
+        int i, seen = 0;
+        if (!is_hex8(p + 2)) continue;
+        count++;
+        pre[0] = (char)toupper((unsigned char)p[2]);
+        pre[1] = (char)toupper((unsigned char)p[3]);
+        pre[2] = (char)toupper((unsigned char)p[4]);
+        pre[3] = 0;
+        for (i = 0; i < *nprefix; i++)
+            if (!strcmp(prefixes[i], pre)) { seen = 1; break; }
+        if (!seen && *nprefix < 32)
+            snprintf(prefixes[(*nprefix)++], sizeof prefixes[0], "%s", pre);
+    }
+    free(t);
+    return count;
 }
 
 /* Run a compiled tool, capturing stdout+stderr into a log.  cmd.exe mangles a
@@ -254,6 +306,12 @@ static void parse_args(int argc, char **argv, Opts *o)
               "%s/reports/generated/corpus_closure.json", o->root);
     o->max_functions = 0;
     o->nmod = 0;
+    o->merged_sha[0] = 0;
+    o->nprefix = 0;
+    o->merged_entries = 0;
+    o->merged_dups = 0;
+    o->merged_ok = 0;
+    o->merge_only = 0;
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "--root") && i + 1 < argc) i++;
@@ -265,14 +323,32 @@ static void parse_args(int argc, char **argv, Opts *o)
         else if (!strcmp(a, "--layout-file") && i + 1 < argc) snprintf(o->layout_file, sizeof o->layout_file, "%s", argv[++i]);
         else if (!strcmp(a, "--report") && i + 1 < argc) snprintf(o->report, sizeof o->report, "%s", argv[++i]);
         else if (!strcmp(a, "--max-functions") && i + 1 < argc) o->max_functions = atol(argv[++i]);
+        else if (!strcmp(a, "--merge-only")) o->merge_only = 1;
         else {
             fprintf(stderr, "usage: corpusclosure --input-list F [--root DIR] "
                     "[--tools DIR] [--out-root DIR] [--work-root DIR] "
                     "[--corpus-hash F] [--layout-file F] [--report F] "
-                    "[--max-functions N]\n");
+                    "[--max-functions N] [--merge-only]\n");
             exit(2);
         }
     }
+    path_slash(o->root);
+    path_slash(o->tools);
+    path_slash(o->input_list);
+    path_slash(o->work_root);
+    path_slash(o->corpus_hash);
+    path_slash(o->layout_file);
+    path_slash(o->report);
+    path_slash(o->out_root);
+    join_path(o->merged_list, sizeof o->merged_list,
+              "%s/wc3_all_list.h", o->out_root);
+    join_path(o->merged_funcs, sizeof o->merged_funcs,
+              "%s/wc3_all_funcs.txt", o->out_root);
+    join_path(o->manifest, sizeof o->manifest,
+              "%s/corpus_manifest.json", o->out_root);
+    path_slash(o->merged_list);
+    path_slash(o->merged_funcs);
+    path_slash(o->manifest);
 }
 
 static int load_inputs(Opts *o)
@@ -322,6 +398,35 @@ static void first_external(const char *rep, char *out, size_t cap)
     snprintf(out, cap, "0x%s", hex);
 }
 
+static int load_module_report(Module *m)
+{
+    char *rep = read_text(m->report);
+    if (!rep) {
+        fprintf(stderr, "corpusclosure: %s: no report\n", m->name);
+        m->verdict_pass = 0;
+        m->residual = -1;
+        return -1;
+    }
+    {
+        char verdict[32] = "", cv[32] = "";
+        json_string(rep, "verdict", verdict, sizeof verdict);
+        json_string(rep, "closure_verdict", cv, sizeof cv);
+        m->verdict_pass = !strcmp(verdict, "pass");
+        m->closure_pass = !strcmp(cv, "pass");
+        m->seed_entries = json_int(rep, "seed_entries", 0);
+        m->rounds = json_int(rep, "rounds", 0);
+        m->definitions = json_int(rep, "merged_entries", 0);
+        m->constant_targets = json_int(rep, "constant_targets", 0);
+        m->residual = json_int(rep, "residual_violations", 0);
+        m->in_image_unknown = json_int(rep, "in_image_unknown_target", 0);
+        m->unknown_count = json_int(rep, "unknown_target", 0);
+        m->no_terminal_count = json_int(rep, "no_terminal", 0);
+        first_external(rep, m->external, sizeof m->external);
+    }
+    free(rep);
+    return 0;
+}
+
 static int write_report(Opts *o, const char *corpus_sha,
                         int passed, int total_def, int total_targets,
                         int total_residual)
@@ -352,7 +457,16 @@ static int write_report(Opts *o, const char *corpus_sha,
         json_str(f, m->report);
         fprintf(f, "}%s\n", i + 1 < o->nmod ? "," : "");
     }
-    fprintf(f, "  ],\n  \"totals\": {\"modules\": %d, \"passed\": %d, "
+    fprintf(f, "  ],\n  \"merged\": {\"list\": "); json_str(f, o->merged_list);
+    fprintf(f, ", \"sha256\": \"%s\", \"entries\": %d, \"duplicates\": %d, "
+            "\"prefixes\": [", o->merged_sha, o->merged_entries,
+            o->merged_dups);
+    {
+        int j;
+        for (j = 0; j < o->nprefix; j++)
+            fprintf(f, "%s\"%s\"", j ? ", " : "", o->prefixes[j]);
+    }
+    fprintf(f, "]},\n  \"totals\": {\"modules\": %d, \"passed\": %d, "
             "\"definitions\": %d, \"constant_targets\": %d, "
             "\"residual_violations\": %d},\n",
             o->nmod, passed, total_def, total_targets, total_residual);
@@ -382,10 +496,59 @@ static int write_report(Opts *o, const char *corpus_sha,
         fprintf(f, "],\n");
     }
     fprintf(f, "  \"verdict\": \"%s\",\n",
-            (passed == o->nmod && total_residual == 0) ? "pass" : "fail");
+            (passed == o->nmod && total_residual == 0 && o->merged_ok &&
+             o->merged_dups == 0 && o->merged_entries == total_def)
+                ? "pass" : "fail");
     fprintf(f, "  \"outputs\": {\"out_root\": "); json_str(f, o->out_root);
     fprintf(f, ", \"work_root\": "); json_str(f, o->work_root);
     fprintf(f, "}\n}\n");
+    fclose(f);
+    return 0;
+}
+
+/* corpus_manifest.json is the build's input: it names the merged list, its
+ * hash and the per-module translation units.  CMake reads it instead of
+ * hard-coding module names or prefixes. */
+static int write_manifest(Opts *o, const char *corpus_sha, int passed,
+                          int total_def, int total_residual)
+{
+    FILE *f = fopen(o->manifest, "w");
+    int i, j;
+    if (!f) return -1;
+    fprintf(f, "{\n  \"schema\": 1,\n  \"generator\": \"wc3lift\",\n");
+    fprintf(f, "  \"lift_rev\": 1,\n  \"seed_mode\": \"block\",\n");
+    fprintf(f, "  \"corpus_sha256\": \"%s\",\n", corpus_sha);
+    fprintf(f, "  \"merged\": {\"list\": "); json_str(f, o->merged_list);
+    fprintf(f, ", \"funcs\": "); json_str(f, o->merged_funcs);
+    fprintf(f, ", \"sha256\": \"%s\", \"entries\": %d, \"duplicates\": %d, "
+            "\"prefixes\": [", o->merged_sha, o->merged_entries, o->merged_dups);
+    for (j = 0; j < o->nprefix; j++)
+        fprintf(f, "%s\"%s\"", j ? ", " : "", o->prefixes[j]);
+    fprintf(f, "]},\n  \"modules\": [\n");
+    for (i = 0; i < o->nmod; i++) {
+        Module *m = &o->mod[i];
+        fprintf(f, "    {\"name\": "); json_str(f, m->name);
+        fprintf(f, ", \"image\": "); json_str(f, m->path);
+        fprintf(f, ", \"image_sha256\": \"%s\", \"seed_entries\": %d, "
+                "\"definitions\": %d, \"rounds\": %d, "
+                "\"residual_violations\": %d, \"verdict\": \"%s\", ",
+                m->sha, m->seed_entries, m->definitions, m->rounds,
+                m->residual, (m->verdict_pass && m->residual == 0) ? "pass" : "fail");
+        fprintf(f, "\"seed\": "); json_str(f, m->seed_c);
+        fprintf(f, ", \"seed_sha256\": \"%s\"", m->seed_sha);
+        fprintf(f, ", \"closed\": "); json_str(f, m->closed_c);
+        fprintf(f, ", \"closed_sha256\": \"%s\"", m->closed_sha);
+        fprintf(f, ", \"list\": "); json_str(f, m->list_h);
+        fprintf(f, ", \"list_sha256\": \"%s\"", m->list_sha);
+        fprintf(f, "}%s\n", i + 1 < o->nmod ? "," : "");
+    }
+    fprintf(f, "  ],\n  \"totals\": {\"modules\": %d, \"passed\": %d, "
+            "\"definitions\": %d, \"residual_violations\": %d},\n",
+            o->nmod, passed, total_def, total_residual);
+    fprintf(f, "  \"verdict\": \"%s\"\n}\n",
+            (passed == o->nmod && total_residual == 0 && o->merged_ok &&
+             o->merged_dups == 0 && o->merged_entries == total_def)
+                ? "pass" : "fail");
     fclose(f);
     return 0;
 }
@@ -401,7 +564,7 @@ int main(int argc, char **argv)
     parse_args(argc, argv, &o);
     /* sanity: required binaries and files exist */
     {
-        const char *need[] = {"closure_pipeline.exe", "corpus.exe", NULL};
+        const char *need[] = {"closure_pipeline.exe", "corpus.exe", "known.exe", NULL};
         for (i = 0; need[i]; i++) {
             join_path(tmp, sizeof tmp, "%s/%s", o.tools, need[i]);
             FILE *probe = fopen(tmp, "rb");
@@ -425,78 +588,81 @@ int main(int argc, char **argv)
     if (mkdir_p(o.out_root) != 0 || mkdir_p(o.work_root) != 0) return 2;
 
     /* 1. The whole input set is verified before any module is lifted. */
-    join_path(log, sizeof log, "%s/00_corpus_verify.log", o.out_root);
-    rc = run_tool(log,
-                  "\"%s/corpus.exe\" verify --inputs \"%s\" --root \"%s\" "
-                  "--generator wc3lift --lift-rev 1 --layout-file \"%s\" "
-                  "--expected \"%s\"",
-                  o.tools, o.input_list, o.root, o.layout_file, o.corpus_hash);
-    verify_log_text = read_text(log);
-    if (rc != 0) {
-        fprintf(stderr, "corpusclosure: corpus identity verify FAILED\n%s\n",
-                verify_log_text ? verify_log_text : "");
+    if (!o.merge_only) {
+        join_path(log, sizeof log, "%s/00_corpus_verify.log", o.out_root);
+        rc = run_tool(log,
+                      "\"%s/corpus.exe\" verify --inputs \"%s\" --root \"%s\" "
+                      "--generator wc3lift --lift-rev 1 --layout-file \"%s\" "
+                      "--expected \"%s\"",
+                      o.tools, o.input_list, o.root, o.layout_file, o.corpus_hash);
+        verify_log_text = read_text(log);
+        if (rc != 0) {
+            fprintf(stderr, "corpusclosure: corpus identity verify FAILED\n%s\n",
+                    verify_log_text ? verify_log_text : "");
+            free(verify_log_text);
+            return 1;
+        }
         free(verify_log_text);
-        return 1;
+        printf("corpusclosure: corpus identity pass %s (%d inputs)\n",
+               corpus_sha, o.nmod);
+    } else {
+        printf("corpusclosure: merge-only (existing module outputs)\n");
     }
-    free(verify_log_text);
-    printf("corpusclosure: corpus identity pass %s (%d inputs)\n",
-           corpus_sha, o.nmod);
 
     /* 2. One compiled closure loop per module. */
     for (i = 0; i < o.nmod; i++) {
         Module *m = &o.mod[i];
-        char *rep;
         char image[DIR_MAX_PATH];
+        char refs[CMD_CAP] = "";
+        int j;
         join_path(image, sizeof image, "%s/%s", o.root, m->path);
         join_path(outdir, sizeof outdir, "%s/%s", o.out_root, m->name);
         join_path(workdir, sizeof workdir, "%s/%s", o.work_root, m->name);
         join_path(m->report, sizeof m->report, "%s/%s.closure.json",
                   outdir, m->name);
+        join_path(m->seed_c, sizeof m->seed_c, "%s/seed.c", outdir);
+        join_path(m->closed_c, sizeof m->closed_c, "%s/closed.c", outdir);
+        join_path(m->list_h, sizeof m->list_h, "%s/corpus.list.h", outdir);
         if (mkdir_p(outdir) != 0 || mkdir_p(workdir) != 0) return 2;
+        for (j = 0; j < o.nmod; j++) {
+            char refpath[DIR_MAX_PATH];
+            size_t used;
+            if (j == i) continue;
+            join_path(refpath, sizeof refpath, "%s/%s", o.root, o.mod[j].path);
+            used = strlen(refs);
+            if (used < sizeof refs)
+                snprintf(refs + used, sizeof refs - used,
+                         " --refs-image \"%s\"", refpath);
+        }
         if (sha256_file(image, m->sha) != 0) {
             fprintf(stderr, "corpusclosure: %s: image missing\n", m->name);
             continue;
         }
-        join_path(log, sizeof log, "%s/pipeline.log", outdir);
-        if (o.max_functions > 0)
-            snprintf(cmd, sizeof cmd,
-                     "\"%s/closure_pipeline.exe\" --image \"%s\" "
-                     "--skip-identity-check --out-dir \"%s\" "
-                     "--work-dir \"%s\" --report \"%s\" --root \"%s\" "
-                     "--tools \"%s\" --max-functions %ld",
-                     o.tools, image, outdir, workdir, m->report, o.root,
-                     o.tools, o.max_functions);
-        else
-            snprintf(cmd, sizeof cmd,
-                     "\"%s/closure_pipeline.exe\" --image \"%s\" "
-                     "--skip-identity-check --out-dir \"%s\" "
-                     "--work-dir \"%s\" --report \"%s\" --root \"%s\" "
-                     "--tools \"%s\"",
-                     o.tools, image, outdir, workdir, m->report, o.root,
-                     o.tools);
-        rc = run_tool(log, "%s", cmd);
-        rep = read_text(m->report);
-        if (!rep) {
-            fprintf(stderr, "corpusclosure: %s: no report (rc=%d)\n", m->name, rc);
-            m->verdict_pass = 0;
-            m->residual = -1;
-        } else {
-            char verdict[32] = "", cv[32] = "";
-            json_string(rep, "verdict", verdict, sizeof verdict);
-            json_string(rep, "closure_verdict", cv, sizeof cv);
-            m->verdict_pass = !strcmp(verdict, "pass");
-            m->closure_pass = !strcmp(cv, "pass");
-            m->seed_entries = json_int(rep, "seed_entries", 0);
-            m->rounds = json_int(rep, "rounds", 0);
-            m->definitions = json_int(rep, "merged_entries", 0);
-            m->constant_targets = json_int(rep, "constant_targets", 0);
-            m->residual = json_int(rep, "residual_violations", 0);
-            m->in_image_unknown = json_int(rep, "in_image_unknown_target", 0);
-            m->unknown_count = json_int(rep, "unknown_target", 0);
-            m->no_terminal_count = json_int(rep, "no_terminal", 0);
-            first_external(rep, m->external, sizeof m->external);
-            free(rep);
+        if (!o.merge_only) {
+            join_path(log, sizeof log, "%s/pipeline.log", outdir);
+            if (o.max_functions > 0)
+                snprintf(cmd, sizeof cmd,
+                         "\"%s/closure_pipeline.exe\" --image \"%s\" "
+                         "--skip-identity-check --out-dir \"%s\" "
+                         "--work-dir \"%s\" --report \"%s\" --root \"%s\" "
+                         "--tools \"%s\"%s --max-functions %ld",
+                         o.tools, image, outdir, workdir, m->report, o.root,
+                         o.tools, refs, o.max_functions);
+            else
+                snprintf(cmd, sizeof cmd,
+                         "\"%s/closure_pipeline.exe\" --image \"%s\" "
+                         "--skip-identity-check --out-dir \"%s\" "
+                         "--work-dir \"%s\" --report \"%s\" --root \"%s\" "
+                         "--tools \"%s\"%s",
+                         o.tools, image, outdir, workdir, m->report, o.root,
+                         o.tools, refs);
+            rc = run_tool(log, "%s", cmd);
         }
+        if (load_module_report(m) != 0 && !o.merge_only)
+            fprintf(stderr, "corpusclosure: %s: pipeline rc=%d\n", m->name, rc);
+        if (sha256_file(m->seed_c, m->seed_sha) != 0) m->seed_sha[0] = 0;
+        if (sha256_file(m->closed_c, m->closed_sha) != 0) m->closed_sha[0] = 0;
+        if (sha256_file(m->list_h, m->list_sha) != 0) m->list_sha[0] = 0;
         m->present = 1;
         if (m->verdict_pass) passed++;
         if (m->residual > 0) total_residual += m->residual;
@@ -507,14 +673,59 @@ int main(int argc, char **argv)
                m->definitions, m->constant_targets, m->residual);
     }
 
+    /* 3. One authoritative cross-module list, scanned from the generated C
+     * definitions rather than from per-module headers.  This is the input the
+     * dispatcher and the relifted build consume; corpus_manifest.json records
+     * its hash and the per-module translation units. */
+    join_path(log, sizeof log, "%s/99_merge.log", o.out_root);
+    rc = run_tool(log,
+                  "\"%s/known.exe\" \"%s\" --list \"%s\" --funcs \"%s\"",
+                  o.tools, o.out_root, o.merged_list, o.merged_funcs);
+    if (rc == 0) {
+        char *merge_log = read_text(log);
+        int dups = 0, n;
+        if (merge_log) {
+            const char *p = strstr(merge_log, " definitions, ");
+            if (p) dups = atoi(p + strlen(" definitions, "));
+            free(merge_log);
+        }
+        n = scan_list(o.merged_list, o.prefixes, &o.nprefix);
+        if (n > 0 && sha256_file(o.merged_list, o.merged_sha) == 0) {
+            o.merged_entries = n;
+            o.merged_dups = dups;
+            o.merged_ok = 1;
+        }
+    }
+    if (!o.merged_ok) {
+        fprintf(stderr, "corpusclosure: merged manifest FAILED (see %s)\n", log);
+        o.merged_sha[0] = 0;
+        o.merged_entries = 0;
+        o.merged_dups = 0;
+    } else {
+        printf("corpusclosure: merged %d definitions, %d duplicate(s), "
+               "sha256 %s -> %s\n", o.merged_entries, o.merged_dups,
+               o.merged_sha, o.merged_list);
+        if (o.merged_entries != total_def)
+            fprintf(stderr,
+                    "corpusclosure: merged list has %d entries, module sum is %d\n",
+                    o.merged_entries, total_def);
+    }
+    if (write_manifest(&o, corpus_sha, passed, total_def, total_residual) != 0) {
+        fprintf(stderr, "corpusclosure: cannot write %s\n", o.manifest);
+        return 1;
+    }
     if (write_report(&o, corpus_sha, passed, total_def, total_targets,
                      total_residual) != 0) {
         fprintf(stderr, "corpusclosure: cannot write %s\n", o.report);
         return 1;
     }
-    printf("corpusclosure: %s (%d/%d modules, %d definitions, %d targets, "
-           "%d residual) -> %s\n",
-           (passed == o.nmod && total_residual == 0) ? "pass" : "fail",
-           passed, o.nmod, total_def, total_targets, total_residual, o.report);
-    return (passed == o.nmod && total_residual == 0) ? 0 : 1;
+    {
+        int ok = passed == o.nmod && total_residual == 0 && o.merged_ok &&
+                 o.merged_dups == 0 && o.merged_entries == total_def;
+        printf("corpusclosure: %s (%d/%d modules, %d definitions, %d targets, "
+               "%d residual, %d merged) -> %s\n",
+               ok ? "pass" : "fail", passed, o.nmod, total_def,
+               total_targets, total_residual, o.merged_entries, o.report);
+        return ok ? 0 : 1;
+    }
 }

@@ -17,11 +17,25 @@ param(
     [int]$Api = 26,
     [switch]$War3Only,
     [switch]$D3D9,
-    [switch]$VerboseCommands
+    [switch]$VerboseCommands,
+    [string]$Ccache
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot 'ccache.ps1')
+$ccache = Get-Wc3Ccache -Explicit $Ccache
+if (-not $ccache) {
+    Write-Warning 'ccache not found; boot probe will build without a compiler cache'
+}
+function Invoke-Wc3Compile {
+    param([string]$Compiler, [string[]]$Arguments)
+    if ($script:ccache) {
+        & $script:ccache $Compiler.Replace('\', '/') @Arguments
+    } else {
+        & $Compiler @Arguments
+    }
+}
 if (-not $OutDir) { $OutDir = Join-Path $root 'build\boot' }
 $objDir = Join-Path $OutDir 'obj'
 $genDir = Join-Path $OutDir 'generated'
@@ -80,8 +94,11 @@ foreach ($src in $sources) {
     $name = [IO.Path]::GetFileNameWithoutExtension($src)
     $obj = Join-Path $objDir "$name.o"
     Write-Host "[boot] compile $([IO.Path]::GetFileName($src))"
-    if ($VerboseCommands) { Write-Host ($clang + ' ' + ($common -join ' ') + ' -c ' + $src + ' -o ' + $obj) }
-    & $clang @common '-c' $src '-o' $obj
+    if ($VerboseCommands) {
+        $compilerLabel = if ($ccache) { "$ccache $($clang.Replace('\', '/'))" } else { $clang }
+        Write-Host ($compilerLabel + ' ' + ($common -join ' ') + ' -c ' + $src + ' -o ' + $obj)
+    }
+    Invoke-Wc3Compile $clang ($common + @('-c', $src, '-o', $obj))
     if ($LASTEXITCODE -ne 0) { throw "compile failed: $src" }
     $objects += $obj
 }
@@ -146,7 +163,7 @@ if ($D3D9) {
         '-I', (Join-Path $root 'third_party\softfloat\source\8086-SSE')
     )
     Write-Host '[boot] compile dxvk_entry.cpp'
-    & $clangxx @cxxCommon '-c' $dxvkSrc '-o' $dxvkObj
+    Invoke-Wc3Compile $clangxx ($cxxCommon + @('-c', $dxvkSrc, '-o', $dxvkObj))
     if ($LASTEXITCODE -ne 0) { throw 'compile failed: dxvk_entry.cpp' }
     $objects += $dxvkObj
 }

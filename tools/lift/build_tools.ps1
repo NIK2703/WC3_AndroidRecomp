@@ -18,12 +18,14 @@ param(
     [switch]$Force,
     [switch]$Smoke,
     [switch]$PosixCheck,
-    [string]$Gcc
+    [string]$Gcc,
+    [string]$Ccache
 )
 $ErrorActionPreference = 'Stop'
 
 $toolRoot = $PSScriptRoot
 $root     = (Resolve-Path (Join-Path $toolRoot '..\..')).Path
+. (Join-Path $root 'tools\ccache.ps1')
 $csrc      = Join-Path $toolRoot 'csrc'
 $csrcLocal = Join-Path $toolRoot 'csrc_local'
 $posixShim = Join-Path $toolRoot 'posix_shim'
@@ -47,8 +49,17 @@ if (-not $Gcc) {
 if (-not (Test-Path $dll)) { throw "vendor runtime missing: $dll" }
 if (-not (Test-Path $bin)) { New-Item -ItemType Directory -Force -Path $bin | Out-Null }
 
+$ccache = Get-Wc3Ccache -Explicit $Ccache
+if (-not $ccache) {
+    Write-Warning 'ccache not found; lift tools will build without a compiler cache'
+}
+$compilerExe = if ($ccache) { $ccache } else { $Gcc }
+$compilerPrefix = if ($ccache) { @($Gcc.Replace('\', '/')) } else { @() }
+
 $common = @('-O2', '-Wall', '-Wextra', '-std=c11', '-static')
 $core   = @('liftcore.c', 'liftutil.c', 'liftemit.c', 'csglue.c')
+$closure2Src = @((Join-Path $csrcLocal 'closure2.c'), (Join-Path $csrc 'lift32.c')) +
+    @($core | ForEach-Object { Join-Path $csrc $_ })
 
 # out -> sources, plus an optional define and an optional source directory.
 # closure.exe reuses lift32.c's lf_lift_files(), so its main must be compiled
@@ -76,18 +87,21 @@ $targets = @(
     @{ out = 'lift32.exe';   src = @('lift32.c') + $core },
     @{ out = 'seed.exe';     src = @('seed.c') + $core },
     @{ out = 'closure.exe';  src = @('closure.c', 'lift32.c') + $core; def = 'WC3_NO_LIFT_MAIN' },
+    @{ out = 'closure2.exe'; srcfull = $closure2Src; def = 'WC3_NO_LIFT_MAIN' },
     @{ out = 'cstest.exe';   src = @('cstest.c', 'csglue.c') },
     @{ out = 'corpus.exe';   src = @('corpus.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'liftpass.exe'; src = @('liftpass.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'closure_pipeline.exe'; src = @('closure_pipeline.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
+    @{ out = 'thunkseeds.exe'; srcfull = @((Join-Path $csrcLocal 'thunkseeds.c'), (Join-Path $csrc 'csglue.c')) },
     @{ out = 'corpusinput.exe'; src = @('corpusinput.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
-    @{ out = 'corpusclosure.exe'; src = @('corpusclosure.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal }
+    @{ out = 'corpusclosure.exe'; src = @('corpusclosure.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
+    @{ out = 'splitcorpus.exe'; src = @('splitcorpus.c', 'dirwalk.c'); dir = $csrcLocal }
 )
 
 $scriptTime = [IO.File]::GetLastWriteTimeUtc($PSCommandPath)
 foreach ($t in $targets) {
     $srcdir = if ($t.dir) { $t.dir } else { $csrc }
-    $srcs = @($t.src | ForEach-Object { Join-Path $srcdir $_ })
+    $srcs = if ($t.srcfull) { @($t.srcfull) } else { @($t.src | ForEach-Object { Join-Path $srcdir $_ }) }
     foreach ($s in $srcs) { if (-not (Test-Path $s)) { throw "missing source: $s" } }
     $out  = Join-Path $bin $t.out
     $newest = $scriptTime
@@ -100,13 +114,40 @@ foreach ($t in $targets) {
         Write-Host ("up to date: {0}" -f $t.out)
         continue
     }
-    $gargs = @($common)
-    if ($t.def) { $gargs += "-D$($t.def)" }
-    $gargs += @('-I', $srcdir, '-I', $csrcLocal, '-I', $csrc, '-I', $inc, '-o', $out) + $srcs
+    $flags = @($common)
+    if ($t.def) { $flags += "-D$($t.def)" }
+    $includeArgs = @('-I', $srcdir, '-I', $csrcLocal, '-I', $csrc, '-I', $inc)
     Write-Host ("gcc -> {0}" -f $t.out)
+
+    # Compile separately from linking.  ccache cannot cache a compiler call
+    # that also links, so a one-shot `gcc sources -o exe` would always be
+    # reported as "called for linking" (BP-12).
+    $objDir = Join-Path $bin 'obj'
+    New-Item -ItemType Directory -Force -Path $objDir | Out-Null
+    $objects = @()
+    $index = 0
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $buildOut = & $Gcc @gargs 2>&1
+    foreach ($s in $srcs) {
+        $objName = '{0}_{1}_{2}.o' -f `
+            [IO.Path]::GetFileNameWithoutExtension($t.out), $index, `
+            [IO.Path]::GetFileNameWithoutExtension($s)
+        $obj = Join-Path $objDir $objName
+        $compileArgs = @($compilerPrefix) + @($flags) + @($includeArgs) +
+            @('-c', $s, '-o', $obj)
+        $buildOut = & $compilerExe @compileArgs 2>&1
+        $rc = $LASTEXITCODE
+        if ($rc -ne 0) {
+            $ErrorActionPreference = $prev
+            $buildOut | ForEach-Object { Write-Host $_ }
+            throw ("build failed: {0} ({1})" -f $t.out, $s)
+        }
+        $objects += $obj
+        $index++
+    }
+    $linkArgs = @($compilerPrefix) + @($flags) + @($includeArgs) +
+        @($objects) + @('-o', $out)
+    $buildOut = & $compilerExe @linkArgs 2>&1
     $rc = $LASTEXITCODE
     $ErrorActionPreference = $prev
     if ($rc -ne 0) {
@@ -153,6 +194,23 @@ if ($Smoke) {
         if ($vas -notmatch $va) { throw "corpus list missed $va" }
     }
     Write-Host ("smoke: corpus hash/list OK ({0})" -f (($hash -join ' ').Trim()))
+
+    # splitcorpus.exe: generated C is cut at function boundaries, never in the
+    # middle of a function, and every chunk gets the cpu.h include.
+    $splitDir = Join-Path $bin 'smoke_split'
+    if (Test-Path $splitDir) { Remove-Item -Recurse -Force $splitDir }
+    $split = & (Join-Path $bin 'splitcorpus.exe') (Join-Path $fixtures 'war3_smoke.c') $splitDir smoke 1 0 2>&1
+    if ($LASTEXITCODE -ne 0) { $split | ForEach-Object { Write-Host $_ }; throw 'splitcorpus failed' }
+    $chunks = @(Get-ChildItem -LiteralPath $splitDir -Filter '*.c')
+    if ($chunks.Count -ne 2) { throw "splitcorpus wrote $($chunks.Count) chunks, expected 2" }
+    foreach ($chunk in $chunks) {
+        $body = Get-Content -LiteralPath $chunk.FullName -Raw
+        if ($body -notmatch '#include "cpu\.h"') { throw "splitcorpus chunk missing cpu.h: $($chunk.Name)" }
+        if (([regex]::Matches($body, '(?m)^void L_')).Count -ne 1) {
+            throw "splitcorpus chunk does not contain exactly one function: $($chunk.Name)"
+        }
+    }
+    Write-Host 'smoke: corpus split OK (2 chunks)'
 
     # liftpass.exe: a clean catalogue passes and a deliberately corrupted one
     # fails with all five detectors firing (V5.4).  Without the negative half
@@ -208,9 +266,11 @@ if ($PosixCheck) {
         # = 'Stop' (set at the top) those would become terminating errors.
         $prev = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $out = & $Gcc '-fsyntax-only' '-std=c11' '-Wall' '-Wextra' `
-            '-DWC3_FORCE_POSIX' '-I' $posixShim '-I' $csrcLocal `
-            '-I' $csrc '-I' $inc $f.FullName 2>&1
+        $syntaxArgs = @($compilerPrefix) + @(
+            '-fsyntax-only', '-std=c11', '-Wall', '-Wextra',
+            '-DWC3_FORCE_POSIX', '-I', $posixShim, '-I', $csrcLocal,
+            '-I', $csrc, '-I', $inc, $f.FullName)
+        $out = & $compilerExe @syntaxArgs 2>&1
         $rc = $LASTEXITCODE
         $ErrorActionPreference = $prev
         if ($rc -ne 0) {

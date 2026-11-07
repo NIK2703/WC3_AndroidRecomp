@@ -8,11 +8,20 @@
 param(
     [switch]$Clean,
     [switch]$NativeDebug,
-    [string]$GamesActivityAar = ''
+    [string]$GamesActivityAar = '',
+    [string]$CorpusRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+if ($CorpusRoot) {
+    $corpusPath = if ([IO.Path]::IsPathRooted($CorpusRoot)) {
+        $CorpusRoot
+    } else {
+        Join-Path $root $CorpusRoot
+    }
+    $CorpusRoot = (Resolve-Path $corpusPath).Path
+}
 
 function Get-AndroidSdk {
     $candidates = @()
@@ -110,10 +119,15 @@ $configure = @(
     "-DANDROID_NDK=$($ndk.Root)",
     '-DCMAKE_BUILD_TYPE=Release',
     "-DWC3_DEBUG=$debugValue",
+    '-DWC3_USE_CCACHE=ON',
+    '-DWC3_REQUIRE_CCACHE=ON',
     '-DWC3_BUILD_PLATFORM_TEST=OFF',
     '-DWC3_BUILD_APP=ON',
     "-DGAMEACTIVITY_ROOT=$ga"
 )
+if ($CorpusRoot) {
+    $configure += "-DWC3_RELIFTED_CORPUS_ROOT=$CorpusRoot"
+}
 Write-Host "[app] ndk   $($ndk.Root)"
 Write-Host "[app] aar   $GamesActivityAar"
 Write-Host "[app] debug $($NativeDebug.IsPresent)"

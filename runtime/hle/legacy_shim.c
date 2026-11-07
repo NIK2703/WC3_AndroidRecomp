@@ -4,6 +4,8 @@
  * This is the only target-tree translation unit that includes the quarantined
  * as-built headers.  Everything else consumes legacy_shim.h.
  */
+#include <string.h>
+
 #include "hle_registry.h"
 #include "hle_android.h"
 
@@ -92,9 +94,70 @@ uint32_t wc3_legacy_arg32(const CPU *cpu, unsigned index)
     return rd32g(cpu->esp + 4u + index * 4u);
 }
 
+uint32_t wc3_legacy_guest_alloc(uint32_t size)
+{
+    return hle_guest_alloc(size);
+}
+
+uint32_t wc3_legacy_guest_alloc0(uint32_t size)
+{
+    uint32_t n = size ? size : 1u;
+    uint32_t p = hle_guest_alloc(n);
+    if (p) memset((void *)(uintptr_t)p, 0, n);
+    return p;
+}
+
+void wc3_legacy_guest_free(uint32_t addr)
+{
+    hle_guest_free(addr);
+}
+
+uint32_t wc3_legacy_guest_size(uint32_t addr)
+{
+    /* GBlk { uint32_t size; uint32_t next; } lives immediately before the
+     * payload.  Validate both the header range and the recorded size before
+     * trusting either. */
+    if (!addr || addr < 8u || !hle_android_guest_ok(addr - 8u, 8u)) return 0;
+    uint32_t size = rd32g(addr - 8u);
+    return (size && size <= GUEST_HLE_HEAP_SIZE - 8u) ? size : 0;
+}
+
+void wc3_legacy_guest_copy(uint32_t dst, uint32_t src, uint32_t size)
+{
+    if (!size || !hle_android_guest_ok(dst, size) ||
+        !hle_android_guest_ok(src, size))
+        return;
+    memcpy((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, size);
+}
+
+void wc3_legacy_guest_move(uint32_t dst, uint32_t src, uint32_t size)
+{
+    if (!size || !hle_android_guest_ok(dst, size) ||
+        !hle_android_guest_ok(src, size))
+        return;
+    memmove((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, size);
+}
+
+void wc3_legacy_guest_fill(uint32_t dst, uint8_t value, uint32_t size)
+{
+    if (!size || !hle_android_guest_ok(dst, size)) return;
+    memset((void *)(uintptr_t)dst, (int)value, size);
+}
+
+void wc3_legacy_guest_zero(uint32_t dst, uint32_t size)
+{
+    if (!size || !hle_android_guest_ok(dst, size)) return;
+    memset((void *)(uintptr_t)dst, 0, size);
+}
+
 void wc3_legacy_set_screen_size(uint32_t width, uint32_t height)
 {
     hle_android_set_screen_size(width, height);
+}
+
+int wc3_legacy_current_display_mode(uint32_t *width, uint32_t *height)
+{
+    return hle_android_current_display_mode(width, height);
 }
 
 int wc3_legacy_default_display_mode(uint32_t *width, uint32_t *height)
@@ -105,6 +168,21 @@ int wc3_legacy_default_display_mode(uint32_t *width, uint32_t *height)
 int wc3_legacy_select_display_mode(uint32_t width, uint32_t height)
 {
     return hle_android_select_display_mode(width, height);
+}
+
+int display_mode_at(uint32_t index, uint32_t *width, uint32_t *height)
+{
+    return hle_android_display_mode(index, width, height);
+}
+
+int display_mode_supported(uint32_t width, uint32_t height)
+{
+    return hle_android_display_mode_supported(width, height);
+}
+
+uint32_t display_refresh_hz(void)
+{
+    return hle_android_display_refresh_rate();
 }
 
 void wc3_legacy_mouse_move(float nx, float ny)

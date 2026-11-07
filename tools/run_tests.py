@@ -7,6 +7,7 @@ they are listed as `unavailable` and never reported as passed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -16,11 +17,125 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build" / "host"
+_CCACHE = None
+_CCACHE_CANDIDATES = (
+    "C:/msys64/usr/bin/ccache.exe",
+    "C:/msys64/ucrt64/bin/ccache.exe",
+    "C:/msys64/mingw64/bin/ccache.exe",
+    "C:/msys64/clang64/bin/ccache.exe",
+    "C:/ProgramData/chocolatey/bin/ccache.exe",
+    "C:/Program Files/ccache/ccache.exe",
+)
+
+
+def find_ccache() -> str | None:
+    """Return ccache using the same discovery order as the CMake module."""
+    candidates = []
+    if os.environ.get("CCACHE"):
+        candidates.append(os.environ["CCACHE"])
+    candidates.extend(("ccache", "ccache.exe"))
+    if os.name == "nt":
+        candidates.extend(_CCACHE_CANDIDATES)
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if not resolved and Path(candidate).is_file():
+            resolved = candidate
+        if resolved:
+            return str(Path(resolved)).replace("\\", "/")
+    return None
+
+
+_CCACHE = find_ccache()
+
+
+def _is_compiler(path: object) -> bool:
+    name = Path(str(path)).name.lower()
+    return name in {"gcc", "gcc.exe", "g++", "g++.exe",
+                    "clang", "clang.exe", "clang++", "clang++.exe",
+                    "cc", "cc.exe", "c++", "c++.exe"}
+
+
+def _with_ccache(cmd: list[object]) -> list[object]:
+    actual = list(cmd)
+    if _CCACHE and actual and _is_compiler(actual[0]):
+        actual = [_CCACHE, str(actual[0]).replace("\\", "/"), *actual[1:]]
+    return actual
+
+
+def _execute(cmd: list[object], cwd: Path = ROOT) -> int:
+    actual = _with_ccache(cmd)
+    print("+ " + " ".join(str(x) for x in actual))
+    return subprocess.run(actual, cwd=cwd).returncode
+
+
+def _compile_and_link(cmd: list[str], cwd: Path) -> int | None:
+    """Split a one-shot compile+link so ccache can cache the compile stage.
+
+    ccache marks a compiler invocation with sources and ``-o executable`` as
+    "called for linking" and cannot cache it.  Host tests and small tools are
+    usually written that way, so compile each source with ``-c`` first and then
+    link the objects.  Commands that already use ``-c``, preprocess, or dump
+    assembly are left alone.
+    """
+    actual = [str(x) for x in cmd]
+    if len(actual) < 2 or not _is_compiler(actual[0]):
+        return None
+    if any(flag in actual for flag in ("-c", "-E", "-S")):
+        return None
+    try:
+        out_index = actual.index("-o")
+        output = actual[out_index + 1]
+    except (ValueError, IndexError):
+        return None
+    if Path(output).suffix.lower() in {".o", ".obj"}:
+        return None
+
+    source_suffixes = {".c", ".cc", ".cpp", ".cxx", ".s", ".asm"}
+
+    def is_source(arg: str) -> bool:
+        path = Path(arg)
+        if not path.is_absolute():
+            path = cwd / path
+        return path.suffix.lower() in source_suffixes and path.is_file()
+
+    sources = [arg for arg in actual[1:] if is_source(arg)]
+    if not sources:
+        return None
+
+    source_set = set(sources)
+    base = [actual[0]]
+    skip_output = False
+    for arg in actual[1:]:
+        if skip_output:
+            skip_output = False
+            continue
+        if arg == "-o":
+            skip_output = True
+            continue
+        if arg in source_set:
+            continue
+        base.append(arg)
+
+    digest = hashlib.sha256(
+        ("\0".join(base) + "\0" + "\0".join(sources)).encode()).hexdigest()[:16]
+    objdir = BUILD / "ccache-objects" / digest
+    objdir.mkdir(parents=True, exist_ok=True)
+
+    objects: list[str] = []
+    for index, source in enumerate(sources):
+        obj = objdir / f"{index:02d}_{Path(source).stem}.o"
+        objects.append(str(obj))
+        rc = _execute([*base, "-c", source, "-o", str(obj)], cwd)
+        if rc != 0:
+            return rc
+    return _execute([*base, *objects, "-o", output], cwd)
 
 
 def run(cmd: list[str], cwd: Path = ROOT) -> int:
-    print("+ " + " ".join(str(x) for x in cmd))
-    return subprocess.run(cmd, cwd=cwd).returncode
+    split_rc = _compile_and_link(cmd, cwd)
+    if split_rc is not None:
+        return split_rc
+    return _execute(cmd, cwd=cwd)
 
 
 def gcc() -> str | None:
@@ -137,7 +252,7 @@ def test_posix_shim() -> int:
     failed: list[str] = []
     warnings = 0
     for src in files:
-        proc = subprocess.run([*common, str(src)], cwd=ROOT,
+        proc = subprocess.run(_with_ccache([*common, str(src)]), cwd=ROOT,
                               capture_output=True, text=True)
         if proc.returncode != 0:
             failed.append(src.name)
@@ -538,6 +653,117 @@ def test_hle_process() -> int:
     return 0
 
 
+def test_user32_window() -> int:
+    """T0: USER32 display metrics, desktop window and cursor counter."""
+    cc = gcc()
+    if not cc:
+        print("user32 window: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "window"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "user32" / "window" / "window_hle.c"),
+        str(ROOT / "tests" / "user32_window_test.c"),
+    ]
+    for name, debug in (("user32_window_test_debug.exe", 1),
+                        ("user32_window_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_user32_display() -> int:
+    """T0: USER32 display enumeration and mode-change contracts."""
+    cc = gcc()
+    if not cc:
+        print("user32 display: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "display"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "user32" / "display" / "display_hle.c"),
+        str(ROOT / "tests" / "user32_display_test.c"),
+    ]
+    for name, debug in (("user32_display_test_debug.exe", 1),
+                        ("user32_display_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_hle_system() -> int:
+    """T0: kernel32 version and machine-information handlers."""
+    cc = gcc()
+    if not cc:
+        print("hle system: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "process"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "process" / "system_hle.c"),
+        str(ROOT / "tests" / "system_hle_test.c"),
+    ]
+    for name, debug in (("system_hle_test_debug.exe", 1),
+                        ("system_hle_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_hle_memory() -> int:
     """T0: kernel32/memory heap handlers against a fake guest heap."""
     cc = gcc()
@@ -566,6 +792,276 @@ def test_hle_memory() -> int:
     ]
     for name, debug in (("memory_hle_test_debug.exe", 1),
                         ("memory_hle_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_hle_string() -> int:
+    """T0: kernel32 lstrlenA/lstrcpynA against a fake guest arena."""
+    cc = gcc()
+    if not cc:
+        print("hle string: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "string"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "string" / "string_hle.c"),
+        str(ROOT / "tests" / "string_hle_test.c"),
+    ]
+    for name, debug in (("string_hle_test_debug.exe", 1),
+                        ("string_hle_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_msvcr80_string() -> int:
+    """T0: MSVCR80 string/memory handlers over a fake guest arena."""
+    cc = gcc()
+    if not cc:
+        print("msvcr80 string: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "string"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "msvcr80" / "string" / "string_hle.c"),
+        str(ROOT / "tests" / "msvcr80_string_test.c"),
+    ]
+    for name, debug in (("msvcr80_string_test_debug.exe", 1),
+                        ("msvcr80_string_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_msvcr80_rand() -> int:
+    """T0: MSVCR80 srand/rand must match the MSVC LCG sequence."""
+    cc = gcc()
+    if not cc:
+        print("msvcr80 rand: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "rand"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "msvcr80" / "rand" / "rand_hle.c"),
+        str(ROOT / "tests" / "msvcr80_rand_test.c"),
+    ]
+    for name, debug in (("msvcr80_rand_test_debug.exe", 1),
+                        ("msvcr80_rand_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_msvcr80_math() -> int:
+    """T0: MSVCR80 math ABIs (x87 stack, cdecl doubles, SSE2)."""
+    cc = gcc()
+    if not cc:
+        print("msvcr80 math: unavailable (no host C compiler)")
+        return 2
+    archive = ROOT / "third_party" / "softfloat" / "build-host" / "softfloat.a"
+    if not archive.is_file():
+        print("msvcr80 math: unavailable (host SoftFloat archive missing)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "math"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    sources = [
+        ROOT / "runtime" / "hle" / "msvcr80" / "math" / "math_hle.c",
+        ROOT / "tests" / "msvcr80_math_test.c",
+    ]
+    flags = [cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", *include]
+    for name, debug in (("msvcr80_math_test_debug.exe", 1),
+                        ("msvcr80_math_test_release.exe", 0)):
+        objdir = BUILD / f"{name}.objects"
+        objdir.mkdir(parents=True, exist_ok=True)
+        objects: list[str] = []
+        for source in sources:
+            obj = objdir / f"{source.stem}.o"
+            rc = run([*flags, f"-DWC3_DEBUG={debug}", "-c",
+                      str(source), "-o", str(obj)])
+            if rc != 0:
+                return rc
+            objects.append(str(obj))
+        exe = BUILD / name
+        rc = run([cc, *objects, str(archive), "-lm", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_msvcr80_time() -> int:
+    """T0: MSVCR80 _time64/_ctime64 over fake platform and shim."""
+    cc = gcc()
+    if not cc:
+        print("msvcr80 time: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "time"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "msvcr80" / "time" / "crt_time_hle.c"),
+        str(ROOT / "tests" / "msvcr80_time_test.c"),
+    ]
+    for name, debug in (("msvcr80_time_test_debug.exe", 1),
+                        ("msvcr80_time_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_msvcr80_heap() -> int:
+    """T0: MSVCR80 malloc/free/realloc/calloc over the guest heap shim."""
+    cc = gcc()
+    if not cc:
+        print("msvcr80 heap: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "heap"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "msvcr80" / "heap" / "heap_hle.c"),
+        str(ROOT / "tests" / "msvcr80_heap_test.c"),
+    ]
+    for name, debug in (("msvcr80_heap_test_debug.exe", 1),
+                        ("msvcr80_heap_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_legacy_shim() -> int:
+    """T0: real H6.3 shim against a fake registry and low guest mapping."""
+    cc = gcc()
+    if not cc:
+        print("legacy shim: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "legacy"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wno-unused-parameter",
+        "-Wno-sign-compare",
+        *include,
+        str(ROOT / "runtime" / "hle" / "legacy_shim.c"),
+        str(ROOT / "tests" / "legacy_shim_test.c"),
+    ]
+    for name, debug in (("legacy_shim_test_debug.exe", 1),
+                        ("legacy_shim_test_release.exe", 0)):
         exe = BUILD / name
         rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
         if rc != 0:
@@ -643,7 +1139,17 @@ TESTS = {
     "mailbox_set": test_mailbox_set,
     "hle_time": test_hle_time,
     "hle_process": test_hle_process,
+    "user32_window": test_user32_window,
+    "user32_display": test_user32_display,
+    "hle_system": test_hle_system,
     "hle_memory": test_hle_memory,
+    "hle_string": test_hle_string,
+    "msvcr80_heap": test_msvcr80_heap,
+    "msvcr80_math": test_msvcr80_math,
+    "msvcr80_time": test_msvcr80_time,
+    "msvcr80_string": test_msvcr80_string,
+    "msvcr80_rand": test_msvcr80_rand,
+    "legacy_shim": test_legacy_shim,
     "file_layout": test_file_layout,
     "docs": test_docs,
     "upstream_pin": test_upstream_pin,
@@ -684,6 +1190,10 @@ def main(argv: list[str] | None = None) -> int:
         print("t1")
         print("t2")
         return 0
+
+    if not _CCACHE:
+        print("ccache: unavailable; host tests run without a compiler cache",
+              file=sys.stderr)
 
     modes = [args.unit, args.t1, args.t2, args.e2e]
     if sum(bool(x) for x in modes) > 1:

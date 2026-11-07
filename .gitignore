@@ -12,6 +12,7 @@
 /runtime/guest/generated/
 /runtime/gfx/dxvk_*/build/
 /apps/android_gameactivity/build/
+/apps/android_gameactivity/app/build/
 /apps/android_gameactivity/.gradle/
 
 # --- compiled artefacts -----------------------------------------------------

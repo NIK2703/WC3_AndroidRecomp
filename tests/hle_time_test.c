@@ -29,6 +29,12 @@ static void *guest_ptr(uint32_t addr, uint32_t size)
     return g_mem + (addr - GUEST_BASE);
 }
 
+static void put_str(uint32_t addr, const char *text)
+{
+    void *p = guest_ptr(addr, (uint32_t)strlen(text) + 1u);
+    if (p) memcpy(p, text, strlen(text) + 1u);
+}
+
 int wc3_legacy_guest_ok(uint32_t addr, uint32_t size)
 {
     return guest_ptr(addr, size) != NULL;
@@ -307,6 +313,137 @@ int main(void)
     put_args(&c, args, 2);
     if (call("CompareFileTime", &c)) return 1;
     CHECK(c.eax == 0u, "CompareFileTime equal");
+
+    /* Date/time formatting must use the fields, not return the pattern.
+     * The oracle is ru-RU (0x0419), so names are CP1251 and the locale
+     * short date is dd.MM.yyyy. */
+    const uint32_t fmt = GUEST_BASE + 0xB00u;
+    put_str(fmt, "dd.MM.yyyy");
+    uint32_t fargs[6] = { 0, 0, st, 0, out, 64 };
+    put_args(&c, fargs, 6);
+    if (call("GetDateFormatA", &c)) return 1;
+    CHECK(c.eax == 11u, "GetDateFormatA size");
+    CHECK(strcmp((const char *)guest_ptr(out, 16), "29.02.2024") == 0,
+          "GetDateFormatA default");
+
+    fargs[4] = 0;
+    fargs[5] = 0;
+    put_args(&c, fargs, 6);
+    if (call("GetDateFormatA", &c)) return 1;
+    CHECK(c.eax == 11u, "GetDateFormatA size probe");
+
+    fargs[3] = fmt;
+    fargs[4] = out;
+    fargs[5] = 64;
+    put_args(&c, fargs, 6);
+    if (call("GetDateFormatA", &c)) return 1;
+    CHECK(c.eax == 11u, "GetDateFormatA custom size");
+    CHECK(strcmp((const char *)guest_ptr(out, 16), "29.02.2024") == 0,
+          "GetDateFormatA custom");
+
+    put_str(fmt, "ddd, dd MMM yyyy");
+    put_args(&c, fargs, 6);
+    if (call("GetDateFormatA", &c)) return 1;
+    CHECK(c.eax == 16u, "GetDateFormatA names size");
+    CHECK(strcmp((const char *)guest_ptr(out, 32),
+                 "\xD7\xF2, 29 \xF4\xE5\xE2 2024") == 0,
+          "GetDateFormatA names");
+
+    fargs[3] = 0;
+    fargs[1] = 0x00000002u; /* DATE_LONGDATE */
+    put_args(&c, fargs, 6);
+    if (call("GetDateFormatA", &c)) return 1;
+    CHECK(c.eax == 19u, "GetDateFormatA long size");
+    CHECK(strcmp((const char *)guest_ptr(out, 32),
+                 "29 \xF4\xE5\xE2\xF0\xE0\xEB\xFF 2024 \xE3.") == 0,
+          "GetDateFormatA long");
+
+    fargs[1] = 0x00000008u; /* DATE_YEARMONTH */
+    put_args(&c, fargs, 6);
+    if (call("GetDateFormatA", &c)) return 1;
+    CHECK(c.eax == 13u, "GetDateFormatA year-month size");
+    CHECK(strcmp((const char *)guest_ptr(out, 32),
+                 "\xD4\xE5\xE2\xF0\xE0\xEB\xFC 2024") == 0,
+          "GetDateFormatA year-month");
+
+    fargs[1] = 0x00000080u; /* DATE_MONTHDAY, rejected by the oracle */
+    put_args(&c, fargs, 6);
+    if (call("GetDateFormatA", &c)) return 1;
+    CHECK(c.eax == 0u, "GetDateFormatA month-day");
+
+    fargs[1] = 0;
+    fargs[4] = out;
+    fargs[5] = 4;
+    put_args(&c, fargs, 6);
+    if (call("GetDateFormatA", &c)) return 1;
+    CHECK(c.eax == 0u, "GetDateFormatA short buffer");
+
+    const uint32_t bad = GUEST_BASE + 0xC00u;
+    memcpy(guest_ptr(bad, 16), guest_ptr(st, 16), 16);
+    wc3_legacy_wr16g(bad, 0);
+    fargs[2] = bad;
+    fargs[5] = 64;
+    put_args(&c, fargs, 6);
+    if (call("GetDateFormatA", &c)) return 1;
+    CHECK(c.eax == 0u, "GetDateFormatA invalid date");
+
+    uint32_t targs[6] = { 0, 0, st, 0, out, 64 };
+    put_args(&c, targs, 6);
+    if (call("GetTimeFormatA", &c)) return 1;
+    CHECK(c.eax == 9u, "GetTimeFormatA size");
+    CHECK(strcmp((const char *)guest_ptr(out, 16), "12:34:56") == 0,
+          "GetTimeFormatA default");
+
+    put_str(fmt, "hh:mm:ss tt");
+    targs[3] = fmt;
+    put_args(&c, targs, 6);
+    if (call("GetTimeFormatA", &c)) return 1;
+    CHECK(c.eax == 9u, "GetTimeFormatA custom size");
+    CHECK(strcmp((const char *)guest_ptr(out, 16), "12:34:56") == 0,
+          "GetTimeFormatA custom");
+
+    targs[3] = 0;
+    targs[1] = 0x00000002u; /* TIME_NOSECONDS */
+    put_args(&c, targs, 6);
+    if (call("GetTimeFormatA", &c)) return 1;
+    CHECK(c.eax == 6u, "GetTimeFormatA no seconds");
+    CHECK(strcmp((const char *)guest_ptr(out, 16), "12:34") == 0,
+          "GetTimeFormatA no seconds value");
+
+    targs[1] = 0x00000001u; /* TIME_NOMINUTESORSECONDS */
+    put_args(&c, targs, 6);
+    if (call("GetTimeFormatA", &c)) return 1;
+    CHECK(c.eax == 3u, "GetTimeFormatA hours only");
+    CHECK(strcmp((const char *)guest_ptr(out, 16), "12") == 0,
+          "GetTimeFormatA hours only value");
+
+    targs[1] = 0;
+    targs[2] = 0;
+    put_args(&c, targs, 6);
+    if (call("GetTimeFormatA", &c)) return 1;
+    CHECK(c.eax == 9u, "GetTimeFormatA local");
+    CHECK(strcmp((const char *)guest_ptr(out, 16), "15:34:56") == 0,
+          "GetTimeFormatA local value");
+
+    const uint32_t time15 = GUEST_BASE + 0xD00u;
+    memcpy(guest_ptr(time15, 16), guest_ptr(st, 16), 16);
+    wc3_legacy_wr16g(time15 + 8, 15);
+    put_str(fmt, "hh:mm");
+    targs[1] = 0;
+    targs[2] = time15;
+    targs[3] = fmt;
+    put_args(&c, targs, 6);
+    if (call("GetTimeFormatA", &c)) return 1;
+    CHECK(c.eax == 6u, "GetTimeFormatA 12-hour size");
+    CHECK(strcmp((const char *)guest_ptr(out, 16), "03:34") == 0,
+          "GetTimeFormatA 12-hour value");
+
+    targs[1] = 0x00000008u; /* TIME_FORCE24HOURFORMAT */
+    put_args(&c, targs, 6);
+    if (call("GetTimeFormatA", &c)) return 1;
+    CHECK(c.eax == 6u, "GetTimeFormatA force24 size");
+    CHECK(strcmp((const char *)guest_ptr(out, 16), "15:34") == 0,
+          "GetTimeFormatA force24 value");
 
     printf("hle time OK (%d handlers)\n", installed);
     return 0;

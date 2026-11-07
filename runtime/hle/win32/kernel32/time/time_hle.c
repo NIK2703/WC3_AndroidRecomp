@@ -187,6 +187,245 @@ static void read_system_time(uint32_t src, int *year, unsigned *month,
 }
 
 /* ------------------------------------------------------------------ */
+/* date and time formatting                                            */
+/* ------------------------------------------------------------------ */
+
+#define DATE_SHORTDATE     0x00000001u
+#define DATE_LONGDATE      0x00000002u
+#define DATE_YEARMONTH     0x00000008u
+#define DATE_MONTHDAY      0x00000080u
+#define TIME_NOMINUTESORSECONDS 0x00000001u
+#define TIME_NOSECONDS     0x00000002u
+#define TIME_NOTIMEMARKER  0x00000004u
+#define TIME_FORCE24HOURFORMAT 0x00000008u
+
+/* CP1251, because GetDateFormatA/GetTimeFormatA return bytes in the system
+ * ANSI codepage and the oracle desktop is ru-RU (0x0419).  Windows uses
+ * nominative names for explicit MMM/MMMM tokens and genitive month names in
+ * the DATE_LONGDATE pattern; both forms are kept here.  A probe of the oracle
+ * API also showed that the Russian AM/PM strings are empty, so t/tt emit
+ * nothing. */
+static const char *const g_weekday_short[7] = {
+    "\xC2\xF1", "\xCF\xED", "\xC2\xF2", "\xD1\xF0", "\xD7\xF2",
+    "\xCF\xF2", "\xD1\xE1"
+};
+static const char *const g_weekday_long[7] = {
+    "\xE2\xEE\xF1\xEA\xF0\xE5\xF1\xE5\xED\xFC\xE5", /* воскресенье */
+    "\xEF\xEE\xED\xE5\xE4\xE5\xEB\xFC\xED\xE8\xEA", /* понедельник */
+    "\xE2\xF2\xEE\xF0\xED\xE8\xEA",                 /* вторник */
+    "\xF1\xF0\xE5\xE4\xE0",                         /* среда */
+    "\xF7\xE5\xF2\xE2\xE5\xF0\xE3",                 /* четверг */
+    "\xEF\xFF\xF2\xED\xE8\xF6\xE0",                 /* пятница */
+    "\xF1\xF3\xE1\xE1\xEE\xF2\xE0"                  /* суббота */
+};
+static const char *const g_month_short[12] = {
+    "\xFF\xED\xE2", "\xF4\xE5\xE2", "\xEC\xE0\xF0", "\xE0\xEF\xF0",
+    "\xEC\xE0\xE9", "\xE8\xFE\xED", "\xE8\xFE\xEB", "\xE0\xE2\xE3",
+    "\xF1\xE5\xED", "\xEE\xEA\xF2", "\xED\xEE\xFF", "\xE4\xE5\xEA"
+};
+static const char *const g_month_long[12] = {
+    "\xD1\xED\xE2\xE0\xF0\xFC", "\xD4\xE5\xE2\xF0\xE0\xEB\xFC",
+    "\xCC\xE0\xF0\xF2", "\xC0\xEF\xF0\xE5\xEB\xFC",
+    "\xCC\xE0\xE9", "\xC8\xFE\xED\xFC", "\xC8\xFE\xEB\xFC",
+    "\xC0\xE2\xE3\xF3\xF1\xF2", "\xD1\xE5\xED\xF2\xFF\xE1\xF0\xFC",
+    "\xCE\xEA\xF2\xFF\xE1\xF0\xFC", "\xCD\xEE\xFF\xE1\xF0\xFC",
+    "\xC4\xE5\xEA\xE0\xE1\xF0\xFC"
+};
+static const char *const g_month_genitive[12] = {
+    "\xFF\xED\xE2\xE0\xF0\xFF", "\xF4\xE5\xE2\xF0\xE0\xEB\xFF",
+    "\xEC\xE0\xF0\xF2\xE0", "\xE0\xEF\xF0\xE5\xEB\xFF",
+    "\xEC\xE0\xFF", "\xE8\xFE\xED\xFF", "\xE8\xFE\xEB\xFF",
+    "\xE0\xE2\xE3\xF3\xF1\xF2\xE0", "\xF1\xE5\xED\xF2\xFF\xE1\xF0\xFF",
+    "\xEE\xEA\xF2\xFF\xE1\xF0\xFF", "\xED\xEE\xFF\xE1\xF0\xFF",
+    "\xE4\xE5\xEA\xE0\xE1\xF0\xFF"
+};
+
+static int append_char(char *out, int cap, int *len, char ch)
+{
+    if (*len >= cap) return -1;
+    out[(*len)++] = ch;
+    return 0;
+}
+
+static int append_text(char *out, int cap, int *len, const char *text)
+{
+    while (*text) {
+        if (append_char(out, cap, len, *text++)) return -1;
+    }
+    return 0;
+}
+
+static int append_dec(char *out, int cap, int *len, unsigned value, int width)
+{
+    char digits[12];
+    int n = 0;
+    do {
+        digits[n++] = (char)('0' + value % 10u);
+        value /= 10u;
+    } while (value);
+    while (n < width) digits[n++] = '0';
+    for (int i = n - 1; i >= 0; i--) {
+        if (append_char(out, cap, len, digits[i])) return -1;
+    }
+    return 0;
+}
+
+static int read_guest_string(uint32_t addr, char *dst, int cap)
+{
+    if (!addr || cap < 2) return -1;
+    for (int i = 0; i < cap - 1; i++) {
+        if (!wc3_legacy_guest_ok(addr + (uint32_t)i, 1)) return -1;
+        const char ch = (char)wc3_legacy_rd8g(addr + (uint32_t)i);
+        dst[i] = ch;
+        if (!ch) return 0;
+    }
+    dst[cap - 1] = 0;
+    return -1;
+}
+
+static int valid_date(int year, unsigned month, unsigned day)
+{
+    return year >= 1601 && year <= 30827 && month >= 1 && month <= 12 &&
+           day >= 1 && day <= days_in_month(year, month);
+}
+
+static int valid_time(unsigned hour, unsigned minute, unsigned second,
+                      unsigned millisecond)
+{
+    return hour <= 23 && minute <= 59 && second <= 59 && millisecond <= 999;
+}
+
+static int format_date(char *out, int cap, const char *fmt, int year,
+                       unsigned month, unsigned day, int genitive_months)
+{
+    const unsigned weekday =
+        weekday_from_days(days_from_civil(year, month, day));
+    int len = 0;
+
+    for (int i = 0; fmt[i];) {
+        const char ch = fmt[i];
+        if (ch == '\'') {
+            if (fmt[i + 1] == '\'') {
+                if (append_char(out, cap, &len, '\'')) return -1;
+                i += 2;
+            } else {
+                i++;
+                while (fmt[i] && fmt[i] != '\'') {
+                    if (append_char(out, cap, &len, fmt[i++])) return -1;
+                }
+                if (fmt[i] == '\'') i++;
+            }
+            continue;
+        }
+        if (ch == 'd' || ch == 'M' || ch == 'y' || ch == 'g') {
+            int run = 1;
+            while (fmt[i + run] == ch) run++;
+            int rc = 0;
+            if (ch == 'd') {
+                if (run == 1) rc = append_dec(out, cap, &len, day, 0);
+                else if (run == 2) rc = append_dec(out, cap, &len, day, 2);
+                else if (run == 3)
+                    rc = append_text(out, cap, &len, g_weekday_short[weekday]);
+                else
+                    rc = append_text(out, cap, &len, g_weekday_long[weekday]);
+            } else if (ch == 'M') {
+                if (run == 1) rc = append_dec(out, cap, &len, month, 0);
+                else if (run == 2) rc = append_dec(out, cap, &len, month, 2);
+                else if (run == 3)
+                    rc = append_text(out, cap, &len, g_month_short[month - 1u]);
+                else
+                    rc = append_text(out, cap, &len,
+                                     genitive_months
+                                         ? g_month_genitive[month - 1u]
+                                         : g_month_long[month - 1u]);
+            } else if (ch == 'y') {
+                if (run == 1) rc = append_dec(out, cap, &len, (unsigned)year % 100u, 0);
+                else if (run == 2)
+                    rc = append_dec(out, cap, &len, (unsigned)year % 100u, 2);
+                else
+                    rc = append_dec(out, cap, &len, (unsigned)year, 4);
+            } else {
+                rc = append_text(out, cap, &len,
+                                 "\xED\xE0\xF8\xE0 \xFD\xF0\xE0");
+            }
+            if (rc) return -1;
+            i += run;
+            continue;
+        }
+        if (append_char(out, cap, &len, ch)) return -1;
+        i++;
+    }
+    return len;
+}
+
+static int format_time(char *out, int cap, const char *fmt, unsigned hour,
+                       unsigned minute, unsigned second, uint32_t flags)
+{
+    int len = 0;
+    for (int i = 0; fmt[i];) {
+        const char ch = fmt[i];
+        if (ch == '\'') {
+            if (fmt[i + 1] == '\'') {
+                if (append_char(out, cap, &len, '\'')) return -1;
+                i += 2;
+            } else {
+                i++;
+                while (fmt[i] && fmt[i] != '\'') {
+                    if (append_char(out, cap, &len, fmt[i++])) return -1;
+                }
+                if (fmt[i] == '\'') i++;
+            }
+            continue;
+        }
+        if (ch == 'h' || ch == 'H' || ch == 'm' || ch == 's' || ch == 't') {
+            int run = 1;
+            while (fmt[i + run] == ch) run++;
+            int rc = 0;
+            if (ch == 'h' || ch == 'H') {
+                unsigned h = hour;
+                if (ch == 'h' && !(flags & TIME_FORCE24HOURFORMAT)) {
+                    h %= 12u;
+                    if (h == 0) h = 12;
+                }
+                rc = append_dec(out, cap, &len, h, run >= 2 ? 2 : 0);
+            } else if (ch == 'm') {
+                rc = append_dec(out, cap, &len, minute, run >= 2 ? 2 : 0);
+            } else if (ch == 's') {
+                rc = append_dec(out, cap, &len, second, run >= 2 ? 2 : 0);
+            } else {
+                /* ru-RU LOCALE_S1159/LOCALE_S2359 are empty.  The oracle
+                 * probe returns "03:34:56" for "hh:mm:ss tt", so drop the
+                 * separator that precedes the empty marker. */
+                if (len > 0 && out[len - 1] == ' ') len--;
+                (void)run;
+            }
+            if (rc) return -1;
+            i += run;
+            continue;
+        }
+        if (append_char(out, cap, &len, ch)) return -1;
+        i++;
+    }
+    return len;
+}
+
+/* Win32 returns the required size, including the terminator, and writes
+ * nothing when the caller's buffer is too small.  The as-built stub copied a
+ * truncated pattern and reported a length without the terminator. */
+static uint32_t emit_string(uint32_t buf, int cch, const char *text, int len)
+{
+    if (len < 0) return 0;
+    if (cch == 0) return (uint32_t)len + 1u;
+    if (cch < 0 || cch < len + 1 || !buf ||
+        !wc3_legacy_guest_ok(buf, (uint32_t)cch))
+        return 0;
+    for (int i = 0; i < len; i++)
+        wc3_legacy_wr8g(buf + (uint32_t)i, (uint8_t)text[i]);
+    wc3_legacy_wr8g(buf + (uint32_t)len, 0);
+    return (uint32_t)len + 1u;
+}
+
+/* ------------------------------------------------------------------ */
 /* handlers                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -355,6 +594,128 @@ static void h_compare_file_time(CPU *c)
     c->eax = va < vb ? (uint32_t)-1 : (va > vb ? 1u : 0u);
 }
 
+static void h_get_date_format(CPU *c)
+{
+    const uint32_t flags = wc3_legacy_arg32(c, 1);
+    const uint32_t date_ptr = wc3_legacy_arg32(c, 2);
+    const uint32_t format_ptr = wc3_legacy_arg32(c, 3);
+    const uint32_t buf = wc3_legacy_arg32(c, 4);
+    const int cch = (int)wc3_legacy_arg32(c, 5);
+
+    int year = 0;
+    unsigned month = 0, day = 0, hour = 0, minute = 0, second = 0, ms = 0;
+    if (date_ptr) {
+        if (!wc3_legacy_guest_ok(date_ptr, 16)) {
+            c->eax = 0;
+            return;
+        }
+        read_system_time(date_ptr, &year, &month, &day, &hour, &minute,
+                         &second, &ms);
+    } else {
+        int32_t y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, milli = 0;
+        const uint64_t now = g_time->realtime_ns(g_time->ctx);
+        if (g_time->local_time(g_time->ctx, now, &y, &mo, &d, &h, &mi, &s,
+                               &milli) != 0) {
+            c->eax = 0;
+            return;
+        }
+        year = y;
+        month = (unsigned)mo;
+        day = (unsigned)d;
+        hour = (unsigned)h;
+        minute = (unsigned)mi;
+        second = (unsigned)s;
+        ms = (unsigned)milli;
+    }
+    if (!valid_date(year, month, day)) {
+        c->eax = 0;
+        return;
+    }
+
+    char format[128];
+    const char *fmt = "dd.MM.yyyy";
+    int genitive_months = 0;
+    if (format_ptr) {
+        if (read_guest_string(format_ptr, format, (int)sizeof format) != 0) {
+            c->eax = 0;
+            return;
+        }
+        fmt = format;
+    } else if (flags & DATE_MONTHDAY) {
+        /* The oracle rejects DATE_MONTHDAY with no custom format. */
+        c->eax = 0;
+        return;
+    } else if (flags & DATE_YEARMONTH) {
+        fmt = "MMMM yyyy";
+    } else if (flags & DATE_LONGDATE) {
+        fmt = "d MMMM yyyy '\xE3.'";
+        genitive_months = 1;
+    }
+
+    char out[512];
+    const int len = format_date(out, (int)sizeof out, fmt, year, month, day,
+                                genitive_months);
+    c->eax = emit_string(buf, cch, out, len);
+}
+
+static void h_get_time_format(CPU *c)
+{
+    const uint32_t flags = wc3_legacy_arg32(c, 1);
+    const uint32_t time_ptr = wc3_legacy_arg32(c, 2);
+    const uint32_t format_ptr = wc3_legacy_arg32(c, 3);
+    const uint32_t buf = wc3_legacy_arg32(c, 4);
+    const int cch = (int)wc3_legacy_arg32(c, 5);
+
+    int year = 0;
+    unsigned month = 0, day = 0, hour = 0, minute = 0, second = 0, ms = 0;
+    if (time_ptr) {
+        if (!wc3_legacy_guest_ok(time_ptr, 16)) {
+            c->eax = 0;
+            return;
+        }
+        read_system_time(time_ptr, &year, &month, &day, &hour, &minute,
+                         &second, &ms);
+    } else {
+        int32_t y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, milli = 0;
+        const uint64_t now = g_time->realtime_ns(g_time->ctx);
+        if (g_time->local_time(g_time->ctx, now, &y, &mo, &d, &h, &mi, &s,
+                               &milli) != 0) {
+            c->eax = 0;
+            return;
+        }
+        year = y;
+        month = (unsigned)mo;
+        day = (unsigned)d;
+        hour = (unsigned)h;
+        minute = (unsigned)mi;
+        second = (unsigned)s;
+        ms = (unsigned)milli;
+    }
+    if (!valid_time(hour, minute, second, ms)) {
+        c->eax = 0;
+        return;
+    }
+
+    char format[128];
+    const char *fmt = "H:mm:ss";
+    if (format_ptr) {
+        if (read_guest_string(format_ptr, format, (int)sizeof format) != 0) {
+            c->eax = 0;
+            return;
+        }
+        fmt = format;
+    } else if (flags & TIME_NOMINUTESORSECONDS) {
+        fmt = "H";
+    } else if (flags & TIME_NOSECONDS) {
+        fmt = "H:mm";
+    }
+
+    char out[512];
+    const int len = format_time(out, (int)sizeof out, fmt, hour, minute,
+                                second, flags);
+    c->eax = emit_string(buf, cch, out, len);
+}
+
 /* ------------------------------------------------------------------ */
 /* installation                                                        */
 /* ------------------------------------------------------------------ */
@@ -377,6 +738,8 @@ static const TimeOverride g_overrides[] = {
     { "KERNEL32.dll", "FileTimeToLocalFileTime", h_filetime_to_local_file_time },
     { "KERNEL32.dll", "SystemTimeToFileTime", h_system_time_to_file_time },
     { "KERNEL32.dll", "CompareFileTime", h_compare_file_time },
+    { "KERNEL32.dll", "GetDateFormatA", h_get_date_format },
+    { "KERNEL32.dll", "GetTimeFormatA", h_get_time_format },
     { "WINMM.dll", "timeGetTime", h_time_get_time },
 };
 

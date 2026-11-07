@@ -1,6 +1,6 @@
 /* closure_pipeline.c - compiled driver for the static closure loop (BP-6.4).
  *
- *   entry.exe -> seed.exe -> lift32.exe -> closure.exe -> known.exe
+ *   entry.exe -> seed.exe -> lift32.exe -> closure2.exe -> known.exe
  *             -> liftpass.exe (clean corpus + deliberately corrupted fixture)
  *
  * Every step that reads the image or the generated corpus is a compiled C
@@ -8,15 +8,25 @@
  * one JSON report; it never parses generated C itself.  Generated C stays
  * under build/ (R2/R3) and is never published.
  *
+ * Start discovery is instruction-bound by default: entry.exe runs with
+ * --referenced, so a padding-looking byte run is only a start when the image
+ * also contains its VA as a value, and the PE entry point, export table and
+ * TLS callbacks are added explicitly (they are RVA-valued and invisible to a
+ * dword scan).  Referenced candidates whose bytes are a run of code pointers
+ * are jump-table bases, not function entries, and are dropped with the
+ * evidence written next to the report.  --all-starts restores the old padded
+ * inventory for diagnostics.
+ *
  * Seeds are lifted in BLOCK mode by default.  A full-mode linear lift keeps
  * decoding past the real `ret` when the following bytes are an inline data
  * table rather than 0xCC/0x90 padding (seed.exe's extent rule), and emits
  * bogus dispatch targets such as 0xE8C9EC10.  Block mode stops at the first
- * terminator and closure.exe then lifts every real target; --full-seeds keeps
- * the linear mode available as a diagnostic.
+ * terminator and closure2.exe then lifts every real target; --full-seeds
+ * keeps the linear mode available as a diagnostic.
  *
  *   closure_pipeline --image <PE> --out-dir build/lift-closure \
- *       [--max-functions N] [--full-seeds] \
+ *       [--max-functions N] [--full-seeds] [--all-starts] \
+ *       [--refs-image OTHER_PE ...] \
  *       [--report reports/generated/closure_pipeline.json]
  *   closure_pipeline --self-test     # asset-free: prove the detectors fire
  *
@@ -56,11 +66,13 @@
 #define MAX_EXTERNAL 4096
 #define MAX_LINES 64
 #define MAX_EXCLUDED 4096
+#define MAX_REFS 8
 #define CMD_CAP 8192
 
 static const char *TOOLS[] = {"entry.exe", "seed.exe", "lift32.exe",
-                              "closure.exe", "known.exe", "liftpass.exe"};
-#define NTOOLS 6
+                              "closure2.exe", "known.exe", "liftpass.exe",
+                              "thunkseeds.exe"};
+#define NTOOLS 7
 static const char *DETECTORS[] = {"unknown_target", "return_in_void",
                                   "hle_devirtualized", "static_tls_header",
                                   "duplicate_definition"};
@@ -81,6 +93,10 @@ typedef struct {
     int skip_identity;
     char exclude[DIR_MAX_PATH];
     int no_exclude;
+    int referenced;
+    int no_table_filter;
+    char refs[MAX_REFS][DIR_MAX_PATH];
+    int nrefs;
 } Opts;
 
 typedef struct {
@@ -92,7 +108,11 @@ typedef struct {
     char tool_sha[NTOOLS][65];
     int inventory_entries, seed_entries, block_seeds;
     int excluded_seeds;
+    int referenced, pe_meta_seeds, table_filtered, not_code_seeds;
+    int thunk_seed_entries;
     char exclude_file[DIR_MAX_PATH];
+    char table_filtered_file[DIR_MAX_PATH];
+    char thunk_seeds_file[DIR_MAX_PATH];
     char catalog_sha[65];
     int lift32_entries;
     char seed_c_sha[65];
@@ -260,6 +280,255 @@ static int filter_seed_file(const char *src, const char *dst,
     fclose(f);
     free(t);
     return dropped;
+}
+
+/* Concatenate two seed inventories.  The second file is the explicit
+ * thunk-tail supplement and never contains a VA already present in the
+ * first, so no de-duplication pass is needed here. */
+static int merge_seed_files(const char *a, const char *b, const char *dst)
+{
+    char *ta = read_text(a), *tb = read_text(b);
+    FILE *f;
+    size_t na, nb;
+    if (!ta || !tb) { free(ta); free(tb); return -1; }
+    f = fopen(dst, "w");
+    if (!f) { free(ta); free(tb); return -1; }
+    na = strlen(ta);
+    nb = strlen(tb);
+    if (na) fwrite(ta, 1, na, f);
+    if (na && ta[na - 1] != '\n') fputc('\n', f);
+    if (nb) fwrite(tb, 1, nb, f);
+    if (nb && tb[nb - 1] != '\n') fputc('\n', f);
+    fclose(f);
+    free(ta);
+    free(tb);
+    return 0;
+}
+
+/* ------------------------------------------------------- referenced starts */
+
+typedef struct { uint32_t *v; size_t n, cap; } U32Vec;
+
+static void u32_add(U32Vec *a, uint32_t v)
+{
+    if (!v) return;
+    if (a->n == a->cap) {
+        a->cap = a->cap ? a->cap * 2 : 4096;
+        a->v = (uint32_t *)realloc(a->v, a->cap * sizeof(uint32_t));
+        if (!a->v) die("out of memory (seed vector)");
+    }
+    a->v[a->n++] = v;
+}
+
+static int u32_cmp(const void *a, const void *b)
+{
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static void u32_sort_unique(U32Vec *a)
+{
+    size_t i, w = 0;
+    if (a->n < 2) return;
+    qsort(a->v, a->n, sizeof(uint32_t), u32_cmp);
+    for (i = 0; i < a->n; i++)
+        if (!w || a->v[w - 1] != a->v[i]) a->v[w++] = a->v[i];
+    a->n = w;
+}
+
+static int u32_contains(const uint32_t *v, size_t n, uint32_t x)
+{
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (v[mid] < x) lo = mid + 1; else hi = mid;
+    }
+    return lo < n && v[lo] == x;
+}
+
+static int load_seed_vas(const char *path, U32Vec *out)
+{
+    char *t = read_text(path);
+    char *line, *next;
+    if (!t) return -1;
+    for (line = t; *line; line = next) {
+        char *end = strchr(line, '\n'), *p = line, *endp;
+        unsigned long va;
+        next = end ? end + 1 : line + strlen(line);
+        if (end) *end = 0;
+        while (*p == ' ' || *p == '\t' || *p == '\r') p++;
+        va = strtoul(p, &endp, 16);
+        if (endp != p && va) u32_add(out, (uint32_t)va);
+    }
+    free(t);
+    return 0;
+}
+
+static int pe_lfanew(Pe *pe, uint32_t *out)
+{
+    uint8_t b[4];
+    if (!pe_read_at(pe, 0x3C, b, 4)) return 0;
+    *out = pe_rd32(b);
+    return 1;
+}
+
+static int pe_opt_dword(Pe *pe, uint32_t rel, uint32_t *out)
+{
+    uint32_t lf;
+    uint8_t b[4];
+    if (!pe_lfanew(pe, &lf)) return 0;
+    if (!pe_read_at(pe, (long long)lf + 24 + rel, b, 4)) return 0;
+    *out = pe_rd32(b);
+    return 1;
+}
+
+static int pe_data_dir(Pe *pe, int idx, uint32_t *rva, uint32_t *size)
+{
+    uint32_t lf, nrva;
+    uint8_t b[8];
+    if (!pe_opt_dword(pe, 92, &nrva)) return 0;   /* NumberOfRvaAndSizes */
+    if ((uint32_t)idx >= nrva) return 0;
+    if (!pe_lfanew(pe, &lf)) return 0;
+    if (!pe_read_at(pe, (long long)lf + 24 + 96 + (long long)idx * 8, b, 8))
+        return 0;
+    *rva = pe_rd32(b);
+    *size = pe_rd32(b + 4);
+    return 1;
+}
+
+/* The PE entry point is an RVA, so the dword scan cannot see it. */
+static int pe_entry_va(Pe *pe, uint32_t *out)
+{
+    uint32_t rva;
+    if (!pe_opt_dword(pe, 16, &rva) || !rva) return 0;  /* AddressOfEntryPoint */
+    *out = pe->base + rva;
+    return pe_code_section_for_va(pe, *out) >= 0;
+}
+
+static void add_pe_exports(Pe *pe, U32Vec *out)
+{
+    uint32_t rva, size, off, nfunc, funcs_rva, foff, exp_lo, exp_hi, i;
+    uint8_t dir[40];
+    if (!pe_data_dir(pe, 0, &rva, &size) || !rva || size < 40) return;
+    if (!pe_va_to_off(pe, pe->base + rva, &off)) return;
+    if (!pe_read_at(pe, off, dir, 40)) return;
+    nfunc = pe_rd32(dir + 20);
+    funcs_rva = pe_rd32(dir + 28);
+    if (!nfunc || !funcs_rva) return;
+    if (!pe_va_to_off(pe, pe->base + funcs_rva, &foff)) return;
+    exp_lo = pe->base + rva;
+    exp_hi = exp_lo + size;
+    for (i = 0; i < nfunc; i++) {
+        uint8_t b[4];
+        uint32_t frva, va;
+        if (!pe_read_at(pe, (long long)foff + (long long)i * 4, b, 4)) break;
+        frva = pe_rd32(b);
+        if (!frva) continue;
+        /* An RVA inside the export directory is a forwarder string, not code. */
+        if (frva >= rva && frva < rva + size) continue;
+        va = pe->base + frva;
+        if (pe_code_section_for_va(pe, va) >= 0) u32_add(out, va);
+    }
+}
+
+static void add_pe_tls(Pe *pe, U32Vec *out)
+{
+    uint32_t rva, size, off, cb;
+    uint8_t dir[24];
+    int i;
+    if (!pe_data_dir(pe, 9, &rva, &size) || !rva || size < 24) return;
+    if (!pe_va_to_off(pe, pe->base + rva, &off)) return;
+    if (!pe_read_at(pe, off, dir, 24)) return;
+    cb = pe_rd32(dir + 12);                 /* AddressOfCallBacks (VA) */
+    if (!cb) return;
+    for (i = 0; i < 64; i++) {
+        uint32_t v;
+        if (!pe_read_u32(pe, cb + (uint32_t)i * 4, &v) || !v) break;
+        if (pe_code_section_for_va(pe, v) >= 0) u32_add(out, v);
+    }
+}
+
+/* A referenced VA whose first bytes are a run of pointers into the executable
+ * sections is a jump table, not a function entry.  The reference itself is an
+ * instruction displacement such as `jmp [eax*4 + 0x6F2B4380]`, which the raw
+ * dword scan cannot distinguish from a data pointer.  Three consecutive code
+ * pointers is the evidence; real code essentially never starts that way, and
+ * PE entry/export/TLS starts are exempt because the format defines them. */
+static int seed_is_table_base(Pe *pe, uint32_t va)
+{
+    uint32_t v;
+    int k, run = 0;
+    for (k = 0; k < 4; k++) {
+        if (!pe_read_u32(pe, va + (uint32_t)k * 4, &v)) break;
+        if (pe_code_section_for_va(pe, v) >= 0) {
+            if (++run >= 3) return 1;
+        } else {
+            run = 0;
+        }
+    }
+    return 0;
+}
+
+static void print_table_evidence(FILE *f, Pe *pe, uint32_t va)
+{
+    uint32_t v;
+    int k;
+    fprintf(f, "0x%08X", va);
+    for (k = 0; k < 4; k++) {
+        if (!pe_read_u32(pe, va + (uint32_t)k * 4, &v)) break;
+        fprintf(f, " %08X", v);
+    }
+    fputc('\n', f);
+}
+
+/* Rewrite the entry inventory as 0xVA 512 seed_VA, adding the PE entry point,
+ * exports and TLS callbacks, applying the exclusion ledger and dropping
+ * jump-table bases.  Returns 0 on success. */
+static int normalize_referenced_seeds(const char *src, const char *dst,
+                                      const char *drop_path, Pe *pe,
+                                      const uint32_t *ex, int nex,
+                                      int filter_tables, Report *r)
+{
+    U32Vec seeds = { 0 }, meta = { 0 };
+    FILE *f, *drop = NULL;
+    size_t i;
+    int excluded = 0, not_code = 0, filtered = 0;
+
+    if (load_seed_vas(src, &seeds) != 0) return -1;
+    if (pe) {
+        uint32_t va;
+        if (pe_entry_va(pe, &va)) u32_add(&meta, va);
+        add_pe_exports(pe, &meta);
+        add_pe_tls(pe, &meta);
+        u32_sort_unique(&meta);
+        for (i = 0; i < meta.n; i++) u32_add(&seeds, meta.v[i]);
+    }
+    u32_sort_unique(&seeds);
+
+    f = fopen(dst, "w");
+    if (!f) { free(seeds.v); free(meta.v); return -1; }
+    if (filter_tables && drop_path) drop = fopen(drop_path, "w");
+    for (i = 0; i < seeds.n; i++) {
+        uint32_t va = seeds.v[i];
+        if (seed_is_excluded(va, ex, nex)) { excluded++; continue; }
+        if (pe && pe_code_section_for_va(pe, va) < 0) { not_code++; continue; }
+        if (pe && filter_tables && !u32_contains(meta.v, meta.n, va) &&
+            seed_is_table_base(pe, va)) {
+            filtered++;
+            if (drop) print_table_evidence(drop, pe, va);
+            continue;
+        }
+        fprintf(f, "0x%08X 512 seed_%08X\n", va, va);
+    }
+    fclose(f);
+    if (drop) fclose(drop);
+    r->pe_meta_seeds = (int)meta.n;
+    r->excluded_seeds += excluded;
+    r->table_filtered = filtered;
+    r->not_code_seeds = not_code;
+    free(seeds.v);
+    free(meta.v);
+    return 0;
 }
 
 static int count_x(const char *path)
@@ -563,13 +832,27 @@ static void write_report(const char *path, const Report *r)
                 i + 1 < NTOOLS ? "," : "");
     fprintf(f, "  },\n");
 
-    fprintf(f, "  \"discover\": {\"tool\": \"entry.exe + seed.exe\", "
+    fprintf(f, "  \"discover\": {\"tool\": "
+            "\"entry.exe + thunkseeds.exe + seed.exe\", "
+            "\"mode\": \"%s\", \"referenced\": %s, "
             "\"seed_mode\": \"%s\", "
             "\"inventory_entries\": %d, \"seed_entries\": %d, "
-            "\"excluded_seeds\": %d, \"exclude_file\": ",
+            "\"pe_meta_seeds\": %d, \"table_filtered\": %d, "
+            "\"not_code_seeds\": %d, \"excluded_seeds\": %d, "
+            "\"thunk_seed_entries\": %d, "
+            "\"exclude_file\": ",
+            r->referenced ? "referenced+pe-meta+thunk" : "padded-inventory+thunk",
+            r->referenced ? "true" : "false",
             r->block_seeds ? "block" : "full",
-            r->inventory_entries, r->seed_entries, r->excluded_seeds);
+            r->inventory_entries, r->seed_entries,
+            r->pe_meta_seeds, r->table_filtered,
+            r->not_code_seeds, r->excluded_seeds,
+            r->thunk_seed_entries);
     json_str(f, r->exclude_file);
+    fprintf(f, ", \"table_filtered_file\": ");
+    json_str(f, r->table_filtered_file);
+    fprintf(f, ", \"thunk_seeds_file\": ");
+    json_str(f, r->thunk_seeds_file);
     fprintf(f, ", \"catalog_sha256\": \"%s\"},\n", r->catalog_sha);
     fprintf(f, "  \"lift32\": {\"entries\": %d, \"bytes\": %ld, "
             "\"c_sha256\": \"%s\"},\n", r->lift32_entries, r->seed_c_bytes,
@@ -683,12 +966,22 @@ static void parse_args(int argc, char **argv, Opts *o, int *do_self_test)
     o->image[0] = 0;
     o->max_functions = 0;
     o->block_seeds = 1;
+    o->referenced = 1;
+    o->no_table_filter = 0;
+    o->nrefs = 0;
     *do_self_test = 0;
 
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "--self-test")) *do_self_test = 1;
         else if (!strcmp(a, "--full-seeds")) o->block_seeds = 0;
+        else if (!strcmp(a, "--all-starts")) o->referenced = 0;
+        else if (!strcmp(a, "--no-table-filter")) o->no_table_filter = 1;
+        else if (!strcmp(a, "--refs-image") && i + 1 < argc &&
+                 o->nrefs < MAX_REFS) {
+            snprintf(o->refs[o->nrefs], sizeof o->refs[0], "%s", argv[++i]);
+            o->nrefs++;
+        }
         else if (!strcmp(a, "--skip-identity-check")) o->skip_identity = 1;
         else if (!strcmp(a, "--no-exclude")) o->no_exclude = 1;
         else if (!strcmp(a, "--exclude") && i + 1 < argc) snprintf(o->exclude, sizeof o->exclude, "%s", argv[++i]);
@@ -706,6 +999,7 @@ static void parse_args(int argc, char **argv, Opts *o, int *do_self_test)
                     "usage: closure_pipeline [--image <PE>] [--name <layout image>] "
                     "[--root DIR] [--tools DIR] [--out-dir DIR] [--work-dir DIR] "
                     "[--report JSON] [--max-functions N] [--full-seeds] "
+                    "[--all-starts] [--refs-image PE ...] [--no-table-filter] "
                     "[--skip-identity-check] [--exclude F | --no-exclude] "
                     "[--self-test]\n");
             exit(2);
@@ -744,6 +1038,9 @@ int main(int argc, char **argv)
     char merged[DIR_MAX_PATH], report_dir[DIR_MAX_PATH];
     char stem[256], log[DIR_MAX_PATH], tmp[DIR_MAX_PATH];
     char seeds_used[DIR_MAX_PATH], filtered_seeds[DIR_MAX_PATH];
+    char normalized_seeds[DIR_MAX_PATH], table_drops[DIR_MAX_PATH];
+    char thunk_seeds[DIR_MAX_PATH], combined_seeds[DIR_MAX_PATH];
+    char ref_args[CMD_CAP / 2] = "";
     uint32_t excluded[MAX_EXCLUDED];
     int nexcluded = 0;
     char limit_arg[128] = "";
@@ -823,30 +1120,95 @@ int main(int argc, char **argv)
     /* 1/2. Compiled discovery: inventory -> recovered extents.  seed.exe is
      * given the same inventory as its catalog so an extent never crosses the
      * next known function start. */
+    for (i = 0; i < o.nrefs; i++) {
+        size_t used = strlen(ref_args);
+        if (used < sizeof ref_args)
+            snprintf(ref_args + used, sizeof ref_args - used,
+                     " --refs-image \"%s\"", o.refs[i]);
+    }
     join(log, sizeof log, "%s/step_entry.log", o.out_dir);
-    rc = run_step(log, "\"%s/entry.exe\" --module \"%s\" --out \"%s\" --quiet",
-                  o.tools, o.image, entry_seeds);
+    rc = run_step(log, "\"%s/entry.exe\" --module \"%s\" --out \"%s\"%s%s --quiet",
+                  o.tools, o.image, entry_seeds,
+                  o.referenced ? " --referenced" : "", ref_args);
     if (rc != 0) { fprintf(stderr, "entry.exe failed (see %s)\n", log); return 1; }
     r.inventory_entries = count_lines(entry_seeds);
+    r.referenced = o.referenced;
 
     /* Evidence-based exclusions of confirmed non-code starts.  The list is
      * explicit and carries a reason per VA; nothing is guessed from bytes.
      * Both the seed set and the extent-boundary catalog use the filtered
      * inventory, so a data address cannot cap a real function either. */
-    snprintf(seeds_used, sizeof seeds_used, "%s", entry_seeds);
     if (!o.no_exclude) {
         nexcluded = load_exclusions(o.exclude, excluded, MAX_EXCLUDED);
         if (nexcluded > 0) {
+            snprintf(r.exclude_file, sizeof r.exclude_file, "%s", o.exclude);
+            printf("closure_pipeline: %d confirmed non-code start(s) in ledger\n",
+                   nexcluded);
+        }
+    }
+    if (o.referenced) {
+        join(normalized_seeds, sizeof normalized_seeds,
+             "%s/entry_seeds_referenced.txt", o.out_dir);
+        join(table_drops, sizeof table_drops,
+             "%s/entry_seeds_table_dropped.txt", o.out_dir);
+        rc = normalize_referenced_seeds(entry_seeds, normalized_seeds,
+                                        table_drops, have_pe ? &pe : NULL,
+                                        o.no_exclude ? NULL : excluded,
+                                        o.no_exclude ? 0 : nexcluded,
+                                        !o.no_table_filter, &r);
+        if (rc != 0) { fprintf(stderr, "cannot normalize referenced seeds\n"); return 1; }
+        snprintf(seeds_used, sizeof seeds_used, "%s", normalized_seeds);
+        if (r.table_filtered > 0)
+            snprintf(r.table_filtered_file, sizeof r.table_filtered_file,
+                     "%s", table_drops);
+        printf("closure_pipeline: referenced discovery: %d raw, %d PE starts, "
+               "%d table bases dropped, %d non-code dropped\n",
+               r.inventory_entries, r.pe_meta_seeds, r.table_filtered,
+               r.not_code_seeds);
+    } else {
+        snprintf(seeds_used, sizeof seeds_used, "%s", entry_seeds);
+        if (!o.no_exclude && nexcluded > 0) {
             join(filtered_seeds, sizeof filtered_seeds,
                  "%s/entry_seeds_filtered.txt", o.out_dir);
             rc = filter_seed_file(entry_seeds, filtered_seeds,
                                   excluded, nexcluded);
             if (rc < 0) { fprintf(stderr, "cannot filter seed inventory\n"); return 1; }
             r.excluded_seeds = rc;
-            snprintf(r.exclude_file, sizeof r.exclude_file, "%s", o.exclude);
             snprintf(seeds_used, sizeof seeds_used, "%s", filtered_seeds);
             printf("closure_pipeline: excluded %d confirmed non-code start(s)\n", rc);
         }
+    }
+
+    /* entry.exe drops an address-taken function that begins immediately after
+     * a six-byte jmp thunk because it is not 16-byte aligned.  Recover exactly
+     * that class here; thunkseeds.exe scans all sections for an in-image dword
+     * pointing at such a tail and writes the same seed format. */
+    join(thunk_seeds, sizeof thunk_seeds,
+         "%s/entry_seeds_thunks.txt", o.out_dir);
+    join(combined_seeds, sizeof combined_seeds,
+         "%s/entry_seeds_combined.txt", o.out_dir);
+    join(log, sizeof log, "%s/step_thunkseeds.log", o.out_dir);
+    if (!o.no_exclude && nexcluded > 0)
+        rc = run_step(log,
+                      "\"%s/thunkseeds.exe\" --module \"%s\" --known \"%s\" "
+                      "--exclude \"%s\" --out \"%s\"",
+                      o.tools, o.image, seeds_used, o.exclude, thunk_seeds);
+    else
+        rc = run_step(log,
+                      "\"%s/thunkseeds.exe\" --module \"%s\" --known \"%s\" "
+                      "--out \"%s\"",
+                      o.tools, o.image, seeds_used, thunk_seeds);
+    if (rc != 0) { fprintf(stderr, "thunkseeds.exe failed (see %s)\n", log); return 1; }
+    r.thunk_seed_entries = count_lines(thunk_seeds);
+    if (r.thunk_seed_entries > 0) {
+        if (merge_seed_files(seeds_used, thunk_seeds, combined_seeds) != 0) {
+            fprintf(stderr, "cannot merge thunk seeds\n");
+            return 1;
+        }
+        snprintf(r.thunk_seeds_file, sizeof r.thunk_seeds_file, "%s", thunk_seeds);
+        snprintf(seeds_used, sizeof seeds_used, "%s", combined_seeds);
+        printf("closure_pipeline: added %d extra seed(s)\n",
+               r.thunk_seed_entries);
     }
 
     join(log, sizeof log, "%s/step_seed.log", o.out_dir);
@@ -871,16 +1233,17 @@ int main(int argc, char **argv)
     r.seed_c_bytes = file_bytes(seed_c);
     hash_into(seed_c, r.seed_c_sha);
 
-    /* 4. Closure to a fixed point (closure.exe loops internally). */
+    /* 4. Closure to a fixed point (closure2.exe loops internally).  The local
+     * build gives every target a strict block extent; see closure2.c. */
     remove(closed_c);
     remove(closed_list);
     join(log, sizeof log, "%s/step_closure.log", o.out_dir);
     rc = run_step(log,
-                  "\"%s/closure.exe\" \"%s\" \"%s\" \"%s\" \"%s\" "
+                  "\"%s/closure2.exe\" \"%s\" \"%s\" \"%s\" \"%s\" "
                   "--workdir \"%s\"",
                   o.tools, o.image, seed_c, seed_list, closed_c, o.work_dir);
     if (rc != 0) {
-        fprintf(stderr, "closure.exe did not converge (see %s)\n", log);
+        fprintf(stderr, "closure2.exe did not converge (see %s)\n", log);
         if (have_pe) pe_close(&pe);
         return 1;
     }

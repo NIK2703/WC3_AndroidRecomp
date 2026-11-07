@@ -1,5 +1,59 @@
 # Прогресс переноса инструментария (2026-11-06, продолжение)
 
+## Полное многомодульное замыкание и relifted-сборка (2026-11-06)
+
+- `closure2.c` — closure с точным extent первого блока: `capstone` декодирует
+  до первого терминатора (`ret`/`jmp`/`hlt`/…), а не «всю функцию» по
+  эвристике `liftcore.c`. Это устранило перерастание блоков, из-за которого
+  старый closure сливал соседние блоки и терял точки входа.
+- `closure_pipeline.c` — discovery по умолчанию `--referenced`: только
+  padded-starts, на которые есть 4-байтная ссылка в любом из 8 образов;
+  добавлены PE entry point, executable-экспорты и TLS-callbacks (RVA, их не
+  видит dword-скан). Jump-table-base seeds отфильтрованы по evidence из
+  трёх подряд executable-адресов; исключения — только явные PE entry/export/
+  TLS. Диагностика: `--all-starts`, `--no-table-filter`,
+  `entry_seeds_table_dropped.txt` в отчёте.
+- `corpusclosure.c` — все 7 модулей в одном прогоне, каждый следующий модуль
+  передаётся остальным как `--refs-image`. После замыкания `known.exe`
+  сканирует **фактические** `void L_...` определения и публикует
+  `wc3_all_list.h`, `wc3_all_funcs.txt` и `corpus_manifest.json`; `--merge-only`
+  пересобирает манифест из готовых выходов без повторного лифта.
+- `splitcorpus.c` — детерминированная нарезка сгенерированного C по границам
+  функций (`800` функций / `16 MiB` на TU); 230 TU для всего корпуса.
+- CMake: `-DWC3_RELIFTED_CORPUS_ROOT=build/corpus-full` включает
+  `cmake/Wc3ReliftedCorpus.cmake`. Сборка проверяет SHA-256 `wc3_all_list.h`
+  против `corpus_manifest.json`, генерирует dispatcher list из объединённого
+  списка и линкует `wc3_corpus_relifted` вместо legacy-объектов. Пустое
+  значение сохраняет прежний legacy-путь.
+- Полный прогон: **7/7 pass**, 178 019 определений (war3 6 687, game 158 152,
+  Storm 5 220, Mss32 3 684, Mssfast 882, Mp3dec 1 033, ijl15 2 361),
+  480 270 константных целей, **0 residual**, **0 duplicate**, 0 `unknown_target`,
+  0 `no_terminal`. `corpus_sha256 = 37e4b45d…3038`, merged list
+  `sha256 = df4ca4ae2052004c24cb5394e5e75071d2cd9a4b47c0b317b0fccba79fca9ade`.
+- Android arm64-v8a, NDK r29 `29.0.14206865`, API 26, Release: чистая сборка
+  `wc3_corpus_relifted` и `wc3gameactivity` проходит. `llvm-nm` по собранному
+  `.so`: **178 019/178 019** определений `L_*`, **0** undefined `L_*`,
+  0 missing, 0 extra; `manifest.exe --strict` по каждому модулю —
+  `CONSISTENT`; target `wc3_corpus_manifest_check` — pass.
+  `__wrap_L_6F126E30` и `__wrap_L_6F654E20` разрешаются в новые определения.
+
+| Проверка | Результат |
+|---|---|
+| `corpusclosure.exe … --merge-only` | 7/7 pass, 178 019 merged, 0 duplicates |
+| `manifest.exe <module> --strict --active-list …` | 7/7 `CONSISTENT` |
+| `cmake --build build/android_relifted_clean --target wc3_corpus_manifest_check` | pass |
+| `cmake --build build/android_relifted_clean --target wc3gameactivity` | link pass |
+| `llvm-nm` по `.so` | 178 019 defined `L_*`, 0 undefined |
+
+**Не проверено:** T2 device E2E и T1 headless-DUT на этом корпусе, APK-упаковка
+и загрузка лицензионных MPQ на устройстве. Старый `probe_list.h` содержит
+192 557 адресов, из них 43 692 отсутствуют в новом списке (это фрагменты/
+внутренние адреса/ложные старты); новый список содержит 29 154 блочных старта,
+которых не было в старом. Новый корпус — уровень функций/блоков, а не
+надмножество фрагментов; покрытие косвенных/computed-переходов на устройстве
+ещё не измерено. Следующий шаг — T2 boot → menu с логированием
+`find_lifted`-fatal, затем headless T1.
+
 ## Headless platform backend (track A, T0)
 
 - `runtime/platform/headless/` — первая реализация всех 15 интерфейсов

@@ -1,6 +1,6 @@
 # Сборка: самостоятельность target-дерева и воспроизводимость
 
-Статус: **норма, rev 1** (2026-11-06), ADR-025. Нормативный владелец
+Статус: **норма, rev 2** (2026-11-07), ADR-025. Нормативный владелец
 `docs/ARCHITECTURE_1.27B.md` §9.1/§9.2 в части build pipeline,
 воспроизводимости, CI и release hygiene.
 
@@ -186,7 +186,7 @@ wc3build.py check  --target headless [--json <report>]
 Документ не вводит новых `G-xx`: все требования трассируются на существующие
 гейты V2, чтобы не раздувать матрицу без исполнителя.
 
-| Норма | Гейт / шаг | Статус 2026-11-06 |
+| Норма | Гейт / шаг | Статус 2026-11-07 |
 |---|---|---|
 | BP-4 (вендоринг, upstream pin) | G-13, Step 8 | `missing` |
 | BP-5 (`wc3build.py`) | G-13, Step 4/8 | `missing` |
@@ -194,6 +194,7 @@ wc3build.py check  --target headless [--json <report>]
 | BP-7.2 (link graph) | G-02 | `declared` |
 | BP-7.4 (release hygiene) | G-12 | `missing` |
 | BP-8 (CI) | V7 | `declared` |
+| BP-12 (ccache) | BP-8, Step 8 | `enforced` (CMake + build scripts) |
 | BP-4.4 (конец cutover) | Step 9 | не определён до этого документа |
 
 ## BP-10. Владение и порядок
@@ -217,6 +218,32 @@ identity эталонных захватов и difftest'ом на H (без Win
 устройства); T2 — при доступном устройстве, с APK; отчёт BP-6.2
 воспроизводим для обоих target'ов; R2/R3 чистые; G-02/G-05/G-09/G-12/G-13
 переведены в `enforced`.
+
+## BP-12. Кэш компиляции
+
+* **BP-12.1** Все C/C++ компиляции идут через `ccache`. CMake-путь
+  (`cmake/Wc3CompilerCache.cmake`) выставляет
+  `CMAKE_C_COMPILER_LAUNCHER`/`CMAKE_CXX_COMPILER_LAUNCHER`; каноническая
+  сборка `tools/android/build_app.ps1` задаёт `WC3_USE_CCACHE=ON` и
+  `WC3_REQUIRE_CCACHE=ON`, поэтому отсутствие ccache — ошибка конфигурации,
+  а не тихий обход. Host T0 (`tools/run_tests.py`), lift-инструменты
+  (`tools/lift/build_tools.ps1`), boot probe (`tools/build_boot_probe.ps1`)
+  и platform test (`tools/android/run_platform_test.ps1`) используют тот же
+  порядок поиска: `tools/ccache.ps1` для PowerShell и `find_ccache()` в
+  `tools/run_tests.py`.
+* **BP-12.2** Поиск: `WC3_CCACHE`, `CCACHE`, PATH, затем стандартные
+  каталоги MSYS2. На Windows MSYS2 ccache требует путь компилятора с
+  прямыми слэшами; `tools/ccache_wrapper.py` нормализует только этот
+  аргумент и не добавляет логику кэша. Прямой вызов gcc/clang в сборочном
+  пути без launcher запрещён; compile-вызовы всегда идут через ccache.
+  Одношаговый `gcc sources -o exe` в host-тестах и lift-инструментах
+  разбивается на `-c` + link: ccache не кэширует вызов, который линкует.
+* **BP-12.3** Проверка: configure печатает `[wc3] ccache: ...` и launcher;
+  в `CMakeFiles/rules.ninja` compile-команда начинается с launcher'а; в
+  логах host-тестов строка команды содержит `ccache`; `ccache -s` показывает
+  cacheable calls. Неканоническая локальная конфигурация без ccache
+  допускается только с warning и `WC3_REQUIRE_CCACHE=OFF`; для продукта
+  это не допускается.
 
 До BP-4.4 утверждение «новое дерево — канонический target» остаётся
 декларацией, а ADR-020 не имеет измеримого конца.
