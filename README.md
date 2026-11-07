@@ -20,6 +20,22 @@ Known issues:
   out.
 * The game freezes intermittently.
 
+## Launchers
+
+The APK exposes two launcher entries that share the same game data:
+
+| Entry | Label | Process | State directory | Guest command |
+| --- | --- | --- | --- | --- |
+| `.Wc3RocActivity` | Reign of Chaos | `:roc` | `files/roc` | `war3.exe -classic` |
+| `.Wc3GameActivity` | Frozen Throne | default | `files` | `war3.exe` |
+
+The debug build adds `(debug)` to both labels. Both entries read the licensed
+1.27 directory from `/storage/emulated/0/Warcraft 3`; the APK does not ship
+game assets. The game fills the display cutout and republishes its surface
+after a resume. In-game options are persisted in the guest registry under
+`Software\Blizzard Entertainment\Warcraft III` and written to
+`wc3_registry.dat` in the active state directory.
+
 ## Target
 
 * Warcraft III: The Frozen Throne 1.27.1.7085, PE32/x86.
