@@ -310,6 +310,7 @@ foreach(_required
 endforeach()
 
 target_sources(wc3gameactivity PRIVATE
+    "${WC3_ROOT}/runtime/app/overlay_actions_legacy.c"
     ${WC3_CORPUS_OBJECTS}
     ${WC3_D3D9_OBJECTS})
 

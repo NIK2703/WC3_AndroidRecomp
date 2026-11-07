@@ -128,6 +128,16 @@ static const StringOverride g_overrides[] = {
     { "GetCPInfo", h_get_cp_info },
 };
 
+typedef struct StringAddition {
+    const char *name;
+    uint16_t argc;
+    void (*impl)(CPU *c);
+} StringAddition;
+
+static const StringAddition g_additions[] = {
+    { "lstrcatA", 2, h_lstrcat_a },
+};
+
 int wc3_hle_kernel32_string_install(void)
 {
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
@@ -135,5 +145,12 @@ int wc3_hle_kernel32_string_install(void)
                                     g_overrides[i].impl) != 0)
             return -1;
     }
-    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+    for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
+        if (wc3_legacy_hle_add("KERNEL32.dll", g_additions[i].name,
+                               (int)g_additions[i].argc, 1,
+                               g_additions[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0] +
+                 sizeof g_additions / sizeof g_additions[0]);
 }

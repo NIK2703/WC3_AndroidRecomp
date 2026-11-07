@@ -15,7 +15,7 @@
 
 #define GUEST_BASE 0x10000u
 #define GUEST_SIZE 0x10000u
-#define MAX_ROWS 8u
+#define MAX_ROWS 16u
 
 static uint8_t g_mem[GUEST_SIZE];
 static uint32_t g_args[8];
@@ -46,6 +46,14 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
     g_rows[g_row_count].impl = impl;
     g_row_count++;
     return 0;
+}
+
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c))
+{
+    (void)argc;
+    (void)cdecl_abi;
+    return wc3_legacy_hle_override(dll, name, impl);
 }
 
 uint32_t wc3_legacy_arg32(const CPU *c, unsigned index)
@@ -120,10 +128,11 @@ static uint32_t invoke(const char *name, uint32_t a0, uint32_t a1, uint32_t a2)
 int main(void)
 {
     const int installed = wc3_hle_kernel32_string_install();
-    CHECK(installed == 4, "install count");
-    CHECK(g_row_count == 4u, "row count");
+    CHECK(installed == 5, "install count");
+    CHECK(g_row_count == 5u, "row count");
     CHECK(find_impl("lstrlenA") != NULL, "lstrlenA row");
     CHECK(find_impl("lstrcpynA") != NULL, "lstrcpynA row");
+    CHECK(find_impl("lstrcatA") != NULL, "lstrcatA row");
     CHECK(find_impl("GetACP") != NULL, "GetACP row");
     CHECK(find_impl("GetCPInfo") != NULL, "GetCPInfo row");
 
@@ -162,6 +171,32 @@ int main(void)
     CHECK(invoke("lstrcpynA", dst, 0, 8) == dst, "lstrcpynA NULL source");
     CHECK(((uint8_t *)guest_ptr(dst, 16))[0] == 0u,
           "lstrcpynA NULL source terminator");
+
+    const uint32_t src = GUEST_BASE + 0x180u;
+    memcpy(guest_ptr(src, 4), "def", 4);
+
+    memset(guest_ptr(dst, 16), 0x55, 16);
+    memcpy(guest_ptr(dst, 4), "abc", 4);
+    CHECK(invoke("lstrcatA", dst, src, 0) == dst, "lstrcatA return");
+    CHECK(memcmp(guest_ptr(dst, 7), "abcdef\0", 7) == 0, "lstrcatA append");
+    CHECK(((uint8_t *)guest_ptr(dst, 16))[7] == 0x55u, "lstrcatA tail");
+
+    memset(guest_ptr(dst, 16), 0x55, 16);
+    memcpy(guest_ptr(dst, 1), "", 1);
+    CHECK(invoke("lstrcatA", dst, src, 0) == dst, "lstrcatA empty dst");
+    CHECK(memcmp(guest_ptr(dst, 4), "def\0", 4) == 0, "lstrcatA empty dst text");
+
+    const uint32_t empty = GUEST_BASE + 0x1C0u;
+    memset(guest_ptr(empty, 1), 0, 1);
+    memcpy(guest_ptr(dst, 4), "abc", 4);
+    CHECK(invoke("lstrcatA", dst, empty, 0) == dst, "lstrcatA empty src");
+    CHECK(memcmp(guest_ptr(dst, 4), "abc\0", 4) == 0, "lstrcatA empty src text");
+
+    CHECK(invoke("lstrcatA", 0, src, 0) == 0u, "lstrcatA NULL dst");
+    memset(guest_ptr(dst, 4), "abc", 4);
+    CHECK(invoke("lstrcatA", dst, 0, 0) == dst, "lstrcatA NULL src");
+    CHECK(memcmp(guest_ptr(dst, 4), "abc\0", 4) == 0,
+          "lstrcatA NULL src terminator");
 
     CHECK(invoke("GetACP", 0, 0, 0) == 1251u, "GetACP value");
     const uint32_t cpinfo = GUEST_BASE + 0x300u;

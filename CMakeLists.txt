@@ -109,11 +109,53 @@ if(WC3_BUILD_APP)
         IMPORTED_LOCATION "${GA_ARCHIVE}")
     target_include_directories(game_activity_static INTERFACE "${GA_INCLUDE}")
 
+    # Winlator C touch engine, vendored under third_party.  It is a pinned
+    # third-party input library, not imported build logic: the overlay adapter
+    # in runtime/platform/android/controls is the only consumer.  Vendor code
+    # keeps its own warnings/strings (R9/VENDOR_MANIFEST.md).
+    file(GLOB_RECURSE WC3_WINLATOR_INPUT_SOURCES CONFIGURE_DEPENDS
+        "${WC3_ROOT}/third_party/winlator-input/*.c")
+    add_library(winlator_input STATIC ${WC3_WINLATOR_INPUT_SOURCES})
+    target_include_directories(winlator_input PUBLIC
+        "${WC3_ROOT}/third_party/winlator-input")
+    target_compile_options(winlator_input PRIVATE -w)
+    set_target_properties(winlator_input PROPERTIES
+        C_EXTENSIONS ON
+        POSITION_INDEPENDENT_CODE ON)
+
+    # Overlay host boundary: profile/view model, software RGBA8 renderer,
+    # Android SurfaceView presentation, the input ring/wake/adapter, and the
+    # direct-JNI haptics sink.  No guest ABI or legacy header is visible here;
+    # the action bridge (runtime/app) is the only file that reaches the shim.
+    add_library(wc3_overlay STATIC
+        "${WC3_ROOT}/runtime/platform/android/controls/wc3_controls.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/wc3_haptics_android.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/wc3_input_adapter.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/wc3_input_ring.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/wc3_input_wake.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/wc3_overlay.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/wc3_overlay_android.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/wc3_overlay_profile.c")
+    target_include_directories(wc3_overlay PUBLIC
+        "${WC3_ROOT}/runtime/platform/android/controls"
+        "${WC3_ROOT}/runtime/diag"
+        "${WC3_ROOT}/third_party/winlator-input")
+    target_link_libraries(wc3_overlay PUBLIC winlator_input android log m)
+    target_compile_definitions(wc3_overlay PUBLIC
+        WC3_DEBUG=${WC3_DEBUG_DEFINE})
+    target_compile_options(wc3_overlay PRIVATE -Wall -Wextra -O2)
+    set_target_properties(wc3_overlay PROPERTIES
+        C_EXTENSIONS ON
+        POSITION_INDEPENDENT_CODE ON)
+
     add_library(wc3gameactivity SHARED
         "${WC3_ROOT}/apps/android_gameactivity/src/main/cpp/host_shell.c")
-    target_include_directories(wc3gameactivity PRIVATE ${WC3_INCLUDES})
+    target_include_directories(wc3gameactivity PRIVATE
+        ${WC3_INCLUDES}
+        "${WC3_ROOT}/runtime/app")
     target_link_libraries(wc3gameactivity PRIVATE
         wc3_platform
+        wc3_overlay
         -Wl,--whole-archive game_activity_static -Wl,--no-whole-archive
         android log aaudio m)
     if(NOT WC3_WITH_LEGACY_BOOT)
