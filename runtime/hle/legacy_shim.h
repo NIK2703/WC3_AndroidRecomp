@@ -36,6 +36,20 @@ const char *wc3_legacy_hle_describe(uint32_t thunk);
 int wc3_legacy_hle_override(const char *dll, const char *name,
                             void (*impl)(CPU *c));
 
+/* Install a target handler and return the as-built handler it replaced.  The
+ * wrapper may call the previous handler and then extend the observable state;
+ * this is the strangler seam for calls whose side effects still live in the
+ * quarantine (window creation and the input message pump). */
+int wc3_legacy_hle_chain(const char *dll, const char *name,
+                         void (*impl)(CPU *c),
+                         void (**previous)(CPU *c));
+
+/* The as-built last-error cell is thread-local static state.  These accessors
+ * call its registered getter/setter so target handlers can report a Win32
+ * error without duplicating the quarantine symbol. */
+void wc3_legacy_set_last_error(uint32_t code);
+uint32_t wc3_legacy_get_last_error(void);
+
 /* Register an import row the as-built table did not define.  The resolver
  * creates a guessed-arity stub for an unknown import; this replaces that stub
  * (or appends a row when the import has not been bound yet) during bootstrap.

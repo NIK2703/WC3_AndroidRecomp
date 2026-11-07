@@ -47,6 +47,10 @@
 #include "hle_input_state.h"
 #include "hle_registry.h"
 
+#if WC3_DEBUG && WC3_DEBUG_HLE
+#include "wc3_watch_state.h"
+#endif
+
 #ifdef WC3_DEBUG_RESOLUTION
 #define RES_LOG(...) do { \
     fprintf(stderr, "[resolution] " __VA_ARGS__); \
@@ -983,6 +987,8 @@ typedef struct {
     uint32_t state;
     uint32_t file_map_base;
     uint32_t file_map_size;
+    uint32_t iocp_port;      /* CreateIoCompletionPort association */
+    uint32_t iocp_key;
 } GHandle;
 
 static GHandle g_handles[GH_MAX];
@@ -1247,7 +1253,11 @@ static void h_get_startup_info(CPU *c)
     c->eax = 0;
 }
 
-static void h_get_command_line(CPU *c) { c->eax = g_cmdline_cell; }
+/* GetCommandLineA returns the string itself.  g_cmdline_cell is only the
+ * one-word _acmdln data import and must not be handed to callers: Storm's
+ * option parser reads this return value and otherwise sees a pointer's bytes
+ * instead of "-classic"/"-loadfile". */
+static void h_get_command_line(CPU *c) { c->eax = g_cmdline_str ? g_cmdline_str : g_cmdline_cell; }
 
 static void h_get_module_file_name(CPU *c)
 {
@@ -2888,6 +2898,20 @@ static void h_sleep(CPU *c)
 #define WAVE_DONE_MAX      256
 #define WAVE_RING_BYTES    (8u * 1024u * 1024u)
 #define WOM_DONE_MSG       0x3BDu
+/* A completion belongs to a fixed guest thread (by default the thread that
+ * opened the device), but it must be DELIVERED without an artificial delay:
+ * winmm sets WHDR_DONE and calls the callback in the same breath.  Any gap
+ * between the two lets Miles re-submit the same WAVEHDR while its WOM_DONE is
+ * still queued.  WC3_WAVEOUT_DONE_HANDOFF_MS restores a wait for A/B,
+ * WC3_WAVEOUT_DONE_ROUTE=submitter switches affinity to the submitting
+ * thread, WC3_WAVEOUT_DONE_EARLY_FLAG=1 restores the legacy RT-thread flag
+ * (raised before the callback, which lets Miles rewrite the PCM mid-copy). */
+#define WAVE_DONE_HANDOFF_MS 10u
+#define WAVE_DONE_ROUTE_OWNER     0
+#define WAVE_DONE_ROUTE_SUBMITTER 1
+/* waveOutOpen leaves the AAudio stream paused until the ring holds at least
+ * this many bursts, so the first real callback cannot underrun. */
+#define WAVE_PREFILL_BURSTS 2u
 
 #define WHDR_DONE          0x00000001u
 #define WHDR_PREPARED      0x00000002u
@@ -2919,7 +2943,14 @@ typedef struct {
     uint32_t guest;       /* guest WAVEHDR */
     uint32_t remaining;   /* canonical bytes not yet handed to AAudio */
     uint32_t done_at;     /* silent sink: GetTickCount deadline */
+    pthread_t submitter;  /* guest thread that called waveOutWrite */
 } WaveBlock;
+
+typedef struct {
+    uint32_t hdr;         /* guest WAVEHDR to report done */
+    pthread_t owner;      /* thread that submitted that header */
+    uint32_t queued_ms;   /* monotonic ms when the completion was raised */
+} WaveDone;
 
 typedef struct {
     int used;
@@ -2938,12 +2969,17 @@ typedef struct {
     uint32_t head, tail;  /* free-running canonical byte counters */
     WaveBlock blk[WAVE_HDR_MAX];
     int blk_head, blk_count;
-    uint32_t done[WAVE_DONE_MAX];  /* guest WAVEHDR completions */
+    WaveDone done[WAVE_DONE_MAX];  /* guest WAVEHDR completions */
     int done_head, done_count;
     int underrun_fade;   /* device-side click suppression on ring underrun */
     int fade_in;         /* ramp up on the first callback after an underrun */
-    pthread_t owner;     /* thread that called waveOutOpen (CALLBACK_FUNCTION) */
-    uint32_t last_done_ms; /* last WOM_DONE delivery, for the stall fallback */
+    int started;         /* AAudio stream running (after ring prefill) */
+    int done_route;      /* WAVE_DONE_ROUTE_OWNER or _SUBMITTER */
+    uint32_t done_handoff_ms; /* wait before a foreign thread may deliver */
+    int done_early_flag; /* 1: legacy -- set WHDR_DONE on the RT thread */
+    int32_t burst_frames;/* AAudio frames per burst, cached for the prefill */
+    pthread_t owner;     /* thread that called waveOutOpen (diagnostics) */
+    uint32_t last_done_ms; /* last WOM_DONE delivery, for diagnostics */
 } WaveDev;
 
 static WaveDev g_wave_dev[WAVE_DEV_MAX];
@@ -2984,6 +3020,27 @@ static uint32_t wave_now_ms(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint32_t)((uint64_t)ts.tv_sec * 1000u +
                       (uint64_t)ts.tv_nsec / 1000000u);
+}
+
+/* Read once at waveOutOpen and cached per device: wave_queue_done_locked()
+ * runs on the AAudio real-time thread and must not call getenv(). */
+static void wave_done_tuning_from_env(WaveDev *d)
+{
+    const char *route = getenv("WC3_WAVEOUT_DONE_ROUTE");
+    const char *wait = getenv("WC3_WAVEOUT_DONE_HANDOFF_MS");
+    const char *early = getenv("WC3_WAVEOUT_DONE_EARLY_FLAG");
+    d->done_route = (route && !strcmp(route, "submitter"))
+                        ? WAVE_DONE_ROUTE_SUBMITTER : WAVE_DONE_ROUTE_OWNER;
+    d->done_handoff_ms = WAVE_DONE_HANDOFF_MS;
+    if (wait) {
+        long v = strtol(wait, NULL, 10);
+        if (v >= 0 && v <= 1000) d->done_handoff_ms = (uint32_t)v;
+    }
+    /* Strict winmm semantics by default: WHDR_DONE is raised at WOM_DONE
+     * delivery, not on the AAudio RT thread.  With handoff_ms=0 the callback
+     * follows within 0-1 ms, so Miles never sees a "free" header while the
+     * PCM is still being copied.  =1 restores the old early flag for A/B. */
+    d->done_early_flag = (early && early[0] == '1');
 }
 
 /* ---- USER32 timers ---------------------------------------------------
@@ -3045,7 +3102,9 @@ static void timer_service(CPU *c)
                     now, due[i].callback, due[i].id);
 #endif
 #if WC3_DEBUG && WC3_DEBUG_HLE
-        if (g_timer_hle_log++ < 240)
+        /* Keep tick diagnostics for the whole run: a 240-line cap truncated
+         * exactly where the mixer's later stalls needed to be measured. */
+        if (g_timer_hle_log++ < 4000)
             fprintf(stderr, "[timer] fire t=%u tid=%lu gid=%u cb=%08X id=%u\n",
                     now, (unsigned long)pthread_self(),
                     hle_current_guest_id(),
@@ -3225,22 +3284,47 @@ static void wave_dump_pcm(const uint8_t *p, uint32_t n)
         return;
     }
     fwrite(p, 1, n, g_wave_dump_file);
-    fflush(g_wave_dump_file);
+    /* Flushing every 50 ms block to flash under the dump lock stalls the
+     * AAudio RT callback: short grew 4 -> 743 in the 21:13 dump run.  Flush
+     * rarely; the final fclose() flushes the tail. */
+    if ((g_wave_dump_total / (n ? n : 1)) % 64u == 63u)
+        fflush(g_wave_dump_file);
     g_wave_dump_total += n;
 }
 #endif
 
-/* Mark a guest WAVEHDR done and queue WOM_DONE.  Called with g_wave_lock. */
-static void wave_queue_done_locked(WaveDev *d, uint32_t hdr, const char *why)
+/* Mark a guest WAVEHDR done and queue WOM_DONE.  Called with g_wave_lock.
+ * `submitter` is the guest thread that called waveOutWrite for this header.
+ * Miles keeps driver state on the guest thread that opened the device, so by
+ * default the completion is addressed to d->owner.  Delivering it to an
+ * arbitrary pumping worker makes Miles re-submit a header before its
+ * WOM_DONE arrives (WHDR_INQUEUE is observed set at delivery time), which is
+ * the source of repeated PCM blocks, block-boundary clicks and silence.
+ * Each completion carries its own queued_ms: the old gate measured the age
+ * from the LAST DELIVERY (d->last_done_ms), so any quiet gap made the very
+ * first completion after that gap look stale and triggered a permanent owner
+ * handover to whichever worker happened to pump first. */
+static void wave_queue_done_locked(WaveDev *d, uint32_t hdr,
+                                   pthread_t submitter, const char *why)
 {
-    if (hdr && guest_ok(hdr, 32)) {
+    /* winmm raises WHDR_DONE and invokes the callback together.  Setting the
+     * flag here, on the AAudio RT thread, opens a window in which Miles sees
+     * a "free" header but has NOT received WOM_DONE yet and starts rewriting
+     * the PCM while waveOutWrite() is still copying it -- measured as 3194
+     * intra-buffer discontinuities in build/wave_dump_fix1_raw.pcm.
+     * By default the flag is now raised at delivery in waveout_service();
+     * WC3_WAVEOUT_DONE_EARLY_FLAG=1 restores this legacy path. */
+    if (d->done_early_flag && hdr && guest_ok(hdr, 32)) {
         uint32_t f = rd32g(hdr + 16);
         f = (f & ~WHDR_INQUEUE) | WHDR_DONE | WHDR_PREPARED;
         wr32g(hdr + 16, f);
     }
     if (d->done_count >= WAVE_DONE_MAX) return;
     int i = (d->done_head + d->done_count) % WAVE_DONE_MAX;
-    d->done[i] = hdr;
+    d->done[i].hdr = hdr;
+    d->done[i].owner = (d->done_route == WAVE_DONE_ROUTE_SUBMITTER)
+                           ? submitter : d->owner;
+    d->done[i].queued_ms = wave_now_ms();
     d->done_count++;
     g_wave_pending = 1;
     (void)why;
@@ -3277,6 +3361,10 @@ static volatile uint32_t g_aa_fake, g_aa_peak, g_aa_nonzero, g_aa_samples;
 static volatile uint64_t g_aa_energy_us, g_aa_energy_cb;
 static unsigned g_aa_energy_reported, g_aa_short_reported, g_aa_error_reported;
 static uint64_t g_aa_report_us;
+/* WOM_DONE delivery health: late = older than one 50 ms guest buffer;
+ * foreign = delivered on a thread other than the addressed one. */
+static volatile unsigned g_wave_done_late, g_wave_done_fallback;
+static volatile uint32_t g_wave_done_max_age;
 #endif
 static uint64_t aa_now_us(void)
 {
@@ -3303,8 +3391,10 @@ static aaudio_data_callback_result_t wave_aaudio_cb(AAudioStream *stream,
     if (g_aa_last_us) {
         uint64_t gap = now_us - g_aa_last_us;
         if (gap > g_aa_max_gap_us) g_aa_max_gap_us = gap;
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
         if (gap >= 5000u) g_aa_gap5++;
         if (gap >= 20000u) g_aa_gap20++;
+#endif
     }
     g_aa_last_us = now_us;
     g_aa_cb++;
@@ -3356,7 +3446,7 @@ static aaudio_data_callback_result_t wave_aaudio_cb(AAudioStream *stream,
         b->remaining -= n;
         left -= n;
         if (b->remaining == 0) {
-            wave_queue_done_locked(d, b->guest, "audio");
+            wave_queue_done_locked(d, b->guest, b->submitter, "audio");
             d->blk_head = (d->blk_head + 1) % WAVE_HDR_MAX;
             d->blk_count--;
         }
@@ -3485,6 +3575,13 @@ static void wave_audio_stats_report(void)
             cb, shortc, slow, silent, (unsigned)g_aa_min_avail,
             (unsigned long long)g_aa_max_gap_us, gap5, gap20, (int)xruns,
             (unsigned long long)g_aa_lock_max_us);
+    fprintf(stderr, "[wave] done late=%u foreign=%u maxage_ms=%u started=%d "
+                    "handoff_ms=%u early_flag=%d\n",
+            g_wave_done_late, g_wave_done_fallback,
+            (unsigned)g_wave_done_max_age,
+            (int)(g_wave_dev[0].used ? g_wave_dev[0].started : -1),
+            g_wave_dev[0].used ? g_wave_dev[0].done_handoff_ms : 0u,
+            g_wave_dev[0].used ? g_wave_dev[0].done_early_flag : -1);
     if (errs != g_aa_error_reported) {
         g_aa_error_reported = errs;
         fprintf(stderr, "[wave] AAudio error %d on dev %d count=%u\n",
@@ -3542,13 +3639,13 @@ static int wave_open_aaudio(WaveDev *d)
         r = AAudioStreamBuilder_openStream(b, &d->stream);
         AAudioStreamBuilder_delete(b);
         if (r == AAUDIO_OK && d->stream) {
-            aaudio_result_t sr = AAudioStream_requestStart(d->stream);
-            if (sr != AAUDIO_OK) {
-                fprintf(stderr, "[wave] AAudio start failed %d\n", (int)sr);
-                AAudioStream_close(d->stream);
-                d->stream = NULL;
-                continue;
-            }
+            /* Do NOT start here: waveOutOpen is followed by a one-frame
+             * device probe.  Starting with an empty ring produced seven
+             * consecutive short callbacks and an audible click on entry.
+             * h_wave_out_write() starts the stream once the first real
+             * buffer has pre-filled the ring (WAVE_PREFILL_BURSTS). */
+            d->started = 0;
+            d->burst_frames = AAudioStream_getFramesPerBurst(d->stream);
 #ifdef WC3_DEBUG
             int32_t actual = AAudioStream_getSampleRate(d->stream);
             if (actual != d->rate)
@@ -3616,6 +3713,8 @@ static void waveout_service(CPU *c)
     int have_now = 0;
     for (;;) {
         uint32_t gh = 0, hdr = 0, cb = 0, inst = 0, ev = 0;
+        uint32_t done_age = 0;
+        int done_foreign = 0;
         int found = 0;
 
         if (pthread_mutex_trylock(&g_wave_lock) != 0) break;
@@ -3627,7 +3726,7 @@ static void waveout_service(CPU *c)
             while (d->blk_count > 0) {
                 WaveBlock *b = &d->blk[d->blk_head];
                 if ((int32_t)(now - b->done_at) < 0) break;
-                wave_queue_done_locked(d, b->guest, "fake");
+                wave_queue_done_locked(d, b->guest, b->submitter, "fake");
                 d->blk_head = (d->blk_head + 1) % WAVE_HDR_MAX;
                 d->blk_count--;
             }
@@ -3637,24 +3736,43 @@ static void waveout_service(CPU *c)
         for (int i = 0; i < WAVE_DEV_MAX && !found; i++) {
             WaveDev *d = &g_wave_dev[i];
             if (!d->used || d->done_count == 0) continue;
-            /* WOM_DONE belongs on the thread that opened the device.  Other
-             * guest threads still service their own timers (above) but must
-             * leave the completion queued for the owner.  If the owner has
-             * not pumped for 250 ms, hand ownership to this pumping thread
-             * once, instead of scattering callbacks over a dozen workers. */
-            if (!pthread_equal(d->owner, pthread_self())) {
-                if ((int32_t)(now - d->last_done_ms) < 250) {
+            WaveDone *q = &d->done[d->done_head];
+            /* Each completion carries the guest thread that should receive
+             * it and the time it was raised.  The 20:56 device log still had
+             * 106/385 deliveries with WHDR_INQUEUE re-set and 70 completions
+             * held for exactly 100 ms: any wait between the RT thread raising
+             * a completion and the guest receiving WOM_DONE lets Miles
+             * re-submit the header first.  Default handoff is therefore 0 --
+             * the first pumping guest thread delivers immediately.  A/B:
+             * WC3_WAVEOUT_DONE_HANDOFF_MS=100 restores the wait. */
+            done_age = now - q->queued_ms;
+            done_foreign = !pthread_equal(q->owner, pthread_self());
+            if (done_foreign) {
+                if ((int32_t)done_age < (int32_t)d->done_handoff_ms) {
                     other_pending = 1;
                     continue;
                 }
 #if WC3_DEBUG && WC3_DEBUG_AUDIO
-                if (wave_trace())
-                    fprintf(stderr, "[wave] DONE owner handover gid=%u\n",
-                            hle_current_guest_id());
+                g_wave_done_fallback++;
+                if (wave_trace() && d->done_handoff_ms)
+                    fprintf(stderr, "[wave] DONE one-shot fallback gid=%u age=%u\n",
+                            hle_current_guest_id(), done_age);
 #endif
-                d->owner = pthread_self();
             }
-            hdr = d->done[d->done_head];
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+            /* "Late" means older than one 50 ms guest buffer. */
+            if (done_age > 50u) g_wave_done_late++;
+            if (done_age > g_wave_done_max_age) g_wave_done_max_age = done_age;
+#endif
+            hdr = q->hdr;
+            /* Raise WHDR_DONE together with the callback (default).  The
+             * header stays INQUEUE until Miles actually gets WOM_DONE, so
+             * the PCM cannot be rewritten while it is being copied. */
+            if (!d->done_early_flag && hdr && guest_ok(hdr, 32)) {
+                uint32_t f = rd32g(hdr + 16);
+                f = (f & ~WHDR_INQUEUE) | WHDR_DONE | WHDR_PREPARED;
+                wr32g(hdr + 16, f);
+            }
             d->done_head = (d->done_head + 1) % WAVE_DONE_MAX;
             d->done_count--;
             d->last_done_ms = now;
@@ -3675,9 +3793,10 @@ static void waveout_service(CPU *c)
                     gh, hdr, cb);
         if (wave_trace())
             fprintf(stderr, "[wave] DONE t=%u hdr=%08X cb=%08X gid=%u "
-                            "flg=%08X\n",
+                            "flg=%08X age=%u foreign=%d\n",
                     wave_now_ms(), hdr, cb, hle_current_guest_id(),
-                    hdr && guest_ok(hdr, 32) ? rd32g(hdr + 16) : 0u);
+                    hdr && guest_ok(hdr, 32) ? rd32g(hdr + 16) : 0u,
+                    done_age, done_foreign);
 #endif
 
         if (cb) {
@@ -3793,6 +3912,7 @@ static void h_wave_out_open(CPU *c)
      * keeps driver state per guest thread; dispatching it on unrelated worker
      * threads corrupts the mixer over time (stale buffers, then silence). */
     d->owner = pthread_self();
+    wave_done_tuning_from_env(d);
     d->last_done_ms = wave_now_ms();
     d->gh = 0x000A0000u + (uint32_t)slot * 4u;
     d->devid = devid;
@@ -3822,7 +3942,11 @@ static void h_wave_out_open(CPU *c)
     wr32g(phwo, gh);
 #ifdef WC3_DEBUG
     if (wave_trace())
-        fprintf(stderr, "[wave] Open ok ghwo=%u fake=%d\n", gh, d->fake);
+        fprintf(stderr, "[wave] Open ok ghwo=%u fake=%d route=%s "
+                        "handoff_ms=%u early_flag=%d prefill_bursts=%u\n",
+                gh, d->fake,
+                d->done_route == WAVE_DONE_ROUTE_SUBMITTER ? "submitter" : "owner",
+                d->done_handoff_ms, d->done_early_flag, WAVE_PREFILL_BURSTS);
 #endif
 #if WC3_DEBUG && WC3_DEBUG_HLE
     fprintf(stderr, "[wave] open ok ghwo=%u fake=%d gid=%u tid=%lu\n",
@@ -3840,10 +3964,11 @@ static void h_wave_out_close(CPU *c)
     if (!d) { pthread_mutex_unlock(&g_wave_lock); c->eax = MMSYSERR_INVALHANDLE; return; }
     d->closing = 1;
     AAudioStream *stream = d->stream;
+    int was_started = d->started;
     d->stream = NULL;
     pthread_mutex_unlock(&g_wave_lock);
 
-    if (stream) {
+    if (stream && was_started) {
 #if WC3_DEBUG && WC3_DEBUG_AUDIO
         if (wave_trace())
             fprintf(stderr, "[wave] Close begin ghwo=%u t=%u\n",
@@ -3890,7 +4015,7 @@ static void wave_remove_done_locked(WaveDev *d, uint32_t hdr)
     int out = 0;
     for (int i = 0; i < d->done_count; i++) {
         int p = (d->done_head + i) % WAVE_DONE_MAX;
-        if (d->done[p] == hdr) continue;
+        if (d->done[p].hdr == hdr) continue;
         d->done[(d->done_head + out) % WAVE_DONE_MAX] = d->done[p];
         out++;
     }
@@ -3959,7 +4084,10 @@ static void h_wave_out_write(CPU *c)
      * WOM_DONE has reached a thread that pumps messages.  Delivering the
      * queued completions here, on the writer thread, keeps the callback ahead
      * of the reuse of the same WAVEHDR, as it is on Windows.  Running the
-     * callback on this thread also makes its SuspendThread(self) harmless. */
+     * callback on this thread also makes its SuspendThread(self) harmless.
+     * The 50 ms mixer timer runs unconditionally: tying it to
+     * g_wave_pending made it skip ticks whenever no completion was queued. */
+    timer_service(c);
     if (g_wave_pending) waveout_service(c);
 
     uint32_t gh = arg32(c, 0), hdr = arg32(c, 1);
@@ -4003,9 +4131,16 @@ static void h_wave_out_write(CPU *c)
     int bi = (d->blk_head + d->blk_count) % WAVE_HDR_MAX;
     WaveBlock *b = &d->blk[bi];
     b->guest = hdr;
+    b->submitter = pthread_self();
 
-    if (need == 0) {
-        wave_queue_done_locked(d, hdr, "empty");
+    /* A zero-length header and Miles' one-frame device probe complete with
+     * no audible playback: winmm marks them done immediately.  Pushing the
+     * 4-byte probe into a freshly started AAudio ring produced a run of
+     * short callbacks (cb=7 short=7 in the 20:19 device log) and a click on
+     * entry.  Complete it here and leave the ring untouched. */
+    if (need == 0 || (need <= 64 && !d->fake)) {
+        wave_queue_done_locked(d, hdr, pthread_self(),
+                               need == 0 ? "empty" : "probe");
         pthread_mutex_unlock(&g_wave_lock);
         c->eax = MMSYSERR_NOERROR;
         waveout_service(c);
@@ -4019,6 +4154,7 @@ static void h_wave_out_write(CPU *c)
         if (dur < 1) dur = 1;
         b->remaining = 0;
         b->done_at = wave_now_ms() + dur;
+        b->submitter = pthread_self();
         d->blk_count++;
         pthread_mutex_unlock(&g_wave_lock);
         c->eax = MMSYSERR_NOERROR;
@@ -4052,7 +4188,14 @@ static void h_wave_out_write(CPU *c)
     bi = (d->blk_head + d->blk_count) % WAVE_HDR_MAX;
     b = &d->blk[bi];
     b->guest = hdr;
+    b->submitter = pthread_self();
 
+#ifdef WC3_DEBUG
+    const int dump_pcm = !d->fake && d->tag == WAVE_FORMAT_PCM && d->bits == 16;
+    uint8_t *dump_snapshot = NULL;
+#else
+    const int dump_pcm = 0;
+#endif
     uint32_t idx = d->head % WAVE_RING_BYTES;
     uint32_t first_frames = (WAVE_RING_BYTES - idx) / d->out_align;
     if (first_frames > frames) first_frames = frames;
@@ -4060,16 +4203,45 @@ static void h_wave_out_write(CPU *c)
     if (frames > first_frames)
         wave_copy_s16(d->ring, data + first_frames * src_align,
                       frames - first_frames, d);
+#ifdef WC3_DEBUG
+    /* Snapshot THE RING BYTES, i.e. exactly what AAudio will play, not the
+     * guest buffer.  This is the decisive measurement: if discontinuities
+     * survive here they are produced by the guest mixer / buffer ordering,
+     * not by a torn read of guest memory.  Taken under g_wave_lock so the
+     * RT callback cannot drain these bytes while we copy them. */
+    if (dump_pcm && need) {
+        dump_snapshot = (uint8_t *)malloc(need);
+        if (dump_snapshot) {
+            uint32_t nb = first_frames * d->out_align;
+            memcpy(dump_snapshot, d->ring + idx, nb);
+            if (need > nb)
+                memcpy(dump_snapshot + nb, d->ring, need - nb);
+        }
+    }
+#endif
     d->head += need;
     b->remaining = need;
+    b->submitter = pthread_self();
     d->blk_count++;
+
+    /* Deferred AAudio start.  Decide under g_wave_lock, but call
+     * requestStart() only after it is dropped: the real-time callback takes
+     * the same lock and must never wait on a guest-side start transition. */
+    int start_now = 0;
+    AAudioStream *start_stream = NULL;
+    if (!d->started && d->stream) {
+        uint32_t burst = (uint32_t)(d->burst_frames > 0 ? d->burst_frames : 882);
+        uint32_t prefill = burst * d->out_align * WAVE_PREFILL_BURSTS;
+        if (d->head - d->tail >= prefill) {
+            d->started = 1;
+            start_now = 1;
+            start_stream = d->stream;
+        }
+    }
 #ifdef WC3_DEBUG
     const int log_blk = d->blk_count;
     const uint32_t log_ring = d->head - d->tail;
     const int log_fake = d->fake;
-    const int dump_pcm = !d->fake && d->tag == WAVE_FORMAT_PCM && d->bits == 16;
-#else
-    const int dump_pcm = 0;
 #endif
 #ifdef WC3_DEBUG
     /* Take the dump lock while still holding g_wave_lock so dump order is the
@@ -4084,20 +4256,31 @@ static void h_wave_out_write(CPU *c)
 #endif
     pthread_mutex_unlock(&g_wave_lock);
 
+    if (start_now) {
+        aaudio_result_t sr = AAudioStream_requestStart(start_stream);
+        if (sr != AAUDIO_OK)
+            fprintf(stderr, "[wave] AAudio deferred start failed %d\n", (int)sr);
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+        else if (wave_trace())
+            fprintf(stderr, "[wave] AAudio deferred start ring=%u t=%u\n",
+                    (unsigned)log_ring, wave_now_ms());
+#endif
+    }
+
 #ifdef WC3_DEBUG
     /* Guest-thread diagnostics: never format or write while g_wave_lock is
      * held, otherwise the AAudio callback can miss a period. */
     if (do_dump) {
-        wave_dump_pcm((const uint8_t *)(uintptr_t)data, len);
+        if (dump_snapshot) wave_dump_pcm(dump_snapshot, len);
         pthread_mutex_unlock(&g_wave_dump_lock);
     }
     if (wave_trace()) {
         /* Fingerprint of the submitted PCM: three 8-byte probes at the start,
-         * middle and end.  Byte-identical repeats of the same WAVEHDR show up
-         * as the same hash five writes later. */
+         * middle and end.  Use the under-lock snapshot, never the live guest
+         * buffer, which Miles may already have rewritten. */
         uint32_t ph = 2166136261u;
-        if (data && len >= 32) {
-            const uint8_t *q = (const uint8_t *)(uintptr_t)data;
+        if (dump_snapshot && len >= 32) {
+            const uint8_t *q = dump_snapshot;
             const uint32_t pos[3] = { 0u, len / 2u, len - 8u };
             for (int k = 0; k < 3; k++)
                 for (uint32_t i = 0; i < 8u; i++) {
@@ -4112,6 +4295,7 @@ static void h_wave_out_write(CPU *c)
                 rd32g(c->esp), hle_current_guest_id(),
                 (unsigned long)pthread_self(), pre_flags, ph);
     }
+    free(dump_snapshot);
     g_wave_write_log++;
 #else
     (void)dump_pcm;
@@ -4134,7 +4318,9 @@ static void h_wave_out_reset(CPU *c)
 #endif
     while (d->blk_count > 0) {
         WaveBlock *b = &d->blk[d->blk_head];
-        wave_queue_done_locked(d, b->guest, "reset");
+        /* waveOutReset is synchronous on the calling thread: deliver these
+         * completions to it, not to whichever worker submitted the buffers. */
+        wave_queue_done_locked(d, b->guest, pthread_self(), "reset");
         d->blk_head = (d->blk_head + 1) % WAVE_HDR_MAX;
         d->blk_count--;
     }
@@ -4946,10 +5132,13 @@ typedef struct {
 
 static Iocp g_iocp[IOCP_MAX];
 
-/* File handle -> port binding made by CreateIoCompletionPort(hFile, port, key, 0). */
-typedef struct { uint32_t file, port, key; } IocpAssoc;
-static IocpAssoc g_assoc[32];
-
+/* File handle -> port binding lives on the GHandle.  A side table keyed by the
+ * guest handle value goes stale when the handle is closed and its slot is
+ * reused: the completion then carries the previous file's key and the stream
+ * worker dereferences a released object.  Keeping the association on the
+ * handle also removes the 32-association ceiling.  With the old table full,
+ * CreateIoCompletionPort still reported success, no completion was posted, and
+ * the worker's Sleep(INFINITE) on the port never returned. */
 static Iocp *iocp_find(uint32_t handle)
 {
     for (int i = 0; i < IOCP_MAX; i++)
@@ -4975,25 +5164,24 @@ static void iocp_push(Iocp *p, uint32_t bytes, uint32_t key, uint32_t ov)
  * associated port expects, if this handle is bound to one. */
 static void iocp_complete_file(uint32_t file, uint32_t bytes, uint32_t ov)
 {
-    for (int i = 0; i < 32; i++)
-        if (g_assoc[i].file == file) {
-            Iocp *p = iocp_find(g_assoc[i].port);
-            if (p) iocp_push(p, bytes, g_assoc[i].key, ov);
-            return;
-        }
+    GHandle *g = gh_get(file);
+    if (!g || !g->iocp_port) return;
+    Iocp *p = iocp_find(g->iocp_port);
+    if (p) iocp_push(p, bytes, g->iocp_key, ov);
 }
 
 static void h_create_iocp(CPU *c)
 {
     uint32_t file = arg32(c, 0), port = arg32(c, 1), key = arg32(c, 2);
     if (file && port) {                     /* associate a file with a port */
-        for (int i = 0; i < 32; i++)
-            if (!g_assoc[i].file) {
-                g_assoc[i].file = file;
-                g_assoc[i].port = port;
-                g_assoc[i].key = key;
-                break;
-            }
+        GHandle *g = gh_get(file);
+        if (!g || g->kind != 1) {
+            g_last_error = 6;               /* ERROR_INVALID_HANDLE */
+            c->eax = 0;
+            return;
+        }
+        g->iocp_port = port;
+        g->iocp_key = key;
         g_last_error = 0;
         c->eax = port;
         return;
@@ -5014,10 +5202,25 @@ static void h_create_iocp(CPU *c)
     c->eax = 0;
 }
 
+/* The engine's stream worker calls GetQueuedCompletionStatus with a finite
+ * timeout and then tests both the BOOL and the overlapped output.  Win32 leaves
+ * the output slots unchanged on a timeout, but the guest stack slots holding
+ * them are not initialised by the caller, so a stale overlapped pointer is
+ * dereferenced when the call simply times out.  Zero the three outputs before
+ * the wait: the success path overwrites them, and every FALSE return then
+ * carries a safe value. */
+static void iocp_clear_out(uint32_t pb, uint32_t pk, uint32_t pov)
+{
+    if (pb && guest_ok(pb, 4)) wr32g(pb, 0);
+    if (pk && guest_ok(pk, 4)) wr32g(pk, 0);
+    if (pov && guest_ok(pov, 4)) wr32g(pov, 0);
+}
+
 static void h_get_queued(CPU *c)
 {
     uint32_t h = arg32(c, 0), pb = arg32(c, 1), pk = arg32(c, 2),
              pov = arg32(c, 3), ms = arg32(c, 4);
+    iocp_clear_out(pb, pk, pov);
     Iocp *p = iocp_find(h);
     if (!p) { g_last_error = 6; c->eax = 0; return; }
 
@@ -5906,6 +6109,50 @@ static void watch_note_wait(uint32_t ra, uint32_t h0, uint32_t h1, int active)
         g_main_wait_h1 = h1;
         g_main_wait_active = active;
     }
+}
+
+int wc3_watch_state_get(uint32_t gid, Wc3WatchState *out)
+{
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    out->gid = gid;
+
+    for (int i = 0; i < GUEST_THREAD_MAX; i++) {
+        GThread *t = &g_threads[i];
+        if (!t->used || t->guest_id != gid) continue;
+        out->valid = 1;
+        out->running = t->running;
+        out->exit_code = t->exit_code;
+        out->last_target = t->last_target;
+        out->last_eip = t->last_eip;
+        out->last_esp = t->last_esp;
+        out->last_ebp = t->last_ebp;
+        out->dispatch_count = t->dispatch_count;
+        out->wait_active = t->wait_active;
+        out->wait_ra = t->wait_ra;
+        out->wait_h0 = t->wait_h0;
+        out->wait_h1 = t->wait_h1;
+        return 1;
+    }
+
+    /* The main guest thread has no GThread slot; boot_probe.c assigns it TEB
+     * id 5678 and the watchdog keeps its state in the g_main_* globals. */
+    if (gid == 5678u) {
+        out->valid = 1;
+        out->main_thread = 1;
+        out->running = 1;
+        out->last_target = g_main_last_target;
+        out->last_eip = g_main_last_eip;
+        out->last_esp = g_main_last_esp;
+        out->last_ebp = g_main_last_ebp;
+        out->dispatch_count = g_main_dispatch_count;
+        out->wait_active = g_main_wait_active;
+        out->wait_ra = g_main_wait_ra;
+        out->wait_h0 = g_main_wait_h0;
+        out->wait_h1 = g_main_wait_h1;
+        return 1;
+    }
+    return 0;
 }
 
 static int hang_watch_enabled(void)

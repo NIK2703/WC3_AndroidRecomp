@@ -16,6 +16,7 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -33,6 +34,14 @@
 #define REG_KEY_MAX 96u
 #define REG_VALUE_MAX 128u
 #define REG_OPEN_MAX 32u
+
+/* The registry has no Windows hive behind it on Android.  Keep one text file
+ * beside the other per-process state so a value the game writes survives the
+ * next process launch.  WC3_DATA_DIR is the app-private state directory on
+ * the GameActivity path (app_boot.c sets it before the guest starts). */
+#define REG_FILE_NAME "wc3_registry.dat"
+#define REG_FILE_PATH_MAX 1200u
+#define REG_FILE_LINE_MAX 4096u
 
 #define REG_HANDLE_BASE 0x00150000u
 #define REG_HANDLE_STRIDE 4u
@@ -277,6 +286,139 @@ static void set_value_locked(const char *path, const char *name,
     memset(value->data, 0, sizeof value->data);
     if (data && value->len)
         memcpy(value->data, data, value->len);
+}
+
+static int reg_file_path(char *path, size_t capacity)
+{
+    const char *dir = getenv("WC3_DATA_DIR");
+    if (!dir || !*dir) return 0;
+    const int n = snprintf(path, capacity, "%s/%s", dir, REG_FILE_NAME);
+    return n > 0 && (size_t)n < capacity;
+}
+
+static int hex_nibble(char ch)
+{
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+/* Write the store through a temporary file and rename it into place.  Android
+ * renames atomically, so a process killed during a settings write leaves the
+ * previous file intact. */
+static void persist_registry_locked(void)
+{
+    char path[REG_FILE_PATH_MAX];
+    char temp[REG_FILE_PATH_MAX + 5u];
+    if (!reg_file_path(path, sizeof path)) return;
+    const int n = snprintf(temp, sizeof temp, "%s.tmp", path);
+    if (n <= 0 || (size_t)n >= sizeof temp) return;
+
+    FILE *file = fopen(temp, "wb");
+    if (!file) return;
+
+    int ok = fputs("WC3REG1\n", file) >= 0;
+    for (unsigned i = 0; ok && i < REG_VALUE_MAX; i++) {
+        const RegValue *value = &g_values[i];
+        if (!value->used || !is_ours(value->path)) continue;
+        if (fprintf(file, "%s\t%s\t%u\t%u\t", value->path, value->name,
+                    value->type, value->len) < 0) {
+            ok = 0;
+            break;
+        }
+        for (uint32_t j = 0; j < value->len; j++) {
+            if (fprintf(file, "%02x", value->data[j]) < 0) {
+                ok = 0;
+                break;
+            }
+        }
+        if (ok && fputc('\n', file) == EOF) ok = 0;
+    }
+    if (fclose(file) != 0) ok = 0;
+    if (!ok) {
+        remove(temp);
+        return;
+    }
+#if defined(_WIN32)
+    /* MinGW's rename does not replace an existing destination. */
+    remove(path);
+#endif
+    if (rename(temp, path) != 0) remove(temp);
+}
+
+/* Restore the values written by an earlier process.  Called after the stock
+ * defaults, so a saved resolution wins over the native-size default. */
+static void load_persisted_locked(void)
+{
+    char path[REG_FILE_PATH_MAX];
+    if (!reg_file_path(path, sizeof path)) return;
+    FILE *file = fopen(path, "rb");
+    if (!file) return;
+
+    char line[REG_FILE_LINE_MAX];
+    if (!fgets(line, sizeof line, file) || strcmp(line, "WC3REG1\n") != 0) {
+        fclose(file);
+        return;
+    }
+
+    unsigned loaded = 0u;
+    while (fgets(line, sizeof line, file)) {
+        size_t length = strlen(line);
+        while (length > 0u &&
+               (line[length - 1u] == '\n' || line[length - 1u] == '\r'))
+            line[--length] = '\0';
+        if (!line[0]) continue;
+
+        char *key = line;
+        char *name = strchr(key, '\t');
+        if (!name) continue;
+        *name++ = '\0';
+        char *type_text = strchr(name, '\t');
+        if (!type_text) continue;
+        *type_text++ = '\0';
+        char *length_text = strchr(type_text, '\t');
+        if (!length_text) continue;
+        *length_text++ = '\0';
+        char *hex = strchr(length_text, '\t');
+        if (!hex) continue;
+        *hex++ = '\0';
+
+        char *end = NULL;
+        const unsigned long type = strtoul(type_text, &end, 10);
+        if (!end || *end) continue;
+        end = NULL;
+        const unsigned long data_length = strtoul(length_text, &end, 10);
+        if (!end || *end || data_length > REG_DATA_MAX) continue;
+        if (strlen(hex) < (size_t)data_length * 2u) continue;
+
+        char normalized[REG_PATH_MAX];
+        normalize_path(key, normalized, sizeof normalized);
+        if (!is_ours(normalized) || strlen(name) >= REG_NAME_MAX) continue;
+
+        uint8_t data[REG_DATA_MAX];
+        int valid = 1;
+        for (unsigned long i = 0; i < data_length; i++) {
+            const int high = hex_nibble(hex[i * 2u]);
+            const int low = hex_nibble(hex[i * 2u + 1u]);
+            if (high < 0 || low < 0) {
+                valid = 0;
+                break;
+            }
+            data[i] = (uint8_t)((high << 4) | low);
+        }
+        if (!valid) continue;
+
+        ensure_key_and_parents_locked(normalized);
+        set_value_locked(normalized, name, (uint32_t)type, data,
+                         (uint32_t)data_length);
+        loaded++;
+    }
+    fclose(file);
+
+#ifdef WC3_DEBUG
+    fprintf(stderr, "[registry] loaded %u persisted values\n", loaded);
+#endif
 }
 
 static int remove_value_locked(const char *path, const char *name)
@@ -588,6 +730,14 @@ static void h_set_value(CPU *c)
     memset(value->data, 0, sizeof value->data);
     for (uint32_t i = 0; i < length; i++)
         value->data[i] = wc3_legacy_rd8g(data + i);
+#ifdef WC3_DEBUG
+    if (ci_equal(name, "reswidth") || ci_equal(name, "resheight")) {
+        uint32_t stored = 0u;
+        if (value->len >= 4u) memcpy(&stored, value->data, 4u);
+        fprintf(stderr, "[registry] %s\\%s = %u\n", path, name, stored);
+    }
+#endif
+    persist_registry_locked();
     pthread_mutex_unlock(&g_lock);
     c->eax = REG_SUCCESS;
 }
@@ -612,6 +762,7 @@ static void h_delete_value(CPU *c)
         return;
     }
     const int removed = remove_value_locked(path, name);
+    if (removed) persist_registry_locked();
     pthread_mutex_unlock(&g_lock);
     c->eax = removed ? REG_SUCCESS : REG_FILE_NOT_FOUND;
 }
@@ -643,6 +794,7 @@ static void h_delete_key(CPU *c)
         return;
     }
     const int removed = delete_subtree_locked(path);
+    if (removed) persist_registry_locked();
     pthread_mutex_unlock(&g_lock);
     c->eax = removed ? REG_SUCCESS : REG_FILE_NOT_FOUND;
 }
@@ -927,6 +1079,7 @@ int wc3_hle_advapi32_registry_install(void)
     memset(g_open, 0, sizeof g_open);
     copy_text(g_current_key, sizeof g_current_key, REG_ROOT);
     seed_defaults_locked();
+    load_persisted_locked();
     pthread_mutex_unlock(&g_lock);
 
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {

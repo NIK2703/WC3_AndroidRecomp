@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -170,10 +171,13 @@ static void overlay_stop(void);
 #define OVERLAY_LOGE(...) ((void)0)
 #endif
 
-/* Implemented by the DXVK Win32 shim.  wc3_android_set_window is declared by
- * app_boot.h; the clear call belongs to the same shim and is used when Android
- * destroys the surface. */
+/* Implemented by the DXVK Win32 shim.  The set call publishes a replacement
+ * ANativeWindow so DXVK can rebuild its Vulkan surface; the clear call drops
+ * the exact window Android is about to destroy. */
+void wc3_android_set_window(ANativeWindow *window, uint32_t width,
+                            uint32_t height);
 void wc3_android_clear_window(ANativeWindow *window);
+int wc3_android_set_surface_size(uint32_t width, uint32_t height);
 
 /*
  * User-visible diagnostic text.  This is not a debug log: the product is not
@@ -214,6 +218,8 @@ static void set_activity_text(struct android_app *app, const char *text)
 
 static char g_data_dir[1024];
 static char g_state_dir[1024];
+/* Set by Wc3RocActivity/Wc3TftActivity before GameActivity starts android_main. */
+static char g_game_mode[8] = "tft";
 
 #define SHARED_DATA_DIR_NAME "Warcraft 3"
 
@@ -843,6 +849,21 @@ Java_wc3_recomp_Wc3GameActivity_nativeClearOverlaySurface(
     native_clear_overlay_surface(env, thiz, surface);
 }
 
+JNIEXPORT void JNICALL
+Java_wc3_recomp_Wc3GameActivity_nativeSetGameMode(
+    JNIEnv *env, jclass clazz, jstring mode)
+{
+    (void)clazz;
+    if (!mode) return;
+    const char *value = (*env)->GetStringUTFChars(env, mode, NULL);
+    if (!value) return;
+    if (!strcmp(value, "roc") || !strcmp(value, "tft"))
+        snprintf(g_game_mode, sizeof g_game_mode, "%s", value);
+    else
+        LOGE("unknown game mode: %s", value);
+    (*env)->ReleaseStringUTFChars(env, mode, value);
+}
+
 static void canvas_attach_provider(struct android_app *app)
 {
     if (g_cache_attached || !app || !app->activity ||
@@ -1255,7 +1276,8 @@ static void *boot_thread(void *arg)
         return NULL;
     }
 
-    int rc = wc3_app_boot_start(g_data_dir, g_state_dir, window, width, height);
+    int rc = wc3_app_boot_start(g_data_dir, g_state_dir, window, width, height,
+                                g_game_mode);
     if (rc != 0)
         LOGE("guest boot failed: %d", rc);
     return NULL;
@@ -1274,6 +1296,13 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
             g_surface_w = width;
             g_surface_h = height;
             pthread_mutex_unlock(&g_window_lock);
+            /* Republish every replacement surface to the DXVK shim.  Without
+             * this, Present keeps skipping frames after the activity comes
+             * back because its window slot was cleared on TERM_WINDOW. */
+            wc3_legacy_set_screen_size(width, height);
+            wc3_android_set_window(app->window, width, height);
+            if (wc3_android_set_surface_size(width, height) != 0)
+                LOGE("setBuffersGeometry(%ux%u) failed", width, height);
 #if WC3_DEBUG
             const Wc3Platform *platform = wc3_platform();
             uintptr_t surface = 0;
@@ -1301,17 +1330,24 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
             LOGE("APP_CMD_INIT_WINDOW without a window");
         }
         break;
-    case APP_CMD_TERM_WINDOW:
+    case APP_CMD_TERM_WINDOW: {
+        ANativeWindow *window;
         ime_hide();
         overlay_input_stop();
         pthread_mutex_lock(&g_window_lock);
+        window = g_window;
         g_window = NULL;
+        g_surface_w = 0;
+        g_surface_h = 0;
         pthread_mutex_unlock(&g_window_lock);
-        if (app->window)
-            wc3_android_clear_window(app->window);
+        if (!window)
+            window = app->window;
+        if (window)
+            wc3_android_clear_window(window);
         wc3_android_surface_set_window(NULL);
         LOGI("window terminated");
         break;
+    }
     case APP_CMD_WINDOW_RESIZED:
         wc3_android_surface_set_window(app->window);
         if (app->window) {
@@ -1322,6 +1358,10 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
             g_surface_w = width;
             g_surface_h = height;
             pthread_mutex_unlock(&g_window_lock);
+            wc3_legacy_set_screen_size(width, height);
+            wc3_android_set_window(app->window, width, height);
+            if (wc3_android_set_surface_size(width, height) != 0)
+                LOGE("setBuffersGeometry(%ux%u) failed", width, height);
             const Wc3Platform *platform = wc3_platform();
             if (platform && platform->surface.resize) {
                 platform->surface.resize(platform->surface.ctx, width, height);
@@ -1330,18 +1370,25 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
             LOGI("window resized %ux%u", width, height);
         }
         break;
-    case APP_CMD_DESTROY:
+    case APP_CMD_DESTROY: {
+        ANativeWindow *window;
         ime_hide();
         overlay_input_stop();
         overlay_stop();
         pthread_mutex_lock(&g_window_lock);
+        window = g_window;
         g_window = NULL;
+        g_surface_w = 0;
+        g_surface_h = 0;
         pthread_mutex_unlock(&g_window_lock);
-        if (app->window)
-            wc3_android_clear_window(app->window);
+        if (!window)
+            window = app->window;
+        if (window)
+            wc3_android_clear_window(window);
         wc3_android_surface_set_window(NULL);
         LOGI("destroy requested");
         break;
+    }
     default:
         break;
     }
@@ -1648,6 +1695,18 @@ void android_main(struct android_app *app)
             ? app->activity->internalDataPath
             : data_dir;
     snprintf(g_state_dir, sizeof g_state_dir, "%s", state_dir);
+    if (!strcmp(g_game_mode, "roc")) {
+        char roc_state[1200];
+        int n = snprintf(roc_state, sizeof roc_state, "%s/roc", g_state_dir);
+        if (n > 0 && (size_t)n < sizeof roc_state) {
+            if (mkdir(roc_state, 0770) == 0 || errno == EEXIST)
+                snprintf(g_state_dir, sizeof g_state_dir, "%s", roc_state);
+            else
+                LOGE("cannot create RoC state dir %s: %s", roc_state,
+                     strerror(errno));
+        }
+    }
+    LOGI("game mode %s", g_game_mode);
     LOGI("data dir %s", data_dir);
     LOGI("state dir %s", g_state_dir);
     canvas_attach_provider(app);

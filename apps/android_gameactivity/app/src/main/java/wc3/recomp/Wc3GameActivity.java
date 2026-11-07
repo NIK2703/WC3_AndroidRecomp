@@ -13,6 +13,7 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 
 import com.google.androidgamesdk.GameActivity;
@@ -27,12 +28,26 @@ import com.google.androidgamesdk.GameActivity;
  * The Java side passes the surface to native code and never parses the .icp
  * profile or injects input itself.</p>
  */
-public final class Wc3GameActivity extends GameActivity {
+public class Wc3GameActivity extends GameActivity {
+    static {
+        // Load before GameActivity.onCreate starts android_main.  The
+        // mode-specific activities call nativeSetGameMode() in their own
+        // onCreate, before super.onCreate(), so the native boot path sees the
+        // selected game before it builds the guest command line.
+        System.loadLibrary("wc3gameactivity");
+    }
+
     private SurfaceView overlayView;
+
+    private static native void nativeSetGameMode(String mode);
 
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
     private native void nativeClearOverlaySurface(Surface surface);
+
+    protected static void setGameMode(final String mode) {
+        nativeSetGameMode(mode);
+    }
 
     /**
      * Called from android_main through JNI after platform/memory/PE checks.
@@ -46,6 +61,7 @@ public final class Wc3GameActivity extends GameActivity {
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        applyDisplayCutoutMode();
         ensureSharedDataAccess();
 
         // Visible-password commits every key instead of leaving a composing
@@ -60,6 +76,22 @@ public final class Wc3GameActivity extends GameActivity {
                         | EditorInfo.IME_FLAG_NO_FULLSCREEN);
 
         installOverlaySurface();
+    }
+
+    /**
+     * A landscape game should use the whole panel, including the notch strip.
+     * Without short-edge cutout mode Android shrinks the window by the cutout
+     * inset, which leaves a black band beside the game surface.  The window
+     * theme sets the same mode before the first layout; this call also covers
+     * GameActivity versions that replace the window attributes in onCreate.
+     */
+    private void applyDisplayCutoutMode() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return;
+        final WindowManager.LayoutParams attrs = getWindow().getAttributes();
+        attrs.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams
+                        .LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        getWindow().setAttributes(attrs);
     }
 
     /**

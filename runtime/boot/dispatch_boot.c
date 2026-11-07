@@ -17,7 +17,9 @@
 #include "crt_string_hle.h"
 #include "file_hle.h"
 #include "gdi_dc_hle.h"
+#include "gdi_device_hle.h"
 #include "gdi_obj_hle.h"
+#include "gdi_palette_hle.h"
 #include "stdio_hle.h"
 #include "strerror_hle.h"
 #include "crt_time_hle.h"
@@ -37,6 +39,8 @@
 #include "string_hle.h"
 #include "system_hle.h"
 #include "time_hle.h"
+#include "user_object_hle.h"
+#include "window_facts_hle.h"
 #include "window_hle.h"
 
 #include <stdio.h>
@@ -49,6 +53,7 @@
 #if WC3_DEBUG && WC3_DEBUG_HLE
 /* Temporary hang watchdog hook; see wc3_watch_dispatch() in hle_android.c. */
 void wc3_watch_dispatch(CPU *c, uint32_t target);
+#include "wc3_lock_trace.h"
 #endif
 
 #define X(a) void L_##a(CPU *c);
@@ -96,11 +101,15 @@ void wc3_dispatch_init(void)
     WC3_INSTALL_STEP(wc3_hle_kernel32_string_install());
     WC3_INSTALL_STEP(wc3_hle_advapi32_registry_install());
     WC3_INSTALL_STEP(wc3_hle_gdi32_dc_install());
+    WC3_INSTALL_STEP(wc3_hle_gdi32_device_install());
     WC3_INSTALL_STEP(wc3_hle_gdi32_objects_install());
+    WC3_INSTALL_STEP(wc3_hle_gdi32_palette_install());
     WC3_INSTALL_STEP(user32_display_install());
     WC3_INSTALL_STEP(wc3_hle_user32_menu_install());
     WC3_INSTALL_STEP(wc3_hle_user32_scroll_install());
     WC3_INSTALL_STEP(wc3_hle_user32_window_install());
+    WC3_INSTALL_STEP(wc3_hle_user32_window_facts_install());
+    WC3_INSTALL_STEP(wc3_hle_user32_user_object_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_heap_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_math_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_crt_install());
@@ -114,6 +123,12 @@ void wc3_dispatch_init(void)
     WC3_INSTALL_STEP(msvcr80_convert_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_time_install());
 #undef WC3_INSTALL_STEP
+
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    /* Ownership tracing for the registry lock: a frozen guest can show its
+     * waiters but not the thread that never released the lock. */
+    wc3_lock_trace_start();
+#endif
 
     size_t count = sizeof g_lift / sizeof g_lift[0];
     for (size_t i = 0; i < count; i++) {
@@ -162,6 +177,13 @@ static void dispatch_unknown(CPU *c, uint32_t target, int tail)
 static void dispatch_common(CPU *c, uint32_t target, int tail)
 {
     int chained = 0;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    uint32_t lt_op = 0, lt_lock = 0, lt_arg = 0;
+    uint32_t lt_ra = 0, lt_caller = 0, lt_gid = 0;
+    int lt_tracked = wc3_lock_trace_enter(c, target, &lt_op, &lt_lock,
+                                          &lt_arg, &lt_ra, &lt_caller,
+                                          &lt_gid);
+#endif
     g_disp_depth++;
     for (;;) {
         g_tail_pending = 0;
@@ -186,6 +208,11 @@ static void dispatch_common(CPU *c, uint32_t target, int tail)
         dispatch_unknown(c, target, tail || chained);
     }
     g_disp_depth--;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (lt_tracked)
+        wc3_lock_trace_leave(lt_op, lt_lock, lt_arg, lt_ra, lt_caller,
+                             lt_gid);
+#endif
 }
 
 void dispatch(CPU *c, uint32_t target)

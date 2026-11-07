@@ -54,6 +54,63 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
     return -1;
 }
 
+int wc3_legacy_hle_chain(const char *dll, const char *name,
+                         void (*impl)(CPU *c),
+                         void (**previous)(CPU *c))
+{
+    if (!dll || !name || !impl || !previous) return -1;
+    for (unsigned i = 0; i < g_hle_count; i++) {
+        HleEnt *e = &g_hle[i];
+        if (!ascii_equal_ci(e->dll, dll)) continue;
+        if (!ascii_equal_ci(e->name, name)) continue;
+        if (!e->fn) return -1;
+        *previous = e->fn;
+        e->fn = impl;
+        return 0;
+    }
+    return -1;
+}
+
+static HleFn find_hle_fn(const char *dll, const char *name)
+{
+    if (!dll || !name) return NULL;
+    for (unsigned i = 0; i < g_hle_count; i++) {
+        HleEnt *e = &g_hle[i];
+        if (!ascii_equal_ci(e->dll, dll)) continue;
+        if (!ascii_equal_ci(e->name, name)) continue;
+        return e->fn;
+    }
+    return NULL;
+}
+
+/* The as-built last-error cell is thread-local static state in the quarantine.
+ * Call its registered accessor rather than reaching for the symbol.  The
+ * fabricated stack only carries the one argument the setter reads. */
+void wc3_legacy_set_last_error(uint32_t code)
+{
+    HleFn set_last_error = find_hle_fn("KERNEL32.dll", "SetLastError");
+    if (!set_last_error) return;
+    uint32_t stack = hle_guest_alloc(8u);
+    if (!stack) return;
+    wr32g(stack, 0u);
+    wr32g(stack + 4u, code);
+    CPU c;
+    memset(&c, 0, sizeof c);
+    c.esp = stack;
+    set_last_error(&c);
+    hle_guest_free(stack);
+}
+
+uint32_t wc3_legacy_get_last_error(void)
+{
+    HleFn get_last_error = find_hle_fn("KERNEL32.dll", "GetLastError");
+    if (!get_last_error) return 0u;
+    CPU c;
+    memset(&c, 0, sizeof c);
+    get_last_error(&c);
+    return c.eax;
+}
+
 static void copy_bounded(char *dst, size_t cap, const char *src)
 {
     size_t n = strlen(src);

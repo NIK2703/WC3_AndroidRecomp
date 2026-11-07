@@ -1,100 +1,127 @@
 # wc3_android_recomp
 
-Статическая рекомпиляция Warcraft III: The Frozen Throne (1.27.1.7085) в
-нативный порт для Android arm64-v8a. x86-32 код переводится в C на этапе
-сборки, затем NDK/Clang компилирует его в ARM64.
+Static recompilation of Warcraft III: The Frozen Throne (1.27.1.7085) into a
+native Android arm64-v8a port. The target pipeline lifts the original x86-32
+code to C and compiles it with the Android NDK/Clang for ARM64.
 
-> Архитектура описана в `docs/ARCHITECTURE_1.27B.md` (rev 2.2 / M2): текущее
-> состояние и целевая модель. План миграции лежит в `PLAN_REFACTOR_1.27B.md`.
->
-> Статус: rev 2.2 / M2, 2026-11-07. В `E:\projects\warcraft3_recomp` уже
-> работает Android-порт: загрузка, меню и 3D-сцена на устройстве, 191 650
-> адресов в dispatcher, 498/498 и 828/828 импортов, `libwc3game-thin.so`
-> размером 216 МБ. Ранее найденный графический дефект исправлен в старом
-> дереве. Сохранение исправления проверяют гейты V5.9 и V6.6. Новое дерево
-> объявлено каноническим target. Миграция идёт постепенным strangler-cutover,
-> и каждый шаг проходит два исполняемых гейта.
+This repository is the canonical target tree. This README describes the target
+design, project boundaries, and current development status; it does not claim
+that the port is finished. Detailed migration state is tracked in
+`config/migration.json`.
 
-## Целевая конфигурация
+## Development status
 
-* Warcraft III: The Frozen Throne 1.27.1.7085, PE32/x86, MSVC 12.0.
-* Android 8+ (API 26), arm64-v8a, Vulkan.
-* Продуктом является `libwc3gameactivity.so`. Рекомпилированный код
-  собирается только под Android (ADR-026/027). Верификационный
-  `--target headless` (`wc3_headless`, CI-хост) даёт исполняемый DUT для T1
-  (`docs/VERIFICATION.md`, V4.7). Эталон: оригинальная лицензионная игра
-  1.27.1.7085 на Windows и её зафиксированные захваты. Difftest использует их
-  для быстрого цикла без adb.
-* Guest: `war3.exe` `0x00400000`, `game.dll` `0x6F000000`, `Storm.dll`
-  `0x35000000`, `Mss32.dll`/`Mssfast`/`Mp3dec` `0x351..0x35300000`,
-  `ijl15.dll` `0x60000000`. Это фиксированный Android-layout, `corpus_fixed`.
-  Guest VA отображается на host pointer в младших 4 ГБ (identity mapping).
-* Рендер идёт через D3D9 и thin bridge в статически собранные DXVK 1.10.3 и
-  3.1.1. Оба лежат в одном APK, символы изолированы через
-  `objcopy --prefix-symbols`. Селектор выбирает бэкенд по возможностям
-  physical device и один раз откатывается на другой при ошибке создания
-  device. Только один бэкенд создаёт Vulkan instance и device.
-* `VulkanDriverApi` (`system` | `turnip`) задаёт Vulkan ICD. adrenotools и
-  Turnip разрешены и документированы как способ выбора ICD.
+At the time of writing, the graphics subsystem is fully debugged. The port can
+launch a melee map or a campaign mission.
+
+Known issues:
+
+* Audio is unstable: periodic clicks are audible, and music occasionally drops
+  out.
+* The game freezes intermittently.
+
+## Target
+
+* Warcraft III: The Frozen Throne 1.27.1.7085, PE32/x86.
+* Android 8.0+ (API 26), arm64-v8a, Vulkan.
+* The shipped product is `libwc3gameactivity.so`. The only shipped target is
+  Android arm64-v8a; recompiled code is not built, linked, or shipped for
+  Windows.
+* `--target headless` builds `wc3_headless`, a verification-only device under
+  test (DUT) for T1. It is not part of the APK and is not a product.
+* The oracle is the original licensed 1.27.1.7085 game on Windows and its
+  recorded reference captures. The recompiled code is not built for Windows.
+* Guest images use fixed, corpus-defined base addresses in the low 4 GB, with
+  identity mapping to host pointers. Changing those bases requires a relift.
+
+## Controls
+
+| Action | Touch gesture |
+| --- | --- |
+| Move the camera | Quick swipe |
+| Select a group of units | Double tap with a swipe, or long tap with a swipe |
+| Add units to a group | Swipe on button 1-8 |
+| Rebind a group | Long press on button 1-8 |
+| Left mouse click | Single tap |
+| Right mouse click | Double tap |
+| Attack command (A + left click) | Long tap |
+| Open the game menu | Long press on Esc |
+
+## Graphics
+
+* D3D9 rendering goes through a thin bridge to DXVK.
+* The dual-backend selector and fallback are provisional until they are
+  measured.
+* The Vulkan ICD is selected explicitly through `VulkanDriverApi` (`system` or
+  `turnip`).
 
 ## Runtime
 
-* Guest threads сохраняются. `CreateThread` и `_beginthreadex` создают реальный
-  host thread. Каждый поток получает `CPU`, guest stack, TEB и TLS
-  (`GUEST_THREAD_MAX = 24`). В игре подтверждено 18 вызовов `CreateThread`.
-* `ThreadApi`, `SyncApi`, `AssetApi` и `VulkanDriverApi` обязательны. 36 из 426
-  HLE-записей относятся к thread/sync.
-* Guest-visible events, mutex, semaphore и critical sections реализованы как
-  HLE-объекты с точной семантикой Win32.
-* Host lock освобождается до `dispatch()` и до обратного вызова в гость.
-  Per-object локи допустимы в HLE, lock-free atomics в mailbox/ring и
-  собственные локи DXVK/`dxvk_win32` из vendor allowlist.
-* Android host threads сохраняются. Cross-thread события идут через lock-free
-  mailbox/queue с документированным владельцем.
-* `HleEntry` вычисляет `stack_cleanup = 4 + (cdecl ? 0 : argc*4)` и хранит
-  поле `user` для COM-слотов. PE игры присутствует (`E:\Games\Warcraft III`),
-  поэтому presence проверяется по PE, а arity проверяется по spec и анализу
-  call-site.
+* Guest threads are real host threads. `CreateThread` and `_beginthreadex`
+  create a host thread with its own CPU state, guest stack, TEB, TLS state, and
+  dispatcher state, within the fixed guest-thread limit.
+* `ThreadApi`, `SyncApi`, `AssetApi`, and `VulkanDriverApi` are required
+  platform interfaces. `NetApi` is not included; LAN and Battle.net are out of
+  scope.
+* Guest-visible events, mutexes, semaphores, and critical sections are HLE
+  objects; their behavior must follow Win32 semantics. No-op waits and stub
+  synchronization are not allowed.
+* No host lock may be held across `dispatch()`, a callback into the guest, or a
+  wait on a guest-visible object. Per-object HLE locks, lock-free
+  mailbox/ring atomics, and vendor-owned DXVK/`dxvk_win32` locks are allowed.
+* High-level emulation (HLE) replaces only external OS and hardware APIs. Game
+  logic, rendering, audio, MPQ handling, and JASS remain recompiled guest code.
+* HLE is split by guest DLL and then by subsystem.
+* The guest ABI is frozen at source level. Changes to the `CPU` struct,
+  dispatch signatures, HLE thunk window, stack-cleanup formula, or image bases
+  require a relift; appending fields to `CPU` is allowed.
 
-## Данные и верификация
+## Data and verification
 
-* `AssetApi` читает лицензионные MPQ (`war3.mpq`, `War3x.mpq`,
-  `War3xlocal.mpq`, `War3Patch.mpq`) из app-specific каталога или через SAF.
-  MPQ читает собственный лифтнутый код `Storm.dll`. Saves, replays и registry
-  HLE хранятся в app-private dir.
-* Проверка идёт на трёх уровнях. T0: asset-free static и unit, на каждом
-  коммите. T1: difftest headless-DUT `wc3_headless` против эталонных захватов
-  оригинальной игры на Windows, на каждом шаге cutover, на CI-хосте. T2:
-  device E2E, перед релизом. T1 исполняет тот же корпус и HLE, что и продукт,
-  подменяя только `Wc3Platform` и графический frontend
-  (`docs/VERIFICATION.md`, V4.7; ADR-027). T2 считается пройденным только со
-  статусом `pass`. Зелёные T0 и T1 достаточны для продолжения работы.
-* Каждый шаг переноса кода завершают зелёные T0 и T1: static/unit и сравнение
-  с эталонными захватами, на CI-хосте. Загрузка Android до меню входит в T2 и
-  обязательна на финальном E2E.
+* `AssetApi` reads licensed MPQ archives from an app-specific directory or
+  through SAF. MPQ parsing uses the lifted `Storm.dll`. Saves, replays, and
+  registry data are kept in app-private storage.
+* T0 covers asset-free static and unit tests. T1 is a difftest of the
+  `wc3_headless` DUT against recorded captures from the original Windows game.
+  T2 is device end-to-end testing.
+* T1 runs the same corpus and HLE as the product; the platform and graphics
+  frontend are the verification-specific parts.
+* Gate results are diagnostic. `unavailable` and `missing` are recorded as
+  such; they are not reported as passes and do not stop development by
+  themselves.
 
-## Debug и оптимизация
+## Debug and release builds
 
-* Весь отладочный код находится под `#if WC3_DEBUG`. Если `WC3_DEBUG` не
-  определён, он равен 0. Вложенные подтеги используют
-  `#if WC3_DEBUG && WC3_DEBUG_X`.
-* Каждая отладочная, логгирующая или трассирующая инструкция оборачивается в
-  `#if WC3_DEBUG && WC3_DEBUG_<ЦЕЛЬ>`. Тег берётся из реестра
-  `runtime/diag/wc3_debug.h`: `WC3_DEBUG_HLE`, `WC3_DEBUG_GRAPHICS`,
-  `WC3_DEBUG_ASSETS` и другие.
-* Release собирается с `-DWC3_DEBUG=0 -DNDEBUG` и нулевыми подтегами. При
-  нулевых подтегах компилятор удаляет отладочные ветки. Release hygiene
-  применяется к нашему коду; DXVK и third_party идут по allowlist.
-* Два варианта описаны в ADR-030 и `docs/BUILD_VARIANTS.md`. Release имеет
-  `applicationId` `wc3.recomp`, debug имеет `wc3.recomp.debug`. Оба варианта
-  ставятся рядом, данные изолированы по UID. `--variant` задаёт вариант
-  атомарно для Gradle и native-сборки. Debug сохраняет `-O2`.
-* Java-диагностика находится только в `app/src/debug/`. Продуктовые числовые
-  коды отказа остаются в release.
-* Горячий путь использует compile-time HLE-таблицы и неизменяемый registry.
+* All native debug code is compiled only under `#if WC3_DEBUG`. An undefined
+  `WC3_DEBUG` evaluates to 0. Nested diagnostic subtags use
+  `#if WC3_DEBUG && WC3_DEBUG_<TARGET>`.
+* Every native diagnostic, logging, or tracing statement must use a tag from
+  `runtime/diag/wc3_debug.h`, such as `WC3_DEBUG_HLE`, `WC3_DEBUG_GRAPHICS`,
+  or `WC3_DEBUG_ASSETS`.
+* Release builds use `-DWC3_DEBUG=0 -DNDEBUG` and zero subtags, so debug code
+  is absent from the binary. Release hygiene applies to project code; DXVK and
+  `third_party` follow their own allowlists.
+* Release uses application ID `wc3.recomp`; debug uses `wc3.recomp.debug`.
+  The namespace and JNI names remain `wc3.recomp`. Both variants can be
+  installed side by side, with data isolated by UID. `--variant` selects the
+  variant atomically for Gradle and the native build. Debug builds keep `-O2`.
+* Numeric product failure codes remain in release builds.
 
-## Правовая рамка
+## Building
 
-Репозиторий содержит исходный код и инструменты. Игровые данные и бинарники
-пользователь берёт из своей лицензионной копии игры. Сгенерированный C
-является производной от бинарника.
+The canonical Android build is driven by `tools/android/build_app.ps1`. It
+requires ccache: `WC3_USE_CCACHE=ON` and `WC3_REQUIRE_CCACHE=ON`, so a missing
+ccache is an error rather than a silent fallback.
+
+Host-side T0 checks are run with:
+
+```powershell
+python tools/run_tests.py --unit
+```
+
+## Legal
+
+This repository contains source code and tools only. Game assets and binaries
+are not included. Users must provide their own licensed copy of Warcraft III.
+The generated C code is derived from the game binaries, so game assets, DLLs,
+and generated C must not be redistributed.

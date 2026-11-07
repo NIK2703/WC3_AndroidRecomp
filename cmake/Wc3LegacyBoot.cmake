@@ -91,10 +91,12 @@ add_custom_target(wc3_boot_dispatch_gen DEPENDS "${WC3_BOOT_DISPATCH_LIST}")
 # --- target-side boot code (no quarantine headers) ------------------------
 add_library(wc3_boot STATIC
     "${WC3_ROOT}/runtime/boot/app_boot.c"
-    "${WC3_ROOT}/runtime/boot/dispatch_boot.c")
+    "${WC3_ROOT}/runtime/boot/dispatch_boot.c"
+    "${WC3_ROOT}/runtime/diag/wc3_lock_trace.c")
 add_dependencies(wc3_boot wc3_boot_dispatch_gen)
 target_include_directories(wc3_boot PRIVATE
     "${WC3_BOOT_GEN_DIR}"
+    "${WC3_ROOT}/runtime/diag"
     "${WC3_ROOT}/runtime/hle"
     "${WC3_ROOT}/runtime/hle/msvcr80/convert"
     "${WC3_ROOT}/runtime/hle/msvcr80/crt"
@@ -111,7 +113,9 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/advapi32/registry"
     "${WC3_ROOT}/runtime/hle/win32/comctl32/imagelist"
     "${WC3_ROOT}/runtime/hle/win32/gdi32/dc"
+    "${WC3_ROOT}/runtime/hle/win32/gdi32/device"
     "${WC3_ROOT}/runtime/hle/win32/gdi32/objects"
+    "${WC3_ROOT}/runtime/hle/win32/gdi32/palette"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/memory"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/process"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/resource"
@@ -120,7 +124,9 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/user32/display"
     "${WC3_ROOT}/runtime/hle/win32/user32/menu"
     "${WC3_ROOT}/runtime/hle/win32/user32/scroll"
+    "${WC3_ROOT}/runtime/hle/win32/user32/user_object"
     "${WC3_ROOT}/runtime/hle/win32/user32/window"
+    "${WC3_ROOT}/runtime/hle/win32/user32/window_facts"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/third_party/softfloat/source/include"
@@ -182,7 +188,9 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/advapi32/registry/registry_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/comctl32/imagelist/imagelist_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/gdi32/dc/gdi_dc_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/gdi32/device/gdi_device_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/gdi32/objects/gdi_obj_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/gdi32/palette/gdi_palette_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/memory/memory_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/process/process_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/process/system_hle.c"
@@ -192,7 +200,9 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/user32/display/display_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/menu/menu_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/scroll/scroll_hle.c"
-    "${WC3_ROOT}/runtime/hle/win32/user32/window/window_hle.c")
+    "${WC3_ROOT}/runtime/hle/win32/user32/user_object/user_object_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/user32/window/window_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/user32/window_facts/window_facts_hle.c")
 target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle"
     "${WC3_ROOT}/runtime/diag"
@@ -211,7 +221,9 @@ target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/advapi32/registry"
     "${WC3_ROOT}/runtime/hle/win32/comctl32/imagelist"
     "${WC3_ROOT}/runtime/hle/win32/gdi32/dc"
+    "${WC3_ROOT}/runtime/hle/win32/gdi32/device"
     "${WC3_ROOT}/runtime/hle/win32/gdi32/objects"
+    "${WC3_ROOT}/runtime/hle/win32/gdi32/palette"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/memory"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/process"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/resource"
@@ -220,7 +232,9 @@ target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/user32/display"
     "${WC3_ROOT}/runtime/hle/win32/user32/menu"
     "${WC3_ROOT}/runtime/hle/win32/user32/scroll"
+    "${WC3_ROOT}/runtime/hle/win32/user32/user_object"
     "${WC3_ROOT}/runtime/hle/win32/user32/window"
+    "${WC3_ROOT}/runtime/hle/win32/user32/window_facts"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/runtime/platform"
@@ -251,6 +265,7 @@ add_library(wc3_legacy_boot STATIC
     "${WC3_ROOT}/runtime/legacy/hle_widescreen127.c")
 target_include_directories(wc3_legacy_boot PRIVATE
     "${WC3_ROOT}/runtime/legacy"
+    "${WC3_ROOT}/runtime/diag"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/third_party/softfloat/source/include"
     "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")

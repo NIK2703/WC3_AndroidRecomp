@@ -61,12 +61,52 @@ static void redirect_output(const char *state_dir)
         setvbuf(stderr, NULL, _IOLBF, 0);
 }
 
+/* The Windows Reign of Chaos launcher starts war3.exe with -classic; the
+ * Frozen Throne launcher starts it with no game switch.  Keep the switch in
+ * the product boot layer, before the guest command line is assembled, so the
+ * quarantined legacy source does not need another edit. */
+static void set_game_args(int roc)
+{
+    if (!roc)
+        return;
+    const char *existing = getenv("WC3_ARGS");
+    if (!existing || !*existing) {
+        setenv("WC3_ARGS", "-classic", 1);
+        return;
+    }
+    if (strstr(existing, "-classic"))
+        return;
+    char merged[512];
+    int n = snprintf(merged, sizeof merged, "-classic %s", existing);
+    if (n > 0 && (size_t)n < sizeof merged)
+        setenv("WC3_ARGS", merged, 1);
+}
+
+/* A separate small marker is reliable even though run.txt is opened twice
+ * (stdout truncates, stderr appends) and the two streams can overwrite each
+ * other at boot.  It is also the release-visible acceptance signal. */
+static void write_game_mode_marker(const char *state_dir, int roc)
+{
+    char path[1024];
+    int n = snprintf(path, sizeof path, "%s/game_mode.txt", state_dir);
+    if (n <= 0 || (size_t)n >= sizeof path)
+        return;
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return;
+    const char *args = getenv("WC3_ARGS");
+    fprintf(f, "mode=%s\nargs=%s\n", roc ? "roc" : "tft", args ? args : "");
+    fclose(f);
+}
+
 int wc3_app_boot_start(const char *data_dir, const char *state_dir,
-                       ANativeWindow *window, uint32_t width, uint32_t height)
+                       ANativeWindow *window, uint32_t width, uint32_t height,
+                       const char *game_mode)
 {
     if (!data_dir || !*data_dir || !state_dir || !*state_dir || !window ||
         !width || !height)
         return -EINVAL;
+    const int roc = game_mode && !strcmp(game_mode, "roc");
     /* The shared game directory is also the guest's working directory.  Let
      * the game create saves, replays and logs without inheriting a restrictive
      * umask; Android's FUSE may still present 0660. */
@@ -77,6 +117,8 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
     }
 
     redirect_output(state_dir);
+    set_game_args(roc);
+    write_game_mode_marker(state_dir, roc);
 
     /* These are the product defaults, not diagnostics: the shipped APK has no
      * shell to pass arguments and must load the game and use DXVK.  Sound is

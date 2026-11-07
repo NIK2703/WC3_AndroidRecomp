@@ -3,4 +3,6 @@
     <!-- BV-2.3: the debug source set overrides only this label, so both
          applicationId variants stay distinguishable in the launcher. -->
     <string name="app_name">WC3 recomp</string>
+    <string name="app_name_roc">Reign of Chaos</string>
+    <string name="app_name_tft">Frozen Throne</string>
 </resources>

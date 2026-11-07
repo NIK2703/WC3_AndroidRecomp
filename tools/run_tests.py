@@ -1066,6 +1066,158 @@ def test_gdi_objects() -> int:
     return 0
 
 
+def test_window_facts() -> int:
+    """T0: USER32 window facts recorded through the chained as-built handlers."""
+    cc = gcc()
+    if not cc:
+        print("window facts: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "window_facts"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "user32" / "window_facts" / "window_facts_hle.c"),
+        str(ROOT / "tests" / "user32_window_facts_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("user32_window_facts_test_debug.exe", 1),
+                        ("user32_window_facts_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_user_object() -> int:
+    """T0: USER32 process window station and object information."""
+    cc = gcc()
+    if not cc:
+        print("user object: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "user_object"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "user32" / "user_object" / "user_object_hle.c"),
+        str(ROOT / "tests" / "user_object_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("user_object_test_debug.exe", 1),
+                        ("user_object_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_gdi_device() -> int:
+    """T0: GDI32 gamma-ramp state and display device caps."""
+    cc = gcc()
+    if not cc:
+        print("gdi device: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "device"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "device" / "gdi_device_hle.c"),
+        str(ROOT / "tests" / "gdi_device_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("gdi_device_test_debug.exe", 1),
+                        ("gdi_device_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_gdi_palette() -> int:
+    """T0: GDI32 palette handles, selection and system-palette entries."""
+    cc = gcc()
+    if not cc:
+        print("gdi palette: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "palette"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "palette" / "gdi_palette_hle.c"),
+        str(ROOT / "tests" / "gdi_palette_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("gdi_palette_test_debug.exe", 1),
+                        ("gdi_palette_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_registry_hle() -> int:
     """T0: ADVAPI32 registry store, handles and enumeration."""
     cc = gcc()
@@ -1711,6 +1863,8 @@ TESTS = {
     "hle_time": test_hle_time,
     "hle_process": test_hle_process,
     "user32_window": test_user32_window,
+    "window_facts": test_window_facts,
+    "user_object": test_user_object,
     "user32_display": test_user32_display,
     "hle_system": test_hle_system,
     "hle_memory": test_hle_memory,
@@ -1719,6 +1873,8 @@ TESTS = {
     "comctl32_imagelist": test_comctl32_imagelist,
     "gdi_dc": test_gdi_dc,
     "gdi_objects": test_gdi_objects,
+    "gdi_device": test_gdi_device,
+    "gdi_palette": test_gdi_palette,
     "scroll_hle": test_scroll_hle,
     "user32_menu": test_user32_menu,
     "registry_hle": test_registry_hle,

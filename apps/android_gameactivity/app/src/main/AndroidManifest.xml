@@ -12,13 +12,42 @@
     <application
         android:allowBackup="false"
         android:hasCode="true"
+        android:icon="@mipmap/ic_launcher_tft"
         android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_tft"
         android:theme="@style/Wc3Theme">
 
+        <activity
+            android:name=".Wc3RocActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode|density"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_roc"
+            android:label="@string/app_name_roc"
+            android:launchMode="singleTask"
+            android:process=":roc"
+            android:roundIcon="@mipmap/ic_launcher_roc"
+            android:screenOrientation="userLandscape"
+            android:taskAffinity="${applicationId}.roc">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="wc3gameactivity" />
+        </activity>
+
+        <!-- The original activity stays the TFT entry and the default process.
+             This keeps the existing .Wc3GameActivity component and pidof-based
+             tooling working; only the RoC entry gets an isolated process. -->
         <activity
             android:name=".Wc3GameActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode|density"
             android:exported="true"
+            android:icon="@mipmap/ic_launcher_tft"
+            android:label="@string/app_name_tft"
+            android:launchMode="singleTask"
+            android:roundIcon="@mipmap/ic_launcher_tft"
             android:screenOrientation="userLandscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
