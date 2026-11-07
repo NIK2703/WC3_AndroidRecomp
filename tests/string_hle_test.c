@@ -128,13 +128,14 @@ static uint32_t invoke(const char *name, uint32_t a0, uint32_t a1, uint32_t a2)
 int main(void)
 {
     const int installed = wc3_hle_kernel32_string_install();
-    CHECK(installed == 6, "install count");
-    CHECK(g_row_count == 6u, "row count");
+    CHECK(installed == 7, "install count");
+    CHECK(g_row_count == 7u, "row count");
     CHECK(find_impl("lstrlenA") != NULL, "lstrlenA row");
     CHECK(find_impl("lstrcpynA") != NULL, "lstrcpynA row");
     CHECK(find_impl("lstrcatA") != NULL, "lstrcatA row");
     CHECK(find_impl("IsBadStringPtrA") != NULL, "IsBadStringPtrA row");
     CHECK(find_impl("GetACP") != NULL, "GetACP row");
+    CHECK(find_impl("GetOEMCP") != NULL, "GetOEMCP row");
     CHECK(find_impl("GetCPInfo") != NULL, "GetCPInfo row");
 
     const uint32_t text = GUEST_BASE + 0x100u;
@@ -212,6 +213,7 @@ int main(void)
           "IsBadStringPtrA short range");
 
     CHECK(invoke("GetACP", 0, 0, 0) == 1251u, "GetACP value");
+    CHECK(invoke("GetOEMCP", 0, 0, 0) == 866u, "GetOEMCP value");
     const uint32_t cpinfo = GUEST_BASE + 0x300u;
     memset(guest_ptr(cpinfo, 24), 0xAA, 24);
     CHECK(invoke("GetCPInfo", 1251, cpinfo, 0) == 1u, "GetCPInfo return");

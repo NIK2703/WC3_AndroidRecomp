@@ -839,6 +839,234 @@ def test_hle_string() -> int:
     return 0
 
 
+def test_hle_resource() -> int:
+    """T0: kernel32 PE resource lookup against a synthetic guest image."""
+    cc = gcc()
+    if not cc:
+        print("hle resource: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "resource"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "resource" / "resource_hle.c"),
+        str(ROOT / "tests" / "kernel32_resource_test.c"),
+    ]
+    for name, debug in (("kernel32_resource_test_debug.exe", 1),
+                        ("kernel32_resource_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_comctl32_imagelist() -> int:
+    """T0: COMCTL32 image-list handles and drag state."""
+    cc = gcc()
+    if not cc:
+        print("comctl32 imagelist: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "comctl32" / "imagelist"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "comctl32" / "imagelist" / "imagelist_hle.c"),
+        str(ROOT / "tests" / "comctl32_imagelist_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("comctl32_imagelist_test_debug.exe", 1),
+                        ("comctl32_imagelist_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_gdi_dc() -> int:
+    """T0: GDI32 per-DC color, mode and alignment state."""
+    cc = gcc()
+    if not cc:
+        print("gdi dc: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "dc"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "dc" / "gdi_dc_hle.c"),
+        str(ROOT / "tests" / "gdi_dc_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("gdi_dc_test_debug.exe", 1),
+                        ("gdi_dc_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_scroll_hle() -> int:
+    """T0: USER32 scroll-bar state and SCROLLINFO accessors."""
+    cc = gcc()
+    if not cc:
+        print("scroll: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "scroll"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "user32" / "scroll" / "scroll_hle.c"),
+        str(ROOT / "tests" / "scroll_hle_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("scroll_hle_test_debug.exe", 1),
+                        ("scroll_hle_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_gdi_objects() -> int:
+    """T0: GDI32 regions, pens and per-DC line state."""
+    cc = gcc()
+    if not cc:
+        print("gdi objects: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "objects"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "objects" / "gdi_obj_hle.c"),
+        str(ROOT / "tests" / "gdi_obj_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("gdi_obj_test_debug.exe", 1),
+                        ("gdi_obj_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_registry_hle() -> int:
+    """T0: ADVAPI32 registry store, handles and enumeration."""
+    cc = gcc()
+    if not cc:
+        print("registry: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "advapi32" / "registry"),
+        "-I" + str(ROOT / "runtime" / "diag"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "advapi32" / "registry" / "registry_hle.c"),
+        str(ROOT / "tests" / "registry_hle_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("registry_hle_test_debug.exe", 1),
+                        ("registry_hle_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_msvcr80_string() -> int:
     """T0: MSVCR80 string/memory handlers over a fake guest arena."""
     cc = gcc()
@@ -1071,6 +1299,47 @@ def test_msvcr80_file() -> int:
     ]
     for name, debug in (("msvcr80_file_test_debug.exe", 1),
                         ("msvcr80_file_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_msvcr80_stdio() -> int:
+    """T0: MSVCR80 stdio streams over Wc3FileApi and shared descriptors."""
+    cc = gcc()
+    if not cc:
+        print("msvcr80 stdio: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "file"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "stdio"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "msvcr80" / "file" / "file_hle.c"),
+        str(ROOT / "runtime" / "hle" / "msvcr80" / "stdio" / "stdio_hle.c"),
+        str(ROOT / "tests" / "msvcr80_stdio_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("msvcr80_stdio_test_debug.exe", 1),
+                        ("msvcr80_stdio_test_release.exe", 0)):
         exe = BUILD / name
         rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
         if rc != 0:
@@ -1408,9 +1677,16 @@ TESTS = {
     "hle_system": test_hle_system,
     "hle_memory": test_hle_memory,
     "hle_string": test_hle_string,
+    "hle_resource": test_hle_resource,
+    "comctl32_imagelist": test_comctl32_imagelist,
+    "gdi_dc": test_gdi_dc,
+    "gdi_objects": test_gdi_objects,
+    "scroll_hle": test_scroll_hle,
+    "registry_hle": test_registry_hle,
     "msvcr80_heap": test_msvcr80_heap,
     "msvcr80_math": test_msvcr80_math,
     "msvcr80_file": test_msvcr80_file,
+    "msvcr80_stdio": test_msvcr80_stdio,
     "msvcr80_convert": test_msvcr80_convert,
     "msvcr80_crt": test_msvcr80_crt,
     "msvcr80_secure": test_msvcr80_secure,

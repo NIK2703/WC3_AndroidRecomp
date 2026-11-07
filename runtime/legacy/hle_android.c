@@ -2940,11 +2940,20 @@ typedef struct {
     int blk_head, blk_count;
     uint32_t done[WAVE_DONE_MAX];  /* guest WAVEHDR completions */
     int done_head, done_count;
+    int underrun_fade;   /* device-side click suppression on ring underrun */
+    int fade_in;         /* ramp up on the first callback after an underrun */
+    pthread_t owner;     /* thread that called waveOutOpen (CALLBACK_FUNCTION) */
+    uint32_t last_done_ms; /* last WOM_DONE delivery, for the stall fallback */
 } WaveDev;
 
 static WaveDev g_wave_dev[WAVE_DEV_MAX];
 static pthread_mutex_t g_wave_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_wave_ret_thunk;
+/* Guest completion callbacks must not run concurrently (winmm serializes
+ * them), but a host mutex must NEVER be held across dispatch() — that would
+ * violate the project lock invariant.  This non-blocking atomic token guards
+ * ONLY the completion loop; per-thread timers are serviced before it is taken,
+ * and a busy peer returns immediately instead of blocking or spinning. */
 static volatile int g_wave_service_lock;
 #ifdef WC3_DEBUG
 static int g_wave_trace = -1;
@@ -3179,6 +3188,11 @@ static void wave_copy_s16(uint8_t *dst, uint32_t src, uint32_t frames,
 static FILE *g_wave_dump_file;
 static uint64_t g_wave_dump_total;
 static int g_wave_dump_state;
+/* Serialises dump writes in ring-append order.  Two guest threads can call
+ * waveOutWrite concurrently; without this lock the FILE order can differ
+ * from the order the AAudio callback consumes, which fabricates a
+ * discontinuity at every swapped buffer boundary. */
+static pthread_mutex_t g_wave_dump_lock = PTHREAD_MUTEX_INITIALIZER;
 static const char *wave_dump_dir(void)
 {
     const char *dir = getenv("WC3_DATA_DIR");
@@ -3255,6 +3269,7 @@ static volatile int g_aa_error, g_aa_error_dev;
 static volatile unsigned g_aa_error_count;
 #if WC3_DEBUG && WC3_DEBUG_AUDIO
 static volatile unsigned g_aa_slow;
+static volatile unsigned g_aa_gap5, g_aa_gap20;
 static volatile uint64_t g_aa_lock_max_us;
 static volatile uint32_t g_aa_short_want, g_aa_short_avail;
 static volatile uint32_t g_aa_want, g_aa_take, g_aa_ring, g_aa_blocks;
@@ -3285,8 +3300,12 @@ static aaudio_data_callback_result_t wave_aaudio_cb(AAudioStream *stream,
     uint8_t *out = (uint8_t *)audio;
 #ifdef WC3_DEBUG
     uint64_t now_us = aa_now_us();
-    if (g_aa_last_us && now_us - g_aa_last_us > g_aa_max_gap_us)
-        g_aa_max_gap_us = now_us - g_aa_last_us;
+    if (g_aa_last_us) {
+        uint64_t gap = now_us - g_aa_last_us;
+        if (gap > g_aa_max_gap_us) g_aa_max_gap_us = gap;
+        if (gap >= 5000u) g_aa_gap5++;
+        if (gap >= 20000u) g_aa_gap20++;
+    }
     g_aa_last_us = now_us;
     g_aa_cb++;
 #endif
@@ -3367,8 +3386,54 @@ static aaudio_data_callback_result_t wave_aaudio_cb(AAudioStream *stream,
 #endif
     pthread_mutex_unlock(&g_wave_lock);
 
-    /* No logging, allocation or file access on the real-time path. */
-    if (take < want) memset(out + take, 0, want - take);
+    /* Device-side underrun shaping, after the lock is dropped.  A step to
+     * zero and back is itself the click: hold the last delivered frame,
+     * ramp it down over ~2 ms, then ramp back up on the next callback that
+     * has data.  No allocation, logging or guest memory access on this path.
+     * Guest-visible WAVEHDR state is untouched. */
+    {
+        const uint32_t frame_bytes = d->out_align ? d->out_align : 4u;
+        const uint32_t chans = frame_bytes / 2u;
+        uint32_t ramp = d->rate / 500u;          /* ~2 ms of frames */
+        if (ramp < 1u) ramp = 1u;
+
+        if (d->fade_in && take >= frame_bytes) {
+            uint32_t frames = take / frame_bytes;
+            uint32_t n = frames < ramp ? frames : ramp;
+            int16_t *o = (int16_t *)(void *)out;
+            for (uint32_t f = 0; f < n; f++) {
+                uint32_t gain = (256u * (f + 1u)) / n;
+                for (uint32_t c = 0; c < chans; c++) {
+                    uint32_t i = f * chans + c;
+                    o[i] = (int16_t)(((int32_t)o[i] * (int32_t)gain) >> 8);
+                }
+            }
+            d->fade_in = 0;
+        }
+
+        if (take < want) {
+            uint8_t *miss = out + take;
+            uint32_t bytes = want - take;
+            if (d->underrun_fade && take >= frame_bytes) {
+                const int16_t *last =
+                    (const int16_t *)(const void *)(out + take - frame_bytes);
+                int16_t *dst = (int16_t *)(void *)miss;
+                uint32_t avail_frames = bytes / frame_bytes;
+                uint32_t n = avail_frames < ramp ? avail_frames : ramp;
+                for (uint32_t f = 0; f < n; f++) {
+                    uint32_t gain = 256u - (256u * f / n);
+                    for (uint32_t c = 0; c < chans; c++)
+                        dst[f * chans + c] =
+                            (int16_t)(((int32_t)last[c] * (int32_t)gain) >> 8);
+                }
+                uint32_t done = n * frame_bytes;
+                if (done < bytes) memset(miss + done, 0, bytes - done);
+            } else {
+                memset(miss, 0, bytes);
+            }
+            d->fade_in = 1;
+        }
+    }
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -3406,10 +3471,19 @@ static void wave_audio_stats_report(void)
     const unsigned slow = g_aa_slow;
     const unsigned silent = g_aa_silent;
     const unsigned errs = g_aa_error_count;
+    const unsigned gap5 = g_aa_gap5, gap20 = g_aa_gap20;
+    int32_t xruns = -1;
+    for (unsigned i = 0; i < WAVE_DEV_MAX; i++) {
+        if (g_wave_dev[i].used && g_wave_dev[i].stream) {
+            xruns = AAudioStream_getXRunCount(g_wave_dev[i].stream);
+            break;
+        }
+    }
     fprintf(stderr, "[wave] aa cb=%u short=%u slow=%u silent=%u min=%u "
-                    "maxgap_us=%llu lockmax_us=%llu\n",
+                    "maxgap_us=%llu gap5=%u gap20=%u xruns=%d "
+                    "lockmax_us=%llu\n",
             cb, shortc, slow, silent, (unsigned)g_aa_min_avail,
-            (unsigned long long)g_aa_max_gap_us,
+            (unsigned long long)g_aa_max_gap_us, gap5, gap20, (int)xruns,
             (unsigned long long)g_aa_lock_max_us);
     if (errs != g_aa_error_reported) {
         g_aa_error_reported = errs;
@@ -3442,6 +3516,11 @@ static void wave_audio_stats_report(void)
 
 static int wave_open_aaudio(WaveDev *d)
 {
+    /* A hard memset(0) at an underrun is a step discontinuity, and that step
+     * is the audible click.  Default to a ~2 ms fade; set
+     * WC3_WAVEOUT_UNDERRUN_FADE=0 to restore the old behaviour for A/B. */
+    const char *fade_env = getenv("WC3_WAVEOUT_UNDERRUN_FADE");
+    d->underrun_fade = !fade_env || fade_env[0] != '0';
     /* Low latency is the right choice for a game mixer, but not every device
      * accepts it; a plain stream is still better than the silent fallback. */
     const aaudio_performance_mode_t modes[2] = {
@@ -3506,11 +3585,20 @@ static void wave_init(void)
 }
 
 /* Deliver queued WOM_DONE callbacks on this guest thread.  The message pump
- * calls this; Miles' callback may call back into waveOut, and the global
- * service lock makes a nested PeekMessage return without recursion. */
+ * calls this; a WOM_DONE callback may re-enter GetMessage, so the completion
+ * token is non-blocking.  Per-thread timers are serviced BEFORE that token —
+ * a busy peer can no longer starve this thread's 50 ms mixer tick.  No host
+ * lock is held across dispatch(): g_wave_lock is dropped before every
+ * callback, as the lock invariant requires. */
 static void waveout_service(CPU *c)
 {
     if (!c) return;
+    /* Miles' 50 ms mixer timer is per-thread and has its own lock.  It runs
+     * before ANY completion work: a long WOM_DONE dispatch on another thread
+     * used to make this thread skip its tick entirely (a 50 ms timer measured
+     * at 70 ms median / 652 ms worst case).  timer_service() is a no-op until
+     * wave_init() has installed the return thunk. */
+    timer_service(c);
     if (__atomic_exchange_n(&g_wave_service_lock, 1, __ATOMIC_ACQ_REL)) {
 #ifdef WC3_DEBUG
         if (wave_trace() && g_wave_service_log++ < 64)
@@ -3523,11 +3611,6 @@ static void waveout_service(CPU *c)
         fprintf(stderr, "[wave] service enter pending=%d\n", g_wave_pending);
 #endif
     wave_init();
-
-    /* Run any due thread-timer callbacks before draining waveOut.  Miles'
-     * 50 ms mixer timer is what enqueues real PCM; without it the guest only
-     * ever writes its one-frame device probe. */
-    timer_service(c);
 
     uint32_t now = 0;
     int have_now = 0;
@@ -3549,25 +3632,52 @@ static void waveout_service(CPU *c)
                 d->blk_count--;
             }
         }
+        if (!have_now) { now = wave_now_ms(); have_now = 1; }
+        int other_pending = 0;
         for (int i = 0; i < WAVE_DEV_MAX && !found; i++) {
             WaveDev *d = &g_wave_dev[i];
             if (!d->used || d->done_count == 0) continue;
+            /* WOM_DONE belongs on the thread that opened the device.  Other
+             * guest threads still service their own timers (above) but must
+             * leave the completion queued for the owner.  If the owner has
+             * not pumped for 250 ms, hand ownership to this pumping thread
+             * once, instead of scattering callbacks over a dozen workers. */
+            if (!pthread_equal(d->owner, pthread_self())) {
+                if ((int32_t)(now - d->last_done_ms) < 250) {
+                    other_pending = 1;
+                    continue;
+                }
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+                if (wave_trace())
+                    fprintf(stderr, "[wave] DONE owner handover gid=%u\n",
+                            hle_current_guest_id());
+#endif
+                d->owner = pthread_self();
+            }
             hdr = d->done[d->done_head];
             d->done_head = (d->done_head + 1) % WAVE_DONE_MAX;
             d->done_count--;
+            d->last_done_ms = now;
             gh = d->gh;
             cb = d->callback;
             inst = d->instance;
             ev = d->event;
             found = 1;
         }
-        if (!found) g_wave_pending = 0;
+        /* Never clear the wakeup flag while completions for another thread
+         * are still queued. */
+        if (!found) g_wave_pending = other_pending;
         pthread_mutex_unlock(&g_wave_lock);
         if (!found) break;
 #ifdef WC3_DEBUG
         if (wave_trace() && g_wave_service_log++ < 64)
             fprintf(stderr, "[wave] service pop ghwo=%u hdr=%08X cb=%08X\n",
                     gh, hdr, cb);
+        if (wave_trace())
+            fprintf(stderr, "[wave] DONE t=%u hdr=%08X cb=%08X gid=%u "
+                            "flg=%08X\n",
+                    wave_now_ms(), hdr, cb, hle_current_guest_id(),
+                    hdr && guest_ok(hdr, 32) ? rd32g(hdr + 16) : 0u);
 #endif
 
         if (cb) {
@@ -3678,6 +3788,12 @@ static void h_wave_out_open(CPU *c)
     WaveDev *d = &g_wave_dev[slot];
     memset(d, 0, sizeof *d);
     d->used = 1;
+    /* Win32 CALLBACK_FUNCTION delivers WOM_DONE on the thread that opened
+     * the device (winmm owns a hidden window on that thread).  Miles' handler
+     * keeps driver state per guest thread; dispatching it on unrelated worker
+     * threads corrupts the mixer over time (stale buffers, then silence). */
+    d->owner = pthread_self();
+    d->last_done_ms = wave_now_ms();
     d->gh = 0x000A0000u + (uint32_t)slot * 4u;
     d->devid = devid;
     d->tag = tag;
@@ -3850,6 +3966,9 @@ static void h_wave_out_write(CPU *c)
     if (!hdr || !guest_ok(hdr, 32)) { c->eax = MMSYSERR_INVALPARAM; return; }
     uint32_t data = rd32g(hdr + 0);
     uint32_t len = rd32g(hdr + 4);
+    /* Pre-submission WAVEHDR flags: needed to tell a real completion from a
+     * stale re-submission in the write trace. */
+    const uint32_t pre_flags = rd32g(hdr + 16);
 
     pthread_mutex_lock(&g_wave_lock);
     WaveDev *d = wave_dev_from_guest(gh);
@@ -3952,21 +4071,52 @@ static void h_wave_out_write(CPU *c)
 #else
     const int dump_pcm = 0;
 #endif
+#ifdef WC3_DEBUG
+    /* Take the dump lock while still holding g_wave_lock so dump order is the
+     * ring's append order, but NEVER block on it: another guest thread may be
+     * in fwrite()+fflush() to flash, and holding g_wave_lock across that wait
+     * stalls the AAudio real-time callback.  A skipped diagnostic block is
+     * cheaper than a missed audio period. */
+    const int do_dump = dump_pcm &&
+                        pthread_mutex_trylock(&g_wave_dump_lock) == 0;
+#else
+    const int do_dump = 0;
+#endif
     pthread_mutex_unlock(&g_wave_lock);
 
 #ifdef WC3_DEBUG
     /* Guest-thread diagnostics: never format or write while g_wave_lock is
      * held, otherwise the AAudio callback can miss a period. */
-    if (dump_pcm)
+    if (do_dump) {
         wave_dump_pcm((const uint8_t *)(uintptr_t)data, len);
-    if (wave_trace() &&
-        (g_wave_write_log < 32u || (g_wave_write_log % 64u) == 0))
+        pthread_mutex_unlock(&g_wave_dump_lock);
+    }
+    if (wave_trace()) {
+        /* Fingerprint of the submitted PCM: three 8-byte probes at the start,
+         * middle and end.  Byte-identical repeats of the same WAVEHDR show up
+         * as the same hash five writes later. */
+        uint32_t ph = 2166136261u;
+        if (data && len >= 32) {
+            const uint8_t *q = (const uint8_t *)(uintptr_t)data;
+            const uint32_t pos[3] = { 0u, len / 2u, len - 8u };
+            for (int k = 0; k < 3; k++)
+                for (uint32_t i = 0; i < 8u; i++) {
+                    ph ^= q[pos[k] + i];
+                    ph *= 16777619u;
+                }
+        }
         fprintf(stderr, "[wave] Write t=%u ghwo=%u hdr=%08X len=%u need=%u "
-                        "blk=%d ring=%u fake=%d\n",
-                wave_now_ms(), gh, hdr, len, need, log_blk, log_ring, log_fake);
+                        "blk=%d ring=%u fake=%d ra=%08X gid=%u tid=%lu "
+                        "flg=%08X h=%08X\n",
+                wave_now_ms(), gh, hdr, len, need, log_blk, log_ring, log_fake,
+                rd32g(c->esp), hle_current_guest_id(),
+                (unsigned long)pthread_self(), pre_flags, ph);
+    }
     g_wave_write_log++;
 #else
     (void)dump_pcm;
+    (void)do_dump;
+    (void)pre_flags;
 #endif
     c->eax = MMSYSERR_NOERROR;
     wave_probe_pump(c, need, 0);
@@ -6806,10 +6956,14 @@ static void u_get_message(CPU *c)
     uint32_t hwnd = arg32(c, 1), lo = arg32(c, 2), hi = arg32(c, 3);
     if (!out) { c->eax = 0xFFFFFFFFu; return; }
 
-    /* Keep Miles' waveOut completion and mixer timer serviced on the guest
-     * thread that pumps messages, exactly as the Windows host does.  The old
-     * stub returned "no message" immediately; do the same when the queue is
-     * empty so startup is not held inside a blocking wait. */
+    /* Windows dispatches WM_TIMER from the message pump.  Service this
+     * thread's due timers here, before waveout_service(), so the 50 ms Miles
+     * mixer timer does not depend on the global completion-service lock or on
+     * whether a waveOut completion happens to be pending. */
+    timer_service(c);
+    /* Keep Miles' waveOut completion serviced on the guest thread that pumps
+     * messages.  The old stub returned "no message" immediately; do the same
+     * when the queue is empty so startup is not held inside a blocking wait. */
     waveout_service(c);
     keyboard_service();
     if (u_msg_take(out, hwnd, lo, hi, 1)) {
@@ -6842,6 +6996,7 @@ static void u_peek_message(CPU *c)
     uint32_t out = arg32(c, 0);
     uint32_t hwnd = arg32(c, 1), lo = arg32(c, 2), hi = arg32(c, 3);
     int remove = (arg32(c, 4) & 1) != 0;             /* PM_REMOVE */
+    timer_service(c);
     waveout_service(c);
     keyboard_service();
     c->eax = (uint32_t)u_msg_take(out, hwnd, lo, hi, remove);
@@ -8143,7 +8298,12 @@ static void reg_seed_sound_defaults(void)
  * the launcher falls back to 800x600 before it ever asks D3D9, so seed the
  * default (100% = native surface) plus the colour/refresh fields a normal
  * Windows install has.  The game's own resolution menu overwrites these at
- * run time; only the initial value matters here. */
+ * run time; only the initial value matters here.
+ *
+ * lockfb is a DWORD on the Windows reference install and is 0 there.  The
+ * Android backend has to present the same value before the launcher reads
+ * the Video key; otherwise the missing value takes the launcher down its
+ * default path. */
 static void reg_seed_resolution_defaults(void)
 {
     uint32_t w = 0, h = 0;
@@ -8154,6 +8314,7 @@ static void reg_seed_resolution_defaults(void)
         { "colordepth",   32 },
         { "refreshrate",  60 },
         { "adapter",      0 },
+        { "lockfb",       0 },
     };
     for (size_t i = 0; i < sizeof d / sizeof d[0]; i++) {
         uint32_t value = d[i].value;

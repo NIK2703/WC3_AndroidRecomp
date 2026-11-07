@@ -661,13 +661,16 @@ static void publish_visual(void)
             break;
         }
     }
+    int changed = 0;
     if (next >= 0) {
-        controls_sync_visuals(&g_visual[next]);
-        atomic_store_explicit(&g_visual_active, next, memory_order_release);
-        atomic_fetch_add_explicit(&g_visual_gen, 1u, memory_order_release);
+        changed = controls_sync_visuals(&g_visual[next]);
+        if (changed > 0) {
+            atomic_store_explicit(&g_visual_active, next, memory_order_release);
+            atomic_fetch_add_explicit(&g_visual_gen, 1u, memory_order_release);
+        }
     }
     pthread_mutex_unlock(&g_overlay_lock);
-    if (next >= 0) visual_signal();
+    if (changed > 0) visual_signal();
 }
 
 static void present_blank(ANativeWindow *window, int width, int height)

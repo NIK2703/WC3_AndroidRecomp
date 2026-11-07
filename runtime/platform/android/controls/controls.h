@@ -48,8 +48,12 @@ void controls_resize(int width, int height);
  */
 int controls_populate_overlay(Wc3Overlay *overlay);
 
-/* Copy only visual state; element count, geometry and text are unchanged. */
-void controls_sync_visuals(Wc3Overlay *overlay);
+/*
+ * Copy only visual state; element count, geometry and text are unchanged.
+ * Returns 1 when at least one visual field changed, 0 when the overlay already
+ * matches the engine, and -1 when the overlay cannot be synced.
+ */
+int controls_sync_visuals(Wc3Overlay *overlay);
 
 const char *controls_last_error(void);
 

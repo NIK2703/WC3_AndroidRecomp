@@ -1,10 +1,11 @@
 /*
  * file_hle.c - target-side MSVCR80 low-level file descriptors.
  *
- * The guest imports _open, _read, _write, _lseeki64 and _close from the CRT.
- * The as-built table did not define them, so the resolver bound generic
- * zero-returning stubs.  This slice implements the descriptor surface over
- * Wc3FileApi and keeps the as-built path translation:
+ * The guest imports _open, _read, _write, _lseeki64, _close and the four
+ * _stat/_fstat variants from the CRT.  The as-built table did not define them,
+ * so the resolver bound generic zero-returning stubs.  This slice implements
+ * the descriptor and stat surface over Wc3FileApi and keeps the as-built path
+ * translation:
  *
  *   Z:\data\war3.mpq  -> /data/war3.mpq
  *   C:\foo\bar.txt    -> foo/bar.txt
@@ -66,7 +67,8 @@ static const Wc3FileApi *file_api(void)
 
 /* Read a bounded guest C string.  A missing terminator or an unmapped byte is
  * a hard path failure rather than a truncated name. */
-static int read_guest_path(uint32_t address, char *buffer, size_t capacity)
+int wc3_hle_msvcr80_read_guest_path(uint32_t address, char *buffer,
+                                    size_t capacity)
 {
     size_t i = 0;
 
@@ -87,7 +89,7 @@ static int read_guest_path(uint32_t address, char *buffer, size_t capacity)
  * directory.  The as-built code writes a leading slash for rooted C: paths
  * too, contradicting its own comment; the target keeps C: relative so a save
  * path cannot escape to the host root. */
-static void map_path(const char *input, char *output, size_t capacity)
+void wc3_hle_msvcr80_map_path(const char *input, char *output, size_t capacity)
 {
     size_t out = 0;
     int keep_root = 1;
@@ -134,6 +136,145 @@ static int map_open_flags(int flags, int *mapped)
     return 1;
 }
 
+int wc3_hle_msvcr80_fd_open(const char *host_path, int flags, int *fd_out)
+{
+    if (!host_path || !fd_out) return -1;
+    const Wc3FileApi *file = file_api();
+    if (!file) return -1;
+
+    uintptr_t handle = 0;
+    if (file->open(file->ctx, host_path, flags, &handle) != 0) return -1;
+
+    pthread_mutex_lock(&g_fd_lock);
+    for (unsigned i = 0; i < FD_LIMIT; i++) {
+        if (g_slots[i].used) continue;
+        g_slots[i].used = 1;
+        g_slots[i].handle = handle;
+        pthread_mutex_unlock(&g_fd_lock);
+        *fd_out = (int)(FD_BASE + i);
+        return 0;
+    }
+    pthread_mutex_unlock(&g_fd_lock);
+    (void)file->close(file->ctx, handle);
+    return -1;
+}
+
+static FileSlot *fd_slot_locked(int fd)
+{
+    const unsigned slot = (unsigned)fd;
+    if (fd < (int)FD_BASE || slot - FD_BASE >= FD_LIMIT) return NULL;
+    return &g_slots[slot - FD_BASE];
+}
+
+int wc3_hle_msvcr80_fd_read(int fd, void *buffer, uint32_t count,
+                            uint32_t *read_out)
+{
+    if (count == 0u) {
+        if (read_out) *read_out = 0u;
+        return 0;
+    }
+    if (!buffer || count > 0x7FFFFFFFu) return -1;
+    const Wc3FileApi *file = file_api();
+    if (!file) return -1;
+
+    pthread_mutex_lock(&g_fd_lock);
+    FileSlot *slot = fd_slot_locked(fd);
+    if (!slot || !slot->used) {
+        pthread_mutex_unlock(&g_fd_lock);
+        return -1;
+    }
+    uint32_t got = 0;
+    const int rc = file->read(file->ctx, slot->handle, buffer, count, &got);
+    pthread_mutex_unlock(&g_fd_lock);
+    if (rc != 0) return -1;
+    if (read_out) *read_out = got;
+    return 0;
+}
+
+int wc3_hle_msvcr80_fd_write(int fd, const void *buffer, uint32_t count,
+                             uint32_t *written_out)
+{
+    if (count == 0u) {
+        if (written_out) *written_out = 0u;
+        return 0;
+    }
+    if (!buffer || count > 0x7FFFFFFFu) return -1;
+    const Wc3FileApi *file = file_api();
+    if (!file) return -1;
+
+    pthread_mutex_lock(&g_fd_lock);
+    FileSlot *slot = fd_slot_locked(fd);
+    if (!slot || !slot->used) {
+        pthread_mutex_unlock(&g_fd_lock);
+        return -1;
+    }
+    uint32_t written = 0;
+    const int rc = file->write(file->ctx, slot->handle, buffer, count,
+                               &written);
+    pthread_mutex_unlock(&g_fd_lock);
+    if (rc != 0) return -1;
+    if (written_out) *written_out = written;
+    return 0;
+}
+
+int wc3_hle_msvcr80_fd_seek(int fd, int64_t offset, int whence,
+                            uint64_t *position_out)
+{
+    if (whence < 0 || whence > 2) return -1;
+    const Wc3FileApi *file = file_api();
+    if (!file) return -1;
+
+    pthread_mutex_lock(&g_fd_lock);
+    FileSlot *slot = fd_slot_locked(fd);
+    if (!slot || !slot->used) {
+        pthread_mutex_unlock(&g_fd_lock);
+        return -1;
+    }
+    uint64_t position = 0;
+    const int rc = file->seek(file->ctx, slot->handle, offset, whence,
+                              &position);
+    pthread_mutex_unlock(&g_fd_lock);
+    if (rc != 0) return -1;
+    if (position_out) *position_out = position;
+    return 0;
+}
+
+int wc3_hle_msvcr80_fd_size(int fd, uint64_t *size_out)
+{
+    if (!size_out) return -1;
+    const Wc3FileApi *file = file_api();
+    if (!file || !file->size) return -1;
+
+    pthread_mutex_lock(&g_fd_lock);
+    FileSlot *slot = fd_slot_locked(fd);
+    if (!slot || !slot->used) {
+        pthread_mutex_unlock(&g_fd_lock);
+        return -1;
+    }
+    const int rc = file->size(file->ctx, slot->handle, size_out);
+    pthread_mutex_unlock(&g_fd_lock);
+    return rc == 0 ? 0 : -1;
+}
+
+int wc3_hle_msvcr80_fd_close(int fd)
+{
+    const Wc3FileApi *file = file_api();
+    if (!file) return -1;
+
+    pthread_mutex_lock(&g_fd_lock);
+    FileSlot *slot = fd_slot_locked(fd);
+    if (!slot || !slot->used) {
+        pthread_mutex_unlock(&g_fd_lock);
+        return -1;
+    }
+    const uintptr_t handle = slot->handle;
+    slot->used = 0;
+    slot->handle = 0;
+    const int rc = file->close(file->ctx, handle);
+    pthread_mutex_unlock(&g_fd_lock);
+    return rc == 0 ? 0 : -1;
+}
+
 static void fail(CPU *c)
 {
     c->eax = 0xFFFFFFFFu;
@@ -148,26 +289,15 @@ static void h_open(CPU *c)
     int flags = 0;
 
     fail(c);
-    if (!read_guest_path(path_address, guest_path, sizeof guest_path)) return;
-    if (!map_open_flags(guest_flags, &flags)) return;
-    const Wc3FileApi *file = file_api();
-    if (!file) return;
-
-    map_path(guest_path, host_path, sizeof host_path);
-    uintptr_t handle = 0;
-    if (file->open(file->ctx, host_path, flags, &handle) != 0) return;
-
-    pthread_mutex_lock(&g_fd_lock);
-    for (unsigned i = 0; i < FD_LIMIT; i++) {
-        if (g_slots[i].used) continue;
-        g_slots[i].used = 1;
-        g_slots[i].handle = handle;
-        pthread_mutex_unlock(&g_fd_lock);
-        c->eax = FD_BASE + i;
+    if (!wc3_hle_msvcr80_read_guest_path(path_address, guest_path,
+                                         sizeof guest_path))
         return;
-    }
-    pthread_mutex_unlock(&g_fd_lock);
-    (void)file->close(file->ctx, handle);
+    if (!map_open_flags(guest_flags, &flags)) return;
+
+    wc3_hle_msvcr80_map_path(guest_path, host_path, sizeof host_path);
+    int fd = -1;
+    if (wc3_hle_msvcr80_fd_open(host_path, flags, &fd) != 0) return;
+    c->eax = (uint32_t)fd;
 }
 
 static void h_read(CPU *c)
@@ -183,22 +313,11 @@ static void h_read(CPU *c)
     }
     if (count > 0x7FFFFFFFu) return;
     if (!wc3_legacy_guest_ok(buffer, count)) return;
-    const Wc3FileApi *file = file_api();
-    if (!file) return;
 
-    const unsigned slot = (unsigned)fd;
-    if (fd < (int)FD_BASE || slot - FD_BASE >= FD_LIMIT) return;
-
-    pthread_mutex_lock(&g_fd_lock);
-    if (!g_slots[slot - FD_BASE].used) {
-        pthread_mutex_unlock(&g_fd_lock);
-        return;
-    }
     uint32_t got = 0;
-    const int rc = file->read(file->ctx, g_slots[slot - FD_BASE].handle,
-                              (void *)(uintptr_t)buffer, count, &got);
-    pthread_mutex_unlock(&g_fd_lock);
-    if (rc != 0) return;
+    if (wc3_hle_msvcr80_fd_read(fd, (void *)(uintptr_t)buffer, count,
+                                &got) != 0)
+        return;
     c->eax = got;
 }
 
@@ -215,23 +334,11 @@ static void h_write(CPU *c)
     }
     if (count > 0x7FFFFFFFu) return;
     if (!wc3_legacy_guest_ok(buffer, count)) return;
-    const Wc3FileApi *file = file_api();
-    if (!file) return;
 
-    const unsigned slot = (unsigned)fd;
-    if (fd < (int)FD_BASE || slot - FD_BASE >= FD_LIMIT) return;
-
-    pthread_mutex_lock(&g_fd_lock);
-    if (!g_slots[slot - FD_BASE].used) {
-        pthread_mutex_unlock(&g_fd_lock);
-        return;
-    }
     uint32_t written = 0;
-    const int rc = file->write(file->ctx, g_slots[slot - FD_BASE].handle,
-                               (const void *)(uintptr_t)buffer, count,
-                               &written);
-    pthread_mutex_unlock(&g_fd_lock);
-    if (rc != 0) return;
+    if (wc3_hle_msvcr80_fd_write(fd, (const void *)(uintptr_t)buffer, count,
+                                 &written) != 0)
+        return;
     c->eax = written;
 }
 
@@ -245,48 +352,17 @@ static void h_lseeki64(CPU *c)
 
     fail(c);
     c->edx = 0xFFFFFFFFu;
-    if (origin < 0 || origin > 2) return;
-    const Wc3FileApi *file = file_api();
-    if (!file) return;
-
-    const unsigned slot = (unsigned)fd;
-    if (fd < (int)FD_BASE || slot - FD_BASE >= FD_LIMIT) return;
-
-    pthread_mutex_lock(&g_fd_lock);
-    if (!g_slots[slot - FD_BASE].used) {
-        pthread_mutex_unlock(&g_fd_lock);
-        return;
-    }
     uint64_t position = 0;
-    const int rc = file->seek(file->ctx, g_slots[slot - FD_BASE].handle,
-                              offset, origin, &position);
-    pthread_mutex_unlock(&g_fd_lock);
-    if (rc != 0) return;
+    if (wc3_hle_msvcr80_fd_seek(fd, offset, origin, &position) != 0) return;
     c->eax = (uint32_t)position;
     c->edx = (uint32_t)(position >> 32);
 }
 
 static void h_close(CPU *c)
 {
-    const int fd = (int)wc3_legacy_arg32(c, 0u);
-    const Wc3FileApi *file = file_api();
-
     fail(c);
-    if (!file) return;
-    const unsigned slot = (unsigned)fd;
-    if (fd < (int)FD_BASE || slot - FD_BASE >= FD_LIMIT) return;
-
-    pthread_mutex_lock(&g_fd_lock);
-    if (!g_slots[slot - FD_BASE].used) {
-        pthread_mutex_unlock(&g_fd_lock);
-        return;
-    }
-    const uintptr_t handle = g_slots[slot - FD_BASE].handle;
-    g_slots[slot - FD_BASE].used = 0;
-    g_slots[slot - FD_BASE].handle = 0;
-    const int rc = file->close(file->ctx, handle);
-    pthread_mutex_unlock(&g_fd_lock);
-    if (rc == 0) c->eax = 0u;
+    if (wc3_hle_msvcr80_fd_close((int)wc3_legacy_arg32(c, 0u)) == 0)
+        c->eax = 0u;
 }
 
 /* MSVCRT's _stat64i32 is 48 bytes and _stat64 is 56 bytes.  Only the fields
@@ -329,14 +405,16 @@ static void write_stat(CPU *c, uint32_t address, const Wc3FileStat *st,
     c->eax = 0u;
 }
 
-static int read_stat_path(CPU *c, uint32_t path_address, char *host_path,
+static int read_stat_path(uint32_t path_address, char *host_path,
                           const Wc3FileApi **file_out)
 {
     char guest_path[FILE_PATH_MAX];
-    if (!read_guest_path(path_address, guest_path, sizeof guest_path)) return 0;
+    if (!wc3_hle_msvcr80_read_guest_path(path_address, guest_path,
+                                         sizeof guest_path))
+        return 0;
     const Wc3FileApi *file = file_api();
     if (!file || !file->stat) return 0;
-    map_path(guest_path, host_path, FILE_PATH_MAX);
+    wc3_hle_msvcr80_map_path(guest_path, host_path, FILE_PATH_MAX);
     *file_out = file;
     return 1;
 }
@@ -348,7 +426,7 @@ static void h_stat64i32(CPU *c)
     Wc3FileStat st;
 
     fail(c);
-    if (!read_stat_path(c, wc3_legacy_arg32(c, 0u), host_path, &file)) return;
+    if (!read_stat_path(wc3_legacy_arg32(c, 0u), host_path, &file)) return;
     if (file->stat(file->ctx, host_path, &st) != 0) return;
     write_stat(c, wc3_legacy_arg32(c, 1u), &st, 0);
 }
@@ -360,27 +438,14 @@ static void h_stat64(CPU *c)
     Wc3FileStat st;
 
     fail(c);
-    if (!read_stat_path(c, wc3_legacy_arg32(c, 0u), host_path, &file)) return;
+    if (!read_stat_path(wc3_legacy_arg32(c, 0u), host_path, &file)) return;
     if (file->stat(file->ctx, host_path, &st) != 0) return;
     write_stat(c, wc3_legacy_arg32(c, 1u), &st, 1);
 }
 
-static int fstat_size(CPU *c, int fd, uint64_t *size_out)
+static int fstat_size(int fd, uint64_t *size_out)
 {
-    const Wc3FileApi *file = file_api();
-    if (!file) return 0;
-    const unsigned slot = (unsigned)fd;
-    if (fd < (int)FD_BASE || slot - FD_BASE >= FD_LIMIT) return 0;
-
-    pthread_mutex_lock(&g_fd_lock);
-    if (!g_slots[slot - FD_BASE].used) {
-        pthread_mutex_unlock(&g_fd_lock);
-        return 0;
-    }
-    const int rc = file->size(file->ctx, g_slots[slot - FD_BASE].handle,
-                              size_out);
-    pthread_mutex_unlock(&g_fd_lock);
-    return rc == 0;
+    return wc3_hle_msvcr80_fd_size(fd, size_out) == 0;
 }
 
 static void h_fstat64(CPU *c)
@@ -388,7 +453,7 @@ static void h_fstat64(CPU *c)
     uint64_t size = 0;
 
     fail(c);
-    if (!fstat_size(c, (int)wc3_legacy_arg32(c, 0u), &size)) return;
+    if (!fstat_size((int)wc3_legacy_arg32(c, 0u), &size)) return;
     Wc3FileStat st = { size, 0, WC3_FILE_STAT_REGULAR };
     write_stat(c, wc3_legacy_arg32(c, 1u), &st, 1);
 }
@@ -398,7 +463,7 @@ static void h_fstat64i32(CPU *c)
     uint64_t size = 0;
 
     fail(c);
-    if (!fstat_size(c, (int)wc3_legacy_arg32(c, 0u), &size)) return;
+    if (!fstat_size((int)wc3_legacy_arg32(c, 0u), &size)) return;
     Wc3FileStat st = { size, 0, WC3_FILE_STAT_REGULAR };
     write_stat(c, wc3_legacy_arg32(c, 1u), &st, 0);
 }

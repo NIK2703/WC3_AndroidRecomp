@@ -543,8 +543,8 @@ out_locked:
     return rc;
 }
 
-void controls_sync_visuals(Wc3Overlay *overlay) {
-    if (!overlay || !g_initialized) return;
+int controls_sync_visuals(Wc3Overlay *overlay) {
+    if (!overlay || !g_initialized) return -1;
 
     Wc3OverlayElement snapshot[WC3_OVERLAY_MAX_ELEMENTS];
     memset(snapshot, 0, sizeof(snapshot));
@@ -590,18 +590,32 @@ void controls_sync_visuals(Wc3Overlay *overlay) {
     }
 #endif
 
-    if (!valid) return;
+    if (!valid) return -1;
+
+    bool changed = false;
     for (int i = 0; i < n; i++) {
         Wc3OverlayElement *dst = &overlay->elements[i];
-        dst->visual_layers = snapshot[i].visual_layers;
-        dst->alpha_outer = snapshot[i].alpha_outer;
-        dst->alpha_stroke = snapshot[i].alpha_stroke;
-        dst->alpha_fill = snapshot[i].alpha_fill;
-        dst->alpha_glow = snapshot[i].alpha_glow;
-        dst->engaged = snapshot[i].engaged;
-        dst->selected = snapshot[i].selected;
-        dst->active_petals = snapshot[i].active_petals;
+        const Wc3OverlayElement *src = &snapshot[i];
+        if (dst->visual_layers != src->visual_layers ||
+            dst->alpha_outer != src->alpha_outer ||
+            dst->alpha_stroke != src->alpha_stroke ||
+            dst->alpha_fill != src->alpha_fill ||
+            dst->alpha_glow != src->alpha_glow ||
+            dst->engaged != src->engaged ||
+            dst->selected != src->selected ||
+            dst->active_petals != src->active_petals)
+            changed = true;
+
+        dst->visual_layers = src->visual_layers;
+        dst->alpha_outer = src->alpha_outer;
+        dst->alpha_stroke = src->alpha_stroke;
+        dst->alpha_fill = src->alpha_fill;
+        dst->alpha_glow = src->alpha_glow;
+        dst->engaged = src->engaged;
+        dst->selected = src->selected;
+        dst->active_petals = src->active_petals;
     }
+    return changed ? 1 : 0;
 }
 
 const char *controls_last_error(void) {

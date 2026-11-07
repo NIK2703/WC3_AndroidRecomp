@@ -6,17 +6,128 @@
  * exposes.  The as-built default of 800 for unrelated metrics is preserved:
  * the game uses those metrics only as loose layout hints, and changing them
  * without a device measurement would be a guess.
+ *
+ * Window properties are self-contained too.  They are an atom table keyed by
+ * the guest HWND; the value is an opaque 32-bit handle, so the target does not
+ * need a real window tree to preserve SetPropA/GetPropA/RemovePropA.
  */
 #include "window_hle.h"
 
+#include <pthread.h>
 #include <stdint.h>
+#include <string.h>
+#include <strings.h>
 
 #include "cpu.h"
 #include "legacy_shim.h"
 
 #define DESKTOP_WINDOW_HANDLE 0x00010000u
+#define PROPERTY_TABLE_SIZE 256u
+#define PROPERTY_NAME_SIZE 256u
 
 static int32_t g_cursor_display_count;
+
+/* Window properties are an atom table in Win32: the name is case-insensitive
+ * and the value is an opaque 32-bit handle.  The target has no real HWND tree,
+ * so the table keys on the guest handle exactly as the guest passes it; that
+ * preserves the property contract without pretending to own a window. */
+typedef struct User32Property {
+    uint32_t hwnd;
+    uint32_t value;
+    char name[PROPERTY_NAME_SIZE];
+    uint8_t used;
+} User32Property;
+
+static User32Property g_properties[PROPERTY_TABLE_SIZE];
+static pthread_mutex_t g_property_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int read_property_name(uint32_t address, char *buffer)
+{
+    if (!address || !buffer) return 0;
+    for (size_t i = 0; i + 1u < PROPERTY_NAME_SIZE; i++) {
+        if (address > UINT32_MAX - (uint32_t)i) return 0;
+        const uint32_t byte_address = address + (uint32_t)i;
+        if (!wc3_legacy_guest_ok(byte_address, 1u)) return 0;
+        const char ch = (char)wc3_legacy_rd8g(byte_address);
+        buffer[i] = ch;
+        if (!ch) return i != 0u;
+    }
+    buffer[PROPERTY_NAME_SIZE - 1u] = '\0';
+    return 0;
+}
+
+static void h_get_prop(CPU *c)
+{
+    const uint32_t hwnd = wc3_legacy_arg32(c, 0u);
+    char name[PROPERTY_NAME_SIZE];
+    c->eax = 0;
+    if (!hwnd || !read_property_name(wc3_legacy_arg32(c, 1u), name))
+        return;
+
+    pthread_mutex_lock(&g_property_lock);
+    for (unsigned i = 0; i < PROPERTY_TABLE_SIZE; i++) {
+        if (g_properties[i].used && g_properties[i].hwnd == hwnd &&
+            strcasecmp(g_properties[i].name, name) == 0) {
+            c->eax = g_properties[i].value;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_property_lock);
+}
+
+static void h_set_prop(CPU *c)
+{
+    const uint32_t hwnd = wc3_legacy_arg32(c, 0u);
+    const uint32_t value = wc3_legacy_arg32(c, 2u);
+    char name[PROPERTY_NAME_SIZE];
+    c->eax = 0;
+    if (!hwnd || !read_property_name(wc3_legacy_arg32(c, 1u), name))
+        return;
+
+    pthread_mutex_lock(&g_property_lock);
+    for (unsigned i = 0; i < PROPERTY_TABLE_SIZE; i++) {
+        if (g_properties[i].used && g_properties[i].hwnd == hwnd &&
+            strcasecmp(g_properties[i].name, name) == 0) {
+            g_properties[i].value = value;
+            c->eax = 1;
+            pthread_mutex_unlock(&g_property_lock);
+            return;
+        }
+    }
+    for (unsigned i = 0; i < PROPERTY_TABLE_SIZE; i++) {
+        if (!g_properties[i].used) {
+            const size_t name_length = strlen(name) + 1u;
+            g_properties[i].hwnd = hwnd;
+            g_properties[i].value = value;
+            memcpy(g_properties[i].name, name, name_length);
+            g_properties[i].used = 1;
+            c->eax = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_property_lock);
+}
+
+static void h_remove_prop(CPU *c)
+{
+    const uint32_t hwnd = wc3_legacy_arg32(c, 0u);
+    char name[PROPERTY_NAME_SIZE];
+    c->eax = 0;
+    if (!hwnd || !read_property_name(wc3_legacy_arg32(c, 1u), name))
+        return;
+
+    pthread_mutex_lock(&g_property_lock);
+    for (unsigned i = 0; i < PROPERTY_TABLE_SIZE; i++) {
+        if (g_properties[i].used && g_properties[i].hwnd == hwnd &&
+            strcasecmp(g_properties[i].name, name) == 0) {
+            c->eax = g_properties[i].value;
+            g_properties[i].used = 0;
+            g_properties[i].name[0] = '\0';
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_property_lock);
+}
 
 static void h_get_desktop_window(CPU *c)
 {
@@ -63,6 +174,58 @@ static void h_show_cursor(CPU *c)
     c->eax = (uint32_t)g_cursor_display_count;
 }
 
+static int32_t read_rect_field(uint32_t address)
+{
+    return (int32_t)wc3_legacy_rd32g(address);
+}
+
+static void write_rect_field(uint32_t address, int32_t value)
+{
+    wc3_legacy_wr32g(address, (uint32_t)value);
+}
+
+static void h_intersect_rect(CPU *c)
+{
+    const uint32_t destination = wc3_legacy_arg32(c, 0u);
+    const uint32_t first = wc3_legacy_arg32(c, 1u);
+    const uint32_t second = wc3_legacy_arg32(c, 2u);
+    c->eax = 0;
+
+    if (!wc3_legacy_guest_ok(destination, 16u) ||
+        !wc3_legacy_guest_ok(first, 16u) ||
+        !wc3_legacy_guest_ok(second, 16u))
+        return;
+
+    const int32_t left = read_rect_field(first) > read_rect_field(second)
+                             ? read_rect_field(first)
+                             : read_rect_field(second);
+    const int32_t top = read_rect_field(first + 4u) >
+                                read_rect_field(second + 4u)
+                            ? read_rect_field(first + 4u)
+                            : read_rect_field(second + 4u);
+    const int32_t right = read_rect_field(first + 8u) <
+                                  read_rect_field(second + 8u)
+                              ? read_rect_field(first + 8u)
+                              : read_rect_field(second + 8u);
+    const int32_t bottom = read_rect_field(first + 12u) <
+                                   read_rect_field(second + 12u)
+                               ? read_rect_field(first + 12u)
+                               : read_rect_field(second + 12u);
+
+    if (left < right && top < bottom) {
+        write_rect_field(destination, left);
+        write_rect_field(destination + 4u, top);
+        write_rect_field(destination + 8u, right);
+        write_rect_field(destination + 12u, bottom);
+        c->eax = 1;
+    } else {
+        write_rect_field(destination, 0);
+        write_rect_field(destination + 4u, 0);
+        write_rect_field(destination + 8u, 0);
+        write_rect_field(destination + 12u, 0);
+    }
+}
+
 typedef struct User32WindowOverride {
     const char *name;
     void (*impl)(CPU *c);
@@ -74,13 +237,34 @@ static const User32WindowOverride g_overrides[] = {
     { "ShowCursor", h_show_cursor },
 };
 
+typedef struct User32WindowAddition {
+    const char *name;
+    int argc;
+    void (*impl)(CPU *c);
+} User32WindowAddition;
+
+static const User32WindowAddition g_additions[] = {
+    { "GetPropA", 2, h_get_prop },
+    { "SetPropA", 3, h_set_prop },
+    { "RemovePropA", 2, h_remove_prop },
+    { "IntersectRect", 3, h_intersect_rect },
+};
+
 int wc3_hle_user32_window_install(void)
 {
     g_cursor_display_count = 0;
+    memset(g_properties, 0, sizeof g_properties);
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
         if (wc3_legacy_hle_override("USER32.dll", g_overrides[i].name,
                                     g_overrides[i].impl) != 0)
             return -1;
     }
-    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+    for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
+        if (wc3_legacy_hle_add("USER32.dll", g_additions[i].name,
+                               g_additions[i].argc, 0,
+                               g_additions[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0] +
+                 sizeof g_additions / sizeof g_additions[0]);
 }

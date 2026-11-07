@@ -101,6 +101,12 @@ static void test_file(const Wc3FileApi *f)
     uint64_t size = 0;
     check(f->size(f->ctx, h, &size) == 0, "file size");
     check(size == strlen(text), "file size value");
+    Wc3FileStat st;
+    check(f->stat(f->ctx, path, &st) == 0, "file stat");
+    check((st.mode & WC3_FILE_STAT_REGULAR) != 0 &&
+              (st.mode & WC3_FILE_STAT_DIRECTORY) == 0,
+          "file stat mode");
+    check(st.size == strlen(text), "file stat size");
     char buf[32] = {0};
     uint32_t got = 0;
     check(f->read(f->ctx, h, buf, sizeof buf, &got) == 0, "file read");
@@ -926,7 +932,7 @@ int main(void)
     check(wc3_headless_platform_init(&p, &config) == 0, "platform init");
     check(wc3_headless_platform_init(&p, &config) == -1,
           "platform init once");
-    check(p.mem.reserve && p.file.open && p.time.monotonic_ns &&
+    check(p.mem.reserve && p.file.open && p.file.stat && p.time.monotonic_ns &&
               p.thread.create && p.sync.wait && p.input.push &&
               p.input.set_text_focus && p.surface.acquire && p.audio.open &&
               p.audio.set_callback && p.config.get && p.asset.init &&

@@ -16,14 +16,21 @@
 #include "crt_hle.h"
 #include "crt_string_hle.h"
 #include "file_hle.h"
+#include "gdi_dc_hle.h"
+#include "gdi_obj_hle.h"
+#include "stdio_hle.h"
 #include "strerror_hle.h"
 #include "crt_time_hle.h"
 #include "display_hle.h"
 #include "heap_hle.h"
+#include "imagelist_hle.h"
 #include "math_hle.h"
 #include "memory_hle.h"
 #include "process_hle.h"
 #include "rand_hle.h"
+#include "registry_hle.h"
+#include "resource_hle.h"
+#include "scroll_hle.h"
 #include "secure_hle.h"
 #include "sort_hle.h"
 #include "string_hle.h"
@@ -80,16 +87,23 @@ void wc3_dispatch_init(void)
         if (_r < 0) abort(); \
     } while (0)
     WC3_INSTALL_STEP(wc3_hle_kernel32_time_install());
+    WC3_INSTALL_STEP(wc3_hle_comctl32_imagelist_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_process_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_system_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_memory_install());
+    WC3_INSTALL_STEP(wc3_hle_kernel32_resource_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_string_install());
+    WC3_INSTALL_STEP(wc3_hle_advapi32_registry_install());
+    WC3_INSTALL_STEP(wc3_hle_gdi32_dc_install());
+    WC3_INSTALL_STEP(wc3_hle_gdi32_objects_install());
     WC3_INSTALL_STEP(user32_display_install());
+    WC3_INSTALL_STEP(wc3_hle_user32_scroll_install());
     WC3_INSTALL_STEP(wc3_hle_user32_window_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_heap_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_math_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_crt_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_file_install());
+    WC3_INSTALL_STEP(wc3_hle_msvcr80_stdio_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_rand_install());
     WC3_INSTALL_STEP(msvcr80_secure_install());
     WC3_INSTALL_STEP(msvcr80_error_install());

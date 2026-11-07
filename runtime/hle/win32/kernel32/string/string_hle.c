@@ -1,11 +1,12 @@
 /*
  * string_hle.c - target-side kernel32 narrow-string subset.
  *
- * lstrlenA, lstrcpynA, GetACP and GetCPInfo are byte-oriented and locale-free.
- * They are moved before the rest of the string/locale group because they can
- * be verified against the Windows contract without guessing an encoding.
- * The ANSI code page stays the fixed 1251 model: the guest's CPINFO describes
- * a single-byte code page, so MaxCharSize is 1 and there are no lead bytes.
+ * lstrlenA, lstrcpynA, GetACP, GetOEMCP and GetCPInfo are byte-oriented and
+ * locale-free.  They are moved before the rest of the string/locale group
+ * because they can be verified against the Windows contract without guessing
+ * an encoding.  The ANSI/OEM code pages stay the fixed 1251/866 model: the
+ * guest's CPINFO describes a single-byte code page, so MaxCharSize is 1 and
+ * there are no lead bytes.
  *
  * lstrcpynA always null-terminates when iMaxLength is nonzero, including the
  * truncation case.  A Windows probe confirmed that n=4 on "abcdef" produces
@@ -126,6 +127,13 @@ static void h_get_acp(CPU *c)
     c->eax = 1251;
 }
 
+static void h_get_oemcp(CPU *c)
+{
+    /* The fixed 1251 ANSI model pairs with the Russian OEM code page.  Keep
+     * the two answers in one place until the locale layer owns both. */
+    c->eax = 866;
+}
+
 static void h_get_cp_info(CPU *c)
 {
     const uint32_t cp = wc3_legacy_arg32(c, 0);
@@ -163,6 +171,7 @@ typedef struct StringAddition {
 static const StringAddition g_additions[] = {
     { "lstrcatA", 2, h_lstrcat_a },
     { "IsBadStringPtrA", 2, h_is_bad_string_ptr_a },
+    { "GetOEMCP", 0, h_get_oemcp },
 };
 
 int wc3_hle_kernel32_string_install(void)
