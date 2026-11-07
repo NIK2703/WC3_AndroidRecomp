@@ -7571,8 +7571,6 @@ static uint32_t u_call_guest(CPU *c, uint32_t fn, int argc, const uint32_t *args
  * when the request is serviced; u_call_guest keeps the nested call from
  * corrupting the outer import's stack. */
 static volatile int g_settings_save_requested;
-static uint32_t g_last_settings_save_ms;
-static int g_settings_save_clock_started;
 
 /* Defined in the registry HLE module.  The save writes all 79 preference
  * values, so bracket it and let the registry rewrite the file once. */
@@ -7584,28 +7582,15 @@ void wc3_android_request_settings_save(void)
     g_settings_save_requested = 1;
 }
 
-#define SETTINGS_AUTOSAVE_MS 5000u
-
 static void service_settings_save(CPU *c)
 {
+    if (!g_settings_save_requested) return;
+
     /* The activity can be paused before the guest has loaded its preference
      * store.  Saving then would write a fresh default map over the player's
      * file.  The game loads the store before it registers its window class,
      * so g_wndproc is a safe "preferences are live" boundary. */
     if (!g_wndproc) return;
-
-    const uint32_t now = wave_now_ms();
-    if (!g_settings_save_requested) {
-        if (!g_settings_save_clock_started) {
-            g_settings_save_clock_started = 1;
-            g_last_settings_save_ms = now;
-            return;
-        }
-        if ((uint32_t)(now - g_last_settings_save_ms) <
-            SETTINGS_AUTOSAVE_MS)
-            return;
-        g_settings_save_requested = 1;
-    }
 
     /* game.dll 1.27, image base 0x6f000000.  CPreferencesWar3::Get() returns
      * the in-memory preference map; CPreferencesWar3::Save(0x50) walks every
@@ -7616,42 +7601,12 @@ static void service_settings_save(CPU *c)
     const uint32_t saved_edx = c->edx;
     const uint32_t prefs = u_call_guest(c, 0x6f040ed0u, 0, NULL);
     if (prefs) {
-#ifdef WC3_DEBUG
-        /* Debug-only: apply an index/value pair supplied through a small text
-         * file in the active data directory.  This lets a test drive one
-         * preference through the game's own setter and then the normal save
-         * path without relying on adb input injection. */
-        const char *data_dir = getenv("WC3_DATA_DIR");
-        if (data_dir && *data_dir) {
-            char test_path[512];
-            const int test_n = snprintf(test_path, sizeof test_path,
-                                        "%s/test_pref.txt", data_dir);
-            if (test_n > 0 && (size_t)test_n < sizeof test_path) {
-                FILE *test_file = fopen(test_path, "r");
-                if (test_file) {
-                    unsigned test_index = 0u, test_value = 0u;
-                    const int parsed = fscanf(test_file, "%u %u",
-                                              &test_index, &test_value);
-                    fclose(test_file);
-                    remove(test_path);
-                    if (parsed == 2 && test_index < 0x50u) {
-                        uint32_t args[2] = { test_index, test_value };
-                        c->ecx = prefs;
-                        (void)u_call_guest(c, 0x6f042b40u, 2, args);
-                        fprintf(stderr, "[settings] test set pref %u=%u\n",
-                                test_index, test_value);
-                    }
-                }
-            }
-        }
-#endif
         uint32_t all = 0x50u;
         c->ecx = prefs;
         wc3_hle_registry_begin_batch();
         (void)u_call_guest(c, 0x6f042620u, 1, &all);
         wc3_hle_registry_end_batch();
         g_settings_save_requested = 0;
-        g_last_settings_save_ms = wave_now_ms();
 #ifdef WC3_DEBUG
         fprintf(stderr, "[settings] saved in-memory preferences via game.dll\n");
 #endif
