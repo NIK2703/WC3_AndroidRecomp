@@ -236,19 +236,30 @@ static int unaligned_address_taken_start(Pe *pe, long long off,
                                          int zero_neighbor)
 {
     uint8_t first, before[3];
+    int executable = (sec->chars & 0x20000000u) != 0;
     int max_run = 7;
-    if (sec->chars & 0x20000000u) return 0;
     if (off < 1) return 0;
-    /* Large runs are usually jump tables of internal case blocks.  A
-     * zero-delimited table in read-only data is a function-pointer table
-     * instead: war3 0x45C800 is the CRT's 87-entry initializer list, whose
-     * first entry 0x404599 follows a ret without alignment padding.  Keep
-     * writable-data runs small, where Mssfast/Mp3dec switch tables live. */
-    if ((sec->chars & 0x40000000u) && zero_neighbor) max_run = 256;
-    if (source_run < 1 || source_run > max_run) return 0;
+    if (executable) {
+        /* A code-resident dword table is a jump table.  Its entries are
+         * literal dispatch targets, including unaligned case blocks that
+         * begin with an epilogue or use the caller's frame.  An isolated
+         * immediate is not a table: require at least two adjacent code
+         * pointers. */
+        if (source_run < 2 || source_run > 4096) return 0;
+    } else {
+        /* Large runs are usually jump tables of internal case blocks.  A
+         * zero-delimited table in read-only data is a function-pointer table
+         * instead: war3 0x45C800 is the CRT's 87-entry initializer list, whose
+         * first entry 0x404599 follows a ret without alignment padding.  Keep
+         * writable-data runs small, where Mssfast/Mp3dec switch tables live. */
+        if ((sec->chars & 0x40000000u) && zero_neighbor) max_run = 256;
+        if (source_run < 1 || source_run > max_run) return 0;
+    }
     if (!pe_read_at(pe, off, &first, 1) || !plausible_start(first)) return 0;
-    if (epilogue_or_fpu_entry(pe, off)) return 0;
-    if (frame_dependent_start(pe, off)) return 0;
+    if (!executable) {
+        if (epilogue_or_fpu_entry(pe, off)) return 0;
+        if (frame_dependent_start(pe, off)) return 0;
+    }
     if (pe_read_at(pe, off - 1, before, 1) && before[0] == 0xC3)
         return 1;
     if (off >= 3 && pe_read_at(pe, off - 3, before, 3) &&
