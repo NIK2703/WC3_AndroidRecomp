@@ -4,9 +4,10 @@
 принципы, модель исполнения, слои, инварианты и указатели. Нормативные
 **владельцы своих областей**: `FILE_LAYOUT.md` (R1–R14), `VERIFICATION.md`
 (V/G), `GUEST_ABI.md` (ABI), `EXACTNESS.md` (E), `GRAPHICS_DECISION.md` (GB),
-`HLE_MODULES.md` (H), `BUILD_PIPELINE.md` (BP), `ADR.md` (записи решений),
-`PERFORMANCE.md` (P0/P1/P2), `PERFORMANCE_CONTRACT.md` (PM),
-`THREAD_AUDIT.md` (TA).
+`HLE_MODULES.md` (H), `BUILD_PIPELINE.md` (BP), `BUILD_VARIANTS.md` (BV:
+release/debug-варианты, имена пакетов, теги диагностики),
+`ADR.md` (записи решений), `PERFORMANCE.md` (P0/P1/P2),
+`PERFORMANCE_CONTRACT.md` (PM), `THREAD_AUDIT.md` (TA).
 **Граница цели (ADR-026/027):** единственный **поставляемый** target —
 Android arm64-v8a; рекомпилированный код под Windows не собирается.
 Допускается единственный **верификационный** target `--target headless`
@@ -39,6 +40,7 @@ Android arm64-v8a; рекомпилированный код под Windows не
 | `GRAPHICS_DECISION.md` | **норма (выбор DXVK), rev 1, ADR-023** | GB-1…GB-10: статусы ADR, матрица A/B/C/D, fallback, измерения, kill criterion |
 | `HLE_MODULES.md` | **норма (разбиение HLE), rev 1, ADR-024** | H1–H12: дерево по guest DLL, §4.2 ↔ R7, 2 009 импортов, карта M5, реестр |
 | `BUILD_PIPELINE.md` | **норма (сборка), rev 2, ADR-025** | BP-1…BP-12: самостоятельность target-дерева, вендоринг, `wc3build.py`, воспроизводимость, CI, конец cutover, ccache |
+| `BUILD_VARIANTS.md` | **норма (варианты и диагностика), rev 1, ADR-030** | BV-1…BV-13: `applicationId` `wc3.recomp` / `wc3.recomp.debug`, один атомарный `--variant`, изоляция данных двух UID, `wc3_build_config`, реестр тегов `WC3_DEBUG_<ЦЕЛЬ>`, обязательная обёртка отладочных инструкций, guest-ABI-инвариант наблюдения, release hygiene и план миграции (G-12/G-13) |
 | `THREAD_AUDIT.md` | производный + гейт, rev 2.4 | 36 thread/sync импортов, evidence, инвентарь гонок, T0/T1/T2, **TA-1…TA-18 — контракт потоков, матрица владения, L0/L1/L2, стресс-тест, расписания T1, реентерабельность, shutdown, summary для L2** |
 | `DXVK_THREADS.md` | производный + гейт | Dual-DXVK, symbol isolation, ICD, vendor-потоки, TA-7 |
 | `reports/REFACTOR_PLAN_CRITIQUE_2.md` | история | Первый critique-pass rev 1 |
@@ -74,6 +76,7 @@ Android arm64-v8a; рекомпилированный код под Windows не
 | 2.8 | PM-17…PM-24 и TA-12…TA-18; `check_docs.py` проверяет сплошность `PM-n`/`TA-n`; V6.7/V10/G-10 и `AGENTS.md` приведены к ADR-029 | `PERFORMANCE_CONTRACT.md` rev 3, `THREAD_AUDIT.md` rev 2.4 |
 | 2.9 | R15–R22, `config/migration.json` (M1–M7), валидатор в `check_file_layout.py`, R4-overflow = error, near-limit ≥380, R-id в `check_docs.py` | `FILE_LAYOUT.md` rev 2 §6, `BACKLOG.md` F4/F5/B7 |
 | 2.10 | M8: 25 compiled C-инструментов (22 пинящихся upstream + `corpus`/`liftpass`/`closure_pipeline` в `tools/lift/csrc_local/`), sha256-пин upstream, прототип G-15. Замыкание корпуса — только compiled C-конвейер `entry → seed → lift32 → closure → known → liftpass` (`closure_pipeline.exe`), без Python-драйвера; `CMakeLists.txt` читает upstream из `config/build_upstream.json` | `PROGRESS.md`, `config/migration.json`, `reports/generated/closure_pipeline.json` |
+| 2.11 | BV-1…BV-13 + ADR-030: нормативная архитектура release/debug (`wc3.recomp` / `wc3.recomp.debug`), единый `--variant`, теги `WC3_DEBUG_<ЦЕЛЬ>` для любой диагностики; новый владелец зарегистрирован в индексе и `check_docs.py` по R22 | `BUILD_VARIANTS.md` rev 1, `ADR.md`, §9.3/§9.4 хаба, `AGENTS.md`, BP-7.4 |
 
 Канонический acceptance-прогон — `VERIFICATION.md` V7. Состояние миграции
 ведётся в `config/migration.json` (R19), а не в этом тексте.

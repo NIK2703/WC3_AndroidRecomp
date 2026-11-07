@@ -4,8 +4,9 @@
  * The comparison callback is lifted guest code, so qsort has to enter the
  * guest dispatcher with a cdecl frame of two guest pointers.  The as-built
  * implementation already does that; this slice moves it behind the shim and
- * replaces its one-per-thread scratch buffer with a per-call guest allocation,
- * which also makes concurrent qsort calls safe during the migration.
+ * replaces its one-per-thread, 256-byte scratch buffer with a per-call guest
+ * allocation.  Concurrent qsort calls are safe during the migration and an
+ * element wider than 256 bytes is copied instead of silently left unsorted.
  */
 #ifndef WC3_HLE_MSVCR80_SORT_H
 #define WC3_HLE_MSVCR80_SORT_H

@@ -193,6 +193,22 @@ static long file_bytes(const char *path)
     return n;
 }
 
+static int append_file(const char *src, const char *dst)
+{
+    FILE *in = fopen(src, "rb");
+    FILE *out;
+    char buf[1 << 16];
+    size_t n;
+    if (!in) return -1;
+    out = fopen(dst, "ab");
+    if (!out) { fclose(in); return -1; }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) { fclose(in); fclose(out); return -1; }
+    fclose(in);
+    fclose(out);
+    return 0;
+}
+
 static void hash_into(const char *path, char out[65])
 {
     if (!path || !*path || sha256_file(path, out) != 0) out[0] = 0;
@@ -1040,6 +1056,7 @@ int main(int argc, char **argv)
     char seeds_used[DIR_MAX_PATH], filtered_seeds[DIR_MAX_PATH];
     char normalized_seeds[DIR_MAX_PATH], table_drops[DIR_MAX_PATH];
     char thunk_seeds[DIR_MAX_PATH], combined_seeds[DIR_MAX_PATH];
+    char edge_c[DIR_MAX_PATH], closure_seed_c[DIR_MAX_PATH];
     char ref_args[CMD_CAP / 2] = "";
     uint32_t excluded[MAX_EXCLUDED];
     int nexcluded = 0;
@@ -1188,16 +1205,20 @@ int main(int argc, char **argv)
     join(combined_seeds, sizeof combined_seeds,
          "%s/entry_seeds_combined.txt", o.out_dir);
     join(log, sizeof log, "%s/step_thunkseeds.log", o.out_dir);
+    join(edge_c, sizeof edge_c, "%s/jump_edges.c", o.work_dir);
+    join(closure_seed_c, sizeof closure_seed_c,
+         "%s/closure_seed.c", o.work_dir);
     if (!o.no_exclude && nexcluded > 0)
         rc = run_step(log,
                       "\"%s/thunkseeds.exe\" --module \"%s\" --known \"%s\" "
-                      "--exclude \"%s\" --out \"%s\"",
-                      o.tools, o.image, seeds_used, o.exclude, thunk_seeds);
+                      "--exclude \"%s\" --out \"%s\" --edges-out \"%s\"",
+                      o.tools, o.image, seeds_used, o.exclude, thunk_seeds,
+                      edge_c);
     else
         rc = run_step(log,
                       "\"%s/thunkseeds.exe\" --module \"%s\" --known \"%s\" "
-                      "--out \"%s\"",
-                      o.tools, o.image, seeds_used, thunk_seeds);
+                      "--out \"%s\" --edges-out \"%s\"",
+                      o.tools, o.image, seeds_used, thunk_seeds, edge_c);
     if (rc != 0) { fprintf(stderr, "thunkseeds.exe failed (see %s)\n", log); return 1; }
     r.thunk_seed_entries = count_lines(thunk_seeds);
     if (r.thunk_seed_entries > 0) {
@@ -1234,14 +1255,26 @@ int main(int argc, char **argv)
     hash_into(seed_c, r.seed_c_sha);
 
     /* 4. Closure to a fixed point (closure2.exe loops internally).  The local
-     * build gives every target a strict block extent; see closure2.c. */
+     * build gives every target a strict block extent; see closure2.c.  Jump-
+     * table arms found in code-resident pointer tables are injected as
+     * synthetic edges, so they go through closure2's strict extent instead of
+     * the seed lift's whole-function heuristic. */
     remove(closed_c);
     remove(closed_list);
+    remove(closure_seed_c);
+    if (append_file(seed_c, closure_seed_c) != 0 ||
+        append_file(edge_c, closure_seed_c) != 0) {
+        fprintf(stderr, "cannot assemble closure seed (see %s / %s)\n",
+                seed_c, edge_c);
+        if (have_pe) pe_close(&pe);
+        return 1;
+    }
     join(log, sizeof log, "%s/step_closure.log", o.out_dir);
     rc = run_step(log,
                   "\"%s/closure2.exe\" \"%s\" \"%s\" \"%s\" \"%s\" "
                   "--workdir \"%s\"",
-                  o.tools, o.image, seed_c, seed_list, closed_c, o.work_dir);
+                  o.tools, o.image, closure_seed_c, seed_list, closed_c,
+                  o.work_dir);
     if (rc != 0) {
         fprintf(stderr, "closure2.exe did not converge (see %s)\n", log);
         if (have_pe) pe_close(&pe);

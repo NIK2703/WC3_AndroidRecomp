@@ -22,11 +22,16 @@
 
 #define NS_PER_SEC 1000000000ull
 #define CTIME_BUFFER_SIZE 32u
+#define TM_SIZE 36u
 
 static const Wc3TimeApi *g_time;
 /* Guest VA of this guest thread's asctime buffer.  The HLE call runs on the
  * guest thread's host thread, so host TLS is the correct lifetime boundary. */
 static THREAD_LOCAL uint32_t g_ctime_buffer;
+/* gmtime and localtime use separate per-thread results, matching the CRT's
+ * thread-local static struct tm objects. */
+static THREAD_LOCAL uint32_t g_gmtime_buffer;
+static THREAD_LOCAL uint32_t g_localtime_buffer;
 
 static int64_t days_from_civil(int64_t y, unsigned m, unsigned d)
 {
@@ -120,6 +125,129 @@ static uint64_t realtime_seconds(void)
     return g_time->realtime_ns(g_time->ctx) / NS_PER_SEC;
 }
 
+typedef struct GuestTm {
+    int32_t sec;
+    int32_t min;
+    int32_t hour;
+    int32_t mday;
+    int32_t mon;
+    int32_t year;
+    int32_t wday;
+    int32_t yday;
+    int32_t isdst;
+} GuestTm;
+
+/* Howard Hinnant's civil_from_days: inverse of days_from_civil above. */
+static void civil_from_days(int64_t days, int64_t *year, unsigned *month,
+                            unsigned *day)
+{
+    const int64_t z = days + 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = (unsigned)(z - era * 146097);
+    const unsigned yoe =
+        (doe - doe / 1460u + doe / 36524u - doe / 146096u) / 365u;
+    const int64_t y = (int64_t)yoe + era * 400;
+    const unsigned doy = doe - (365u * yoe + yoe / 4u - yoe / 100u);
+    const unsigned mp = (5u * doy + 2u) / 153u;
+    const unsigned d = doy - (153u * mp + 2u) / 5u + 1u;
+    const unsigned m = mp + (mp < 10u ? 3u : (unsigned)-9);
+    *year = y + (m <= 2u);
+    *month = m;
+    *day = d;
+}
+
+static int utc_tm(int64_t seconds, GuestTm *out)
+{
+    int64_t days = seconds / 86400;
+    int64_t rem = seconds % 86400;
+    if (rem < 0) {
+        rem += 86400;
+        days--;
+    }
+
+    int64_t year = 0;
+    unsigned month = 0, day = 0;
+    civil_from_days(days, &year, &month, &day);
+    if (year < (int64_t)INT32_MIN + 1900 ||
+        year > (int64_t)INT32_MAX + 1900)
+        return 0;
+
+    out->sec = (int32_t)(rem % 60);
+    out->min = (int32_t)((rem / 60) % 60);
+    out->hour = (int32_t)(rem / 3600);
+    out->mday = (int32_t)day;
+    out->mon = (int32_t)month - 1;
+    out->year = (int32_t)(year - 1900);
+    out->wday = (int32_t)weekday_from_civil(year, month, day);
+    out->yday = (int32_t)(days_from_civil(year, month, day) -
+                          days_from_civil(year, 1, 1));
+    out->isdst = 0;
+    return 1;
+}
+
+/* Wc3TimeApi exposes the local calendar fields but not the DST flag.  The
+ * fields already contain the offset-adjusted wall clock; the CRT's tm_isdst
+ * indicator is therefore reported as zero rather than guessed. */
+static int local_tm(int64_t seconds, GuestTm *out)
+{
+    if (!g_time || !g_time->local_time) return 0;
+    if (seconds < 0 || (uint64_t)seconds > UINT64_MAX / NS_PER_SEC) return 0;
+
+    int32_t year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    int32_t millisecond = 0;
+    const uint64_t ns = (uint64_t)seconds * NS_PER_SEC;
+    if (g_time->local_time(g_time->ctx, ns, &year, &month, &day, &hour,
+                           &minute, &second, &millisecond) != 0)
+        return 0;
+    if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 ||
+        hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60)
+        return 0;
+    if (year < INT32_MIN + 1900 || year > INT32_MAX - 1900) return 0;
+
+    out->sec = second;
+    out->min = minute;
+    out->hour = hour;
+    out->mday = day;
+    out->mon = month - 1;
+    out->year = year - 1900;
+    out->wday = (int32_t)weekday_from_civil(year, (unsigned)month,
+                                            (unsigned)day);
+    out->yday = (int32_t)(days_from_civil(year, (unsigned)month,
+                                          (unsigned)day) -
+                          days_from_civil(year, 1, 1));
+    out->isdst = 0;
+    return 1;
+}
+
+static uint32_t tm_slot(uint32_t *slot)
+{
+    if (!*slot) *slot = wc3_legacy_guest_alloc(TM_SIZE);
+    if (!*slot || !wc3_legacy_guest_ok(*slot, TM_SIZE)) return 0;
+    return *slot;
+}
+
+static void write_tm(uint32_t addr, const GuestTm *tm)
+{
+    wc3_legacy_wr32g(addr + 0u, (uint32_t)tm->sec);
+    wc3_legacy_wr32g(addr + 4u, (uint32_t)tm->min);
+    wc3_legacy_wr32g(addr + 8u, (uint32_t)tm->hour);
+    wc3_legacy_wr32g(addr + 12u, (uint32_t)tm->mday);
+    wc3_legacy_wr32g(addr + 16u, (uint32_t)tm->mon);
+    wc3_legacy_wr32g(addr + 20u, (uint32_t)tm->year);
+    wc3_legacy_wr32g(addr + 24u, (uint32_t)tm->wday);
+    wc3_legacy_wr32g(addr + 28u, (uint32_t)tm->yday);
+    wc3_legacy_wr32g(addr + 32u, (uint32_t)tm->isdst);
+}
+
+static int read_time64_arg(const CPU *c, unsigned index, int64_t *value)
+{
+    const uint32_t addr = wc3_legacy_arg32(c, index);
+    if (!addr || !wc3_legacy_guest_ok(addr, 8)) return 0;
+    *value = (int64_t)((uint64_t)wc3_legacy_rd32g(addr) |
+                       ((uint64_t)wc3_legacy_rd32g(addr + 4u) << 32));
+    return 1;
+}
+
 static void h_time64(CPU *c)
 {
     if (!g_time || !g_time->realtime_ns) {
@@ -197,6 +325,57 @@ static void h_ctime64(CPU *c)
     c->eax = g_ctime_buffer;
 }
 
+static void h_gmtime64(CPU *c)
+{
+    int64_t seconds = 0;
+    GuestTm tm;
+
+    if (!read_time64_arg(c, 0u, &seconds) || !utc_tm(seconds, &tm)) {
+        c->eax = 0;
+        return;
+    }
+    const uint32_t out = tm_slot(&g_gmtime_buffer);
+    if (!out) {
+        c->eax = 0;
+        return;
+    }
+    write_tm(out, &tm);
+    c->eax = out;
+}
+
+static void h_localtime64(CPU *c)
+{
+    int64_t seconds = 0;
+    GuestTm tm;
+
+    if (!read_time64_arg(c, 0u, &seconds) || !local_tm(seconds, &tm)) {
+        c->eax = 0;
+        return;
+    }
+    const uint32_t out = tm_slot(&g_localtime_buffer);
+    if (!out) {
+        c->eax = 0;
+        return;
+    }
+    write_tm(out, &tm);
+    c->eax = out;
+}
+
+static void h_localtime64_s(CPU *c)
+{
+    const uint32_t out = wc3_legacy_arg32(c, 0u);
+    int64_t seconds = 0;
+    GuestTm tm;
+
+    if (!out || !wc3_legacy_guest_ok(out, TM_SIZE) ||
+        !read_time64_arg(c, 1u, &seconds) || !local_tm(seconds, &tm)) {
+        c->eax = 22u; /* EINVAL */
+        return;
+    }
+    write_tm(out, &tm);
+    c->eax = 0;
+}
+
 typedef struct CrtTimeOverride {
     const char *name;
     void (*impl)(CPU *c);
@@ -205,6 +384,18 @@ typedef struct CrtTimeOverride {
 static const CrtTimeOverride g_overrides[] = {
     { "_time64", h_time64 },
     { "_ctime64", h_ctime64 },
+};
+
+typedef struct CrtTimeAddition {
+    const char *name;
+    uint16_t argc;
+    void (*impl)(CPU *c);
+} CrtTimeAddition;
+
+static const CrtTimeAddition g_additions[] = {
+    { "_gmtime64", 1, h_gmtime64 },
+    { "_localtime64", 1, h_localtime64 },
+    { "_localtime64_s", 2, h_localtime64_s },
 };
 
 int wc3_hle_msvcr80_time_install(void)
@@ -220,5 +411,12 @@ int wc3_hle_msvcr80_time_install(void)
                                     g_overrides[i].impl) != 0)
             return -1;
     }
-    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+    for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
+        if (wc3_legacy_hle_add("MSVCR80.dll", g_additions[i].name,
+                               (int)g_additions[i].argc, 1,
+                               g_additions[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0] +
+                 sizeof g_additions / sizeof g_additions[0]);
 }

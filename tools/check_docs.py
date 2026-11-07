@@ -34,6 +34,7 @@ NORMATIVE = (
     ROOT / "docs" / "GRAPHICS_DECISION.md",
     ROOT / "docs" / "HLE_MODULES.md",
     ROOT / "docs" / "BUILD_PIPELINE.md",
+    ROOT / "docs" / "BUILD_VARIANTS.md",
     ROOT / "docs" / "THREAD_AUDIT.md",
     ROOT / "docs" / "DXVK_THREADS.md",
 )
@@ -57,18 +58,21 @@ ID_OWNERS = {
     "PM": ROOT / "docs" / "PERFORMANCE_CONTRACT.md",
     "TA": ROOT / "docs" / "THREAD_AUDIT.md",
     "R": ROOT / "docs" / "FILE_LAYOUT.md",
+    "BV": ROOT / "docs" / "BUILD_VARIANTS.md",
 }
 ID_DEF_RE = {
     "PM": re.compile(r"\*\*PM-(\d+)\s*\("),
     "TA": re.compile(r"\*\*TA-(\d+)\s*\("),
     "R": re.compile(r"^\|\s*R(\d+)\s*\|", re.M),
+    "BV": re.compile(r"\*\*BV-(\d+)\s*\("),
 }
 ID_REF_RE = {
     "PM": re.compile(r"\bPM-(\d+)\b"),
     "TA": re.compile(r"\bTA-(\d+)\b"),
     "R": re.compile(r"\bR(\d+)\b"),
+    "BV": re.compile(r"\bBV-(\d+)\b"),
 }
-ID_LABEL = {"PM": "PM-", "TA": "TA-", "R": "R"}
+ID_LABEL = {"PM": "PM-", "TA": "TA-", "R": "R", "BV": "BV-"}
 
 
 def rel(path: Path) -> str:

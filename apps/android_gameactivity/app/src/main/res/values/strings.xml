@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- BV-2.3: the debug source set overrides only this label, so both
+         applicationId variants stay distinguishable in the launcher. -->
+    <string name="app_name">WC3 recomp</string>
+</resources>

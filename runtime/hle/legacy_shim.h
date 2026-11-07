@@ -36,6 +36,15 @@ const char *wc3_legacy_hle_describe(uint32_t thunk);
 int wc3_legacy_hle_override(const char *dll, const char *name,
                             void (*impl)(CPU *c));
 
+/* Register an import row the as-built table did not define.  The resolver
+ * creates a guessed-arity stub for an unknown import; this replaces that stub
+ * (or appends a row when the import has not been bound yet) during bootstrap.
+ * `cdecl_abi` selects the caller-pops convention, so a cdecl CRT import must
+ * pass 1 even when `argc` is known.  Must run before the first guest thread;
+ * returns 0 on success, -1 for a bad argument or a full registry. */
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c));
+
 /* Guest memory and argument accessors, served by the quarantine until the
  * guest layer moves into the target tree.  They keep one range table: a target
  * module must not link a second copy of runtime/guest during the migration. */
@@ -73,9 +82,16 @@ int      display_mode_at(uint32_t index, uint32_t *width, uint32_t *height);
 int      display_mode_supported(uint32_t width, uint32_t height);
 uint32_t display_refresh_hz(void);
 
-/* host_shell.c: the virtual cursor consumed by the guest. */
+/* host_shell.c and runtime/app/overlay_actions_legacy.c: the virtual cursor
+ * and keyboard consumed by the guest.  These are the only entry points for
+ * host-side input; overlay code never includes a legacy header. */
 void wc3_legacy_mouse_move(float nx, float ny);
+void wc3_legacy_mouse_move_delta(int dx, int dy);
 void wc3_legacy_mouse_button(int down);
+void wc3_legacy_mouse_button_ex(int button, int down);
+void wc3_legacy_mouse_wheel(int delta);
+void wc3_legacy_key_event(int vk, int down);
+void wc3_legacy_release_all(void);
 
 #ifdef __cplusplus
 }

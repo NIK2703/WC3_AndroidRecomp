@@ -43,6 +43,11 @@ static uint32_t g_display_w, g_display_h;
 static int g_display_select;
 static float g_mouse_x, g_mouse_y;
 static int g_mouse_down;
+static int g_mouse_dx, g_mouse_dy;
+static int g_mouse_button_ex;
+static int g_mouse_wheel;
+static int g_key_vk, g_key_down;
+static int g_release_all;
 
 static void *guest_ptr(uint32_t addr, uint32_t size)
 {
@@ -177,6 +182,33 @@ void hle_android_mouse_button(int down)
     g_mouse_down = down;
 }
 
+void hle_android_mouse_move_delta(int dx, int dy)
+{
+    g_mouse_dx = dx;
+    g_mouse_dy = dy;
+}
+
+void hle_android_mouse_button_ex(int button, int down)
+{
+    g_mouse_button_ex = (button << 1) | (down ? 1 : 0);
+}
+
+void hle_android_mouse_wheel(int delta)
+{
+    g_mouse_wheel = delta;
+}
+
+void hle_android_key_event(int vk, int down)
+{
+    g_key_vk = vk;
+    g_key_down = down;
+}
+
+void hle_android_release_all(void)
+{
+    g_release_all++;
+}
+
 static void fn_a(CPU *c) { c->eax = 0xAAAAu; }
 static void fn_b(CPU *c) { c->eax = 0xBBBBu; }
 
@@ -217,6 +249,28 @@ int main(void)
     CHECK(wc3_legacy_hle_override("KERNEL32.dll", "TestA", NULL) == -1,
           "override NULL fn");
 
+    CHECK(wc3_legacy_hle_add("MSVCR80.dll", "TestC", 2, 1, fn_a) == 0,
+          "add new row");
+    CHECK(g_hle_count == 3u, "add appends");
+    CHECK(g_hle[2].argc == 2u && g_hle[2].cdecl_abi == 1u,
+          "add stores arity and convention");
+    CHECK(wc3_legacy_hle_add("msvcr80.DLL", "testc", 3, 0, fn_b) == 0,
+          "add updates existing row");
+    CHECK(g_hle_count == 3u, "add update does not append");
+    CHECK(g_hle[2].fn == fn_b && g_hle[2].argc == 3u &&
+              g_hle[2].cdecl_abi == 0u,
+          "add update replaces fields");
+    CHECK(wc3_legacy_hle_add(NULL, "TestC", 1, 1, fn_a) == -1,
+          "add NULL dll");
+    CHECK(wc3_legacy_hle_add("KERNEL32.dll", NULL, 1, 1, fn_a) == -1,
+          "add NULL name");
+    CHECK(wc3_legacy_hle_add("KERNEL32.dll", "TestD", 1, 1, NULL) == -1,
+          "add NULL fn");
+    CHECK(wc3_legacy_hle_add("KERNEL32.dll", "TestD", -1, 1, fn_a) == -1,
+          "add negative argc");
+    CHECK(wc3_legacy_hle_add("KERNEL32.dll", "TestD", 0x10000, 1, fn_a) == -1,
+          "add oversized argc");
+
     CPU c;
     memset(&c, 0, sizeof c);
     wc3_legacy_hle_call(GUEST_HLE_BASE + GUEST_HLE_STRIDE, &c);
@@ -248,6 +302,16 @@ int main(void)
     wc3_legacy_mouse_button(1);
     CHECK(g_mouse_x == 0.25f && g_mouse_y == 0.75f && g_mouse_down == 1,
           "mouse forwarding");
+    wc3_legacy_mouse_move_delta(7, -3);
+    wc3_legacy_mouse_button_ex(2, 1);
+    wc3_legacy_mouse_wheel(-120);
+    wc3_legacy_key_event(0x41, 1);
+    wc3_legacy_release_all();
+    CHECK(g_mouse_dx == 7 && g_mouse_dy == -3, "mouse delta forwarding");
+    CHECK(g_mouse_button_ex == 5, "mouse button forwarding");
+    CHECK(g_mouse_wheel == -120, "mouse wheel forwarding");
+    CHECK(g_key_vk == 0x41 && g_key_down == 1, "key forwarding");
+    CHECK(g_release_all == 1, "release_all forwarding");
 
     if (map_guest() != 0) {
         printf("legacy shim OK (registry only; no low guest mapping)\n");

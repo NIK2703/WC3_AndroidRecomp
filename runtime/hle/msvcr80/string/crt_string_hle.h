@@ -1,9 +1,10 @@
 /*
- * crt_string_hle.h - target-side MSVCR80 string/memory/ctype/numeric subset.
+ * crt_string_hle.h - target-side MSVCR80 string/memory/ctype subset.
  *
  * These functions are byte-oriented and do not depend on the CRT heap except
- * _strdup, which uses the shim's guest allocator.  Formatting, scanning,
- * numeric conversion and qsort stay in the quarantine.
+ * _strdup, which uses the shim's guest allocator.  wcsrchr/wcsstr operate on
+ * 16-bit Windows code units and stay in this slice; the remaining wide-
+ * character conversion stays in the quarantine.
  */
 #ifndef WC3_HLE_MSVCR80_STRING_H
 #define WC3_HLE_MSVCR80_STRING_H

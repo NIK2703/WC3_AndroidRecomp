@@ -21,7 +21,8 @@
 #include "legacy_shim.h"
 
 #define MAX_ROWS 64u
-#define EXPECTED_ROWS 33u
+#define EXPECTED_ROWS 35u
+#define EXP_ADDR 0x1000u
 
 typedef struct Row {
     const char *dll;
@@ -32,6 +33,7 @@ typedef struct Row {
 static Row g_rows[MAX_ROWS];
 static unsigned g_row_count;
 static uint32_t g_args[16];
+static uint32_t g_exponent;
 static int g_failures;
 
 int wc3_legacy_hle_override(const char *dll, const char *name,
@@ -44,6 +46,30 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
     g_rows[g_row_count].impl = impl;
     g_row_count++;
     return 0;
+}
+
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c))
+{
+    (void)argc;
+    (void)cdecl_abi;
+    if (!dll || !name || !impl) return -1;
+    if (g_row_count >= MAX_ROWS) return -1;
+    g_rows[g_row_count].dll = dll;
+    g_rows[g_row_count].name = name;
+    g_rows[g_row_count].impl = impl;
+    g_row_count++;
+    return 0;
+}
+
+int wc3_legacy_guest_ok(uint32_t addr, uint32_t size)
+{
+    return addr == EXP_ADDR && size <= 4u;
+}
+
+void wc3_legacy_wr32g(uint32_t addr, uint32_t value)
+{
+    if (addr == EXP_ADDR) g_exponent = value;
 }
 
 uint32_t wc3_legacy_arg32(const CPU *c, unsigned index)
@@ -179,6 +205,23 @@ static double call_cdecl_2(const char *name, double x, double y)
     return pop_x87(&c);
 }
 
+static double call_frexp(double x, uint32_t exponent_addr)
+{
+    void (*impl)(CPU *c) = find_impl("frexp");
+    if (!impl) {
+        printf("FAIL: missing handler frexp\n");
+        g_failures++;
+        return NAN;
+    }
+    clear_args();
+    set_arg_f64(0u, x);
+    g_args[2] = exponent_addr;
+    CPU c;
+    init_cpu(&c);
+    impl(&c);
+    return pop_x87(&c);
+}
+
 static double call_sse2_1(const char *name, double x)
 {
     void (*impl)(CPU *c) = find_impl(name);
@@ -223,6 +266,7 @@ int main(void)
         "_libm_sse2_cos_precise", "_libm_sse2_atan_precise",
         "_libm_sse2_asin_precise", "_libm_sse2_acos_precise",
         "_libm_sse2_pow_precise", "_libm_sse2_atan2_precise",
+        "_hypot", "frexp",
     };
 
     const int installed = wc3_hle_msvcr80_math_install();
@@ -263,6 +307,27 @@ int main(void)
     eqd("pow", call_cdecl_2("pow", 2.0, 10.0), 1024.0);
     eqd("fmod", call_cdecl_2("fmod", 7.0, 3.0), 1.0);
     eqd("atan2", call_cdecl_2("atan2", 1.0, 0.0), atan2(1.0, 0.0));
+
+    eqd("_hypot", call_cdecl_2("_hypot", 3.0, 4.0), 5.0);
+    eqd("_hypot zero", call_cdecl_2("_hypot", 0.0, 0.0), 0.0);
+
+    {
+        g_exponent = 0xDEADBEEFu;
+        eqd("frexp 6.25", call_frexp(6.25, EXP_ADDR), 0.78125);
+        check(g_exponent == 3u, "frexp exponent 6.25");
+
+        g_exponent = 0xDEADBEEFu;
+        eqd("frexp zero", call_frexp(0.0, EXP_ADDR), 0.0);
+        check(g_exponent == 0u, "frexp exponent zero");
+
+        g_exponent = 0xDEADBEEFu;
+        eqd("frexp negative", call_frexp(-0.75, EXP_ADDR), -0.75);
+        check(g_exponent == 0u, "frexp exponent negative");
+
+        g_exponent = 0xDEADBEEFu;
+        eqd("frexp bad pointer", call_frexp(6.25, 0xFFFFu), 0.78125);
+        check(g_exponent == 0xDEADBEEFu, "frexp bad pointer untouched");
+    }
 
     /* SSE2 helpers: xmm0 (and xmm1) in, xmm0 out. */
     eqd("sse2 sqrt", call_sse2_1("_libm_sse2_sqrt_precise", 6.25), 2.5);

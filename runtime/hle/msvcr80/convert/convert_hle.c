@@ -13,10 +13,14 @@
  * would make the CRT treat the following byte as a trail byte and split text
  * at the wrong place.  _ismbcspace is the ASCII whitespace set.
  *
- * C's strtol/strtoul also set errno on overflow.  The as-built handlers never
- * mapped errno into guest memory, and there is no target seam for the guest
- * CRT's errno, so this slice preserves the value-only behaviour rather than
- * inventing a guest errno write.
+ * The as-built table also lacked the 64-bit integer conversions and strtod.
+ * They follow the same MSVCRT grammar as the 32-bit pair, with 64-bit
+ * saturation in EDX:EAX; strtod copies the guest string into a bounded host
+ * buffer because the host parser cannot read guest memory.  C's conversion
+ * routines set errno on overflow.  The as-built handlers never mapped errno
+ * into guest memory, and there is no target seam for the guest CRT's errno,
+ * so this slice preserves the value-only behaviour rather than inventing a
+ * guest errno write.
  */
 #include "convert_hle.h"
 
@@ -30,7 +34,7 @@
 
 typedef struct ParsedInteger {
     uint32_t end;       /* first byte that was not part of the number */
-    uint32_t magnitude; /* low 32 bits, valid when overflow is clear */
+    uint64_t magnitude; /* valid when overflow is clear */
     int negative;
     int overflow;
     int digits;
@@ -99,7 +103,7 @@ static ParsedInteger parse_integer(uint32_t text, int base)
         const int digit = digit_value(ch);
         if (digit < 0 || digit >= radix) break;
         if (!r.overflow) {
-            if (value > (0xFFFFFFFFull - (uint64_t)digit) / (uint64_t)radix)
+            if (value > (UINT64_MAX - (uint64_t)digit) / (uint64_t)radix)
                 r.overflow = 1;
             else
                 value = value * (uint64_t)radix + (uint64_t)digit;
@@ -116,27 +120,57 @@ static ParsedInteger parse_integer(uint32_t text, int base)
     }
 
     r.end = text + offset;
-    r.magnitude = (uint32_t)value;
+    r.magnitude = value;
     return r;
 }
 
-static void h_atof(CPU *c)
+static uint32_t copy_guest_text(uint32_t text, char *buffer, uint32_t capacity)
 {
-    const uint32_t text = wc3_legacy_arg32(c, 0);
-    char buffer[ATOF_BUFFER];
     uint32_t length = 0;
 
-    while (length + 1u < ATOF_BUFFER) {
+    while (length + 1u < capacity) {
         uint8_t ch;
         if (!byte_at(text, length, &ch)) break;
         buffer[length++] = (char)ch;
         if (!ch) break;
     }
     buffer[length] = 0;
+    return length;
+}
+
+static void h_atof(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    char buffer[ATOF_BUFFER];
+
+    copy_guest_text(text, buffer, ATOF_BUFFER);
 
     /* Host strtod has the same decimal grammar in the C locale and performs
      * correct rounding.  The legacy handler returned zero for every input. */
     const double value = strtod(buffer, NULL);
+    fpush(c, x87_from_f64(value));
+}
+
+static void h_strtod(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t endptr = wc3_legacy_arg32(c, 1);
+    char buffer[ATOF_BUFFER];
+    char *host_end = NULL;
+
+    const uint32_t length = copy_guest_text(text, buffer, ATOF_BUFFER);
+    const double value = strtod(buffer, &host_end);
+
+    if (endptr && wc3_legacy_guest_ok(endptr, 4)) {
+        uint32_t consumed = 0;
+        if (host_end && host_end >= buffer) {
+            const size_t offset = (size_t)(host_end - buffer);
+            if (offset > length) consumed = length;
+            else consumed = (uint32_t)offset;
+        }
+        wc3_legacy_wr32g(endptr, text + consumed);
+    }
+
     fpush(c, x87_from_f64(value));
 }
 
@@ -159,7 +193,58 @@ static void h_strtol(CPU *c)
         c->eax = r.negative ? 0x80000000u : 0x7FFFFFFFu;
         return;
     }
-    c->eax = r.negative ? (uint32_t)(-(int64_t)r.magnitude) : r.magnitude;
+    c->eax = r.negative ? (uint32_t)(-(int64_t)(uint32_t)r.magnitude)
+                        : (uint32_t)r.magnitude;
+}
+
+static void set_edx_eax(CPU *c, uint64_t value)
+{
+    c->eax = (uint32_t)value;
+    c->edx = (uint32_t)(value >> 32);
+}
+
+static void h_strtoll(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t endptr = wc3_legacy_arg32(c, 1);
+    const ParsedInteger r = parse_integer(text, (int)wc3_legacy_arg32(c, 2));
+
+    if (endptr && wc3_legacy_guest_ok(endptr, 4))
+        wc3_legacy_wr32g(endptr, r.end);
+
+    if (!r.digits) {
+        set_edx_eax(c, 0u);
+        return;
+    }
+
+    const uint64_t limit = r.negative ? 0x8000000000000000ull
+                                      : 0x7FFFFFFFFFFFFFFFull;
+    if (r.overflow || r.magnitude > limit) {
+        set_edx_eax(c, r.negative ? 0x8000000000000000ull
+                                  : 0x7FFFFFFFFFFFFFFFull);
+        return;
+    }
+    set_edx_eax(c, r.negative ? 0u - r.magnitude : r.magnitude);
+}
+
+static void h_strtoull(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t endptr = wc3_legacy_arg32(c, 1);
+    const ParsedInteger r = parse_integer(text, (int)wc3_legacy_arg32(c, 2));
+
+    if (endptr && wc3_legacy_guest_ok(endptr, 4))
+        wc3_legacy_wr32g(endptr, r.end);
+
+    if (!r.digits) {
+        set_edx_eax(c, 0u);
+        return;
+    }
+    if (r.overflow) {
+        set_edx_eax(c, UINT64_MAX);
+        return;
+    }
+    set_edx_eax(c, r.negative ? 0u - r.magnitude : r.magnitude);
 }
 
 static void h_strtoul(CPU *c)
@@ -175,11 +260,11 @@ static void h_strtoul(CPU *c)
         c->eax = 0;
         return;
     }
-    if (r.overflow) {
+    if (r.overflow || r.magnitude > 0xFFFFFFFFull) {
         c->eax = 0xFFFFFFFFu;
         return;
     }
-    c->eax = r.negative ? (uint32_t)(0u - r.magnitude) : r.magnitude;
+    c->eax = r.negative ? (uint32_t)(0u - r.magnitude) : (uint32_t)r.magnitude;
 }
 
 static void h_ismbblead(CPU *c)
@@ -208,6 +293,19 @@ static const ConvertOverride g_overrides[] = {
     { "_ismbcspace", h_ismbcspace },
 };
 
+typedef struct ConvertAddition {
+    const char *name;
+    uint16_t argc;
+    void (*impl)(CPU *c);
+} ConvertAddition;
+
+static const ConvertAddition g_additions[] = {
+    { "strtod", 2, h_strtod },
+    { "strtoll", 3, h_strtoll },
+    { "strtoull", 3, h_strtoull },
+    { "_strtoi64", 3, h_strtoll },
+};
+
 int msvcr80_convert_install(void)
 {
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
@@ -215,5 +313,12 @@ int msvcr80_convert_install(void)
                                     g_overrides[i].impl) != 0)
             return -1;
     }
-    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+    for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
+        if (wc3_legacy_hle_add("MSVCR80.dll", g_additions[i].name,
+                               (int)g_additions[i].argc, 1,
+                               g_additions[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0] +
+                 sizeof g_additions / sizeof g_additions[0]);
 }

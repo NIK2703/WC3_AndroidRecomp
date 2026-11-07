@@ -73,7 +73,7 @@ uint32_t wc3_legacy_arg32(const CPU *cpu, unsigned index)
 
 uint32_t wc3_legacy_guest_alloc0(uint32_t size)
 {
-    if (size > 512u) return 0;
+    if (size > 1024u) return 0;
     const uint32_t p = g_scratch_next;
     g_scratch_next += (size + 7u) & ~7u;
     memset(guest_ptr(p, size), 0, size);
@@ -219,21 +219,48 @@ int main(void)
     }
 
     {
+        typedef struct BigItem {
+            int32_t key;
+            uint8_t payload[548];
+        } BigItem;
+        BigItem input[2];
+        BigItem output[2];
+        memset(input, 0, sizeof input);
+        input[0].key = 2;
+        input[0].payload[0] = 0x22;
+        input[0].payload[547] = 0x02;
+        input[1].key = 1;
+        input[1].payload[0] = 0x11;
+        input[1].payload[547] = 0x01;
+        put_bytes(ARRAY_ADDR, input, sizeof input);
+        check(call_qsort(ARRAY_ADDR, 2, sizeof(BigItem), CMP_VA) == 0u,
+              "qsort wide record");
+        get_bytes(ARRAY_ADDR, output, sizeof output);
+        check(output[0].key == 1 && output[0].payload[0] == 0x11 &&
+                  output[0].payload[547] == 0x01,
+              "qsort wide record first");
+        check(output[1].key == 2 && output[1].payload[0] == 0x22 &&
+                  output[1].payload[547] == 0x02,
+              "qsort wide record second");
+        check(g_free_count == 3u, "qsort wide record scratch release");
+    }
+
+    {
         const uint32_t before = g_dispatch_count;
         const int32_t input[] = { 7, 6 };
         put_bytes(ARRAY_ADDR, input, sizeof input);
         check(call_qsort(ARRAY_ADDR, 1, 4, CMP_VA) == 0u, "qsort count one");
         check(call_qsort(ARRAY_ADDR, 0, 4, CMP_VA) == 0u, "qsort count zero");
         check(g_dispatch_count == before, "qsort short arrays do not compare");
-        check(g_free_count == 2u, "qsort short arrays do not allocate");
+        check(g_free_count == 3u, "qsort short arrays do not allocate");
     }
 
     {
         const uint32_t before = g_dispatch_count;
         const uint32_t before_free = g_free_count;
         check(call_qsort(ARRAY_ADDR, 2, 0, CMP_VA) == 0u, "qsort width zero");
-        check(call_qsort(ARRAY_ADDR, 2, 257, CMP_VA) == 0u,
-              "qsort width too large");
+        check(call_qsort(ARRAY_ADDR, 2, 0xFFFFFFFFu, CMP_VA) == 0u,
+              "qsort width overflow");
         check(call_qsort(0, 2, 4, CMP_VA) == 0u, "qsort null base");
         check(call_qsort(GUEST_BASE + GUEST_SIZE - 4u, 2, 4, CMP_VA) == 0u,
               "qsort short array");

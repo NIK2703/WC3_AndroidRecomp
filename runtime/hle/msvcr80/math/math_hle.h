@@ -9,6 +9,9 @@
  *     the x87 stack and push the result back;
  *   - the SSE2 _libm_sse2_* helpers, which take xmm0/xmm1 and return xmm0.
  *
+ * _hypot and frexp are additions: the as-built table never defined them.  They
+ * use the same cdecl/x87 ABI as the rest of this slice.
+ *
  * FP control-word functions (_control87/_controlfp_s/_clearfp) are not part of
  * this slice: the as-built handlers only return the default control word and
  * do not model the guest FPU, so moving them would preserve a stub rather than

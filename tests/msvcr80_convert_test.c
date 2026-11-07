@@ -13,7 +13,7 @@
 #include "convert_hle.h"
 #include "legacy_shim.h"
 
-#define MAX_ROWS 8u
+#define MAX_ROWS 16u
 #define GUEST_BASE 0x20000u
 #define GUEST_SIZE 0x10000u
 #define TEXT_ADDR (GUEST_BASE + 0x100u)
@@ -65,6 +65,19 @@ uint32_t wc3_legacy_arg32(const CPU *cpu, unsigned index)
 int wc3_legacy_hle_override(const char *dll, const char *name,
                             void (*impl)(CPU *c))
 {
+    if (!dll || !name || !impl || g_row_count >= MAX_ROWS) return -1;
+    g_rows[g_row_count].dll = dll;
+    g_rows[g_row_count].name = name;
+    g_rows[g_row_count].impl = impl;
+    g_row_count++;
+    return 0;
+}
+
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c))
+{
+    (void)argc;
+    (void)cdecl_abi;
     if (!dll || !name || !impl || g_row_count >= MAX_ROWS) return -1;
     g_rows[g_row_count].dll = dll;
     g_rows[g_row_count].name = name;
@@ -185,6 +198,68 @@ static uint32_t call_strtoul(const char *text, int base, uint32_t *end_out)
     return c.eax;
 }
 
+static uint64_t call_strtoll(const char *text, int base, uint32_t *end_out)
+{
+    void (*impl)(CPU *c) = find_impl("strtoll");
+    if (!impl) {
+        check(0, "missing strtoll");
+        return 0;
+    }
+    place_string(text);
+    wc3_legacy_wr32g(ENDP_ADDR, 0xDEADBEEFu);
+    memset(g_args, 0, sizeof g_args);
+    g_args[0] = TEXT_ADDR;
+    g_args[1] = ENDP_ADDR;
+    g_args[2] = (uint32_t)base;
+    CPU c;
+    memset(&c, 0, sizeof c);
+    impl(&c);
+    if (end_out) *end_out = read_u32(ENDP_ADDR);
+    return ((uint64_t)c.edx << 32) | c.eax;
+}
+
+static uint64_t call_strtoull(const char *text, int base, uint32_t *end_out)
+{
+    void (*impl)(CPU *c) = find_impl("strtoull");
+    if (!impl) {
+        check(0, "missing strtoull");
+        return 0;
+    }
+    place_string(text);
+    wc3_legacy_wr32g(ENDP_ADDR, 0xDEADBEEFu);
+    memset(g_args, 0, sizeof g_args);
+    g_args[0] = TEXT_ADDR;
+    g_args[1] = ENDP_ADDR;
+    g_args[2] = (uint32_t)base;
+    CPU c;
+    memset(&c, 0, sizeof c);
+    impl(&c);
+    if (end_out) *end_out = read_u32(ENDP_ADDR);
+    return ((uint64_t)c.edx << 32) | c.eax;
+}
+
+static double call_strtod(const char *text, uint32_t *end_out)
+{
+    void (*impl)(CPU *c) = find_impl("strtod");
+    if (!impl) {
+        check(0, "missing strtod");
+        return 0.0;
+    }
+    place_string(text);
+    wc3_legacy_wr32g(ENDP_ADDR, 0xDEADBEEFu);
+    memset(g_args, 0, sizeof g_args);
+    g_args[0] = TEXT_ADDR;
+    g_args[1] = ENDP_ADDR;
+    CPU c;
+    memset(&c, 0, sizeof c);
+    cpu_x87_init(&c);
+    impl(&c);
+    if (end_out) *end_out = read_u32(ENDP_ADDR);
+    const double value = pop_x87(&c);
+    check(c.fpu_top == 0, "x87 stack not balanced after strtod");
+    return value;
+}
+
 static uint32_t call_one(const char *name, uint32_t arg)
 {
     void (*impl)(CPU *c) = find_impl(name);
@@ -208,8 +283,8 @@ static uint32_t end_offset(uint32_t end)
 int main(void)
 {
     const int installed = msvcr80_convert_install();
-    check(installed == 5, "install count");
-    check(g_row_count == 5u, "row count");
+    check(installed == 9, "install count");
+    check(g_row_count == 9u, "row count");
     for (unsigned i = 0; i < g_row_count; i++)
         check(strcmp(g_rows[i].dll, "MSVCR80.dll") == 0, "DLL name");
     check(find_impl("atof") != NULL, "atof row");
@@ -217,6 +292,11 @@ int main(void)
     check(find_impl("strtoul") != NULL, "strtoul row");
     check(find_impl("_ismbblead") != NULL, "_ismbblead row");
     check(find_impl("_ismbcspace") != NULL, "_ismbcspace row");
+    check(find_impl("strtod") != NULL, "strtod row");
+    check(find_impl("strtoll") != NULL, "strtoll row");
+    check(find_impl("strtoull") != NULL, "strtoull row");
+    check(find_impl("_strtoi64") != NULL, "_strtoi64 row");
+    check(find_impl("_strtoi64") == find_impl("strtoll"), "_strtoi64 alias");
 
     eqd("atof zero", call_atof("0"), 0.0);
     eqd("atof fraction", call_atof("1.5"), 1.5);
@@ -342,6 +422,120 @@ int main(void)
     }
 
     check(call_strtoul("88", 10, NULL) == 88u, "strtoul null endptr");
+
+    {
+        uint32_t end = 0;
+
+        check(call_strtoll("9223372036854775807", 10, &end) ==
+                  (uint64_t)INT64_MAX,
+              "strtoll INT64_MAX");
+        check(end_offset(end) == 19u, "strtoll INT64_MAX end");
+
+        check(call_strtoll("-9223372036854775808", 10, &end) ==
+                  (uint64_t)INT64_MIN,
+              "strtoll INT64_MIN");
+        check(end_offset(end) == 20u, "strtoll INT64_MIN end");
+
+        check(call_strtoll("9223372036854775808", 10, &end) ==
+                  (uint64_t)INT64_MAX,
+              "strtoll positive saturation");
+        check(call_strtoll("-9223372036854775809", 10, &end) ==
+                  (uint64_t)INT64_MIN,
+              "strtoll negative saturation");
+        check(call_strtoll("999999999999999999999999", 10, &end) ==
+                  (uint64_t)INT64_MAX,
+              "strtoll huge saturation");
+
+        check(call_strtoll("0x7FFFFFFFFFFFFFFF", 0, &end) ==
+                  (uint64_t)INT64_MAX,
+              "strtoll auto hex");
+        check(end_offset(end) == 18u, "strtoll auto hex end");
+
+        check(call_strtoll("0x8000000000000000", 16, &end) ==
+                  (uint64_t)INT64_MAX,
+              "strtoll unsigned hex saturates");
+        check(call_strtoll("-0x8000000000000000", 16, &end) ==
+                  (uint64_t)INT64_MIN,
+              "strtoll negative hex min");
+
+        check(call_strtoll("xyz", 10, &end) == 0u, "strtoll no digits");
+        check(end_offset(end) == 0u, "strtoll no digits end");
+    }
+
+    {
+        uint32_t end = 0;
+
+        check(call_strtoull("18446744073709551615", 10, &end) ==
+                  UINT64_MAX,
+              "strtoull UINT64_MAX");
+        check(end_offset(end) == 20u, "strtoull UINT64_MAX end");
+
+        check(call_strtoull("18446744073709551616", 10, &end) ==
+                  UINT64_MAX,
+              "strtoull saturation");
+        check(call_strtoull("999999999999999999999999", 10, &end) ==
+                  UINT64_MAX,
+              "strtoull huge saturation");
+
+        check(call_strtoull("-1", 10, &end) == UINT64_MAX,
+              "strtoull negative one");
+        check(end_offset(end) == 2u, "strtoull negative one end");
+
+        check(call_strtoull("-18446744073709551615", 10, &end) == 1u,
+              "strtoull negate modulo");
+        check(call_strtoull("-18446744073709551616", 10, &end) ==
+                  UINT64_MAX,
+              "strtoull negative saturation");
+
+        check(call_strtoull("0xFFFFFFFFFFFFFFFF", 0, &end) == UINT64_MAX,
+              "strtoull auto hex");
+        check(end_offset(end) == 18u, "strtoull auto hex end");
+    }
+
+    {
+        void (*impl)(CPU *c) = find_impl("_strtoi64");
+        check(impl != NULL, "_strtoi64 row");
+        if (impl) {
+            uint32_t end = 0;
+            place_string("-42");
+            memset(g_args, 0, sizeof g_args);
+            g_args[0] = TEXT_ADDR;
+            g_args[1] = ENDP_ADDR;
+            g_args[2] = 10u;
+            CPU c;
+            memset(&c, 0, sizeof c);
+            impl(&c);
+            end = read_u32(ENDP_ADDR);
+            check((((uint64_t)c.edx << 32) | c.eax) ==
+                      (uint64_t)(int64_t)-42,
+                  "_strtoi64 result");
+            check(end_offset(end) == 3u, "_strtoi64 end");
+        }
+    }
+
+    {
+        uint32_t end = 0;
+
+        eqd("strtod fraction", call_strtod("1.5", &end), 1.5);
+        check(end_offset(end) == 3u, "strtod fraction end");
+
+        eqd("strtod exponent", call_strtod("-2.25e2", &end), -225.0);
+        check(end_offset(end) == 7u, "strtod exponent end");
+
+        eqd("strtod trailing", call_strtod("  3.5abc", &end), 3.5);
+        check(end_offset(end) == 5u, "strtod trailing end");
+
+        eqd("strtod leading dot", call_strtod("+.5", &end), 0.5);
+        check(end_offset(end) == 3u, "strtod leading dot end");
+
+        eqd("strtod invalid", call_strtod("abc", &end), 0.0);
+        check(end_offset(end) == 0u, "strtod invalid end");
+
+        eqd("strtod tiny", call_strtod("1e-3", &end), 0.001);
+        check(end_offset(end) == 4u, "strtod tiny end");
+    }
+
+    check(call_strtod("88", NULL) == 88.0, "strtod null endptr");
 
     check(call_one("_ismbcspace", 0x20u) == 1u, "ismbcspace space");
     check(call_one("_ismbcspace", 0x09u) == 1u, "ismbcspace tab");

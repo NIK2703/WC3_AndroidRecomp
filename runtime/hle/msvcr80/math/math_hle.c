@@ -125,6 +125,19 @@ MATH1(log10, log10(x))
 MATH2(pow, pow(x, y))
 MATH2(fmod, fmod(x, y))
 MATH2(atan2, atan2(x, y))
+MATH2(_hypot, hypot(x, y))
+
+static void h_frexp(CPU *c)
+{
+    const double x = arg_f64(c, 0u);
+    const uint32_t exponent = wc3_legacy_arg32(c, 2u);
+    int value = 0;
+    const double fraction = frexp(x, &value);
+
+    if (exponent && wc3_legacy_guest_ok(exponent, 4))
+        wc3_legacy_wr32g(exponent, (uint32_t)value);
+    push_f64(c, fraction);
+}
 
 /* ---- SSE2 ABI --------------------------------------------------------- */
 
@@ -201,6 +214,17 @@ static const MathOverride g_overrides[] = {
     { "_libm_sse2_atan2_precise", h_sse2_atan2 },
 };
 
+typedef struct MathAddition {
+    const char *name;
+    uint16_t argc;
+    void (*impl)(CPU *c);
+} MathAddition;
+
+static const MathAddition g_additions[] = {
+    { "_hypot", 4, h__hypot },
+    { "frexp", 3, h_frexp },
+};
+
 int wc3_hle_msvcr80_math_install(void)
 {
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
@@ -208,5 +232,12 @@ int wc3_hle_msvcr80_math_install(void)
                                     g_overrides[i].impl) != 0)
             return -1;
     }
-    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+    for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
+        if (wc3_legacy_hle_add("MSVCR80.dll", g_additions[i].name,
+                               (int)g_additions[i].argc, 1,
+                               g_additions[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0] +
+                 sizeof g_additions / sizeof g_additions[0]);
 }

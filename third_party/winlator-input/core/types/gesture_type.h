@@ -1,0 +1,28 @@
+#ifndef GESTURE_TYPE_H
+#define GESTURE_TYPE_H
+
+#define GESTURE_SLOT_COUNT 5
+
+typedef enum {
+    SINGLE_TAP,
+    LONG_PRESS,
+    DOUBLE_TAP,
+    SINGLE_TAP_DRAG,
+    LONG_PRESS_DRAG,
+    DOUBLE_TAP_DRAG,
+    SINGLE_2ND,
+    DOUBLE_2ND,
+    SINGLE_DRAG_2ND,
+    DOUBLE_DRAG_2ND,
+    GESTURE_TYPE_COUNT
+} GestureType;
+
+#define GESTURE_MASK(t) (1u << (t))
+
+#define SCROLL_DIR_UP    0
+#define SCROLL_DIR_DOWN  1
+#define SCROLL_DIR_LEFT  2
+#define SCROLL_DIR_RIGHT 3
+#define SCROLL_DIR_COUNT 4
+
+#endif

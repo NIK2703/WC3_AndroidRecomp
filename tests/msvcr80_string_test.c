@@ -19,7 +19,7 @@
 #define GUEST_BASE 0x0000u
 #define ARENA_SIZE 0x10000u
 #define HEAP_OFF 0x8000u
-#define MAX_ROWS 32u
+#define MAX_ROWS 64u
 
 static uint8_t g_mem[ARENA_SIZE];
 static uint32_t g_heap_end;
@@ -63,6 +63,20 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
     return 0;
 }
 
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c))
+{
+    (void)argc;
+    (void)cdecl_abi;
+    if (!dll || !name || !impl) return -1;
+    if (g_row_count >= MAX_ROWS) return -1;
+    g_rows[g_row_count].dll = dll;
+    g_rows[g_row_count].name = name;
+    g_rows[g_row_count].impl = impl;
+    g_row_count++;
+    return 0;
+}
+
 uint32_t wc3_legacy_arg32(const CPU *c, unsigned index)
 {
     (void)c;
@@ -78,6 +92,14 @@ uint8_t wc3_legacy_rd8g(uint32_t addr)
 {
     const void *p = guest_ptr(addr, 1);
     return p ? *(const uint8_t *)p : 0;
+}
+
+uint16_t wc3_legacy_rd16g(uint32_t addr)
+{
+    const void *p = guest_ptr(addr, 2);
+    uint16_t value = 0;
+    if (p) memcpy(&value, p, 2);
+    return value;
 }
 
 void wc3_legacy_wr8g(uint32_t addr, uint8_t value)
@@ -159,6 +181,13 @@ static void put_string(uint32_t addr, const char *s)
     memcpy(guest_at(addr, n), s, n);
 }
 
+static void put_wide(uint32_t addr, const uint16_t *s)
+{
+    uint32_t n = 0;
+    while (s[n]) n++;
+    memcpy(guest_at(addr, (n + 1u) * 2u), s, (n + 1u) * 2u);
+}
+
 static void put_bytes(uint32_t addr, const uint8_t *p, uint32_t n)
 {
     memcpy(guest_at(addr, n), p, n);
@@ -182,10 +211,15 @@ static int32_t as_i32(uint32_t v) { return (int32_t)v; }
 int main(void)
 {
     const int installed = wc3_hle_msvcr80_string_install();
-    CHECK(installed == 25, "install count");
-    CHECK(g_row_count == 25u, "row count");
+    CHECK(installed == 36, "install count");
+    CHECK(g_row_count == 36u, "row count");
     CHECK(find_impl("memcpy") != NULL, "memcpy row");
     CHECK(find_impl("_strdup") != NULL, "_strdup row");
+    CHECK(find_impl("strcmp") != NULL, "strcmp row");
+    CHECK(find_impl("memchr") != NULL, "memchr row");
+    CHECK(find_impl("isxdigit") != NULL, "isxdigit row");
+    CHECK(find_impl("wcsrchr") != NULL, "wcsrchr row");
+    CHECK(find_impl("wcsstr") != NULL, "wcsstr row");
     CHECK(strcmp(g_rows[0].dll, "MSVCR80.dll") == 0, "DLL name");
 
     put_string(0x100, "abcdef");
@@ -213,6 +247,18 @@ int main(void)
     put_string(0x730, "x");
     put_string(0x740, "999999999999");
     put_string(0x750, "-999999999999");
+
+    static const uint16_t wide_abc[] = { 'a', 'b', 'c', 'a', 'b', 'c', 0 };
+    static const uint16_t wide_hello[] =
+        { 'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', 0 };
+    static const uint16_t wide_world[] = { 'w', 'o', 'r', 'l', 'd', 0 };
+    static const uint16_t wide_empty[] = { 0 };
+    static const uint16_t wide_z[] = { 'z', 0 };
+    put_wide(0x4000, wide_abc);
+    put_wide(0x4020, wide_hello);
+    put_wide(0x4040, wide_world);
+    put_wide(0x4060, wide_empty);
+    put_wide(0x4070, wide_z);
 
     const uint8_t high1[] = { 0x80, 0 };
     const uint8_t high2[] = { 0x7F, 0 };
@@ -263,6 +309,61 @@ int main(void)
     CHECK(invoke("_strnicmp", 0x140, 0x150, 3) == 0u, "_strnicmp case");
     CHECK(as_i32(invoke("_strnicmp", 0x160, 0x170, 1)) < 0,
           "_strnicmp high bytes");
+
+    CHECK(invoke("strcmp", 0x100, 0x250, 0) == 0u, "strcmp equal");
+    CHECK(as_i32(invoke("strcmp", 0x100, 0x110, 0)) < 0, "strcmp less");
+    CHECK(as_i32(invoke("strcmp", 0x110, 0x100, 0)) > 0, "strcmp greater");
+    CHECK(as_i32(invoke("strcmp", 0x100, 0x510, 0)) > 0, "strcmp prefix");
+    CHECK(as_i32(invoke("strcmp", 0x120, 0x130, 0)) > 0,
+          "strcmp unsigned bytes");
+    CHECK(invoke("strcmp", 0, 0, 0) == 0u, "strcmp both NULL");
+
+    CHECK(invoke("_stricmp", 0x140, 0x150, 0) == 0u, "_stricmp case");
+    CHECK(as_i32(invoke("_stricmp", 0x100, 0x110, 0)) < 0, "_stricmp less");
+    CHECK(as_i32(invoke("_stricmp", 0x160, 0x170, 0)) < 0,
+          "_stricmp high bytes");
+
+    CHECK(invoke("memchr", 0x180, 'b', 6) == 0x181u, "memchr first");
+    CHECK(invoke("memchr", 0x180, 'a', 6) == 0x180u, "memchr first byte");
+    CHECK(invoke("memchr", 0x180, 'z', 6) == 0u, "memchr missing");
+    CHECK(invoke("memchr", 0x180, 'a', 0) == 0u, "memchr n=0");
+    CHECK(invoke("memchr", 0xFFFF, 'a', 0x100) == 0u, "memchr bad range");
+
+    CHECK(invoke("isalnum", '0', 0, 0) == 1u, "isalnum digit");
+    CHECK(invoke("isalnum", 'A', 0, 0) == 1u, "isalnum upper");
+    CHECK(invoke("isalnum", 'z', 0, 0) == 1u, "isalnum lower");
+    CHECK(invoke("isalnum", '!', 0, 0) == 0u, "isalnum miss");
+    CHECK(invoke("isalnum", 0x80u, 0, 0) == 0u, "isalnum high byte");
+    CHECK(invoke("isgraph", '!', 0, 0) == 1u, "isgraph punctuation");
+    CHECK(invoke("isgraph", ' ', 0, 0) == 0u, "isgraph space");
+    CHECK(invoke("islower", 'a', 0, 0) == 1u, "islower hit");
+    CHECK(invoke("islower", 'A', 0, 0) == 0u, "islower miss");
+    CHECK(invoke("isprint", ' ', 0, 0) == 1u, "isprint space");
+    CHECK(invoke("isprint", 0x7Eu, 0, 0) == 1u, "isprint tilde");
+    CHECK(invoke("isprint", 0x7Fu, 0, 0) == 0u, "isprint delete");
+    CHECK(invoke("isupper", 'Z', 0, 0) == 1u, "isupper hit");
+    CHECK(invoke("isupper", 'z', 0, 0) == 0u, "isupper miss");
+    CHECK(invoke("isxdigit", '0', 0, 0) == 1u, "isxdigit digit");
+    CHECK(invoke("isxdigit", 'F', 0, 0) == 1u, "isxdigit upper");
+    CHECK(invoke("isxdigit", 'g', 0, 0) == 0u, "isxdigit miss");
+
+    CHECK(invoke("wcsrchr", 0x4000, 'b', 0) == 0x4008u, "wcsrchr last b");
+    CHECK(invoke("wcsrchr", 0x4000, 'a', 0) == 0x4006u, "wcsrchr last a");
+    CHECK(invoke("wcsrchr", 0x4000, 0, 0) == 0x400Cu,
+          "wcsrchr terminator");
+    CHECK(invoke("wcsrchr", 0x4000, 'z', 0) == 0u, "wcsrchr missing");
+    CHECK(invoke("wcsrchr", 0xFFFF, 'a', 0) == 0u, "wcsrchr bad range");
+
+    CHECK(invoke("wcsstr", 0x4020, 0x4040, 0) == 0x402Cu, "wcsstr found");
+    CHECK(invoke("wcsstr", 0x4040, 0x4040, 0) == 0x4040u, "wcsstr identity");
+    CHECK(invoke("wcsstr", 0x4020, 0x4060, 0) == 0x4020u,
+          "wcsstr empty needle");
+    CHECK(invoke("wcsstr", 0x4020, 0x4070, 0) == 0u, "wcsstr missing");
+    CHECK(invoke("wcsstr", 0x4040, 0x4020, 0) == 0u,
+          "wcsstr longer needle");
+    CHECK(invoke("wcsstr", 0, 0, 0) == 0u, "wcsstr null");
+    CHECK(invoke("wcsstr", 0xFFFF, 0x4060, 0) == 0u,
+          "wcsstr bad haystack");
 
     CHECK(invoke("strchr", 0x180, 'b', 0) == 0x181u, "strchr first");
     CHECK(invoke("strchr", 0x180, 'z', 0) == 0u, "strchr missing");

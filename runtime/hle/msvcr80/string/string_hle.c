@@ -442,6 +442,164 @@ static void h_itoa(CPU *c)
     c->eax = dst;
 }
 
+static void h_strcmp(CPU *c)
+{
+    const uint32_t a = wc3_legacy_arg32(c, 0);
+    const uint32_t b = wc3_legacy_arg32(c, 1);
+    int r = 0;
+    for (uint32_t i = 0;; i++) {
+        const uint8_t ca = (a && byte_ok(a, i)) ? wc3_legacy_rd8g(a + i) : 0;
+        const uint8_t cb = (b && byte_ok(b, i)) ? wc3_legacy_rd8g(b + i) : 0;
+        if (ca != cb) {
+            r = (int)ca - (int)cb;
+            break;
+        }
+        if (!ca) break;
+    }
+    c->eax = (uint32_t)(int32_t)r;
+}
+
+static void h_stricmp(CPU *c)
+{
+    const uint32_t a = wc3_legacy_arg32(c, 0);
+    const uint32_t b = wc3_legacy_arg32(c, 1);
+    int r = 0;
+    for (uint32_t i = 0;; i++) {
+        const uint8_t ca =
+            ascii_upper((a && byte_ok(a, i)) ? wc3_legacy_rd8g(a + i) : 0);
+        const uint8_t cb =
+            ascii_upper((b && byte_ok(b, i)) ? wc3_legacy_rd8g(b + i) : 0);
+        if (ca != cb) {
+            r = (int)ca - (int)cb;
+            break;
+        }
+        if (!ca) break;
+    }
+    c->eax = (uint32_t)(int32_t)r;
+}
+
+static void h_memchr(CPU *c)
+{
+    const uint32_t s = wc3_legacy_arg32(c, 0);
+    const uint8_t ch = (uint8_t)wc3_legacy_arg32(c, 1);
+    const uint32_t n = wc3_legacy_arg32(c, 2);
+    c->eax = 0;
+    if (!s || !n || !wc3_legacy_guest_ok(s, n)) return;
+    for (uint32_t i = 0; i < n; i++) {
+        if (wc3_legacy_rd8g(s + i) == ch) {
+            c->eax = s + i;
+            return;
+        }
+    }
+}
+
+static void h_isalnum(CPU *c)
+{
+    const uint8_t ch = (uint8_t)wc3_legacy_arg32(c, 0);
+    c->eax = ((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= 'a' && ch <= 'z'))
+                 ? 1u
+                 : 0u;
+}
+
+static void h_isgraph(CPU *c)
+{
+    const uint8_t ch = (uint8_t)wc3_legacy_arg32(c, 0);
+    c->eax = (ch >= 0x21u && ch <= 0x7Eu) ? 1u : 0u;
+}
+
+static void h_islower(CPU *c)
+{
+    const uint8_t ch = (uint8_t)wc3_legacy_arg32(c, 0);
+    c->eax = (ch >= 'a' && ch <= 'z') ? 1u : 0u;
+}
+
+static void h_isprint(CPU *c)
+{
+    const uint8_t ch = (uint8_t)wc3_legacy_arg32(c, 0);
+    c->eax = (ch >= 0x20u && ch <= 0x7Eu) ? 1u : 0u;
+}
+
+static void h_isupper(CPU *c)
+{
+    const uint8_t ch = (uint8_t)wc3_legacy_arg32(c, 0);
+    c->eax = (ch >= 'A' && ch <= 'Z') ? 1u : 0u;
+}
+
+static void h_isxdigit(CPU *c)
+{
+    const uint8_t ch = (uint8_t)wc3_legacy_arg32(c, 0);
+    c->eax = ((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F') ||
+              (ch >= 'a' && ch <= 'f'))
+                 ? 1u
+                 : 0u;
+}
+
+/* Guest wchar_t is the 16-bit Windows unit, not the host's 32-bit wchar_t. */
+static int wide_unit_ok(uint32_t base, uint32_t index)
+{
+    if (index > UINT32_MAX / 2u) return 0;
+    const uint32_t off = index * 2u;
+    return add_ok(base, off) && wc3_legacy_guest_ok(base + off, 2);
+}
+
+static uint16_t wide_unit(uint32_t base, uint32_t index)
+{
+    return wide_unit_ok(base, index) ? wc3_legacy_rd16g(base + index * 2u) : 0;
+}
+
+static void h_wcsrchr(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint16_t ch = (uint16_t)wc3_legacy_arg32(c, 1);
+    uint32_t found = 0;
+
+    for (uint32_t i = 0; wide_unit_ok(text, i); i++) {
+        const uint16_t unit = wide_unit(text, i);
+        if (unit == ch) found = text + i * 2u;
+        if (!unit) break;
+    }
+    c->eax = found;
+}
+
+static int wide_prefix_at(uint32_t text, uint32_t needle, uint32_t offset)
+{
+    for (uint32_t i = 0;; i++) {
+        if (!wide_unit_ok(needle, i)) return 0;
+        if (offset > UINT32_MAX - i) return 0;
+        if (!wide_unit_ok(text, offset + i)) return 0;
+        const uint16_t want = wide_unit(needle, i);
+        const uint16_t got = wide_unit(text, offset + i);
+        if (got != want) return 0;
+        if (!want) return 1;
+    }
+}
+
+static void h_wcsstr(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t needle = wc3_legacy_arg32(c, 1);
+
+    if (!text || !needle || !wide_unit_ok(text, 0) ||
+        !wide_unit_ok(needle, 0)) {
+        c->eax = 0;
+        return;
+    }
+    if (wide_unit(needle, 0) == 0) {
+        c->eax = text;
+        return;
+    }
+
+    for (uint32_t i = 0; wide_unit_ok(text, i); i++) {
+        if (wide_prefix_at(text, needle, i)) {
+            c->eax = text + i * 2u;
+            return;
+        }
+        if (!wide_unit(text, i)) break;
+    }
+    c->eax = 0;
+}
+
 typedef struct CrtStringOverride {
     const char *name;
     void (*impl)(CPU *c);
@@ -475,6 +633,30 @@ static const CrtStringOverride g_overrides[] = {
     { "tolower", h_tolower },
 };
 
+/* Game imports that the as-built table never defined.  The resolver used to
+ * install a guessed-arity no-op stub for these; strcmp and memchr in
+ * particular returned whatever happened to be in eax, and every is* predicate
+ * returned false. */
+typedef struct CrtStringAddition {
+    const char *name;
+    uint16_t argc;
+    void (*impl)(CPU *c);
+} CrtStringAddition;
+
+static const CrtStringAddition g_additions[] = {
+    { "strcmp", 2, h_strcmp },
+    { "_stricmp", 2, h_stricmp },
+    { "memchr", 3, h_memchr },
+    { "isalnum", 1, h_isalnum },
+    { "isgraph", 1, h_isgraph },
+    { "islower", 1, h_islower },
+    { "isprint", 1, h_isprint },
+    { "isupper", 1, h_isupper },
+    { "isxdigit", 1, h_isxdigit },
+    { "wcsrchr", 2, h_wcsrchr },
+    { "wcsstr", 2, h_wcsstr },
+};
+
 int wc3_hle_msvcr80_string_install(void)
 {
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
@@ -482,5 +664,12 @@ int wc3_hle_msvcr80_string_install(void)
                                     g_overrides[i].impl) != 0)
             return -1;
     }
-    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+    for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
+        if (wc3_legacy_hle_add("MSVCR80.dll", g_additions[i].name,
+                               (int)g_additions[i].argc, 1,
+                               g_additions[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0] +
+                 sizeof g_additions / sizeof g_additions[0]);
 }

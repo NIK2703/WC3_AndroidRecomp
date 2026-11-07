@@ -313,17 +313,17 @@ lift, без Windows-сборки); **T2** device E2E на self-hosted. ADR-006 
 product build на публичном runner. Без устройства `unavailable` (V1.2).
 
 ### 9.3. Debug и release
-Центральный `runtime/diag/wc3_debug.h`: `#ifndef WC3_DEBUG -> 0`, `#if WC3_DEBUG`,
-вложенные подтеги `#if WC3_DEBUG && WC3_DEBUG_X`. Под gating попадают логи,
-probes, dumps, trace, debug-поля, frame dumps, счётчики, debug env и
-генераторы. Release: `-DWC3_DEBUG=0 -DNDEBUG`, без `getenv` в горячем пути;
-`assert` только NDEBUG-stripped. `--release` применяется к `runtime/`,
+Норма — `docs/BUILD_VARIANTS.md` (BV, ADR-030): release `wc3.recomp`,
+debug `wc3.recomp.debug`; один `--variant`; debug сохраняет `-O2`.
+Центральный `runtime/diag/wc3_debug.h`: `#ifndef WC3_DEBUG -> 0`,
+теги `#if WC3_DEBUG && WC3_DEBUG_<ЦЕЛЬ>` по реестру подсистем;
+логи/probes/dumps/trace/debug-поля/env/генераторы — только под тегом.
+Запрещены `#ifdef`, `if (debug)` и нетегированные guard'ы.
+Release: `-DWC3_DEBUG=0 -DNDEBUG`; `--release` к `runtime/`,
 `apps/` и сгенерированному C; DXVK/third_party — по allowlist.
 ### 9.4. Crash
-Release — fatal abort с фиксированным кодом, без logcat/dump/debug-строк;
-debug — logcat + файл + crash dump под `#if WC3_DEBUG`. Dogfood-сборка
-(`WC3_DOGFOOD`) допускает минимальный breadcrumb, никогда не попадающий в
-release. Понятный startup-экран при отказе обоих DXVK — GB-4.7.
+Release — fatal abort с кодом, без logcat/dump; debug — под `WC3_DEBUG_CRASH`.
+`WC3_DOGFOOD` как вариант упразднён; отказ обоих DXVK — GB-4.7.
 ## 10. Верификация
 ### 10.1. Три уровня
 **T0** asset-free (каждый коммит), **T1** difftest headless-DUT **H** против

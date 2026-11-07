@@ -250,12 +250,22 @@ static int unaligned_address_taken_start(Pe *pe, long long off,
         /* Large runs are usually jump tables of internal case blocks.  A
          * zero-delimited table in read-only data is a function-pointer table
          * instead: war3 0x45C800 is the CRT's 87-entry initializer list, whose
-         * first entry 0x404599 follows a ret without alignment padding.  Keep
-         * writable-data runs small, where Mssfast/Mp3dec switch tables live. */
+         * first entry 0x404599 follows a ret without alignment padding.  A
+         * large writable table is a compiler switch table too (ijl15 keeps one
+         * in .data1); those are lifted as synthetic block edges by the caller,
+         * never as whole-function seeds. */
         if ((sec->chars & 0x40000000u) && zero_neighbor) max_run = 256;
+        if ((sec->chars & 0x80000000u) != 0) max_run = 4096;
         if (source_run < 1 || source_run > max_run) return 0;
     }
     if (!pe_read_at(pe, off, &first, 1) || !plausible_start(first)) return 0;
+    /* A large writable table is a compiler switch table.  Its entries are
+     * case blocks and need not follow a ret, establish a frame, or avoid an
+     * epilogue: they are lifted in isolation, exactly like code-resident
+     * switch arms.  The caller sends them through closure2's strict block
+     * extent, never through the seed catalog. */
+    if (!executable && (sec->chars & 0x80000000u) && source_run >= 8)
+        return 1;
     if (!executable) {
         if (epilogue_or_fpu_entry(pe, off)) return 0;
         if (frame_dependent_start(pe, off)) return 0;
@@ -266,6 +276,45 @@ static int unaligned_address_taken_start(Pe *pe, long long off,
         before[0] == 0xC2)
         return 1;
     return 0;
+}
+
+/* MSVC emits an adjustor thunk for a COM interface whose implementation
+ * lives in a base subobject.  A vtable slot points at
+ *
+ *   add ecx, imm32      81 C1 xx xx xx xx   (or 83 C1 xx for imm8)
+ *   jmp target          E9 rel32             (or EB rel8)
+ *
+ * and the subtract form appears in vtables too.  These are real dispatch
+ * entries, not the data that surrounds them: the target is an in-image code
+ * address.  Recover them from the pointer table and the instruction bytes;
+ * do not infer a function from alignment or from a preceding ret. */
+static int adjustor_thunk_start(Pe *pe, uint32_t va, long long off)
+{
+    uint8_t b[12];
+    uint32_t target;
+    int32_t rel;
+    size_t jmp_at;
+
+    if (!pe_read_at(pe, off, b, sizeof b)) return 0;
+    if (b[0] == 0x81 && (b[1] == 0xC1 || b[1] == 0xE9)) {
+        jmp_at = 6;
+    } else if (b[0] == 0x83 && (b[1] == 0xC1 || b[1] == 0xE9)) {
+        jmp_at = 3;
+    } else {
+        return 0;
+    }
+
+    if (b[jmp_at] == 0xE9) {
+        rel = (int32_t)pe_rd32(b + jmp_at + 1);
+        target = (uint32_t)((int64_t)va + (int64_t)jmp_at + 5 + rel);
+    } else if (b[jmp_at] == 0xEB) {
+        rel = (int8_t)b[jmp_at + 1];
+        target = (uint32_t)((int64_t)va + (int64_t)jmp_at + 2 + rel);
+    } else {
+        return 0;
+    }
+    if (target == va) return 0;
+    return is_code_target(pe, target);
 }
 
 /* Intel/MSVC function alignment commonly fills the gap between two functions
@@ -298,6 +347,31 @@ static int nop_padded_start(Pe *pe, long long off)
         b[0] == 0xFF && b[1] == 0x25)
         return 1;
     return 0;
+}
+
+/* A compiler often lays a jump table directly in front of the next function.
+ * The table has no trailing padding, so the first function byte follows the
+ * last code-pointer entry.  An aligned target taken from a read-only pointer
+ * table is a real function entry when the three preceding dwords are code
+ * pointers and the target starts like a function (not an epilogue, FPU case
+ * block, or a block that consumes the caller's frame). */
+static int aligned_data_table_start(Pe *pe, long long off, const PeSec *sec)
+{
+    uint8_t b[4];
+    int k;
+    if ((sec->chars & PE_SCN_MEM_EXECUTE) != 0) return 0;
+    if ((sec->chars & 0x40000000u) == 0) return 0;
+    if (off < 12) return 0;
+    for (k = 1; k <= 3; k++) {
+        uint32_t v;
+        if (!pe_read_at(pe, off - 4 * k, b, sizeof b)) return 0;
+        v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+            ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+        if (!is_code_target(pe, v)) return 0;
+    }
+    if (epilogue_or_fpu_entry(pe, off)) return 0;
+    if (frame_dependent_start(pe, off)) return 0;
+    return 1;
 }
 
 static int nop_len_before(Pe *pe, long long off)
@@ -380,7 +454,8 @@ static int text_table_base(const uint8_t *buf, uint32_t i)
     return 0;
 }
 
-static int scan_section(Pe *pe, const PeSec *sec, U32Vec *out, const U32Vec *known)
+static int scan_section(Pe *pe, const PeSec *sec, U32Vec *out, U32Vec *edges,
+                        const U32Vec *known)
 {
     uint8_t *buf;
     uint32_t i;
@@ -395,8 +470,9 @@ static int scan_section(Pe *pe, const PeSec *sec, U32Vec *out, const U32Vec *kno
         uint32_t v = pe_rd32(buf + i);
         uint8_t before[6], first;
         long long off;
-        int jmp_tail = 0, zero_neighbor = 0;
+        int jmp_tail = 0, zero_neighbor = 0, source_run = 0, adjustor = 0;
         int source_exec = (sec->chars & PE_SCN_MEM_EXECUTE) != 0;
+        int source_writable = (sec->chars & 0x80000000u) != 0;
         if (!v) continue;
         if (!is_code_target(pe, v)) continue;
         if (known && u32_contains(known, v)) continue;
@@ -430,24 +506,52 @@ static int scan_section(Pe *pe, const PeSec *sec, U32Vec *out, const U32Vec *kno
         }
         off = pe_code_off(pe, v);
         if (off < 0) continue;
+        if (!source_exec) adjustor = adjustor_thunk_start(pe, v, off);
         if (off >= 6 && pe_read_at(pe, off - 6, before, sizeof before))
             jmp_tail = before[0] == 0xFF && before[1] == 0x25;
         if (!jmp_tail) {
             if ((v & 15u) != 0) {
-                int run = code_run_at(pe, buf, i, sec->rawsize,
-                                      &zero_neighbor);
-                if (!unaligned_address_taken_start(pe, off, sec, run,
+                source_run = code_run_at(pe, buf, i, sec->rawsize,
+                                         &zero_neighbor);
+                if (!adjustor &&
+                    !unaligned_address_taken_start(pe, off, sec, source_run,
                                                    zero_neighbor))
                     continue;
             } else {
                 if (source_exec && text_table_base(buf, i)) continue;
-                if (!nop_padded_start(pe, off)) continue;
+                if (source_writable) {
+                    source_run = code_run_at(pe, buf, i, sec->rawsize,
+                                             &zero_neighbor);
+                    if (source_run >= 8) {
+                        if (!adjustor &&
+                            !unaligned_address_taken_start(
+                                pe, off, sec, source_run, zero_neighbor))
+                            continue;
+                    } else if (!adjustor && !nop_padded_start(pe, off) &&
+                               !aligned_data_table_start(pe, off, sec)) {
+                        continue;
+                    }
+                } else if (!adjustor && !nop_padded_start(pe, off) &&
+                           !aligned_data_table_start(pe, off, sec)) {
+                    continue;
+                }
             }
         }
         if (!pe_read_at(pe, off, &first, 1)) continue;
         if (!plausible_start(first)) continue;
         if (looks_like_table(pe, v)) continue;
-        u32_add(out, v);
+        /* A code-resident pointer table holds jump-table arms, i.e. mid-
+         * function labels.  Lifting those from the seed catalog would run
+         * liftcore's whole-function heuristic across the table that follows
+         * the label.  Emit them as synthetic jump edges instead: closure2
+         * gives every such target a strict first-block extent and grows it
+         * only under block mode. */
+        if (!jmp_tail &&
+            ((source_exec && (v & 15u) != 0) ||
+             (!source_exec && source_writable && source_run >= 8)))
+            u32_add(edges, v);
+        else
+            u32_add(out, v);
     }
     free(buf);
     return 0;
@@ -457,14 +561,15 @@ static void usage(void)
 {
     fprintf(stderr,
             "usage: thunkseeds --module PE --out FILE [--known FILE] "
-            "[--exclude FILE] [--audit]\n");
+            "[--exclude FILE] [--edges-out FILE] [--audit]\n");
 }
 
 int main(int argc, char **argv)
 {
     const char *module = NULL, *out_path = NULL, *known_path = NULL;
-    const char *exclude_path = NULL;
-    U32Vec found = { 0 }, known = { 0 }, exclude = { 0 };
+    const char *exclude_path = NULL, *edges_path = NULL;
+    char edges_default[1024];
+    U32Vec found = { 0 }, edges = { 0 }, known = { 0 }, exclude = { 0 };
     FILE *f;
     Pe pe;
     int i;
@@ -474,22 +579,29 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out_path = argv[++i];
         else if (!strcmp(argv[i], "--known") && i + 1 < argc) known_path = argv[++i];
         else if (!strcmp(argv[i], "--exclude") && i + 1 < argc) exclude_path = argv[++i];
+        else if (!strcmp(argv[i], "--edges-out") && i + 1 < argc) edges_path = argv[++i];
         else if (!strcmp(argv[i], "--audit")) audit_mode = 1;
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
         else { usage(); return 2; }
     }
     if (!module || (!out_path && !audit_mode)) { usage(); return 2; }
+    if (!edges_path && out_path) {
+        snprintf(edges_default, sizeof edges_default, "%s.edges.c", out_path);
+        edges_path = edges_default;
+    }
     if (!pe_open(&pe, module)) die("cannot open module as PE32");
     if (known_path) load_known(known_path, &known);
     if (exclude_path) load_known(exclude_path, &exclude);
 
     for (i = 0; i < pe.nsec; i++)
-        scan_section(&pe, &pe.sec[i], &found, &known);
+        scan_section(&pe, &pe.sec[i], &found, &edges, &known);
     u32_sort_unique(&found);
+    u32_sort_unique(&edges);
 
     if (audit_mode) {
         printf("thunkseeds: audit %s: done\n", module);
         free(found.v);
+        free(edges.v);
         free(known.v);
         free(exclude.v);
         pe_close(&pe);
@@ -508,7 +620,25 @@ int main(int argc, char **argv)
         printf("thunkseeds: %s: %zu extra seed(s)\n", module, n);
     }
     fclose(f);
+
+    f = fopen(edges_path, "w");
+    if (!f) { pe_close(&pe); die("cannot open --edges-out"); }
+    {
+        size_t n = 0;
+        fprintf(f, "/* AUTO-GENERATED jump-table edges; scanned by closure2, "
+                   "not compiled. */\n#include \"cpu.h\"\n\n"
+                   "void L_EDGES(CPU *c)\n{\n");
+        for (i = 0; i < (int)edges.n; i++) {
+            if (u32_contains(&exclude, edges.v[i])) continue;
+            fprintf(f, "    dispatch_jmp(c, 0x%08Xu); return;\n", edges.v[i]);
+            n++;
+        }
+        fprintf(f, "}\n");
+        printf("thunkseeds: %s: %zu jump-table edge(s)\n", module, n);
+    }
+    fclose(f);
     free(found.v);
+    free(edges.v);
     free(known.v);
     free(exclude.v);
     pe_close(&pe);

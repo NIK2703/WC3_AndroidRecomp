@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- BV-2.3: debug variant label overlay.  No debug-only Java code lives in
+         main; variant source sets are the preprocessor equivalent here. -->
+    <string name="app_name">WC3 recomp (debug)</string>
+</resources>

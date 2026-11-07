@@ -100,6 +100,22 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
     return 0;
 }
 
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c))
+{
+    (void)argc;
+    (void)cdecl_abi;
+    if (!dll || !name || !impl || g_override_count >= MAX_OVERRIDES)
+        return -1;
+    snprintf(g_overrides[g_override_count].dll,
+             sizeof g_overrides[g_override_count].dll, "%s", dll);
+    snprintf(g_overrides[g_override_count].name,
+             sizeof g_overrides[g_override_count].name, "%s", name);
+    g_overrides[g_override_count].impl = impl;
+    g_override_count++;
+    return 0;
+}
+
 static void (*find_override(const char *name))(CPU *c)
 {
     for (unsigned i = 0; i < g_override_count; i++)
@@ -175,6 +191,11 @@ static void write_u64(uint32_t addr, uint64_t value)
     wc3_legacy_wr32g(addr + 4, (uint32_t)(value >> 32));
 }
 
+static int32_t read_tm(uint32_t addr, unsigned index)
+{
+    return (int32_t)wc3_legacy_rd32g(addr + index * 4u);
+}
+
 static const char *guest_string(uint32_t addr)
 {
     return (const char *)guest_ptr(addr, 64);
@@ -192,11 +213,14 @@ int main(void)
     g_platform.time.realtime_ns = fake_realtime_ns;
     CHECK(wc3_hle_msvcr80_time_install() == -1, "install without local_time");
     g_platform.time.local_time = fake_local_time;
-    CHECK(wc3_hle_msvcr80_time_install() == 2, "install count");
-    CHECK(g_override_count == 2, "recorded row count");
+    CHECK(wc3_hle_msvcr80_time_install() == 5, "install count");
+    CHECK(g_override_count == 5, "recorded row count");
     CHECK(strcmp(g_overrides[0].dll, "MSVCR80.dll") == 0, "DLL name");
     CHECK(find_override("_time64") != NULL, "_time64 row");
     CHECK(find_override("_ctime64") != NULL, "_ctime64 row");
+    CHECK(find_override("_gmtime64") != NULL, "_gmtime64 row");
+    CHECK(find_override("_localtime64") != NULL, "_localtime64 row");
+    CHECK(find_override("_localtime64_s") != NULL, "_localtime64_s row");
 
     /* 2024-02-29 12:34:56.789 UTC. */
     const uint64_t epoch_ns = 1709210096789000000ull;
@@ -278,6 +302,79 @@ int main(void)
     CHECK(c.eax == 0, "_ctime64 local failure");
     g_local_fail = 0;
 
-    printf("msvcr80 time OK (2 handlers)\n");
+    /* _gmtime64 converts UTC without consulting the platform calendar. */
+    write_u64(timer, epoch_sec);
+    args[0] = timer;
+    put_args(&c, args, 1);
+    if (call("_gmtime64", &c)) return 1;
+    CHECK(c.eax != 0, "_gmtime64 return");
+    const uint32_t gm = c.eax;
+    CHECK(read_tm(gm, 0) == 56, "_gmtime64 sec");
+    CHECK(read_tm(gm, 1) == 34, "_gmtime64 min");
+    CHECK(read_tm(gm, 2) == 12, "_gmtime64 hour");
+    CHECK(read_tm(gm, 3) == 29, "_gmtime64 mday");
+    CHECK(read_tm(gm, 4) == 1, "_gmtime64 mon");
+    CHECK(read_tm(gm, 5) == 124, "_gmtime64 year");
+    CHECK(read_tm(gm, 6) == 4, "_gmtime64 wday");
+    CHECK(read_tm(gm, 7) == 59, "_gmtime64 yday");
+    CHECK(read_tm(gm, 8) == 0, "_gmtime64 isdst");
+
+    /* The CRT result is a per-thread object, reused on the next call. */
+    put_args(&c, args, 1);
+    if (call("_gmtime64", &c)) return 1;
+    CHECK(c.eax == gm, "_gmtime64 buffer reuse");
+
+    args[0] = 0;
+    put_args(&c, args, 1);
+    if (call("_gmtime64", &c)) return 1;
+    CHECK(c.eax == 0, "_gmtime64 null");
+    args[0] = 0xFFFFFFFFu;
+    put_args(&c, args, 1);
+    if (call("_gmtime64", &c)) return 1;
+    CHECK(c.eax == 0, "_gmtime64 bad pointer");
+
+    /* _localtime64 uses the platform's local calendar fields. */
+    g_hour = 15;
+    g_minute = 34;
+    g_second = 56;
+    args[0] = timer;
+    put_args(&c, args, 1);
+    if (call("_localtime64", &c)) return 1;
+    CHECK(c.eax != 0, "_localtime64 return");
+    const uint32_t local = c.eax;
+    CHECK(read_tm(local, 0) == 56, "_localtime64 sec");
+    CHECK(read_tm(local, 1) == 34, "_localtime64 min");
+    CHECK(read_tm(local, 2) == 15, "_localtime64 hour");
+    CHECK(read_tm(local, 3) == 29, "_localtime64 mday");
+    CHECK(read_tm(local, 4) == 1, "_localtime64 mon");
+    CHECK(read_tm(local, 5) == 124, "_localtime64 year");
+    CHECK(read_tm(local, 6) == 4, "_localtime64 wday");
+    CHECK(read_tm(local, 7) == 59, "_localtime64 yday");
+    CHECK(read_tm(local, 8) == 0, "_localtime64 isdst");
+
+    /* _localtime64_s writes the caller's buffer and returns EINVAL on a bad
+     * destination or source pointer. */
+    const uint32_t tm_out = GUEST_BASE + 0x600u;
+    args[0] = tm_out;
+    args[1] = timer;
+    put_args(&c, args, 2);
+    if (call("_localtime64_s", &c)) return 1;
+    CHECK(c.eax == 0, "_localtime64_s return");
+    CHECK(read_tm(tm_out, 2) == 15, "_localtime64_s hour");
+    CHECK(read_tm(tm_out, 5) == 124, "_localtime64_s year");
+
+    args[0] = 0;
+    args[1] = timer;
+    put_args(&c, args, 2);
+    if (call("_localtime64_s", &c)) return 1;
+    CHECK(c.eax == 22u, "_localtime64_s null destination");
+
+    args[0] = tm_out;
+    args[1] = 0;
+    put_args(&c, args, 2);
+    if (call("_localtime64_s", &c)) return 1;
+    CHECK(c.eax == 22u, "_localtime64_s null source");
+
+    printf("msvcr80 time OK (5 handlers)\n");
     return 0;
 }

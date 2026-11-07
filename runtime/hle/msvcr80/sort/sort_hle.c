@@ -6,9 +6,12 @@
  * below them is the dispatcher sentinel the quarantine has always used.
  *
  * The as-built implementation kept a thread-local 256-byte guest scratch
- * block.  Here the block comes from the shim's guest heap for the duration of
- * one call, so two guest threads sorting at the same time cannot overwrite
- * each other's pivot element.
+ * block, which silently refused every element wider than 256 bytes.  game.dll's
+ * qsort call site at 0x6F039AEA pushes width 0x228 (552), so that was a real
+ * skipped sort, not a theoretical edge case.  Here the block comes from the
+ * shim's guest heap for the duration of one call, so the element size is not
+ * capped and two guest threads sorting at the same time cannot overwrite each
+ * other's pivot element.
  *
  * The as-built insertion loop shifted the previous element only when the
  * comparator returned a positive value.  A standard qsort comparator returns
@@ -25,7 +28,6 @@
 #include "cpu.h"
 #include "legacy_shim.h"
 
-#define QSORT_MAX_WIDTH 256u
 #define DISPATCH_RETURN 0x7EFFFFF1u
 
 static int push(CPU *c, uint32_t value)
@@ -43,7 +45,7 @@ static void h_qsort(CPU *c)
     const uint32_t width = wc3_legacy_arg32(c, 2);
     const uint32_t compare = wc3_legacy_arg32(c, 3);
 
-    if (!base || count < 2u || !width || width > QSORT_MAX_WIDTH ||
+    if (!base || count < 2u || !width ||
         count > UINT32_MAX / width ||
         !wc3_legacy_guest_ok(base, count * width)) {
         c->eax = 0;

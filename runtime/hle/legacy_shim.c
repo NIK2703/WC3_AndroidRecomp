@@ -53,6 +53,41 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
     return -1;
 }
 
+static void copy_bounded(char *dst, size_t cap, const char *src)
+{
+    size_t n = strlen(src);
+    if (n >= cap) n = cap - 1u;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c))
+{
+    if (!dll || !name || !impl || argc < 0 || argc > 0xFFFF) return -1;
+
+    for (unsigned i = 0; i < g_hle_count; i++) {
+        HleEnt *e = &g_hle[i];
+        if (!ascii_equal_ci(e->dll, dll)) continue;
+        if (!ascii_equal_ci(e->name, name)) continue;
+        e->fn = impl;
+        e->argc = (uint16_t)argc;
+        e->cdecl_abi = cdecl_abi ? 1u : 0u;
+        return 0;
+    }
+
+    if (g_hle_count >= HLE_MAX) return -1;
+    HleEnt *e = &g_hle[g_hle_count++];
+    memset(e, 0, sizeof *e);
+    copy_bounded(e->dll, sizeof e->dll, dll);
+    copy_bounded(e->name, sizeof e->name, name);
+    e->fn = impl;
+    e->argc = (uint16_t)argc;
+    e->cdecl_abi = cdecl_abi ? 1u : 0u;
+    e->used = 1;
+    return 0;
+}
+
 int wc3_legacy_guest_ok(uint32_t addr, uint32_t size)
 {
     return hle_android_guest_ok(addr, size);
@@ -190,7 +225,32 @@ void wc3_legacy_mouse_move(float nx, float ny)
     hle_android_mouse_move(nx, ny);
 }
 
+void wc3_legacy_mouse_move_delta(int dx, int dy)
+{
+    hle_android_mouse_move_delta(dx, dy);
+}
+
 void wc3_legacy_mouse_button(int down)
 {
     hle_android_mouse_button(down);
+}
+
+void wc3_legacy_mouse_button_ex(int button, int down)
+{
+    hle_android_mouse_button_ex(button, down);
+}
+
+void wc3_legacy_mouse_wheel(int delta)
+{
+    hle_android_mouse_wheel(delta);
+}
+
+void wc3_legacy_key_event(int vk, int down)
+{
+    hle_android_key_event(vk, down);
+}
+
+void wc3_legacy_release_all(void)
+{
+    hle_android_release_all();
 }

@@ -3,13 +3,20 @@
 # This script only invokes the new tree's CMake target.  It does not run any
 # script from the old working tree.  Exit codes: 0 built, 1 failure,
 # 2 unavailable (SDK/NDK/CMake or the GameActivity AAR is missing).
+#
+# ADR-030 / BV-3: -Variant is the single atomic input.  It selects the output
+# directory, WC3_DEBUG and the diagnostic tag set, so the native half of an
+# APK can no longer disagree with its Gradle half.  Debug stays optimised
+# (BV-1.1): CMAKE_BUILD_TYPE is Release for both variants.
 
 [CmdletBinding()]
 param(
+    [ValidateSet('release', 'debug')]
+    [string]$Variant = 'release',
     [switch]$Clean,
-    [switch]$NativeDebug,
     [string]$GamesActivityAar = '',
-    [string]$CorpusRoot = ''
+    [string]$CorpusRoot = '',
+    [string]$DebugTags = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,7 +103,8 @@ if (-not $GamesActivityAar -or -not (Test-Path $GamesActivityAar)) {
 }
 $GamesActivityAar = (Resolve-Path $GamesActivityAar).Path
 
-$out = Join-Path $root 'build\android_app'
+# BV-3.1: per-variant build tree prevents a stale .so from another variant.
+$out = Join-Path $root "build\android_app\$Variant"
 $ga = Join-Path $out 'gameactivity-aar'
 if ($Clean) {
     Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
@@ -107,7 +115,15 @@ New-Item -ItemType Directory -Force $ga | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::ExtractToDirectory($GamesActivityAar, $ga)
 
-$debugValue = if ($NativeDebug) { 'ON' } else { 'OFF' }
+$debugValue = if ($Variant -eq 'debug') { 'ON' } else { 'OFF' }
+# BV-5.3: release never activates a tag.  Debug gets a default host-shell set
+# so the existing T2 smoke markers (boot/surface/PE) stay observable; callers
+# may narrow it with -DebugTags 'GRAPHICS;HLE_SYNC'.
+if ($Variant -eq 'release') {
+    $DebugTags = ''
+} elseif (-not $DebugTags) {
+    $DebugTags = 'BOOT;ASSETS;INPUT;GRAPHICS;JNI;MEMORY;CRASH'
+}
 $configure = @(
     '-S', $root,
     '-B', (Join-Path $out 'cmake'),
@@ -118,7 +134,9 @@ $configure = @(
     '-DANDROID_PLATFORM=android-26',
     "-DANDROID_NDK=$($ndk.Root)",
     '-DCMAKE_BUILD_TYPE=Release',
+    "-DWC3_VARIANT=$Variant",
     "-DWC3_DEBUG=$debugValue",
+    "-DWC3_DEBUG_TAGS=$DebugTags",
     '-DWC3_USE_CCACHE=ON',
     '-DWC3_REQUIRE_CCACHE=ON',
     '-DWC3_BUILD_PLATFORM_TEST=OFF',

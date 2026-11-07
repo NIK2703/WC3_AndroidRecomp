@@ -159,6 +159,9 @@ wc3build.py check  --target headless [--json <report>]
   debug-символов. `--release` применяется к `runtime/`, каталогу apps и
   сгенерированному C по preprocessed output **и бинарнику**; DXVK/third_party —
   по allowlist. `release_hygiene_test` обязателен (G-12 = `missing`).
+  Имена пакетов, атомарный `--variant`, раздельные каталоги вариантов и
+  реестр тегов диагностики — норма `docs/BUILD_VARIANTS.md` (BV, ADR-030);
+  этот документ остаётся владельцем конвейера, BV — владельцем вариантов.
 * **BP-7.5** Продукт обязан иметь понятный отказ: числовые startup error codes
   и тексты в Java-ресурсах (G7, GB-4.7), минимальный числовой boot/crash
   descriptor без строк (D2). Release = `abort` без диагностики не является

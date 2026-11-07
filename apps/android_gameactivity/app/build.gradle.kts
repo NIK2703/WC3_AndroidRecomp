@@ -7,14 +7,23 @@ val hostBuildDir = providers.gradleProperty("wc3GameActivityBuildDir").orNull
 if (hostBuildDir != null) {
     layout.buildDirectory.set(file(hostBuildDir))
 }
-val hostJniLibsDir = providers.gradleProperty("wc3JniLibs").orNull
+// BV-3.2: jniLibs belong to a variant, not to `main`.  The generic property is
+// a transitional fallback for local invocations that still call Gradle without
+// -Variant; build_apk.ps1 always passes the per-variant properties.
+val legacyJniLibsDir = providers.gradleProperty("wc3JniLibs").orNull
+val hostJniLibsRelease = providers.gradleProperty("wc3JniLibsRelease").orNull ?: legacyJniLibsDir
+val hostJniLibsDebug = providers.gradleProperty("wc3JniLibsDebug").orNull ?: legacyJniLibsDir
+// BV-11: release signing is supplied from outside the tree.  When no keystore
+// is configured the build remains a local release-hygiene artifact, explicitly
+// not a distribution artifact.
+val releaseStoreFile = providers.gradleProperty("wc3ReleaseStoreFile").orNull
 
 android {
-    namespace = "com.wc3.recomp"
+    namespace = "wc3.recomp"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.wc3.recomp"
+        applicationId = "wc3.recomp"
         minSdk = 26
         targetSdk = 34
         versionCode = 1
@@ -25,9 +34,17 @@ android {
         buildConfig = false
     }
 
-    if (hostJniLibsDir != null) {
-        sourceSets.getByName("main").jniLibs.srcDir(hostJniLibsDir)
+    if (releaseStoreFile != null) {
+        signingConfigs.create("wc3Release") {
+            storeFile = file(releaseStoreFile)
+            storePassword = providers.gradleProperty("wc3ReleaseStorePassword").orNull ?: ""
+            keyAlias = providers.gradleProperty("wc3ReleaseKeyAlias").orNull ?: ""
+            keyPassword = providers.gradleProperty("wc3ReleaseKeyPassword").orNull ?: ""
+        }
     }
+
+    hostJniLibsRelease?.let { sourceSets.maybeCreate("release").jniLibs.srcDir(it) }
+    hostJniLibsDebug?.let { sourceSets.maybeCreate("debug").jniLibs.srcDir(it) }
 
     packaging {
         jniLibs {
@@ -36,11 +53,19 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            // ADR-030 / BV-2: wc3.recomp.debug, installable next to release.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         getByName("release") {
-            // Local release-hygiene artifact only.  The debug keystore is not a
-            // production signing key; distribution signing is a separate,
-            // explicit step.
-            signingConfig = signingConfigs.getByName("debug")
+            // Without wc3ReleaseStoreFile this stays a local release-hygiene
+            // artifact signed by the AGP debug key; it is not distribution.
+            signingConfig = if (releaseStoreFile != null) {
+                signingConfigs.getByName("wc3Release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
         }
     }
