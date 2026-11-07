@@ -118,6 +118,7 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/kernel32/string"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/time"
     "${WC3_ROOT}/runtime/hle/win32/user32/display"
+    "${WC3_ROOT}/runtime/hle/win32/user32/menu"
     "${WC3_ROOT}/runtime/hle/win32/user32/scroll"
     "${WC3_ROOT}/runtime/hle/win32/user32/window"
     "${WC3_ROOT}/runtime/cpu"
@@ -189,6 +190,7 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/kernel32/string/string_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/time/time_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/display/display_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/user32/menu/menu_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/scroll/scroll_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/window/window_hle.c")
 target_include_directories(wc3_hle_modules PRIVATE
@@ -216,6 +218,7 @@ target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/kernel32/string"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/time"
     "${WC3_ROOT}/runtime/hle/win32/user32/display"
+    "${WC3_ROOT}/runtime/hle/win32/user32/menu"
     "${WC3_ROOT}/runtime/hle/win32/user32/scroll"
     "${WC3_ROOT}/runtime/hle/win32/user32/window"
     "${WC3_ROOT}/runtime/cpu"

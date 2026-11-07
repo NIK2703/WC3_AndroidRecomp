@@ -952,6 +952,44 @@ def test_gdi_dc() -> int:
     return 0
 
 
+def test_user32_menu() -> int:
+    """T0: USER32 menu objects and MENUITEMINFO accessors."""
+    cc = gcc()
+    if not cc:
+        print("user32 menu: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "menu"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "user32" / "menu" / "menu_hle.c"),
+        str(ROOT / "tests" / "user32_menu_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("user32_menu_test_debug.exe", 1),
+                        ("user32_menu_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_scroll_hle() -> int:
     """T0: USER32 scroll-bar state and SCROLLINFO accessors."""
     cc = gcc()
@@ -1682,6 +1720,7 @@ TESTS = {
     "gdi_dc": test_gdi_dc,
     "gdi_objects": test_gdi_objects,
     "scroll_hle": test_scroll_hle,
+    "user32_menu": test_user32_menu,
     "registry_hle": test_registry_hle,
     "msvcr80_heap": test_msvcr80_heap,
     "msvcr80_math": test_msvcr80_math,

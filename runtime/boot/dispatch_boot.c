@@ -26,6 +26,7 @@
 #include "imagelist_hle.h"
 #include "math_hle.h"
 #include "memory_hle.h"
+#include "menu_hle.h"
 #include "process_hle.h"
 #include "rand_hle.h"
 #include "registry_hle.h"
@@ -97,6 +98,7 @@ void wc3_dispatch_init(void)
     WC3_INSTALL_STEP(wc3_hle_gdi32_dc_install());
     WC3_INSTALL_STEP(wc3_hle_gdi32_objects_install());
     WC3_INSTALL_STEP(user32_display_install());
+    WC3_INSTALL_STEP(wc3_hle_user32_menu_install());
     WC3_INSTALL_STEP(wc3_hle_user32_scroll_install());
     WC3_INSTALL_STEP(wc3_hle_user32_window_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_heap_install());
