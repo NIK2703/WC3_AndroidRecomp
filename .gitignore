@@ -37,7 +37,7 @@ __pycache__/
 .mypy_cache/
 
 # --- generated reports (regenerate with the tools) --------------------------
-/reports/generated/
+/reports/
 
 # --- local-only documentation and assistant state --------------------------
 /docs/
