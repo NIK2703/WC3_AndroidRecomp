@@ -81,6 +81,58 @@ static uint32_t g_surface_h;
 static int g_boot_started;
 static pthread_t g_boot_thread;
 
+/*
+ * Touch-control overlay host state.
+ *
+ * The Android input callback only enqueues plain touch records.  A dedicated
+ * input thread owns the Winlator state machine, and a separate render thread
+ * owns the overlay ANativeWindow.  No engine lock or SurfaceView lock is held
+ * while the guest runs, and the guest sees input only through the action
+ * bridge.
+ */
+#define OVERLAY_SNAPSHOTS 3
+
+static struct android_app *g_app;
+static Wc3InputRing g_touch_ring;
+static Wc3InputWake *g_input_wake;
+static Wc3InputAdapter g_input_adapter;
+static pthread_t g_input_thread;
+static pthread_t g_overlay_thread;
+static int g_input_thread_started;
+static int g_overlay_thread_started;
+static _Atomic int g_input_stop;
+static _Atomic int g_overlay_stop;
+static _Atomic int g_input_ready;
+static int g_input_width;
+static int g_input_height;
+
+static Wc3Overlay g_visual[OVERLAY_SNAPSHOTS];
+static _Atomic int g_visual_active;
+static _Atomic int g_visual_reading;
+static _Atomic unsigned g_visual_gen;
+static _Atomic int g_visual_ready;
+
+static pthread_mutex_t g_overlay_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_overlay_cond = PTHREAD_COND_INITIALIZER;
+static ANativeWindow *g_overlay_window;
+static int g_overlay_width;
+static int g_overlay_height;
+
+static int g_haptics_ready;
+
+static void overlay_input_stop(void);
+static void overlay_stop(void);
+
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+#define OVERLAY_LOGI(...) \
+    __android_log_print(ANDROID_LOG_INFO, "wc3overlay", __VA_ARGS__)
+#define OVERLAY_LOGE(...) \
+    __android_log_print(ANDROID_LOG_ERROR, "wc3overlay", __VA_ARGS__)
+#else
+#define OVERLAY_LOGI(...) ((void)0)
+#define OVERLAY_LOGE(...) ((void)0)
+#endif
+
 /* Implemented by the DXVK Win32 shim.  wc3_android_set_window is declared by
  * app_boot.h; the clear call belongs to the same shim and is used when Android
  * destroys the surface. */

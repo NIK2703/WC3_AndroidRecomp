@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
+#include "guest_layout.h"
 #include "legacy_shim.h"
 
 /* GetVersion packs major/minor into the low word and the build into the high
