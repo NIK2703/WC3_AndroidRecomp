@@ -2,12 +2,14 @@
 #define WC3_OVERLAY_ACTIONS_LEGACY_H
 
 /*
- * C bridge from the Winlator touch engine's TouchAction stream to the Win32
- * HLE input surface.
+ * Transitional bridge from the Winlator touch engine's TouchAction stream to
+ * the target-side legacy shim.
  *
  * The engine emits X11 keycodes (the values in profile/bind.c).  This adapter
- * is the only place that translates them into Windows virtual keys.  The HLE
- * owns the Win32 scancode/extended-bit layout and the dispatch-time key state.
+ * is the only place that translates them into Windows virtual keys, and it
+ * reaches the as-built HLE only through runtime/hle/legacy_shim.h.  It will be
+ * replaced by a Wc3Platform InputApi consumer when user32 owns the message
+ * queue; until then the shim keeps the UI layer free of legacy headers.
  */
 
 #include <stdbool.h>

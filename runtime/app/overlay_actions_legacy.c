@@ -1,7 +1,81 @@
-#include "wc3_overlay_actions.h"
+/*
+ * overlay_actions_legacy.c - TouchAction to legacy-shim bridge.
+ *
+ * This is the only UI-side file that translates Winlator X11 keycodes and
+ * pointer buttons into the guest input surface.  It calls runtime/hle through
+ * wc3_legacy_* only, so the overlay module itself remains independent of the
+ * quarantined implementation.
+ */
+#include "overlay_actions_legacy.h"
 
-#include "hle_android.h"
-#include "hle_input_state.h"
+#include "legacy_shim.h"
+
+/* Standard Windows virtual-key values.  The overlay action layer is the only
+ * UI-side owner of this translation; the legacy shim forwards the result to
+ * the as-built HLE without exposing a legacy header here. */
+#define WC3_VK_ADD        0x6B
+#define WC3_VK_BACK       0x08
+#define WC3_VK_CAPITAL    0x14
+#define WC3_VK_DECIMAL    0x6E
+#define WC3_VK_DELETE     0x2E
+#define WC3_VK_DIVIDE     0x6F
+#define WC3_VK_DOWN       0x28
+#define WC3_VK_END        0x23
+#define WC3_VK_ESCAPE     0x1B
+#define WC3_VK_F1         0x70
+#define WC3_VK_F10        0x79
+#define WC3_VK_F11        0x7A
+#define WC3_VK_F12        0x7B
+#define WC3_VK_F2         0x71
+#define WC3_VK_F3         0x72
+#define WC3_VK_F4         0x73
+#define WC3_VK_F5         0x74
+#define WC3_VK_F6         0x75
+#define WC3_VK_F7         0x76
+#define WC3_VK_F8         0x77
+#define WC3_VK_F9         0x78
+#define WC3_VK_HOME       0x24
+#define WC3_VK_INSERT     0x2D
+#define WC3_VK_LCONTROL   0xA2
+#define WC3_VK_LEFT       0x25
+#define WC3_VK_LMENU      0xA4
+#define WC3_VK_LSHIFT     0xA0
+#define WC3_VK_MULTIPLY   0x6A
+#define WC3_VK_NEXT       0x22
+#define WC3_VK_NUMLOCK    0x90
+#define WC3_VK_NUMPAD0    0x60
+#define WC3_VK_NUMPAD1    0x61
+#define WC3_VK_NUMPAD2    0x62
+#define WC3_VK_NUMPAD3    0x63
+#define WC3_VK_NUMPAD4    0x64
+#define WC3_VK_NUMPAD5    0x65
+#define WC3_VK_NUMPAD6    0x66
+#define WC3_VK_NUMPAD7    0x67
+#define WC3_VK_NUMPAD8    0x68
+#define WC3_VK_NUMPAD9    0x69
+#define WC3_VK_OEM_1      0xBA
+#define WC3_VK_OEM_2      0xBF
+#define WC3_VK_OEM_3      0xC0
+#define WC3_VK_OEM_4      0xDB
+#define WC3_VK_OEM_5      0xDC
+#define WC3_VK_OEM_6      0xDD
+#define WC3_VK_OEM_7      0xDE
+#define WC3_VK_OEM_COMMA  0xBC
+#define WC3_VK_OEM_MINUS  0xBD
+#define WC3_VK_OEM_PERIOD 0xBE
+#define WC3_VK_OEM_PLUS   0xBB
+#define WC3_VK_PRIOR      0x21
+#define WC3_VK_RCONTROL   0xA3
+#define WC3_VK_RETURN     0x0D
+#define WC3_VK_RIGHT      0x27
+#define WC3_VK_RMENU      0xA5
+#define WC3_VK_RSHIFT     0xA1
+#define WC3_VK_SNAPSHOT   0x2C
+#define WC3_VK_SPACE      0x20
+#define WC3_VK_SUBTRACT   0x6D
+#define WC3_VK_TAB        0x09
+#define WC3_VK_UP         0x26
+
 
 #define WC3_MOUSE_MOVE_FLAG 0x0001
 

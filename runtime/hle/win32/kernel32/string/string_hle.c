@@ -11,6 +11,11 @@
  * truncation case.  A Windows probe confirmed that n=4 on "abcdef" produces
  * "abc\0", not four unterminated bytes; n=1 produces "\0"; n=0 leaves the
  * buffer untouched.
+ *
+ * lstrcatA finds the destination terminator first, then copies the source
+ * including its terminator.  The as-built table did not define it, so the
+ * resolver left a guessed-arity stub that returned zero without appending
+ * anything.
  */
 #include "string_hle.h"
 
@@ -48,6 +53,44 @@ static void h_lstrcpyn_a(CPU *c)
             i++;
         }
         wc3_legacy_wr8g(dst + i, 0);
+    }
+    c->eax = dst;
+}
+
+static void h_lstrcat_a(CPU *c)
+{
+    const uint32_t dst = wc3_legacy_arg32(c, 0);
+    const uint32_t src = wc3_legacy_arg32(c, 1);
+
+    if (!dst || !src || !wc3_legacy_guest_ok(dst, 1)) {
+        c->eax = dst;
+        return;
+    }
+
+    uint32_t end = dst;
+    while (wc3_legacy_guest_ok(end, 1) && wc3_legacy_rd8g(end)) {
+        if (end == UINT32_MAX) {
+            c->eax = dst;
+            return;
+        }
+        end++;
+    }
+    if (!wc3_legacy_guest_ok(end, 1)) {
+        c->eax = dst;
+        return;
+    }
+
+    uint32_t i = 0;
+    while (src <= UINT32_MAX - i && end <= UINT32_MAX - i) {
+        if (!wc3_legacy_guest_ok(src + i, 1)) {
+            wc3_legacy_wr8g(end + i, 0);
+            break;
+        }
+        const uint8_t ch = wc3_legacy_rd8g(src + i);
+        if (!wc3_legacy_guest_ok(end + i, 1)) break;
+        wc3_legacy_wr8g(end + i, ch);
+        if (!ch) break;
+        i++;
     }
     c->eax = dst;
 }
