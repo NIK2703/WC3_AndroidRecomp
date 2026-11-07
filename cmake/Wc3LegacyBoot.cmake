@@ -96,6 +96,7 @@ add_dependencies(wc3_boot wc3_boot_dispatch_gen)
 target_include_directories(wc3_boot PRIVATE
     "${WC3_BOOT_GEN_DIR}"
     "${WC3_ROOT}/runtime/hle"
+    "${WC3_ROOT}/runtime/hle/msvcr80/convert"
     "${WC3_ROOT}/runtime/hle/msvcr80/heap"
     "${WC3_ROOT}/runtime/hle/msvcr80/math"
     "${WC3_ROOT}/runtime/hle/msvcr80/rand"
@@ -153,6 +154,7 @@ set_target_properties(wc3_legacy_shim PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # services only through Wc3Platform, and registration over the as-built table
 # through the shim.  The quarantine file itself is never edited.
 add_library(wc3_hle_modules STATIC
+    "${WC3_ROOT}/runtime/hle/msvcr80/convert/convert_hle.c"
     "${WC3_ROOT}/runtime/hle/msvcr80/heap/heap_hle.c"
     "${WC3_ROOT}/runtime/hle/msvcr80/math/math_hle.c"
     "${WC3_ROOT}/runtime/hle/msvcr80/rand/rand_hle.c"
@@ -167,6 +169,7 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/user32/window/window_hle.c")
 target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle"
+    "${WC3_ROOT}/runtime/hle/msvcr80/convert"
     "${WC3_ROOT}/runtime/hle/msvcr80/heap"
     "${WC3_ROOT}/runtime/hle/msvcr80/math"
     "${WC3_ROOT}/runtime/hle/msvcr80/rand"

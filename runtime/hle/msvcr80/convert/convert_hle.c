@@ -1,0 +1,219 @@
+/*
+ * convert_hle.c - target-side MSVCR80 numeric conversion and multibyte ctype.
+ *
+ * The as-built strtol/strtoul called the host conversion routines.  On the
+ * arm64 host `long` is 64 bits, so a value above LONG_MAX no longer saturated
+ * the way the 32-bit MSVC CRT does: it was truncated by the uint32_t cast
+ * instead.  The as-built atof was a stub returning zero, and _ismbcspace was
+ * an unconditional zero.  This module replaces those five rows with explicit
+ * 32-bit parsing and the CP1251 classification the guest actually runs under.
+ *
+ * The guest uses CP1251 (GetACP returns 1251), which is a single-byte code
+ * page.  _ismbblead therefore reports zero for every byte; a nonzero answer
+ * would make the CRT treat the following byte as a trail byte and split text
+ * at the wrong place.  _ismbcspace is the ASCII whitespace set.
+ *
+ * C's strtol/strtoul also set errno on overflow.  The as-built handlers never
+ * mapped errno into guest memory, and there is no target seam for the guest
+ * CRT's errno, so this slice preserves the value-only behaviour rather than
+ * inventing a guest errno write.
+ */
+#include "convert_hle.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+
+#include "cpu.h"
+#include "legacy_shim.h"
+
+#define ATOF_BUFFER 1024u
+
+typedef struct ParsedInteger {
+    uint32_t end;       /* first byte that was not part of the number */
+    uint32_t magnitude; /* low 32 bits, valid when overflow is clear */
+    int negative;
+    int overflow;
+    int digits;
+} ParsedInteger;
+
+static int byte_at(uint32_t base, uint32_t offset, uint8_t *out)
+{
+    if (!base || base > UINT32_MAX - offset) return 0;
+    if (!wc3_legacy_guest_ok(base + offset, 1)) return 0;
+    *out = wc3_legacy_rd8g(base + offset);
+    return 1;
+}
+
+static int ascii_space(uint8_t ch)
+{
+    return ch == 0x20u || (ch >= 0x09u && ch <= 0x0Du);
+}
+
+static int digit_value(uint8_t ch)
+{
+    if (ch >= '0' && ch <= '9') return (int)(ch - '0');
+    if (ch >= 'a' && ch <= 'z') return (int)(ch - 'a') + 10;
+    if (ch >= 'A' && ch <= 'Z') return (int)(ch - 'A') + 10;
+    return -1;
+}
+
+/* strtol/strtoul share the subject-sequence rules.  `base` is the signed
+ * third argument; 0 selects base 8/10/16 from the prefix, 2..36 is explicit,
+ * and anything else is an invalid argument with no conversion. */
+static ParsedInteger parse_integer(uint32_t text, int base)
+{
+    ParsedInteger r = { text, 0u, 0, 0, 0 };
+    uint32_t offset = 0;
+    uint8_t ch;
+
+    while (byte_at(text, offset, &ch) && ascii_space(ch)) offset++;
+
+    if (byte_at(text, offset, &ch) && (ch == '+' || ch == '-')) {
+        r.negative = ch == '-';
+        offset++;
+    }
+
+    int radix = base;
+    if (radix < 0 || radix == 1 || radix > 36) {
+        r.end = text;
+        return r;
+    }
+
+    if (radix == 0 || radix == 16) {
+        uint8_t zero, marker, digit;
+        if (byte_at(text, offset, &zero) && zero == '0' &&
+            byte_at(text, offset + 1u, &marker) &&
+            (marker == 'x' || marker == 'X') &&
+            byte_at(text, offset + 2u, &digit) &&
+            digit_value(digit) >= 0 && digit_value(digit) < 16) {
+            radix = 16;
+            offset += 2u;
+        } else if (radix == 0) {
+            radix = (byte_at(text, offset, &zero) && zero == '0') ? 8 : 10;
+        }
+    }
+
+    uint64_t value = 0;
+    for (;;) {
+        if (!byte_at(text, offset, &ch)) break;
+        const int digit = digit_value(ch);
+        if (digit < 0 || digit >= radix) break;
+        if (!r.overflow) {
+            if (value > (0xFFFFFFFFull - (uint64_t)digit) / (uint64_t)radix)
+                r.overflow = 1;
+            else
+                value = value * (uint64_t)radix + (uint64_t)digit;
+        }
+        r.digits = 1;
+        offset++;
+    }
+
+    if (!r.digits) {
+        /* No conversion: strtol points endptr at the original string, not at
+         * the whitespace or sign it skipped. */
+        r.end = text;
+        return r;
+    }
+
+    r.end = text + offset;
+    r.magnitude = (uint32_t)value;
+    return r;
+}
+
+static void h_atof(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    char buffer[ATOF_BUFFER];
+    uint32_t length = 0;
+
+    while (length + 1u < ATOF_BUFFER) {
+        uint8_t ch;
+        if (!byte_at(text, length, &ch)) break;
+        buffer[length++] = (char)ch;
+        if (!ch) break;
+    }
+    buffer[length] = 0;
+
+    /* Host strtod has the same decimal grammar in the C locale and performs
+     * correct rounding.  The legacy handler returned zero for every input. */
+    const double value = strtod(buffer, NULL);
+    fpush(c, x87_from_f64(value));
+}
+
+static void h_strtol(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t endptr = wc3_legacy_arg32(c, 1);
+    const ParsedInteger r = parse_integer(text, (int)wc3_legacy_arg32(c, 2));
+
+    if (endptr && wc3_legacy_guest_ok(endptr, 4))
+        wc3_legacy_wr32g(endptr, r.end);
+
+    if (!r.digits) {
+        c->eax = 0;
+        return;
+    }
+
+    const uint32_t limit = r.negative ? 0x80000000u : 0x7FFFFFFFu;
+    if (r.overflow || r.magnitude > limit) {
+        c->eax = r.negative ? 0x80000000u : 0x7FFFFFFFu;
+        return;
+    }
+    c->eax = r.negative ? (uint32_t)(-(int64_t)r.magnitude) : r.magnitude;
+}
+
+static void h_strtoul(CPU *c)
+{
+    const uint32_t text = wc3_legacy_arg32(c, 0);
+    const uint32_t endptr = wc3_legacy_arg32(c, 1);
+    const ParsedInteger r = parse_integer(text, (int)wc3_legacy_arg32(c, 2));
+
+    if (endptr && wc3_legacy_guest_ok(endptr, 4))
+        wc3_legacy_wr32g(endptr, r.end);
+
+    if (!r.digits) {
+        c->eax = 0;
+        return;
+    }
+    if (r.overflow) {
+        c->eax = 0xFFFFFFFFu;
+        return;
+    }
+    c->eax = r.negative ? (uint32_t)(0u - r.magnitude) : r.magnitude;
+}
+
+static void h_ismbblead(CPU *c)
+{
+    /* CP1251 is SBCS; every byte stands alone. */
+    (void)c;
+    c->eax = 0;
+}
+
+static void h_ismbcspace(CPU *c)
+{
+    const uint8_t ch = (uint8_t)wc3_legacy_arg32(c, 0);
+    c->eax = ascii_space(ch) ? 1u : 0u;
+}
+
+typedef struct ConvertOverride {
+    const char *name;
+    void (*impl)(CPU *c);
+} ConvertOverride;
+
+static const ConvertOverride g_overrides[] = {
+    { "atof", h_atof },
+    { "strtol", h_strtol },
+    { "strtoul", h_strtoul },
+    { "_ismbblead", h_ismbblead },
+    { "_ismbcspace", h_ismbcspace },
+};
+
+int msvcr80_convert_install(void)
+{
+    for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
+        if (wc3_legacy_hle_override("MSVCR80.dll", g_overrides[i].name,
+                                    g_overrides[i].impl) != 0)
+            return -1;
+    }
+    return (int)(sizeof g_overrides / sizeof g_overrides[0]);
+}

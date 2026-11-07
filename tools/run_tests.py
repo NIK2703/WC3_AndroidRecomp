@@ -958,6 +958,51 @@ def test_msvcr80_math() -> int:
     return 0
 
 
+def test_msvcr80_convert() -> int:
+    """T0: MSVCR80 numeric conversion and CP1251 predicates."""
+    cc = gcc()
+    if not cc:
+        print("msvcr80 convert: unavailable (no host C compiler)")
+        return 2
+    archive = ROOT / "third_party" / "softfloat" / "build-host" / "softfloat.a"
+    if not archive.is_file():
+        print("msvcr80 convert: unavailable (host SoftFloat archive missing)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "convert"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    sources = [
+        ROOT / "runtime" / "hle" / "msvcr80" / "convert" / "convert_hle.c",
+        ROOT / "tests" / "msvcr80_convert_test.c",
+    ]
+    flags = [cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", *include]
+    for name, debug in (("msvcr80_convert_test_debug.exe", 1),
+                        ("msvcr80_convert_test_release.exe", 0)):
+        objdir = BUILD / f"{name}.objects"
+        objdir.mkdir(parents=True, exist_ok=True)
+        objects: list[str] = []
+        for source in sources:
+            obj = objdir / f"{source.stem}.o"
+            rc = run([*flags, f"-DWC3_DEBUG={debug}", "-c",
+                      str(source), "-o", str(obj)])
+            if rc != 0:
+                return rc
+            objects.append(str(obj))
+        exe = BUILD / name
+        rc = run([cc, *objects, str(archive), "-lm", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_msvcr80_time() -> int:
     """T0: MSVCR80 _time64/_ctime64 over fake platform and shim."""
     cc = gcc()
@@ -1146,6 +1191,7 @@ TESTS = {
     "hle_string": test_hle_string,
     "msvcr80_heap": test_msvcr80_heap,
     "msvcr80_math": test_msvcr80_math,
+    "msvcr80_convert": test_msvcr80_convert,
     "msvcr80_time": test_msvcr80_time,
     "msvcr80_string": test_msvcr80_string,
     "msvcr80_rand": test_msvcr80_rand,
