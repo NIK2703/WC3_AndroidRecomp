@@ -37,6 +37,7 @@ NORMATIVE = (
     ROOT / "docs" / "BUILD_VARIANTS.md",
     ROOT / "docs" / "THREAD_AUDIT.md",
     ROOT / "docs" / "DXVK_THREADS.md",
+    ROOT / "docs" / "AUDIO_ARCHITECTURE.md",
 )
 POLICY_TERMS = ("native_vk", "hle_gl", "hle_d3d9_vk", "D9VkApi", "win32_d3d9")
 ALLOW_CONTEXT = (

@@ -989,6 +989,7 @@ typedef struct {
     uint32_t file_map_size;
     uint32_t iocp_port;      /* CreateIoCompletionPort association */
     uint32_t iocp_key;
+    int      save_trace;     /* opened under Save/ or a .w3z/.w3v path */
 } GHandle;
 
 static GHandle g_handles[GH_MAX];
@@ -1396,6 +1397,21 @@ static int ci_resolve(const char *path, char *out, size_t cap)
     return rc;
 }
 
+/* Save files live under .../Save or carry the .w3z/.w3v suffix.  They are
+ * always logged: the normal open/read trace has a fixed budget that is long
+ * exhausted by the time a player saves, which is exactly the interval this
+ * probe has to cover. */
+static int save_path(const char *p)
+{
+    if (!p) return 0;
+    if (strstr(p, "/Save/") || strstr(p, "\\Save\\")) return 1;
+    size_t n = strlen(p);
+    if (n >= 4 && (strcasecmp(p + n - 4, ".w3z") == 0 ||
+                   strcasecmp(p + n - 4, ".w3v") == 0))
+        return 1;
+    return 0;
+}
+
 static void h_create_file(CPU *c)
 {
     const char *name = gstr(arg32(c, 0));
@@ -1403,6 +1419,7 @@ static void h_create_file(CPU *c)
     char host[512], real[512];
     win_path(name, host, sizeof host);
     ci_resolve(host, real, sizeof real);
+    int is_save = save_path(real);
     int oflags = 0;
     int rd = (access & 0x80000000u) != 0, wr = (access & 0x40000000u) != 0;
     switch (disp) {
@@ -1416,6 +1433,12 @@ static void h_create_file(CPU *c)
     int fd = open(real, oflags, 0666);
     if (fd < 0) {
         g_last_error = (errno == ENOENT) ? 2u : (errno == EACCES ? 5u : 3u);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+        if (is_save)
+            fprintf(stderr, "[save] create failed \"%s\" access=%08X disp=%u "
+                            "flags=%08X errno=%d\n",
+                    real, access, disp, flags, errno);
+#endif
 #ifdef WC3_DEBUG
         if (g_trace) fprintf(stderr, "[file] open failed %s (%s) errno=%d\n", name, real, errno);
 #endif
@@ -1426,7 +1449,13 @@ static void h_create_file(CPU *c)
     GHandle *g = gh_get(h);
     if (!g) { close(fd); c->eax = GH_INVALID; return; }
     g->fd = fd;
+    g->save_trace = is_save;
     g_last_error = 0;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (is_save)
+        fprintf(stderr, "[save] create \"%s\" access=%08X disp=%u flags=%08X "
+                        "-> h=%08X fd=%d\n", real, access, disp, flags, h, fd);
+#endif
     /* The archive open path is the one place where "found" and "opened" differ,
      * so name the handle as well as the file.  Every other open is logged too
      * (bounded), because "was the file ever opened at all" is the question a
@@ -1467,6 +1496,10 @@ static void h_close_handle(CPU *c)
     }
     GHandle *g = gh_get(h);
     if (!g) { c->eax = 0; return; }
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (g->save_trace)
+        fprintf(stderr, "[save] close h=%08X fd=%d\n", h, g->fd);
+#endif
     if (g->fd >= 0) close(g->fd);
     if (g->dir) closedir(g->dir);
     if (g->kind == 4) file_view_release(g);
@@ -1487,6 +1520,12 @@ static void h_read_file(CPU *c)
     if (got && guest_ok(got, 4)) wr32g(got, 0);
     if (!g || g->fd < 0 || !guest_ok(buf, n)) { g_last_error = 6; c->eax = 0; return; }
     ssize_t r = read(g->fd, (void *)(uintptr_t)buf, n);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    static unsigned save_reads;
+    if (g->save_trace && save_reads++ < 400)
+        fprintf(stderr, "[save] read h=%08X n=%u -> %d errno=%d\n",
+                h, n, (int)r, r < 0 ? errno : 0);
+#endif
     if (r < 0) { g_last_error = 3; c->eax = 0; return; }
     if (got && guest_ok(got, 4)) wr32g(got, (uint32_t)r);
 #ifdef WC3_DEBUG
@@ -1507,6 +1546,12 @@ static void h_write_file(CPU *c)
     if (put && guest_ok(put, 4)) wr32g(put, 0);
     if (!g || g->fd < 0 || !guest_ok(buf, n)) { c->eax = 0; return; }
     ssize_t r = write(g->fd, (void *)(uintptr_t)buf, n);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    static unsigned save_writes;
+    if (g->save_trace && save_writes++ < 400)
+        fprintf(stderr, "[save] write h=%08X n=%u -> %d errno=%d\n",
+                h, n, (int)r, r < 0 ? errno : 0);
+#endif
     if (r < 0) { c->eax = 0; return; }
     if (put && guest_ok(put, 4)) wr32g(put, (uint32_t)r);
     if (ov) iocp_complete_file(h, (uint32_t)r, ov);
@@ -1516,7 +1561,13 @@ static void h_write_file(CPU *c)
 static void h_flush_file_buffers(CPU *c)
 {
     GHandle *g = gh_get(arg32(c, 0));
-    if (g && g->fd >= 0) fsync(g->fd);
+    int rc = 0;
+    if (g && g->fd >= 0) rc = fsync(g->fd);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (g && g->save_trace)
+        fprintf(stderr, "[save] flush h=%08X fd=%d -> %d errno=%d\n",
+                arg32(c, 0), g->fd, rc, rc < 0 ? errno : 0);
+#endif
     c->eax = 1;
 }
 
@@ -1529,6 +1580,11 @@ static void h_set_file_pointer(CPU *c)
     uint32_t hin = (hi && guest_ok(hi, 4)) ? rd32g(hi) : 0;
     off_t off = (off_t)(int32_t)lo;
     off_t r = lseek(g->fd, off, whence);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (g->save_trace)
+        fprintf(stderr, "[save] seek h=%08X lo=%d hi=%08X method=%u -> %d errno=%d\n",
+                h, (int)(int32_t)lo, hin, method, (int)r, r < 0 ? errno : 0);
+#endif
     if (r < 0) { c->eax = GH_INVALID; return; }
     if (hi && guest_ok(hi, 4)) wr32g(hi, (uint32_t)((uint64_t)r >> 32));
 #ifdef WC3_DEBUG
@@ -1545,6 +1601,10 @@ static void h_get_file_size(CPU *c)
     if (!g || g->fd < 0) { c->eax = GH_INVALID; return; }
     struct stat st;
     if (fstat(g->fd, &st) != 0) { c->eax = GH_INVALID; return; }
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (g->save_trace)
+        fprintf(stderr, "[save] size h=%08X -> %lld\n", h, (long long)st.st_size);
+#endif
     if (hi && guest_ok(hi, 4)) wr32g(hi, (uint32_t)((uint64_t)st.st_size >> 32));
     c->eax = (uint32_t)st.st_size;
 }
@@ -1570,7 +1630,13 @@ static void h_set_end_of_file(CPU *c)
     GHandle *g = gh_get(arg32(c, 0));
     if (!g || g->fd < 0) { c->eax = 0; return; }
     off_t cur = lseek(g->fd, 0, SEEK_CUR);
-    c->eax = ftruncate(g->fd, cur) == 0 ? 1u : 0u;
+    int rc = ftruncate(g->fd, cur);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (g->save_trace)
+        fprintf(stderr, "[save] truncate h=%08X at=%lld -> %d errno=%d\n",
+                arg32(c, 0), (long long)cur, rc, rc < 0 ? errno : 0);
+#endif
+    c->eax = rc == 0 ? 1u : 0u;
 }
 
 static void h_get_file_attributes(CPU *c)
@@ -1611,7 +1677,13 @@ static void h_delete_file(CPU *c)
 {
     char host[512];
     win_path(gstr(arg32(c, 0)), host, sizeof host);
-    c->eax = unlink(host) == 0 ? 1u : 0u;
+    int rc = unlink(host);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (save_path(host))
+        fprintf(stderr, "[save] delete \"%s\" -> %d errno=%d\n",
+                host, rc, rc < 0 ? errno : 0);
+#endif
+    c->eax = rc == 0 ? 1u : 0u;
 }
 
 static void h_move_file(CPU *c)
@@ -1619,7 +1691,13 @@ static void h_move_file(CPU *c)
     char a[512], b[512];
     win_path(gstr(arg32(c, 0)), a, sizeof a);
     win_path(gstr(arg32(c, 1)), b, sizeof b);
-    c->eax = rename(a, b) == 0 ? 1u : 0u;
+    int rc = rename(a, b);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (save_path(a) || save_path(b))
+        fprintf(stderr, "[save] move \"%s\" -> \"%s\" = %d errno=%d\n",
+                a, b, rc, rc < 0 ? errno : 0);
+#endif
+    c->eax = rc == 0 ? 1u : 0u;
 }
 
 static void h_copy_file(CPU *c)
@@ -5302,9 +5380,24 @@ static int iocp_push(Iocp *p, uint32_t bytes, uint32_t key, uint32_t ov)
 static void iocp_complete_file(uint32_t file, uint32_t bytes, uint32_t ov)
 {
     GHandle *g = gh_get(file);
-    if (!g || !g->iocp_port) return;
+    if (!g || !g->iocp_port) {
+#if WC3_DEBUG && WC3_DEBUG_HLE
+        static unsigned no_port;
+        if (g && g->save_trace && no_port++ < 32)
+            fprintf(stderr, "[save] iocp complete file=%08X bytes=%u ov=%08X "
+                            "-> no port\n", file, bytes, ov);
+#endif
+        return;
+    }
     Iocp *p = iocp_get(g->iocp_port);
     if (!p) return;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    static unsigned push_trace;
+    if (push_trace++ < 128)
+        fprintf(stderr, "[iocp] push port=%08X key=%08X bytes=%u ov=%08X "
+                        "save=%d\n", g->iocp_port, g->iocp_key, bytes, ov,
+                g->save_trace);
+#endif
     iocp_push(p, bytes, g->iocp_key, ov);
     iocp_put(p);
 }
@@ -5478,6 +5571,14 @@ static void h_get_queued(CPU *c)
     p->n--;
     pthread_mutex_unlock(&p->m);
     iocp_put(p);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    {
+        static unsigned gets;
+        if (gets++ < 256)
+            fprintf(stderr, "[iocp] get ok port=%08X key=%08X bytes=%u ov=%08X "
+                            "ms=%u\n", h, it.key, it.bytes, it.ov, ms);
+    }
+#endif
 
     if (pb && guest_ok(pb, 4)) wr32g(pb, it.bytes);
     if (pk && guest_ok(pk, 4)) wr32g(pk, it.key);
@@ -6266,6 +6367,7 @@ typedef struct GThread {
     uint32_t     exit_code;
     uint32_t     tls[64];
 #if WC3_DEBUG && WC3_DEBUG_HLE
+    CPU             *cpu;
     volatile uint32_t last_target, last_eip, last_esp, last_ebp;
     volatile uint32_t dispatch_count;
     volatile uint32_t wait_ra, wait_h0, wait_h1;
@@ -6308,18 +6410,29 @@ static void teb_init_local(CPU *c, uint32_t teb, uint32_t stack_base,
 }
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
+/* Live CPU pointer, published for the watchdog only.  The pointed-to CPU is
+ * owned by the thread running it; the watchdog may read its transient eip to
+ * catch a guest loop that never reaches another dispatch. */
+static CPU *g_main_cpu;
+
 /* Called by the active boot dispatcher for every guest target.  Keep this
  * separate from wc3_dispatch_watch(), whose old-tree probes are far too heavy
  * to run on every dispatch. */
 void wc3_watch_dispatch(CPU *c, uint32_t target)
 {
     if (g_self_thread) {
+        g_self_thread->cpu = c;
+        /* A new dispatch means the thread left whatever HLE wait it was in;
+         * the next wait will set this again. */
+        g_self_thread->wait_active = 0;
         g_self_thread->last_target = target;
         g_self_thread->last_eip = c->eip;
         g_self_thread->last_esp = c->esp;
         g_self_thread->last_ebp = c->ebp;
         g_self_thread->dispatch_count++;
     } else {
+        g_main_cpu = c;
+        g_main_wait_active = 0;
         g_main_last_target = target;
         g_main_last_eip = c->eip;
         g_main_last_esp = c->esp;
@@ -6397,25 +6510,43 @@ static int hang_watch_enabled(void)
     return access(trigger, F_OK) == 0;
 }
 
+static uint32_t cpu_live_eip(CPU *c)
+{
+    return c ? __atomic_load_n(&c->eip, __ATOMIC_RELAXED) : 0;
+}
+
 static void *hang_watch_proc(void *arg)
 {
     (void)arg;
-    for (int i = 0; i < 90; i++) {
+    /* 30 minutes at 2 s.  The previous 3-minute window expired before the
+     * player reached the save dialog, leaving the hang with no state at all. */
+    uint32_t prev_main_n = 0;
+    int stalled = 0;
+    for (int i = 0; i < 900; i++) {
         usleep(2000000);
-        fprintf(stderr, "[watch] t=%u main last=%08X eip=%08X esp=%08X "
-                        "ebp=%08X n=%u wait=%d ra=%08X h0=%08X h1=%08X\n",
-                wave_now_ms(), g_main_last_target, g_main_last_eip,
-                g_main_last_esp, g_main_last_ebp, g_main_dispatch_count,
+        CPU *mc = __atomic_load_n(&g_main_cpu, __ATOMIC_RELAXED);
+        uint32_t mn = __atomic_load_n(&g_main_dispatch_count, __ATOMIC_RELAXED);
+        if (mn == prev_main_n) stalled++; else { stalled = 0; prev_main_n = mn; }
+        if (stalled == 5 && !g_main_wait_active)
+            fprintf(stderr, "[watch] STALL t=%u n=%u pc=%08X last=%08X "
+                            "esp=%08X ebp=%08X\n",
+                    wave_now_ms(), mn, cpu_live_eip(mc), g_main_last_target,
+                    g_main_last_esp, g_main_last_ebp);
+        fprintf(stderr, "[watch] t=%u main last=%08X pc=%08X eip=%08X esp=%08X "
+                        "ebp=%08X n=%u wait=%d ra=%08X h0=%08X h1=%08X stall=%d\n",
+                wave_now_ms(), g_main_last_target, cpu_live_eip(mc),
+                g_main_last_eip, g_main_last_esp, g_main_last_ebp, mn,
                 g_main_wait_active, g_main_wait_ra, g_main_wait_h0,
-                g_main_wait_h1);
+                g_main_wait_h1, stalled);
         for (int j = 0; j < GUEST_THREAD_MAX; j++) {
             GThread *t = &g_threads[j];
             if (!t->used) continue;
-            fprintf(stderr, "[watch] gid=%u run=%d last=%08X eip=%08X "
+            CPU *tc = __atomic_load_n(&t->cpu, __ATOMIC_RELAXED);
+            fprintf(stderr, "[watch] gid=%u run=%d last=%08X pc=%08X eip=%08X "
                             "esp=%08X ebp=%08X n=%u wait=%d ra=%08X "
                             "h0=%08X h1=%08X\n",
-                    t->guest_id, t->running, t->last_target, t->last_eip,
-                    t->last_esp, t->last_ebp, t->dispatch_count,
+                    t->guest_id, t->running, t->last_target, cpu_live_eip(tc),
+                    t->last_eip, t->last_esp, t->last_ebp, t->dispatch_count,
                     t->wait_active, t->wait_ra, t->wait_h0, t->wait_h1);
         }
     }
@@ -6446,6 +6577,9 @@ static void *guest_thread_proc(void *p)
     cpu_x87_init(&c);
     c.esp = t->stack_base + t->stack_size - 0x100;
     teb_init_local(&c, t->teb, t->stack_base, t->stack_size, t->guest_id);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    t->cpu = &c;
+#endif
 
     /* `call start(arg)`: the argument goes first, then the return address. */
     push32(&c, t->arg);
@@ -6453,6 +6587,9 @@ static void *guest_thread_proc(void *p)
     dispatch(&c, t->start);
     t->exit_code = c.eax;
     t->running = 0;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    t->cpu = NULL;
+#endif
     g_self_thread = NULL;
     return NULL;
 }
@@ -7427,6 +7564,102 @@ static uint32_t u_call_guest(CPU *c, uint32_t fn, int argc, const uint32_t *args
     return r;
 }
 
+/* The game writes its preference store only when the options dialog is
+ * applied or when it exits through its own quit path.  Android can pause or
+ * finish the activity without either path, so the host asks for one save at
+ * the next message-pump boundary.  The guest is already inside this thread
+ * when the request is serviced; u_call_guest keeps the nested call from
+ * corrupting the outer import's stack. */
+static volatile int g_settings_save_requested;
+static uint32_t g_last_settings_save_ms;
+static int g_settings_save_clock_started;
+
+/* Defined in the registry HLE module.  The save writes all 79 preference
+ * values, so bracket it and let the registry rewrite the file once. */
+void wc3_hle_registry_begin_batch(void);
+void wc3_hle_registry_end_batch(void);
+
+void wc3_android_request_settings_save(void)
+{
+    g_settings_save_requested = 1;
+}
+
+#define SETTINGS_AUTOSAVE_MS 5000u
+
+static void service_settings_save(CPU *c)
+{
+    /* The activity can be paused before the guest has loaded its preference
+     * store.  Saving then would write a fresh default map over the player's
+     * file.  The game loads the store before it registers its window class,
+     * so g_wndproc is a safe "preferences are live" boundary. */
+    if (!g_wndproc) return;
+
+    const uint32_t now = wave_now_ms();
+    if (!g_settings_save_requested) {
+        if (!g_settings_save_clock_started) {
+            g_settings_save_clock_started = 1;
+            g_last_settings_save_ms = now;
+            return;
+        }
+        if ((uint32_t)(now - g_last_settings_save_ms) <
+            SETTINGS_AUTOSAVE_MS)
+            return;
+        g_settings_save_requested = 1;
+    }
+
+    /* game.dll 1.27, image base 0x6f000000.  CPreferencesWar3::Get() returns
+     * the in-memory preference map; CPreferencesWar3::Save(0x50) walks every
+     * known value and writes it through Storm/ADVAPI32.  Keep the addresses
+     * here rather than in the host: this is the same pinned game image the
+     * rest of the legacy path already targets. */
+    const uint32_t saved_ecx = c->ecx;
+    const uint32_t saved_edx = c->edx;
+    const uint32_t prefs = u_call_guest(c, 0x6f040ed0u, 0, NULL);
+    if (prefs) {
+#ifdef WC3_DEBUG
+        /* Debug-only: apply an index/value pair supplied through a small text
+         * file in the active data directory.  This lets a test drive one
+         * preference through the game's own setter and then the normal save
+         * path without relying on adb input injection. */
+        const char *data_dir = getenv("WC3_DATA_DIR");
+        if (data_dir && *data_dir) {
+            char test_path[512];
+            const int test_n = snprintf(test_path, sizeof test_path,
+                                        "%s/test_pref.txt", data_dir);
+            if (test_n > 0 && (size_t)test_n < sizeof test_path) {
+                FILE *test_file = fopen(test_path, "r");
+                if (test_file) {
+                    unsigned test_index = 0u, test_value = 0u;
+                    const int parsed = fscanf(test_file, "%u %u",
+                                              &test_index, &test_value);
+                    fclose(test_file);
+                    remove(test_path);
+                    if (parsed == 2 && test_index < 0x50u) {
+                        uint32_t args[2] = { test_index, test_value };
+                        c->ecx = prefs;
+                        (void)u_call_guest(c, 0x6f042b40u, 2, args);
+                        fprintf(stderr, "[settings] test set pref %u=%u\n",
+                                test_index, test_value);
+                    }
+                }
+            }
+        }
+#endif
+        uint32_t all = 0x50u;
+        c->ecx = prefs;
+        wc3_hle_registry_begin_batch();
+        (void)u_call_guest(c, 0x6f042620u, 1, &all);
+        wc3_hle_registry_end_batch();
+        g_settings_save_requested = 0;
+        g_last_settings_save_ms = wave_now_ms();
+#ifdef WC3_DEBUG
+        fprintf(stderr, "[settings] saved in-memory preferences via game.dll\n");
+#endif
+    }
+    c->ecx = saved_ecx;
+    c->edx = saved_edx;
+}
+
 static void keyboard_service(void);
 
 static void u_get_message(CPU *c)
@@ -7435,6 +7668,7 @@ static void u_get_message(CPU *c)
     uint32_t hwnd = arg32(c, 1), lo = arg32(c, 2), hi = arg32(c, 3);
     if (!out) { c->eax = 0xFFFFFFFFu; return; }
 
+    service_settings_save(c);
     /* Windows dispatches WM_TIMER from the message pump.  Service this
      * thread's due timers here, before waveout_service(), so the 50 ms Miles
      * mixer timer does not depend on the global completion-service lock or on
@@ -7475,6 +7709,7 @@ static void u_peek_message(CPU *c)
     uint32_t out = arg32(c, 0);
     uint32_t hwnd = arg32(c, 1), lo = arg32(c, 2), hi = arg32(c, 3);
     int remove = (arg32(c, 4) & 1) != 0;             /* PM_REMOVE */
+    service_settings_save(c);
     timer_service(c);
     waveout_service(c);
     keyboard_service();

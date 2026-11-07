@@ -1,0 +1,7 @@
+# Explicit address-taken seeds for Mp3dec.asi (1.27.1.7085).
+#
+# 0x3531C3D4 in .data holds 0x3530A4C5, the CRT initializer reached from
+# DllMain.  It is an aligned function start with no executable reference, so
+# entry.exe and thunkseeds.exe both miss it.  Without this seed the ASI aborts
+# during load with an unknown dispatcher target.
+0x3530A4C5  Mp3dec CRT initializer called through .data pointer

@@ -1078,6 +1078,7 @@ def test_window_facts() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "window_facts"),
+        "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [

@@ -158,10 +158,13 @@ static int json_string(const char *t, const char *key, char *out, size_t cap)
     const char *p;
     size_t n = 0;
     if (!t) return -1;
-    snprintf(pat, sizeof pat, "\"%s\": \"", key);
+    snprintf(pat, sizeof pat, "\"%s\":", key);
     p = strstr(t, pat);
     if (!p) return -1;
     p += strlen(pat);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != '"') return -1;
+    p++;
     while (*p && *p != '"' && n + 1 < cap) {
         if (p[0] == '\\' && p[1] == '\\') { out[n++] = '\\'; p += 2; continue; }
         out[n++] = *p++;
@@ -614,6 +617,8 @@ int main(int argc, char **argv)
         Module *m = &o.mod[i];
         char image[DIR_MAX_PATH];
         char refs[CMD_CAP] = "";
+        char extra[DIR_MAX_PATH] = "";
+        char extra_path[DIR_MAX_PATH];
         int j;
         join_path(image, sizeof image, "%s/%s", o.root, m->path);
         join_path(outdir, sizeof outdir, "%s/%s", o.out_root, m->name);
@@ -639,23 +644,32 @@ int main(int argc, char **argv)
             continue;
         }
         if (!o.merge_only) {
+            FILE *ef;
+            join_path(extra_path, sizeof extra_path,
+                      "%s/config/extra_seeds/%s.txt", o.root, m->name);
+            ef = fopen(extra_path, "rb");
+            if (ef) {
+                fclose(ef);
+                snprintf(extra, sizeof extra, " --extra-seeds \"%s\"",
+                         extra_path);
+            }
             join_path(log, sizeof log, "%s/pipeline.log", outdir);
             if (o.max_functions > 0)
                 snprintf(cmd, sizeof cmd,
                          "\"%s/closure_pipeline.exe\" --image \"%s\" "
                          "--skip-identity-check --out-dir \"%s\" "
                          "--work-dir \"%s\" --report \"%s\" --root \"%s\" "
-                         "--tools \"%s\"%s --max-functions %ld",
+                         "--tools \"%s\"%s%s --max-functions %ld",
                          o.tools, image, outdir, workdir, m->report, o.root,
-                         o.tools, refs, o.max_functions);
+                         o.tools, refs, extra, o.max_functions);
             else
                 snprintf(cmd, sizeof cmd,
                          "\"%s/closure_pipeline.exe\" --image \"%s\" "
                          "--skip-identity-check --out-dir \"%s\" "
                          "--work-dir \"%s\" --report \"%s\" --root \"%s\" "
-                         "--tools \"%s\"%s",
+                         "--tools \"%s\"%s%s",
                          o.tools, image, outdir, workdir, m->report, o.root,
-                         o.tools, refs);
+                         o.tools, refs, extra);
             rc = run_tool(log, "%s", cmd);
         }
         if (load_module_report(m) != 0 && !o.merge_only)

@@ -86,6 +86,12 @@ static RegOpenKey g_open[REG_OPEN_MAX];
 static char g_current_key[REG_PATH_MAX] = REG_ROOT;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* A save-all from the game writes every preference in one burst.  Persist
+ * once at the end of that burst instead of rewriting the whole file for each
+ * value, and skip the write entirely when no value actually changed. */
+static int g_store_batch;
+static int g_store_dirty;
+
 static char ascii_lower(char ch)
 {
     return (ch >= 'A' && ch <= 'Z') ? (char)(ch - 'A' + 'a') : ch;
@@ -345,6 +351,32 @@ static void persist_registry_locked(void)
     remove(path);
 #endif
     if (rename(temp, path) != 0) remove(temp);
+}
+
+static void maybe_persist_locked(void)
+{
+    if (g_store_batch || !g_store_dirty) return;
+    g_store_dirty = 0;
+    persist_registry_locked();
+}
+
+/* The caller brackets a group of registry writes that belong to one logical
+ * save.  The store is still updated immediately; only the file write is
+ * deferred until the group ends.  Both calls are safe from the guest thread
+ * and from the host side. */
+void wc3_hle_registry_begin_batch(void)
+{
+    pthread_mutex_lock(&g_lock);
+    g_store_batch++;
+    pthread_mutex_unlock(&g_lock);
+}
+
+void wc3_hle_registry_end_batch(void)
+{
+    pthread_mutex_lock(&g_lock);
+    if (g_store_batch > 0) g_store_batch--;
+    maybe_persist_locked();
+    pthread_mutex_unlock(&g_lock);
 }
 
 /* Restore the values written by an earlier process.  Called after the stock
@@ -656,6 +688,16 @@ static void h_query_value(CPU *c)
         return;
     }
     RegValue *value = find_value_locked(path, name);
+#ifdef WC3_DEBUG
+    if (!value) {
+        fprintf(stderr, "[registry] get %s\\%s = missing\n", path, name);
+    } else {
+        uint32_t stored = 0u;
+        if (value->len >= 4u) memcpy(&stored, value->data, 4u);
+        fprintf(stderr, "[registry] get %s\\%s = %u (type=%u len=%u)\n",
+                path, name, stored, value->type, value->len);
+    }
+#endif
     if (!value) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_FILE_NOT_FOUND;
@@ -719,25 +761,34 @@ static void h_set_value(CPU *c)
         return;
     }
     ensure_key_and_parents_locked(path);
-    RegValue *value = slot_value_locked(path, name);
-    if (!value) {
-        pthread_mutex_unlock(&g_lock);
-        c->eax = REG_NOT_ENOUGH_MEMORY;
-        return;
+    RegValue *value = find_value_locked(path, name);
+    int changed = 1;
+    if (value) {
+        changed = value->type != type || value->len != length;
+        for (uint32_t i = 0; !changed && i < length; i++) {
+            if (value->data[i] != wc3_legacy_rd8g(data + i)) changed = 1;
+        }
+    } else {
+        value = slot_value_locked(path, name);
+        if (!value) {
+            pthread_mutex_unlock(&g_lock);
+            c->eax = REG_NOT_ENOUGH_MEMORY;
+            return;
+        }
     }
     value->type = type;
     value->len = length;
     memset(value->data, 0, sizeof value->data);
     for (uint32_t i = 0; i < length; i++)
         value->data[i] = wc3_legacy_rd8g(data + i);
+    if (changed) g_store_dirty = 1;
 #ifdef WC3_DEBUG
-    if (ci_equal(name, "reswidth") || ci_equal(name, "resheight")) {
-        uint32_t stored = 0u;
-        if (value->len >= 4u) memcpy(&stored, value->data, 4u);
-        fprintf(stderr, "[registry] %s\\%s = %u\n", path, name, stored);
-    }
+    uint32_t stored = 0u;
+    if (value->len >= 4u) memcpy(&stored, value->data, 4u);
+    fprintf(stderr, "[registry] set %s\\%s = %u (type=%u len=%u)\n",
+            path, name, stored, value->type, value->len);
 #endif
-    persist_registry_locked();
+    maybe_persist_locked();
     pthread_mutex_unlock(&g_lock);
     c->eax = REG_SUCCESS;
 }
@@ -762,7 +813,10 @@ static void h_delete_value(CPU *c)
         return;
     }
     const int removed = remove_value_locked(path, name);
-    if (removed) persist_registry_locked();
+    if (removed) {
+        g_store_dirty = 1;
+        maybe_persist_locked();
+    }
     pthread_mutex_unlock(&g_lock);
     c->eax = removed ? REG_SUCCESS : REG_FILE_NOT_FOUND;
 }
@@ -794,7 +848,10 @@ static void h_delete_key(CPU *c)
         return;
     }
     const int removed = delete_subtree_locked(path);
-    if (removed) persist_registry_locked();
+    if (removed) {
+        g_store_dirty = 1;
+        maybe_persist_locked();
+    }
     pthread_mutex_unlock(&g_lock);
     c->eax = removed ? REG_SUCCESS : REG_FILE_NOT_FOUND;
 }

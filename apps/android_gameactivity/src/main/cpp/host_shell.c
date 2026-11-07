@@ -1330,8 +1330,18 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
             LOGE("APP_CMD_INIT_WINDOW without a window");
         }
         break;
+    case APP_CMD_PAUSE:
+    case APP_CMD_STOP:
+    case APP_CMD_SAVE_STATE:
+        /* The activity may be finished or killed without the game's own quit
+         * path.  Ask the guest thread to persist its in-memory preferences at
+         * the next message-pump boundary; this also covers settings the player
+         * changed but did not explicitly apply. */
+        wc3_android_request_settings_save();
+        break;
     case APP_CMD_TERM_WINDOW: {
         ANativeWindow *window;
+        wc3_android_request_settings_save();
         ime_hide();
         overlay_input_stop();
         pthread_mutex_lock(&g_window_lock);
@@ -1372,6 +1382,7 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
         break;
     case APP_CMD_DESTROY: {
         ANativeWindow *window;
+        wc3_android_request_settings_save();
         ime_hide();
         overlay_input_stop();
         overlay_stop();

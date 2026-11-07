@@ -17,6 +17,11 @@ extern "C" {
 /* Returns the number of rows installed, or -1 when a row is missing. */
 int wc3_hle_advapi32_registry_install(void);
 
+/* Bracket a group of related writes so the persistent store is rewritten
+ * once at the end instead of once per value. */
+void wc3_hle_registry_begin_batch(void);
+void wc3_hle_registry_end_batch(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -95,6 +95,7 @@ typedef struct {
     int no_exclude;
     int referenced;
     int no_table_filter;
+    char extra_seeds[DIR_MAX_PATH];
     char refs[MAX_REFS][DIR_MAX_PATH];
     int nrefs;
 } Opts;
@@ -110,9 +111,11 @@ typedef struct {
     int excluded_seeds;
     int referenced, pe_meta_seeds, table_filtered, not_code_seeds;
     int thunk_seed_entries;
+    int extra_seed_entries;
     char exclude_file[DIR_MAX_PATH];
     char table_filtered_file[DIR_MAX_PATH];
     char thunk_seeds_file[DIR_MAX_PATH];
+    char extra_seeds_file[DIR_MAX_PATH];
     char catalog_sha[65];
     int lift32_entries;
     char seed_c_sha[65];
@@ -360,6 +363,46 @@ static int u32_contains(const uint32_t *v, size_t n, uint32_t x)
         if (v[mid] < x) lo = mid + 1; else hi = mid;
     }
     return lo < n && v[lo] == x;
+}
+
+/* Build the comma-separated argument consumed by `seed.exe --add`.  The file
+ * is a tracked supplement for address-taken functions that neither entry.exe
+ * nor thunkseeds.exe can prove from an executable reference.  Each line is a
+ * hex VA; anything after it is a human-readable reason and is ignored. */
+static int build_extra_seed_arg(const char *path, char *out, size_t cap,
+                                int *count)
+{
+    char *t = read_text(path);
+    char *line, *next;
+    U32Vec seen = {0};
+    size_t used = 0;
+    int n = 0;
+    if (!t) return -1;
+    out[0] = 0;
+    for (line = t; *line; line = next) {
+        char *p = line, *endp;
+        unsigned long va;
+        size_t k;
+        int dup = 0;
+        next = strchr(line, '\n');
+        if (next) *next++ = 0; else next = line + strlen(line);
+        while (*p == ' ' || *p == '\t' || *p == '\r') p++;
+        if (!*p || *p == '#') continue;
+        va = strtoul(p, &endp, 16);
+        if (endp == p || va == 0) continue;
+        for (k = 0; k < seen.n; k++)
+            if (seen.v[k] == (uint32_t)va) { dup = 1; break; }
+        if (dup) continue;
+        if (used + 16 >= cap) { free(seen.v); free(t); return -2; }
+        used += (size_t)snprintf(out + used, cap - used, "%s0x%08lX",
+                                 n ? "," : "", va);
+        u32_add(&seen, (uint32_t)va);
+        n++;
+    }
+    free(seen.v);
+    free(t);
+    *count = n;
+    return 0;
 }
 
 static int load_seed_vas(const char *path, U32Vec *out)
@@ -855,20 +898,26 @@ static void write_report(const char *path, const Report *r)
             "\"inventory_entries\": %d, \"seed_entries\": %d, "
             "\"pe_meta_seeds\": %d, \"table_filtered\": %d, "
             "\"not_code_seeds\": %d, \"excluded_seeds\": %d, "
-            "\"thunk_seed_entries\": %d, "
+            "\"thunk_seed_entries\": %d, \"extra_seed_entries\": %d, "
             "\"exclude_file\": ",
-            r->referenced ? "referenced+pe-meta+thunk" : "padded-inventory+thunk",
+            r->referenced
+                ? (r->extra_seed_entries ? "referenced+pe-meta+thunk+extra"
+                                         : "referenced+pe-meta+thunk")
+                : (r->extra_seed_entries ? "padded-inventory+thunk+extra"
+                                         : "padded-inventory+thunk"),
             r->referenced ? "true" : "false",
             r->block_seeds ? "block" : "full",
             r->inventory_entries, r->seed_entries,
             r->pe_meta_seeds, r->table_filtered,
             r->not_code_seeds, r->excluded_seeds,
-            r->thunk_seed_entries);
+            r->thunk_seed_entries, r->extra_seed_entries);
     json_str(f, r->exclude_file);
     fprintf(f, ", \"table_filtered_file\": ");
     json_str(f, r->table_filtered_file);
     fprintf(f, ", \"thunk_seeds_file\": ");
     json_str(f, r->thunk_seeds_file);
+    fprintf(f, ", \"extra_seeds_file\": ");
+    json_str(f, r->extra_seeds_file);
     fprintf(f, ", \"catalog_sha256\": \"%s\"},\n", r->catalog_sha);
     fprintf(f, "  \"lift32\": {\"entries\": %d, \"bytes\": %ld, "
             "\"c_sha256\": \"%s\"},\n", r->lift32_entries, r->seed_c_bytes,
@@ -984,6 +1033,7 @@ static void parse_args(int argc, char **argv, Opts *o, int *do_self_test)
     o->block_seeds = 1;
     o->referenced = 1;
     o->no_table_filter = 0;
+    o->extra_seeds[0] = 0;
     o->nrefs = 0;
     *do_self_test = 0;
 
@@ -1001,6 +1051,7 @@ static void parse_args(int argc, char **argv, Opts *o, int *do_self_test)
         else if (!strcmp(a, "--skip-identity-check")) o->skip_identity = 1;
         else if (!strcmp(a, "--no-exclude")) o->no_exclude = 1;
         else if (!strcmp(a, "--exclude") && i + 1 < argc) snprintf(o->exclude, sizeof o->exclude, "%s", argv[++i]);
+        else if (!strcmp(a, "--extra-seeds") && i + 1 < argc) snprintf(o->extra_seeds, sizeof o->extra_seeds, "%s", argv[++i]);
         else if (!strcmp(a, "--image") && i + 1 < argc) snprintf(o->image, sizeof o->image, "%s", argv[++i]);
         else if (!strcmp(a, "--name") && i + 1 < argc) snprintf(o->image_name, sizeof o->image_name, "%s", argv[++i]);
         else if (!strcmp(a, "--root") && i + 1 < argc) i++;
@@ -1017,7 +1068,7 @@ static void parse_args(int argc, char **argv, Opts *o, int *do_self_test)
                     "[--report JSON] [--max-functions N] [--full-seeds] "
                     "[--all-starts] [--refs-image PE ...] [--no-table-filter] "
                     "[--skip-identity-check] [--exclude F | --no-exclude] "
-                    "[--self-test]\n");
+                    "[--extra-seeds F] [--self-test]\n");
             exit(2);
         }
     }
@@ -1028,6 +1079,7 @@ static void parse_args(int argc, char **argv, Opts *o, int *do_self_test)
     path_slash(o->bad_fix);
     path_slash(o->good_fix);
     path_slash(o->image);
+    path_slash(o->extra_seeds);
 }
 
 static const char *stem_of(const char *path, char *out, size_t cap)
@@ -1058,6 +1110,9 @@ int main(int argc, char **argv)
     char thunk_seeds[DIR_MAX_PATH], combined_seeds[DIR_MAX_PATH];
     char edge_c[DIR_MAX_PATH], closure_seed_c[DIR_MAX_PATH];
     char ref_args[CMD_CAP / 2] = "";
+    char extra_arg[2048] = "";
+    char extra_add[2048] = "";
+    int extra_count = 0;
     uint32_t excluded[MAX_EXCLUDED];
     int nexcluded = 0;
     char limit_arg[128] = "";
@@ -1228,15 +1283,36 @@ int main(int argc, char **argv)
         }
         snprintf(r.thunk_seeds_file, sizeof r.thunk_seeds_file, "%s", thunk_seeds);
         snprintf(seeds_used, sizeof seeds_used, "%s", combined_seeds);
-        printf("closure_pipeline: added %d extra seed(s)\n",
+        printf("closure_pipeline: added %d thunk seed(s)\n",
                r.thunk_seed_entries);
+    }
+    if (o.extra_seeds[0]) {
+        int n = 0;
+        rc = build_extra_seed_arg(o.extra_seeds, extra_add, sizeof extra_add, &n);
+        if (rc != 0) {
+            fprintf(stderr, "closure_pipeline: cannot read --extra-seeds %s\n",
+                    o.extra_seeds);
+            return 1;
+        }
+        r.extra_seed_entries = n;
+        snprintf(r.extra_seeds_file, sizeof r.extra_seeds_file, "%s",
+                 o.extra_seeds);
+        if (n > 0) {
+            snprintf(extra_arg, sizeof extra_arg, " --add \"%s\"", extra_add);
+            printf("closure_pipeline: added %d explicit seed(s) from %s\n",
+                   n, o.extra_seeds);
+        } else {
+            printf("closure_pipeline: %s contains no seed addresses\n",
+                   o.extra_seeds);
+        }
     }
 
     join(log, sizeof log, "%s/step_seed.log", o.out_dir);
     rc = run_step(log,
                   "\"%s/seed.exe\" --module \"%s\" --catalog \"%s\" "
-                  "--seeds \"%s\" --out \"%s\"%s",
-                  o.tools, o.image, seeds_used, seeds_used, funcs, limit_arg);
+                  "--seeds \"%s\" --out \"%s\"%s%s",
+                  o.tools, o.image, seeds_used, seeds_used, funcs, limit_arg,
+                  extra_arg);
     if (rc != 0) { fprintf(stderr, "seed.exe failed (see %s)\n", log); return 1; }
     r.seed_entries = count_lines(funcs);
     hash_into(funcs, r.catalog_sha);

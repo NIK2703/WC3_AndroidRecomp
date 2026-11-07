@@ -1,0 +1,12 @@
+# Explicit address-taken seeds for Mss32.dll (1.27.1.7085).
+#
+# These are mixer service callbacks installed through AIL_set_mixer_service or
+# returned to the guest by Mss32; they have no executable reference in the
+# image that entry.exe/thunkseeds.exe can prove, so they are tracked here.
+# closure_pipeline passes this file to seed.exe --add.
+0x35139000  MIXER service callback entry
+0x3513D027  MIXER_shutdown
+0x3513D037  MIXER_flush
+0x3513D047  MIXER_merge
+0x3513D09B  MIXER_copy
+0x3513D205  *.mix callback

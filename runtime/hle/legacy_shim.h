@@ -99,6 +99,11 @@ uint32_t display_refresh_hz(void);
 /* host_shell.c and runtime/app/overlay_actions_legacy.c: the virtual cursor
  * and keyboard consumed by the guest.  These are the only entry points for
  * host-side input; overlay code never includes a legacy header. */
+/* Ask the guest thread to make the game write its in-memory preferences to
+ * the registry.  Safe from any host thread; the save itself runs on the guest
+ * thread at the next PeekMessage/GetMessage boundary. */
+void wc3_android_request_settings_save(void);
+
 void wc3_legacy_mouse_move(float nx, float ny);
 void wc3_legacy_mouse_move_delta(int dx, int dy);
 void wc3_legacy_mouse_button(int down);
