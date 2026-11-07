@@ -16,7 +16,7 @@
  * and only runs when wc3_controls emits ACT_HAPTIC.
  */
 
-#include "wc3_haptics_android.h"
+#include "haptics_android.h"
 
 #include <stdbool.h>
 #include <stddef.h>

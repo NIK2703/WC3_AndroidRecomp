@@ -1,4 +1,4 @@
-#include "wc3_overlay.h"
+#include "overlay.h"
 
 #include <math.h>
 #include <stdlib.h>

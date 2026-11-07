@@ -1,4 +1,4 @@
-#include "wc3_input_ring.h"
+#include "input_ring.h"
 
 #include <string.h>
 

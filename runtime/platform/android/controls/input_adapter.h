@@ -8,8 +8,8 @@
 
 #include <stdint.h>
 
-#include "wc3_controls.h"
-#include "wc3_input_ring.h"
+#include "controls.h"
+#include "input_ring.h"
 
 #ifdef __cplusplus
 extern "C" {

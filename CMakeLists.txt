@@ -128,14 +128,14 @@ if(WC3_BUILD_APP)
     # direct-JNI haptics sink.  No guest ABI or legacy header is visible here;
     # the action bridge (runtime/app) is the only file that reaches the shim.
     add_library(wc3_overlay STATIC
-        "${WC3_ROOT}/runtime/platform/android/controls/wc3_controls.c"
-        "${WC3_ROOT}/runtime/platform/android/controls/wc3_haptics_android.c"
-        "${WC3_ROOT}/runtime/platform/android/controls/wc3_input_adapter.c"
-        "${WC3_ROOT}/runtime/platform/android/controls/wc3_input_ring.c"
-        "${WC3_ROOT}/runtime/platform/android/controls/wc3_input_wake.c"
-        "${WC3_ROOT}/runtime/platform/android/controls/wc3_overlay.c"
-        "${WC3_ROOT}/runtime/platform/android/controls/wc3_overlay_android.c"
-        "${WC3_ROOT}/runtime/platform/android/controls/wc3_overlay_profile.c")
+        "${WC3_ROOT}/runtime/platform/android/controls/controls.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/haptics_android.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/input_adapter.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/input_ring.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/input_wake.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/overlay.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/overlay_android.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/overlay_profile.c")
     target_include_directories(wc3_overlay PUBLIC
         "${WC3_ROOT}/runtime/platform/android/controls"
         "${WC3_ROOT}/runtime/diag"

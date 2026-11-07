@@ -1,7 +1,7 @@
 #ifndef WC3_OVERLAY_PROFILE_H
 #define WC3_OVERLAY_PROFILE_H
 
-#include "wc3_overlay.h"
+#include "overlay.h"
 
 #ifdef __cplusplus
 extern "C" {

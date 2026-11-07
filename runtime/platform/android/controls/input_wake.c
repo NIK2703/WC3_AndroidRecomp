@@ -1,4 +1,4 @@
-#include "wc3_input_wake.h"
+#include "input_wake.h"
 
 #include <stdint.h>
 #include <stdlib.h>

@@ -1,4 +1,4 @@
-#include "wc3_input_adapter.h"
+#include "input_adapter.h"
 
 #include <string.h>
 

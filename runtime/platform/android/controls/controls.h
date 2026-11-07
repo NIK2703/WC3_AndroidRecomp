@@ -12,7 +12,7 @@
 
 #include <stdint.h>
 
-#include "wc3_overlay.h"
+#include "overlay.h"
 #include "core/types/touch_action.h"
 
 #ifdef __cplusplus

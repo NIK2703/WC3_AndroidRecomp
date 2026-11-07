@@ -1,4 +1,4 @@
-#include "wc3_controls.h"
+#include "controls.h"
 
 #include <ctype.h>
 #include <pthread.h>

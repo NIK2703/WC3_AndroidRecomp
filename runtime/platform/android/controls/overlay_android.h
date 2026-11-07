@@ -3,7 +3,7 @@
 
 #include <android/native_window.h>
 
-#include "wc3_overlay.h"
+#include "overlay.h"
 
 #ifdef __cplusplus
 extern "C" {

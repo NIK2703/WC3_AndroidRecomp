@@ -15,7 +15,7 @@
 #include <pthread.h>
 #include <stdint.h>
 
-#include "wc3_controls.h"
+#include "controls.h"
 
 #ifdef __cplusplus
 extern "C" {
