@@ -14,6 +14,8 @@
 #include "hle_registry.h"
 #include "hle_android.h"
 #include "hle_input_state.h"
+#include "hle_fast.h"
+#include "guest_memory.h"
 
 #include "legacy_shim.h"
 
@@ -24,6 +26,10 @@ _Static_assert(HLE_STRIDE == WC3_LEGACY_HLE_STRIDE,
 
 void wc3_legacy_hle_call(uint32_t thunk, CPU *c)
 {
+    /* Overridden slots use the clean hle_abi bridge (no release-time call
+     * ring).  Unbound slots keep the as-built path, including its missing
+     * import diagnostics. */
+    if (wc3_hle_fast_call(thunk, c)) return;
     hle_call(thunk, c);
 }
 
@@ -45,6 +51,13 @@ static int ascii_equal_ci(const char *a, const char *b)
     return *a == '\0' && *b == '\0';
 }
 
+static void bind_fast_slot(HleEnt *e)
+{
+    if (!e || !e->fn) return;
+    wc3_hle_fast_bind((uint32_t)(e - &g_hle[0]), e->fn, e->argc,
+                      e->cdecl_abi);
+}
+
 int wc3_legacy_hle_override(const char *dll, const char *name,
                             void (*impl)(CPU *c))
 {
@@ -54,6 +67,21 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
         if (!ascii_equal_ci(e->dll, dll)) continue;
         if (!ascii_equal_ci(e->name, name)) continue;
         e->fn = impl;
+        bind_fast_slot(e);
+        return 0;
+    }
+    return -1;
+}
+
+int wc3_legacy_hle_fast_bind(const char *dll, const char *name)
+{
+    if (!dll || !name) return -1;
+    for (unsigned i = 0; i < g_hle_count; i++) {
+        HleEnt *e = &g_hle[i];
+        if (!ascii_equal_ci(e->dll, dll)) continue;
+        if (!ascii_equal_ci(e->name, name)) continue;
+        if (!e->fn) return -1;
+        bind_fast_slot(e);
         return 0;
     }
     return -1;
@@ -71,6 +99,7 @@ int wc3_legacy_hle_chain(const char *dll, const char *name,
         if (!e->fn) return -1;
         *previous = e->fn;
         e->fn = impl;
+        bind_fast_slot(e);
         return 0;
     }
     return -1;
@@ -136,6 +165,7 @@ int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
         e->fn = impl;
         e->argc = (uint16_t)argc;
         e->cdecl_abi = cdecl_abi ? 1u : 0u;
+        bind_fast_slot(e);
         return 0;
     }
 
@@ -148,11 +178,17 @@ int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
     e->argc = (uint16_t)argc;
     e->cdecl_abi = cdecl_abi ? 1u : 0u;
     e->used = 1;
+    bind_fast_slot(e);
     return 0;
 }
 
 int wc3_legacy_guest_ok(uint32_t addr, uint32_t size)
 {
+    /* O-07: the new validator owns the static-arena page map.  Its dynamic
+     * range log is not identical to the quarantine one yet, so a rejection
+     * still falls through to the as-built check.  A positive answer from the
+     * new table is always an actually mapped or statically owned range. */
+    if (wc3_guest_ok(addr, size)) return 1;
     return hle_android_guest_ok(addr, size);
 }
 
@@ -222,29 +258,31 @@ uint32_t wc3_legacy_guest_size(uint32_t addr)
 
 void wc3_legacy_guest_copy(uint32_t dst, uint32_t src, uint32_t size)
 {
-    if (!size || !hle_android_guest_ok(dst, size) ||
-        !hle_android_guest_ok(src, size))
+    /* wc3_legacy_guest_ok takes the target page-map fast path first and still
+     * falls back to the quarantine check, so the accepted set is unchanged. */
+    if (!size || !wc3_legacy_guest_ok(dst, size) ||
+        !wc3_legacy_guest_ok(src, size))
         return;
     memcpy((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, size);
 }
 
 void wc3_legacy_guest_move(uint32_t dst, uint32_t src, uint32_t size)
 {
-    if (!size || !hle_android_guest_ok(dst, size) ||
-        !hle_android_guest_ok(src, size))
+    if (!size || !wc3_legacy_guest_ok(dst, size) ||
+        !wc3_legacy_guest_ok(src, size))
         return;
     memmove((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, size);
 }
 
 void wc3_legacy_guest_fill(uint32_t dst, uint8_t value, uint32_t size)
 {
-    if (!size || !hle_android_guest_ok(dst, size)) return;
+    if (!size || !wc3_legacy_guest_ok(dst, size)) return;
     memset((void *)(uintptr_t)dst, (int)value, size);
 }
 
 void wc3_legacy_guest_zero(uint32_t dst, uint32_t size)
 {
-    if (!size || !hle_android_guest_ok(dst, size)) return;
+    if (!size || !wc3_legacy_guest_ok(dst, size)) return;
     memset((void *)(uintptr_t)dst, 0, size);
 }
 
@@ -379,9 +417,21 @@ void wc3_legacy_text_diff(const char *old_text, int old_length,
 
 static Wc3LegacyGuestLoop g_cb_body;
 static void *g_cb_opaque;
-static _Atomic int g_cb_ready;
 static sem_t g_cb_sem;
-static pthread_mutex_t g_cb_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* O-34: the callback thread is a one-shot startup object.  A mutex here was
+ * held across hle_guest_alloc(), the guest stack writes and CreateThread, so
+ * the new guest thread could enter wc3_guest_callback_thunk() while the host
+ * lock was still held.  The state word is the only owner: STARTING admits one
+ * caller, READY publishes body/opaque before CreateThread, and FAILED keeps a
+ * failed one-shot from being retried with a half-initialised semaphore. */
+enum {
+    CB_IDLE = 0,
+    CB_STARTING = 1,
+    CB_READY = 2,
+    CB_FAILED = 3
+};
+static _Atomic int g_cb_state;
 
 uint32_t wc3_legacy_hle_thunk_of(const char *dll, const char *name)
 {
@@ -402,7 +452,9 @@ uint32_t wc3_legacy_hle_thunk_of(const char *dll, const char *name)
 static void wc3_guest_callback_thunk(CPU *c)
 {
     uint32_t esp = c->esp;
-    if (g_cb_body) g_cb_body(c, g_cb_opaque);
+    if (atomic_load_explicit(&g_cb_state, memory_order_acquire) == CB_READY &&
+        g_cb_body)
+        g_cb_body(c, g_cb_opaque);
     c->esp = esp;
 }
 
@@ -410,40 +462,42 @@ int wc3_legacy_guest_callback_thread_start(Wc3LegacyGuestLoop body,
                                            void *opaque)
 {
     if (!body) return -1;
-    (void)pthread_mutex_lock(&g_cb_lock);
-    if (atomic_load_explicit(&g_cb_ready, memory_order_acquire)) {
-        (void)pthread_mutex_unlock(&g_cb_lock);
-        return 0;
-    }
+
+    int expected = CB_IDLE;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_cb_state, &expected, CB_STARTING, memory_order_acq_rel,
+            memory_order_acquire))
+        return expected == CB_READY ? 0 : -1;
 
     g_cb_body = body;
     g_cb_opaque = opaque;
     if (sem_init(&g_cb_sem, 0, 0) != 0) {
-        (void)pthread_mutex_unlock(&g_cb_lock);
+        atomic_store_explicit(&g_cb_state, CB_FAILED, memory_order_release);
         return -1;
     }
     if (wc3_legacy_hle_add("WINMM.dll", WC3_CB_THREAD_ROW, 1, 0,
                            wc3_guest_callback_thunk) != 0) {
         sem_destroy(&g_cb_sem);
-        (void)pthread_mutex_unlock(&g_cb_lock);
+        atomic_store_explicit(&g_cb_state, CB_FAILED, memory_order_release);
         return -1;
     }
     uint32_t thunk = wc3_legacy_hle_thunk_of("WINMM.dll", WC3_CB_THREAD_ROW);
     HleFn create = find_hle_fn("KERNEL32.dll", "CreateThread");
     if (!thunk || !create) {
         sem_destroy(&g_cb_sem);
-        (void)pthread_mutex_unlock(&g_cb_lock);
+        atomic_store_explicit(&g_cb_state, CB_FAILED, memory_order_release);
         return -1;
     }
 
     /* CreateThread(lpThreadAttributes, dwStackSize, lpStartAddress,
      *              lpParameter, dwCreationFlags, lpThreadId) -- argc 6.
      * h_create_thread() reads arg32(c,2..5), so [esp] is the return slot and
-     * the six arguments start at esp+4. */
+     * the six arguments start at esp+4.  No host lock is held here: the new
+     * guest thread may enter wc3_guest_callback_thunk() immediately. */
     uint32_t esp = hle_guest_alloc(32u);
     if (!esp) {
         sem_destroy(&g_cb_sem);
-        (void)pthread_mutex_unlock(&g_cb_lock);
+        atomic_store_explicit(&g_cb_state, CB_FAILED, memory_order_release);
         return -1;
     }
     wr32g(esp + 0u, 0x7EFFFFF0u);
@@ -456,7 +510,7 @@ int wc3_legacy_guest_callback_thread_start(Wc3LegacyGuestLoop body,
     /* Publish readiness before CreateThread: the new guest thread enters
      * wc3_legacy_guest_callback_wait() immediately and must not observe a
      * false ready flag and exit. */
-    atomic_store_explicit(&g_cb_ready, 1, memory_order_release);
+    atomic_store_explicit(&g_cb_state, CB_READY, memory_order_release);
     CPU c;
     memset(&c, 0, sizeof c);
     c.esp = esp;
@@ -465,24 +519,23 @@ int wc3_legacy_guest_callback_thread_start(Wc3LegacyGuestLoop body,
     hle_guest_free(esp);
 
     if (!handle) {
-        atomic_store_explicit(&g_cb_ready, 0, memory_order_release);
+        atomic_store_explicit(&g_cb_state, CB_FAILED, memory_order_release);
         sem_destroy(&g_cb_sem);
-        (void)pthread_mutex_unlock(&g_cb_lock);
         return -1;
     }
-    (void)pthread_mutex_unlock(&g_cb_lock);
     return 0;
 }
 
 void wc3_legacy_guest_callback_wake(void)
 {
-    if (atomic_load_explicit(&g_cb_ready, memory_order_acquire))
+    if (atomic_load_explicit(&g_cb_state, memory_order_acquire) == CB_READY)
         (void)sem_post(&g_cb_sem);
 }
 
 int wc3_legacy_guest_callback_wait(void)
 {
-    if (!atomic_load_explicit(&g_cb_ready, memory_order_acquire)) return -1;
+    if (atomic_load_explicit(&g_cb_state, memory_order_acquire) != CB_READY)
+        return -1;
     for (;;) {
         if (sem_wait(&g_cb_sem) == 0) return 0;
         if (errno != EINTR) return -1;

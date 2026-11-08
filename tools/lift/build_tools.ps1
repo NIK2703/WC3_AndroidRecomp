@@ -91,6 +91,7 @@ $targets = @(
     @{ out = 'cstest.exe';   src = @('cstest.c', 'csglue.c') },
     @{ out = 'corpus.exe';   src = @('corpus.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'liftpass.exe'; src = @('liftpass.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
+    @{ out = 'atomiccheck.exe'; src = @('atomiccheck.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'closure_pipeline.exe'; src = @('closure_pipeline.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'thunkseeds.exe'; srcfull = @((Join-Path $csrcLocal 'thunkseeds.c'), (Join-Path $csrc 'csglue.c')) },
     @{ out = 'corpusinput.exe'; src = @('corpusinput.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
@@ -247,6 +248,55 @@ if ($Smoke) {
     if ($LASTEXITCODE -ne 0) { $cpOut | ForEach-Object { Write-Host $_ }; throw 'closure_pipeline self-test failed' }
     if (-not ($cpOut -match 'self-test: pass')) { throw 'closure_pipeline self-test did not report a pass' }
     Write-Host 'smoke: closure driver self-test OK (5/5 detectors)'
+
+    # atomiccheck.exe: a clean xchg/lock-inc fixture passes, the old plain
+    # lowering fails.  This is the negative half of the V5.9 atomic gate; the
+    # CMake configure check runs the same detector over the real corpus.
+    $atomicGood = Join-Path $bin 'smoke_atomic_good.c'
+    $atomicBad  = Join-Path $bin 'smoke_atomic_bad.c'
+    $goodText = @'
+void L_00401000(CPU *c)
+{
+    { uint32_t _v = c->eax;                                      /* 00401000: xchg dword ptr [ebx], eax */
+      uint32_t _old = atomic_xchg32((c->ebx), _v);               /* 00401000: xchg dword ptr [ebx], eax */
+      c->eax = (uint32_t)(_old); }                               /* 00401000: xchg dword ptr [ebx], eax */
+    { uint32_t _old = atomic_xadd32((c->ecx), 1u); flags_incs(c, _old, 4); } /* 00401010: lock inc dword ptr [ecx] */
+    { uint32_t _t = c->esp; c->esp = (uint32_t)(c->eax); c->eax = (uint32_t)(_t); } /* 00401020: xchg esp, eax */
+}
+'@
+    $badText = @'
+void L_00401000(CPU *c)
+{
+    { uint32_t _t = rd32((c->ebx)); wr32((c->ebx), c->eax); c->eax = _t; } /* 00401000: xchg dword ptr [ebx], eax */
+    { uint32_t _old = rd32((c->ecx)); wr32((c->ecx), _old + 1); }          /* 00401010: lock inc dword ptr [ecx] */
+}
+'@
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($atomicGood, $goodText, $utf8)
+    [IO.File]::WriteAllText($atomicBad, $badText, $utf8)
+    $ac = Join-Path $bin 'atomiccheck.exe'
+    $acGoodJson = Join-Path $reportDir 'atomiccheck_smoke.json'
+    $acBadJson  = Join-Path $reportDir 'atomiccheck_bad.json'
+    # Deliberately failing native tools write to stderr; with the script-wide
+    # Stop preference PowerShell 5.1 turns that into NativeCommandError before
+    # the exit code can be inspected.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $acGood = & $ac --file $atomicGood --report $acGoodJson --require-any 2>&1
+    $acGoodRc = $LASTEXITCODE
+    $acBad = & $ac --file $atomicBad --report $acBadJson --require-any 2>&1
+    $acBadRc = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    if ($acGoodRc -ne 0) { $acGood | ForEach-Object { Write-Host $_ }; throw 'atomiccheck rejected the clean fixture' }
+    $acGoodBody = Get-Content -LiteralPath $acGoodJson -Raw
+    if ($acGoodBody -notmatch '"verdict": "pass"') { throw 'atomiccheck clean-fixture report is not a pass' }
+    if ($acBadRc -eq 0) { throw 'atomiccheck accepted plain xchg/lock-inc lowering' }
+    $acBadBody = Get-Content -LiteralPath $acBadJson -Raw
+    if ($acBadBody -notmatch 'non_atomic_lowering' -or
+        $acBadBody -notmatch '00401000' -or $acBadBody -notmatch '00401010') {
+        throw 'atomiccheck did not report both plain xchg and lock-inc sites'
+    }
+    Write-Host 'smoke: atomic lowering gate OK (clean pass, plain xchg/lock inc fail)'
 }
 
 # BP-8.3: the pinned upstream sources are byte-frozen, so POSIX portability

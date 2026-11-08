@@ -96,7 +96,7 @@ static void dispatch_common(CPU *c, uint32_t target, int tail)
         if (target >= GUEST_HLE_BASE &&
             target < GUEST_HLE_BASE + (uint32_t)HLE_MAX * HLE_STRIDE) {
             if (!g_hle_registry) abort();
-            hle_call(g_hle_registry, target, c);
+            hle_abi_call(g_hle_registry, target, c);
             break;
         }
 

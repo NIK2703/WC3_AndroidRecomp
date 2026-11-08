@@ -1058,6 +1058,24 @@ static const W2Override g_overrides[] = {
     { "waveOutSetVolume",        h_w2_set_volume },
 };
 
+/* O-125: as-built WINMM rows that already have a real handler.  Fast-binding
+ * keeps those handlers and their registered argc/cdecl_abi; it only fills
+ * the dense fast registry.  timeGetTime is already bound by the M5 time
+ * module. */
+static const char *const g_as_built_fast_rows[] = {
+    "waveOutGetNumDevs",
+    "waveOutGetDevCapsA",
+    "waveOutOpen",
+    "waveOutClose",
+    "waveOutPrepareHeader",
+    "waveOutUnprepareHeader",
+    "waveOutWrite",
+    "waveOutReset",
+    "waveOutGetID",
+    "waveOutGetVolume",
+    "waveOutSetVolume",
+};
+
 int wc3_hle_winmm_waveout_install(void)
 {
     static int installed = 0;
@@ -1078,6 +1096,17 @@ int wc3_hle_winmm_waveout_install(void)
 #endif
     if (!enable) {
         atomic_store(&g_enabled, 0);
+        for (unsigned i = 0;
+             i < sizeof g_as_built_fast_rows / sizeof g_as_built_fast_rows[0];
+             i++) {
+            if (wc3_legacy_hle_fast_bind("WINMM.dll",
+                                         g_as_built_fast_rows[i]) != 0) {
+#if WC3_DEBUG && WC3_DEBUG_HLE
+                fprintf(stderr, "[wave2] fast-bind missing WINMM row %s\n",
+                        g_as_built_fast_rows[i]);
+#endif
+            }
+        }
         fprintf(stderr, "[wave2] disabled: as-built WINMM path; "
                         "rev 6 needs S5 device acceptance\n");
         installed = 1;

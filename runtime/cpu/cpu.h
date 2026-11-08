@@ -124,7 +124,21 @@ typedef struct {
      * recomp keeps a monotonic guest counter so timing code remains ordered
      * without pretending to reproduce a wall-clock frequency. */
     uint64_t tsc;
+    /* ABI-4/ABI-5: the one transition state owned by each guest thread.
+     * Appending fields is source-level ABI-safe (GUEST_ABI ABI-1/ABI-2);
+     * direct_call.h and dispatch_boot.c must use these fields, not a third
+     * copy of thread-local state.  pending_target holds either a guest VA
+     * (kind 0) or a lifted function pointer (kind 1). */
+    uint32_t disp_depth;
+    uint32_t disp_pending_valid;
+    uint32_t disp_pending_kind;
+    uintptr_t disp_pending_target;
+    uint32_t disp_draining;
 } CPU;
+
+/* Values of CPU.disp_pending_kind (ABI-5.2). */
+#define WC3_DISP_PENDING_VA 0u
+#define WC3_DISP_PENDING_FN 1u
 
 /* The generated translation unit calls these; the host supplies the table
  * lookup. Declared here so a lifted file is a complete C translation unit on
@@ -277,7 +291,8 @@ static inline void wr64(uint32_t a, uint64_t v) { memcpy((void *)(uintptr_t)a, &
  * `lock xadd` for every reference count and every queue index, and a
  * non-atomic one is a use-after-free an hour into a session rather than a
  * crash you can find. Nothing else in this header cares about other threads;
- * these do.
+ * these do.  `xchg` with a memory operand is implicitly locked and the lifter
+ * emits atomic_xchg32 for it.
  *
  * The x86 semantics are "return the old value" for xadd, and for cmpxchg
  * "return what was there, and the caller compares" - the ZF the instruction
@@ -305,7 +320,9 @@ static inline uint32_t atomic_cmpxchg32(uint32_t a, uint32_t cmp, uint32_t nv) {
     return __sync_val_compare_and_swap((volatile uint32_t *)(uintptr_t)a, cmp, nv);
 }
 static inline uint32_t atomic_xchg32(uint32_t a, uint32_t v) {
-    return __sync_lock_test_and_set((volatile uint32_t *)(uintptr_t)a, v);
+    /* x86 xchg with a memory operand is locked and a full barrier; __sync's
+     * test-and-set is only an acquire barrier on some targets. */
+    return __atomic_exchange_n((uint32_t *)(uintptr_t)a, v, __ATOMIC_SEQ_CST);
 }
 static inline uint64_t atomic_cmpxchg64_aligned(uint32_t a, uint64_t cmp, uint64_t nv) {
     return __sync_val_compare_and_swap((volatile uint64_t *)(uintptr_t)a, cmp, nv);
@@ -520,19 +537,29 @@ static inline uint32_t op_shld(CPU *c, uint32_t d, uint32_t s, uint32_t cnt, int
  * zero the destination is architecturally undefined, so it is left alone
  * rather than given a value that code might come to depend on. */
 static inline uint32_t op_bsf(CPU *c, uint32_t d, uint32_t s, int sz) {
-    uint32_t i, n = (uint32_t)sz * 8;
+    s &= mask_sz(sz);
     c->zf = (s == 0);
     if (s == 0) return d;
+#if defined(__GNUC__) || defined(__clang__)
+    return (uint32_t)__builtin_ctz(s);
+#else
+    uint32_t i, n = (uint32_t)sz * 8;
     for (i = 0; i < n; i++) if (s & (1u << i)) return i;
     return d;
+#endif
 }
 
 static inline uint32_t op_bsr(CPU *c, uint32_t d, uint32_t s, int sz) {
-    uint32_t i, n = (uint32_t)sz * 8;
+    s &= mask_sz(sz);
     c->zf = (s == 0);
     if (s == 0) return d;
+#if defined(__GNUC__) || defined(__clang__)
+    return 31u - (uint32_t)__builtin_clz(s);
+#else
+    uint32_t i, n = (uint32_t)sz * 8;
     for (i = n; i-- > 0; ) if (s & (1u << i)) return i;
     return d;
+#endif
 }
 
 /* BT/BTS/BTR/BTC: the selected bit into CF, then the register form's own
@@ -552,41 +579,48 @@ static inline uint32_t op_bittest(CPU *c, uint32_t d, uint32_t bit, int sz, int 
 }
 
 /* RCL/RCR rotate through CF, so the rotated quantity is one bit wider than
- * the operand and the count is taken modulo that wider width. Writing this as
- * a bit at a time is slower than the closed form and is the version that is
- * obviously right, which for an instruction this rare is the better trade. */
+ * the operand.  x86 masks the count to five bits first; for 8- and 16-bit
+ * operands the result is then taken modulo the nine- or seventeen-bit width.
+ * The operand and CF are packed into one uint64_t and rotated in one step. */
 static inline uint32_t op_rcl(CPU *c, uint32_t d, uint32_t cnt, int sz) {
-    uint32_t n = (uint32_t)sz * 8, i;
-    uint32_t mask = (n == 32) ? 0xFFFFFFFFu : ((1u << n) - 1u);
-    cnt %= (n + 1);
-    if (cnt == 0) return d;        /* a zero count changes no flag at all */
-    for (i = 0; i < cnt; i++) {
-        uint32_t top = (d >> (n - 1)) & 1u;
-        d = ((d << 1) | c->cf) & mask;
-        c->cf = top;
+    uint32_t n = (uint32_t)sz * 8u;
+    uint32_t mask = (n == 32u) ? 0xFFFFFFFFu : ((1u << n) - 1u);
+    uint64_t limit = ((uint64_t)1u << (n + 1u)) - 1u;
+    cnt &= 31u;
+    if (cnt == 0u) return d;       /* a zero count changes no flag at all */
+    if (n < 32u) {
+        cnt %= n + 1u;
+        if (cnt == 0u) return d;
     }
+    uint64_t value = ((uint64_t)d & mask) | ((uint64_t)(c->cf & 1u) << n);
+    uint64_t rotated = ((value << cnt) | (value >> ((n + 1u) - cnt))) & limit;
+    c->cf = (uint32_t)((rotated >> n) & 1u);
+    uint32_t r = (uint32_t)rotated & mask;
     /* OF is defined only for a count of one; hardware leaves something there
      * for the rest and nothing may read it. */
-    if (cnt == 1) c->of = (uint32_t)(((d >> (n - 1)) & 1u) ^ c->cf);
-    return d;
+    if (cnt == 1u) c->of = (uint32_t)(((r >> (n - 1u)) & 1u) ^ c->cf);
+    return r;
 }
 
 static inline uint32_t op_rcr(CPU *c, uint32_t d, uint32_t cnt, int sz) {
-    uint32_t n = (uint32_t)sz * 8, i;
-    uint32_t mask = (n == 32) ? 0xFFFFFFFFu : ((1u << n) - 1u);
-    cnt %= (n + 1);
-    if (cnt == 0) return d;
-    /* RCR sets OF from the two top bits of the RESULT, and before the rotate
-     * rather than after - but only the count-of-one case is defined, and for
-     * that one the two are the same thing. */
-    if (cnt == 1) c->of = (uint32_t)((((d >> 1) | (c->cf << (n - 1))) >> (n - 1)) & 1u)
-                        ^ (uint32_t)((((d >> 1) | (c->cf << (n - 1))) >> (n - 2)) & 1u);
-    for (i = 0; i < cnt; i++) {
-        uint32_t bot = d & 1u;
-        d = ((d >> 1) | (c->cf << (n - 1))) & mask;
-        c->cf = bot;
+    uint32_t n = (uint32_t)sz * 8u;
+    uint32_t mask = (n == 32u) ? 0xFFFFFFFFu : ((1u << n) - 1u);
+    uint64_t limit = ((uint64_t)1u << (n + 1u)) - 1u;
+    cnt &= 31u;
+    if (cnt == 0u) return d;
+    if (n < 32u) {
+        cnt %= n + 1u;
+        if (cnt == 0u) return d;
     }
-    return d;
+    uint64_t value = ((uint64_t)d & mask) | ((uint64_t)(c->cf & 1u) << n);
+    uint64_t rotated = ((value >> cnt) | (value << ((n + 1u) - cnt))) & limit;
+    c->cf = (uint32_t)((rotated >> n) & 1u);
+    uint32_t r = (uint32_t)rotated & mask;
+    /* RCR's OF is the XOR of the two top bits of the result; only the
+     * count-of-one case is architecturally defined. */
+    if (cnt == 1u)
+        c->of = (uint32_t)(((r >> (n - 1u)) & 1u) ^ ((r >> (n - 2u)) & 1u));
+    return r;
 }
 
 static inline uint32_t op_shrd(CPU *c, uint32_t d, uint32_t s, uint32_t cnt, int sz) {

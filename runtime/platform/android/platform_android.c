@@ -486,6 +486,15 @@ static int android_thread_sleep_ns(void *ctx, uint64_t ns)
     return 0;
 }
 
+/* Short teardown poll shared by the audio paths.  It waits on the monotonic
+ * clock so a wall-clock step cannot stretch the 1 ms pause. */
+static void android_poll_pause(void)
+{
+    struct timespec ts = {0, 1000000L};
+    while (clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, &ts) == EINTR) {
+    }
+}
+
 static pthread_key_t g_tls_keys[WC3_PLATFORM_TLS_MAX];
 static uint8_t g_tls_used[WC3_PLATFORM_TLS_MAX];
 static pthread_mutex_t g_tls_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -1079,6 +1088,114 @@ static int android_cs_leave(void *ctx, Wc3SyncHandle handle)
 static char g_asset_root[WC3_PLATFORM_PATH_MAX];
 static char g_save_root[WC3_PLATFORM_PATH_MAX];
 
+/* The licensed MPQ directory does not change during a session.  Snapshot its
+ * names once so present() and enumerate_mpq() do not open/scan the directory
+ * on every call; enumerate by index used to cost O(N^2) readdir work.  The
+ * snapshot stores names only, so case-insensitive matching, the root-escape
+ * check and the live stat/access check all keep their old semantics.  A
+ * truncated snapshot (very large directory) falls back to the old scan, and
+ * asset.init() rebuilds it whenever the root is (re)installed. */
+#define WC3_ASSET_SNAPSHOT_MAX 1024u
+#define WC3_ASSET_NAME_MAX 256u
+
+typedef struct AssetSnapshot {
+    uint32_t count;
+    uint32_t truncated;
+    uint32_t open_failed;
+    uint32_t capacity;
+    char (*names)[WC3_ASSET_NAME_MAX];
+} AssetSnapshot;
+
+static pthread_mutex_t g_asset_lock = PTHREAD_MUTEX_INITIALIZER;
+static AssetSnapshot g_asset_snapshot;
+static int g_asset_snapshot_valid;
+
+/* Grow the name table to at least `want` entries.  The final table is shrunk
+ * to the actual count after the directory scan; this helper only avoids a
+ * reallocation per directory entry while the count is still unknown. */
+static int asset_snapshot_reserve_locked(uint32_t want)
+{
+    if (want <= g_asset_snapshot.capacity) return 0;
+    if (want > WC3_ASSET_SNAPSHOT_MAX) return -1;
+
+    uint32_t cap = g_asset_snapshot.capacity ? g_asset_snapshot.capacity : 64u;
+    while (cap < want) {
+        if (cap > WC3_ASSET_SNAPSHOT_MAX / 2u) {
+            cap = WC3_ASSET_SNAPSHOT_MAX;
+            break;
+        }
+        cap *= 2u;
+    }
+    if (cap < want) return -1;
+
+    char (*names)[WC3_ASSET_NAME_MAX] =
+        realloc(g_asset_snapshot.names, (size_t)cap * WC3_ASSET_NAME_MAX);
+    if (!names) return -1;
+    g_asset_snapshot.names = names;
+    g_asset_snapshot.capacity = cap;
+    return 0;
+}
+
+static void asset_snapshot_build_locked(void)
+{
+    free(g_asset_snapshot.names);
+    g_asset_snapshot.names = NULL;
+    g_asset_snapshot.count = 0u;
+    g_asset_snapshot.truncated = 0u;
+    g_asset_snapshot.open_failed = 0u;
+    g_asset_snapshot.capacity = 0u;
+
+    DIR *dir = opendir(g_asset_root);
+    if (!dir) {
+        g_asset_snapshot.open_failed = 1u;
+        return;
+    }
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+        size_t len = strlen(name);
+        if (len == 0u) continue;
+        if (len >= WC3_ASSET_NAME_MAX) {
+            g_asset_snapshot.truncated = 1u;
+            continue;
+        }
+        if (g_asset_snapshot.count >= WC3_ASSET_SNAPSHOT_MAX) {
+            g_asset_snapshot.truncated = 1u;
+            break;
+        }
+        if (asset_snapshot_reserve_locked(g_asset_snapshot.count + 1u) != 0) {
+            g_asset_snapshot.truncated = 1u;
+            break;
+        }
+        memcpy(g_asset_snapshot.names[g_asset_snapshot.count], name, len + 1u);
+        g_asset_snapshot.count++;
+    }
+    (void)closedir(dir);
+
+    /* The temporary growth policy keeps at most one spare capacity step; the
+     * steady-state snapshot owns exactly count entries. */
+    if (g_asset_snapshot.count == 0u) {
+        free(g_asset_snapshot.names);
+        g_asset_snapshot.names = NULL;
+        g_asset_snapshot.capacity = 0u;
+    } else if (g_asset_snapshot.count < g_asset_snapshot.capacity) {
+        char (*names)[WC3_ASSET_NAME_MAX] =
+            realloc(g_asset_snapshot.names,
+                    (size_t)g_asset_snapshot.count * WC3_ASSET_NAME_MAX);
+        if (names) {
+            g_asset_snapshot.names = names;
+            g_asset_snapshot.capacity = g_asset_snapshot.count;
+        }
+    }
+}
+
+static void asset_snapshot_ensure_locked(void)
+{
+    if (g_asset_snapshot_valid) return;
+    asset_snapshot_build_locked();
+    g_asset_snapshot_valid = 1;
+}
+
 static int android_asset_init(void *ctx, const char *asset_root,
                               const char *save_root)
 {
@@ -1087,8 +1204,12 @@ static int android_asset_init(void *ctx, const char *asset_root,
     if (strlen(asset_root) >= sizeof g_asset_root ||
         strlen(save_root) >= sizeof g_save_root)
         return -1;
+    (void)pthread_mutex_lock(&g_asset_lock);
     strcpy(g_asset_root, asset_root);
     strcpy(g_save_root, save_root);
+    g_asset_snapshot_valid = 0;
+    asset_snapshot_ensure_locked();
+    (void)pthread_mutex_unlock(&g_asset_lock);
     return 0;
 }
 
@@ -1130,29 +1251,18 @@ static int asset_file_ok(const char *path)
            access(path, R_OK) == 0;
 }
 
-static int android_asset_present(void *ctx, const char *logical_name)
+/* Fallback for a truncated snapshot: the old directory scan, which is also
+ * what a missing/removed snapshot degrades to.  Caller holds g_asset_lock. */
+static int asset_scan_present_locked(const char *logical_name)
 {
-    (void)ctx;
-    if (!g_asset_root[0] || !logical_name || !*logical_name) return -1;
-    /* Asset names are MPQ basenames.  Do not let a logical name escape the
-     * configured asset root. */
-    if (strchr(logical_name, '/') || strchr(logical_name, '\\')) return 0;
-
-    char path[WC3_PLATFORM_PATH_MAX];
-    int n = snprintf(path, sizeof path, "%s/%s", g_asset_root, logical_name);
-    if (n < 0 || (size_t)n >= sizeof path) return -1;
-    if (asset_file_ok(path)) return 1;
-
-    /* Windows MPQ lookup is case-insensitive; Android's filesystem is not.
-     * Keep the same logical result when a user copied War3Patch.mpq instead of
-     * war3patch.mpq. */
     DIR *dir = opendir(g_asset_root);
     if (!dir) return 0;
+    char path[WC3_PLATFORM_PATH_MAX];
     int present = 0;
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
         if (!ascii_equal_ci(ent->d_name, logical_name)) continue;
-        n = snprintf(path, sizeof path, "%s/%s", g_asset_root, ent->d_name);
+        int n = snprintf(path, sizeof path, "%s/%s", g_asset_root, ent->d_name);
         if (n > 0 && (size_t)n < sizeof path && asset_file_ok(path)) {
             present = 1;
             break;
@@ -1162,11 +1272,8 @@ static int android_asset_present(void *ctx, const char *logical_name)
     return present;
 }
 
-static int android_asset_enumerate(void *ctx, uint32_t index, char *name,
-                                   size_t cap)
+static int asset_scan_enumerate_locked(uint32_t index, char *name, size_t cap)
 {
-    (void)ctx;
-    if (!g_asset_root[0] || !name || cap == 0u) return -1;
     DIR *dir = opendir(g_asset_root);
     if (!dir) return -1;
 
@@ -1184,6 +1291,70 @@ static int android_asset_enumerate(void *ctx, uint32_t index, char *name,
         break;
     }
     closedir(dir);
+    return result;
+}
+
+static int android_asset_present(void *ctx, const char *logical_name)
+{
+    (void)ctx;
+    if (!g_asset_root[0] || !logical_name || !*logical_name) return -1;
+    /* Asset names are MPQ basenames.  Do not let a logical name escape the
+     * configured asset root. */
+    if (strchr(logical_name, '/') || strchr(logical_name, '\\')) return 0;
+
+    char path[WC3_PLATFORM_PATH_MAX];
+    int n = snprintf(path, sizeof path, "%s/%s", g_asset_root, logical_name);
+    if (n < 0 || (size_t)n >= sizeof path) return -1;
+    if (asset_file_ok(path)) return 1;
+
+    /* Windows MPQ lookup is case-insensitive; Android's filesystem is not.
+     * Keep the same logical result when a user copied War3Patch.mpq instead of
+     * war3patch.mpq.  The snapshot resolves the name without syscalls, but
+     * every candidate is still checked live. */
+    (void)pthread_mutex_lock(&g_asset_lock);
+    asset_snapshot_ensure_locked();
+    int present = 0;
+    for (uint32_t i = 0; i < g_asset_snapshot.count; i++) {
+        if (!ascii_equal_ci(g_asset_snapshot.names[i], logical_name)) continue;
+        n = snprintf(path, sizeof path, "%s/%s", g_asset_root,
+                     g_asset_snapshot.names[i]);
+        if (n > 0 && (size_t)n < sizeof path && asset_file_ok(path)) {
+            present = 1;
+            break;
+        }
+    }
+    if (!present && g_asset_snapshot.truncated)
+        present = asset_scan_present_locked(logical_name);
+    (void)pthread_mutex_unlock(&g_asset_lock);
+    return present;
+}
+
+static int android_asset_enumerate(void *ctx, uint32_t index, char *name,
+                                   size_t cap)
+{
+    (void)ctx;
+    if (!g_asset_root[0] || !name || cap == 0u) return -1;
+
+    (void)pthread_mutex_lock(&g_asset_lock);
+    asset_snapshot_ensure_locked();
+    uint32_t seen = 0u;
+    int result = 0;
+    for (uint32_t i = 0; i < g_asset_snapshot.count; i++) {
+        const char *candidate = g_asset_snapshot.names[i];
+        if (!is_mpq_name(candidate)) continue;
+        if (seen++ != index) continue;
+        size_t n = strlen(candidate);
+        if (n >= cap) n = cap - 1u;
+        memcpy(name, candidate, n);
+        name[n] = '\0';
+        result = 1;
+        break;
+    }
+    if (!result && g_asset_snapshot.truncated)
+        result = asset_scan_enumerate_locked(index, name, cap);
+    if (result == 0 && g_asset_snapshot.open_failed)
+        result = -1;
+    (void)pthread_mutex_unlock(&g_asset_lock);
     return result;
 }
 
@@ -1941,7 +2112,7 @@ static int android_audio_open(void *ctx, uint32_t sample_rate,
         (void)AAudioStream_close(stream);
         while (atomic_load_explicit(&st->callback_users,
                                     memory_order_acquire) != 0)
-            usleep(1000);
+            android_poll_pause();
         sem_destroy(&st->wake);
         pthread_mutex_destroy(&st->lifecycle);
         free(st->ring);
@@ -2066,9 +2237,9 @@ static int android_audio_close(void *ctx, uintptr_t handle)
     }
 
     while (atomic_load_explicit(&st->callback_users, memory_order_acquire) != 0)
-        usleep(1000);
+        android_poll_pause();
     while (atomic_load_explicit(&st->writers, memory_order_acquire) != 0)
-        usleep(1000);
+        android_poll_pause();
 
     sem_destroy(&st->wake);
     pthread_mutex_destroy(&st->lifecycle);

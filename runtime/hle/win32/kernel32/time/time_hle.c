@@ -273,11 +273,31 @@ static int append_dec(char *out, int cap, int *len, unsigned value, int width)
 static int read_guest_string(uint32_t addr, char *dst, int cap)
 {
     if (!addr || cap < 2) return -1;
-    for (int i = 0; i < cap - 1; i++) {
-        if (!wc3_legacy_guest_ok(addr + (uint32_t)i, 1)) return -1;
-        const char ch = (char)wc3_legacy_rd8g(addr + (uint32_t)i);
-        dst[i] = ch;
-        if (!ch) return 0;
+    int i = 0;
+    while (i < cap - 1) {
+        const uint32_t at = addr + (uint32_t)i;
+        uint32_t chunk = (uint32_t)(cap - 1 - i);
+        if (chunk > 64u) chunk = 64u;
+        const uint64_t room = 0x100000000ull - at;
+        if (chunk > room) chunk = (uint32_t)room;
+
+        if (wc3_legacy_guest_ok(at, chunk)) {
+            for (uint32_t j = 0; j < chunk; j++) {
+                const char ch = (char)wc3_legacy_rd8g(at + j);
+                dst[i++] = ch;
+                if (!ch) return 0;
+            }
+        } else {
+            /* A chunk that ends in an unmapped byte keeps the old
+             * all-or-nothing result: walk it byte by byte. */
+            for (uint32_t j = 0; j < chunk; j++) {
+                const uint32_t byte = at + j;
+                if (!wc3_legacy_guest_ok(byte, 1u)) return -1;
+                const char ch = (char)wc3_legacy_rd8g(byte);
+                dst[i++] = ch;
+                if (!ch) return 0;
+            }
+        }
     }
     dst[cap - 1] = 0;
     return -1;

@@ -5,6 +5,14 @@
  * (window, bar) pair owns a range, page and position; SetScrollInfo returns
  * the previous position and GetScrollInfo fills only the fields selected by
  * fMask, as Win32 does.
+ *
+ * The slot table has two lock levels.  g_scroll_table_lock owns slot identity
+ * (used/hwnd/bar) and allocation; g_scroll_locks[i] owns slot i's range, page
+ * and position.  A lookup resolves and pins a slot by taking its mutex before
+ * dropping the table lock, so install() cannot clear or reuse the slot while
+ * the caller still holds it.  Lock order is table -> slot; no slot lock is
+ * held while taking the table lock.  Guest SCROLLINFO memory is read before
+ * either lock and written after both are released.
  */
 #include "scroll_hle.h"
 
@@ -47,36 +55,79 @@ typedef struct ScrollState {
 } ScrollState;
 
 static ScrollState g_scroll[SCROLL_SLOTS];
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_scroll_table_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_scroll_locks[SCROLL_SLOTS];
+static pthread_once_t g_scroll_locks_once = PTHREAD_ONCE_INIT;
+
+static void init_scroll_locks(void)
+{
+    for (unsigned i = 0; i < SCROLL_SLOTS; i++)
+        pthread_mutex_init(&g_scroll_locks[i], NULL);
+}
+
+static void ensure_scroll_locks(void)
+{
+    (void)pthread_once(&g_scroll_locks_once, init_scroll_locks);
+}
 
 static int valid_bar(uint32_t bar)
 {
     return bar <= SB_CTL;
 }
 
-static ScrollState *find_state(uint32_t hwnd, uint32_t bar)
+/* Caller holds g_scroll_table_lock.  Slot identity changes only under that
+ * lock, so a resolved index can be pinned with g_scroll_locks[index] while the
+ * table lock is still held. */
+static unsigned find_state_index_locked(uint32_t hwnd, uint32_t bar)
 {
     for (unsigned i = 0; i < SCROLL_SLOTS; i++) {
         if (g_scroll[i].used && g_scroll[i].hwnd == hwnd &&
             g_scroll[i].bar == bar)
-            return &g_scroll[i];
+            return i;
     }
-    return NULL;
+    return SCROLL_SLOTS;
 }
 
-static ScrollState *ensure_state(uint32_t hwnd, uint32_t bar)
+/* Caller holds g_scroll_table_lock.  Returns the matching slot with its slot
+ * mutex held, allocating the first free slot when the pair is new, or NULL
+ * when all slots are in use.  A new slot becomes visible only after its mutex
+ * is held and it has been cleared, so a concurrent lookup cannot observe a
+ * half-initialised slot. */
+static ScrollState *lock_state_locked(uint32_t hwnd, uint32_t bar)
 {
-    ScrollState *state = find_state(hwnd, bar);
-    if (state) return state;
-    for (unsigned i = 0; i < SCROLL_SLOTS; i++) {
-        if (g_scroll[i].used) continue;
-        memset(&g_scroll[i], 0, sizeof g_scroll[i]);
-        g_scroll[i].used = 1u;
-        g_scroll[i].hwnd = hwnd;
-        g_scroll[i].bar = bar;
-        return &g_scroll[i];
+    unsigned index = find_state_index_locked(hwnd, bar);
+    if (index == SCROLL_SLOTS) {
+        for (unsigned i = 0; i < SCROLL_SLOTS; i++) {
+            if (g_scroll[i].used) continue;
+            index = i;
+            break;
+        }
+        if (index == SCROLL_SLOTS) return NULL;
+        pthread_mutex_lock(&g_scroll_locks[index]);
+        memset(&g_scroll[index], 0, sizeof g_scroll[index]);
+        g_scroll[index].used = 1u;
+        g_scroll[index].hwnd = hwnd;
+        g_scroll[index].bar = bar;
+        return &g_scroll[index];
     }
-    return NULL;
+    pthread_mutex_lock(&g_scroll_locks[index]);
+    return &g_scroll[index];
+}
+
+/* Resolve a pair to a pinned slot.  The table lock is dropped before the
+ * caller sees the pointer; the slot mutex stays held across the state update,
+ * so install() cannot reset the table underneath the caller. */
+static ScrollState *lock_state(uint32_t hwnd, uint32_t bar)
+{
+    pthread_mutex_lock(&g_scroll_table_lock);
+    ScrollState *state = lock_state_locked(hwnd, bar);
+    pthread_mutex_unlock(&g_scroll_table_lock);
+    return state;
+}
+
+static void unlock_state(ScrollState *state)
+{
+    pthread_mutex_unlock(&g_scroll_locks[(unsigned)(state - g_scroll)]);
 }
 
 static int32_t max_position(const ScrollState *state)
@@ -111,26 +162,35 @@ static void h_set_scroll_info(CPU *c)
     if (wc3_legacy_rd32g(info + SCROLLINFO_CB_SIZE) < SCROLLINFO_SIZE)
         return;
 
-    pthread_mutex_lock(&g_lock);
-    ScrollState *state = ensure_state(hwnd, bar);
-    if (!state) {
-        pthread_mutex_unlock(&g_lock);
-        return;
-    }
-
     const uint32_t mask = wc3_legacy_rd32g(info + SCROLLINFO_MASK);
-    const int32_t old_position = state->position;
+    int32_t minimum = 0;
+    int32_t maximum = 0;
+    uint32_t page = 0u;
+    int32_t position = 0;
     if (mask & SIF_RANGE) {
-        state->minimum = (int32_t)wc3_legacy_rd32g(info + SCROLLINFO_MIN);
-        state->maximum = (int32_t)wc3_legacy_rd32g(info + SCROLLINFO_MAX);
+        minimum = (int32_t)wc3_legacy_rd32g(info + SCROLLINFO_MIN);
+        maximum = (int32_t)wc3_legacy_rd32g(info + SCROLLINFO_MAX);
     }
     if (mask & SIF_PAGE)
-        state->page = wc3_legacy_rd32g(info + SCROLLINFO_PAGE);
+        page = wc3_legacy_rd32g(info + SCROLLINFO_PAGE);
     if (mask & SIF_POS)
-        state->position = (int32_t)wc3_legacy_rd32g(info + SCROLLINFO_POS);
+        position = (int32_t)wc3_legacy_rd32g(info + SCROLLINFO_POS);
+
+    ScrollState *state = lock_state(hwnd, bar);
+    if (!state) return;
+
+    const int32_t old_position = state->position;
+    if (mask & SIF_RANGE) {
+        state->minimum = minimum;
+        state->maximum = maximum;
+    }
+    if (mask & SIF_PAGE)
+        state->page = page;
+    if (mask & SIF_POS)
+        state->position = position;
     state->position = clamp_position(state, state->position);
     c->eax = (uint32_t)old_position;
-    pthread_mutex_unlock(&g_lock);
+    unlock_state(state);
 }
 
 static void h_get_scroll_info(CPU *c)
@@ -146,28 +206,28 @@ static void h_get_scroll_info(CPU *c)
     if (wc3_legacy_rd32g(info + SCROLLINFO_CB_SIZE) < SCROLLINFO_SIZE)
         return;
 
-    pthread_mutex_lock(&g_lock);
-    ScrollState *state = ensure_state(hwnd, bar);
-    if (!state) {
-        pthread_mutex_unlock(&g_lock);
-        return;
-    }
-
     const uint32_t mask = wc3_legacy_rd32g(info + SCROLLINFO_MASK);
+    ScrollState *state = lock_state(hwnd, bar);
+    if (!state) return;
+
+    const int32_t minimum = state->minimum;
+    const int32_t maximum = state->maximum;
+    const uint32_t page = state->page;
+    const int32_t position = state->position;
+    unlock_state(state);
+
     wc3_legacy_wr32g(info + SCROLLINFO_CB_SIZE, SCROLLINFO_SIZE);
     if (mask & SIF_RANGE) {
-        wc3_legacy_wr32g(info + SCROLLINFO_MIN, (uint32_t)state->minimum);
-        wc3_legacy_wr32g(info + SCROLLINFO_MAX, (uint32_t)state->maximum);
+        wc3_legacy_wr32g(info + SCROLLINFO_MIN, (uint32_t)minimum);
+        wc3_legacy_wr32g(info + SCROLLINFO_MAX, (uint32_t)maximum);
     }
     if (mask & SIF_PAGE)
-        wc3_legacy_wr32g(info + SCROLLINFO_PAGE, state->page);
+        wc3_legacy_wr32g(info + SCROLLINFO_PAGE, page);
     if (mask & SIF_POS)
-        wc3_legacy_wr32g(info + SCROLLINFO_POS, (uint32_t)state->position);
+        wc3_legacy_wr32g(info + SCROLLINFO_POS, (uint32_t)position);
     if (mask & SIF_TRACKPOS)
-        wc3_legacy_wr32g(info + SCROLLINFO_TRACK,
-                         (uint32_t)state->position);
+        wc3_legacy_wr32g(info + SCROLLINFO_TRACK, (uint32_t)position);
     c->eax = 1u;
-    pthread_mutex_unlock(&g_lock);
 }
 
 static void h_set_scroll_pos(CPU *c)
@@ -180,14 +240,13 @@ static void h_set_scroll_pos(CPU *c)
     c->eax = 0u;
     if (!hwnd || !valid_bar(bar)) return;
 
-    pthread_mutex_lock(&g_lock);
-    ScrollState *state = ensure_state(hwnd, bar);
+    ScrollState *state = lock_state(hwnd, bar);
     if (state) {
         const int32_t old_position = state->position;
         state->position = clamp_position(state, position);
         c->eax = (uint32_t)old_position;
+        unlock_state(state);
     }
-    pthread_mutex_unlock(&g_lock);
 }
 
 typedef struct ScrollAddition {
@@ -204,9 +263,18 @@ static const ScrollAddition g_additions[] = {
 
 int wc3_hle_user32_scroll_install(void)
 {
-    pthread_mutex_lock(&g_lock);
+    ensure_scroll_locks();
+
+    /* Install is a bootstrap step.  Holding the table lock and every slot lock
+     * gives the reset the same exclusivity the former single lock had, and
+     * follows the table -> slot order used at runtime. */
+    pthread_mutex_lock(&g_scroll_table_lock);
+    for (unsigned i = 0; i < SCROLL_SLOTS; i++)
+        pthread_mutex_lock(&g_scroll_locks[i]);
     memset(g_scroll, 0, sizeof g_scroll);
-    pthread_mutex_unlock(&g_lock);
+    for (unsigned i = 0; i < SCROLL_SLOTS; i++)
+        pthread_mutex_unlock(&g_scroll_locks[i]);
+    pthread_mutex_unlock(&g_scroll_table_lock);
 
     for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
         if (wc3_legacy_hle_add("USER32.dll", g_additions[i].name,

@@ -84,7 +84,25 @@ static RegKey g_keys[REG_KEY_MAX];
 static RegValue g_values[REG_VALUE_MAX];
 static RegOpenKey g_open[REG_OPEN_MAX];
 static char g_current_key[REG_PATH_MAX] = REG_ROOT;
+/* g_lock owns keys, values, g_current_key, dirty state and persistence.
+ * g_open_table_lock owns g_open[i].used/.handle and first-free allocation;
+ * g_open_locks[i] owns g_open[i].path.  Lock order is
+ * g_lock -> g_open_table_lock -> g_open_locks[i]; slot locks are leaves. */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_open_table_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_open_locks[REG_OPEN_MAX];
+static pthread_once_t g_open_locks_once = PTHREAD_ONCE_INIT;
+static int g_open_locks_ready;
+
+static void init_open_locks(void)
+{
+    int ready = 1;
+    for (unsigned i = 0; i < REG_OPEN_MAX; i++) {
+        if (pthread_mutex_init(&g_open_locks[i], NULL) != 0)
+            ready = 0;
+    }
+    g_open_locks_ready = ready;
+}
 
 /* A save-all from the game writes every preference in one burst.  Persist
  * once at the end of that burst instead of rewriting the whole file for each
@@ -275,7 +293,6 @@ static RegValue *slot_value_locked(const char *path, const char *name)
         copy_text(g_values[i].name, sizeof g_values[i].name, name);
         g_values[i].type = REG_SZ;
         g_values[i].len = 0u;
-        memset(g_values[i].data, 0, sizeof g_values[i].data);
         return &g_values[i];
     }
     return NULL;
@@ -289,7 +306,6 @@ static void set_value_locked(const char *path, const char *name,
     if (!value) return;
     value->type = type;
     value->len = length > REG_DATA_MAX ? REG_DATA_MAX : length;
-    memset(value->data, 0, sizeof value->data);
     if (data && value->len)
         memcpy(value->data, data, value->len);
 }
@@ -380,18 +396,19 @@ void wc3_hle_registry_end_batch(void)
 }
 
 /* Restore the values written by an earlier process.  Called after the stock
- * defaults, so a saved resolution wins over the native-size default. */
-static void load_persisted_locked(void)
+ * defaults, so a saved resolution wins over the native-size default.  Returns
+ * the restored count, or -1 when no valid persistence file was read. */
+static int load_persisted_locked(void)
 {
     char path[REG_FILE_PATH_MAX];
-    if (!reg_file_path(path, sizeof path)) return;
+    if (!reg_file_path(path, sizeof path)) return -1;
     FILE *file = fopen(path, "rb");
-    if (!file) return;
+    if (!file) return -1;
 
     char line[REG_FILE_LINE_MAX];
     if (!fgets(line, sizeof line, file) || strcmp(line, "WC3REG1\n") != 0) {
         fclose(file);
-        return;
+        return -1;
     }
 
     unsigned loaded = 0u;
@@ -447,17 +464,16 @@ static void load_persisted_locked(void)
         loaded++;
     }
     fclose(file);
-
-#ifdef WC3_DEBUG
-    fprintf(stderr, "[registry] loaded %u persisted values\n", loaded);
-#endif
+    return (int)loaded;
 }
 
 static int remove_value_locked(const char *path, const char *name)
 {
     RegValue *value = find_value_locked(path, name);
     if (!value) return 0;
-    memset(value, 0, sizeof *value);
+    /* used is the only structural bit: readers gate on it and never inspect
+     * a retired slot's payload, which is fully overwritten on reuse. */
+    value->used = 0u;
     return 1;
 }
 
@@ -476,7 +492,7 @@ static int delete_subtree_locked(const char *path)
         if (!g_values[i].used) continue;
         if (ci_equal(g_values[i].path, path) ||
             is_descendant(g_values[i].path, path)) {
-            memset(&g_values[i], 0, sizeof g_values[i]);
+            g_values[i].used = 0u;
             removed = 1;
         }
     }
@@ -484,17 +500,25 @@ static int delete_subtree_locked(const char *path)
         if (!g_keys[i].used) continue;
         if (ci_equal(g_keys[i].path, path) ||
             is_descendant(g_keys[i].path, path)) {
-            memset(&g_keys[i], 0, sizeof g_keys[i]);
+            g_keys[i].used = 0u;
             removed = 1;
         }
     }
+    /* The table lock prevents slot reuse across this scan; the matching slot
+     * lock protects the path during comparison and clearing. */
+    pthread_mutex_lock(&g_open_table_lock);
     for (unsigned i = 0; i < REG_OPEN_MAX; i++) {
         if (!g_open[i].used) continue;
+        pthread_mutex_lock(&g_open_locks[i]);
         if (ci_equal(g_open[i].path, path) ||
             is_descendant(g_open[i].path, path)) {
-            memset(&g_open[i], 0, sizeof g_open[i]);
+            g_open[i].used = 0u;
+            g_open[i].handle = 0u;
+            memset(g_open[i].path, 0, sizeof g_open[i].path);
         }
+        pthread_mutex_unlock(&g_open_locks[i]);
     }
+    pthread_mutex_unlock(&g_open_table_lock);
     return removed;
 }
 
@@ -504,24 +528,46 @@ static int is_handle_in_range(uint32_t handle)
            handle < REG_HANDLE_BASE + REG_OPEN_MAX * REG_HANDLE_STRIDE;
 }
 
-static RegOpenKey *find_open_locked(uint32_t handle)
+/* Caller holds g_open_table_lock.  Only table-owned identity is read. */
+static int find_open_index_locked(uint32_t handle)
 {
     for (unsigned i = 0; i < REG_OPEN_MAX; i++) {
         if (g_open[i].used && g_open[i].handle == handle)
-            return &g_open[i];
+            return (int)i;
     }
-    return NULL;
+    return -1;
 }
 
+/* Caller holds g_open_table_lock and index identifies a used slot.  Pin the
+ * slot, clear identity under both locks, drop the table, then clear the path
+ * under the slot lock.  Both locks are released before returning. */
+static void clear_open_slot_locked(int index)
+{
+    pthread_mutex_lock(&g_open_locks[index]);
+    g_open[index].used = 0u;
+    g_open[index].handle = 0u;
+    pthread_mutex_unlock(&g_open_table_lock);
+    memset(g_open[index].path, 0, sizeof g_open[index].path);
+    pthread_mutex_unlock(&g_open_locks[index]);
+}
+
+/* Caller holds g_open_table_lock.  On success the selected slot is pinned
+ * before the table lock is dropped, then the path is copied under the slot
+ * lock.  The table lock is released on every return path. */
 static uint32_t open_handle_locked(const char *path)
 {
     for (unsigned i = 0; i < REG_OPEN_MAX; i++) {
         if (g_open[i].used) continue;
+        const uint32_t handle = REG_HANDLE_BASE + i * REG_HANDLE_STRIDE;
         g_open[i].used = 1u;
-        g_open[i].handle = REG_HANDLE_BASE + i * REG_HANDLE_STRIDE;
+        g_open[i].handle = handle;
+        pthread_mutex_lock(&g_open_locks[i]);
+        pthread_mutex_unlock(&g_open_table_lock);
         copy_text(g_open[i].path, sizeof g_open[i].path, path);
-        return g_open[i].handle;
+        pthread_mutex_unlock(&g_open_locks[i]);
+        return handle;
     }
+    pthread_mutex_unlock(&g_open_table_lock);
     return 0u;
 }
 
@@ -530,33 +576,53 @@ static int is_predefined_root(uint32_t handle)
     return handle >= 0x80000000u && handle <= 0x8000000Fu;
 }
 
-static const char *parent_path_locked(uint32_t handle, int *invalid)
+/* Caller holds g_lock.  Resolve and pin the slot under the table lock, then
+ * copy the path under the slot lock.  No pointer into g_open escapes. */
+static int open_path_copy_locked(uint32_t handle, char *out, size_t capacity)
 {
-    *invalid = 0;
-    if (is_handle_in_range(handle)) {
-        RegOpenKey *open = find_open_locked(handle);
-        if (!open) {
-            *invalid = 1;
-            return NULL;
-        }
-        return open->path;
+    int found = 0;
+    pthread_mutex_lock(&g_open_table_lock);
+    const int index = find_open_index_locked(handle);
+    if (index >= 0) {
+        pthread_mutex_lock(&g_open_locks[index]);
+        pthread_mutex_unlock(&g_open_table_lock);
+        copy_text(out, capacity, g_open[index].path);
+        pthread_mutex_unlock(&g_open_locks[index]);
+        found = 1;
+    } else {
+        pthread_mutex_unlock(&g_open_table_lock);
     }
-    if (is_predefined_root(handle)) return REG_ROOT;
-    return g_current_key;
+    return found;
 }
 
-static const char *operation_path_locked(uint32_t handle, int *invalid)
+/* Caller holds g_lock.  Predefined roots and other handles resolve from
+ * store state under that lock; target-range handles take the open table lock
+ * and then their slot lock inside open_path_copy_locked. */
+static void parent_path_copy_locked(uint32_t handle, char *out,
+                                    size_t capacity, int *invalid)
 {
     *invalid = 0;
     if (is_handle_in_range(handle)) {
-        RegOpenKey *open = find_open_locked(handle);
-        if (!open) {
-            *invalid = 1;
-            return NULL;
-        }
-        return open->path;
+        if (!open_path_copy_locked(handle, out, capacity)) *invalid = 1;
+        return;
     }
-    return g_current_key;
+    if (is_predefined_root(handle)) {
+        copy_text(out, capacity, REG_ROOT);
+        return;
+    }
+    copy_text(out, capacity, g_current_key);
+}
+
+/* Caller holds g_lock.  Same lock rule as parent_path_copy_locked. */
+static void operation_path_copy_locked(uint32_t handle, char *out,
+                                       size_t capacity, int *invalid)
+{
+    *invalid = 0;
+    if (is_handle_in_range(handle)) {
+        if (!open_path_copy_locked(handle, out, capacity)) *invalid = 1;
+        return;
+    }
+    copy_text(out, capacity, g_current_key);
 }
 
 static void h_open_key(CPU *c)
@@ -566,15 +632,20 @@ static void h_open_key(CPU *c)
     const uint32_t out = wc3_legacy_arg32(c, 4u);
     char sub[REG_PATH_MAX];
     char path[REG_PATH_MAX];
+    char base[REG_PATH_MAX];
 
     if (!read_guest_string(sub_address, sub, sizeof sub)) {
         c->eax = REG_INVALID_PARAMETER;
         return;
     }
 
+    /* The required output is range-checked before any host lock.  The key and
+     * open are still created for an invalid destination and rolled back below. */
+    const int out_valid = out && wc3_legacy_guest_ok(out, 4u);
+
     pthread_mutex_lock(&g_lock);
     int invalid = 0;
-    const char *base = parent_path_locked(parent, &invalid);
+    parent_path_copy_locked(parent, base, sizeof base, &invalid);
     if (invalid) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_HANDLE;
@@ -588,22 +659,29 @@ static void h_open_key(CPU *c)
     }
 
     ensure_key_and_parents_locked(path);
+    /* open_handle_locked releases the table lock after pinning the slot. */
+    pthread_mutex_lock(&g_open_table_lock);
     const uint32_t handle = open_handle_locked(path);
     if (!handle) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_NOT_ENOUGH_MEMORY;
         return;
     }
-    if (!out || !wc3_legacy_guest_ok(out, 4u)) {
-        RegOpenKey *open = find_open_locked(handle);
-        if (open) memset(open, 0, sizeof *open);
+    if (!out_valid) {
+        pthread_mutex_lock(&g_open_table_lock);
+        const int index = find_open_index_locked(handle);
+        if (index >= 0)
+            clear_open_slot_locked(index);
+        else
+            pthread_mutex_unlock(&g_open_table_lock);
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_PARAMETER;
         return;
     }
-    wc3_legacy_wr32g(out, handle);
     copy_text(g_current_key, sizeof g_current_key, path);
     pthread_mutex_unlock(&g_lock);
+
+    wc3_legacy_wr32g(out, handle);
     c->eax = REG_SUCCESS;
 }
 
@@ -615,15 +693,24 @@ static void h_create_key(CPU *c)
     const uint32_t disposition = wc3_legacy_arg32(c, 8u);
     char sub[REG_PATH_MAX];
     char path[REG_PATH_MAX];
+    char base[REG_PATH_MAX];
 
     if (!read_guest_string(sub_address, sub, sizeof sub)) {
         c->eax = REG_INVALID_PARAMETER;
         return;
     }
 
+    /* Both destinations are optional.  Range-check them before any host lock;
+     * the key and open are still created for an invalid destination and rolled
+     * back below.  Keep the original short-circuit: an invalid out is already
+     * fatal, so disposition is not checked in that case. */
+    const int out_valid = !out || wc3_legacy_guest_ok(out, 4u);
+    const int disposition_valid =
+        out_valid && (!disposition || wc3_legacy_guest_ok(disposition, 4u));
+
     pthread_mutex_lock(&g_lock);
     int invalid = 0;
-    const char *base = parent_path_locked(parent, &invalid);
+    parent_path_copy_locked(parent, base, sizeof base, &invalid);
     if (invalid) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_HANDLE;
@@ -640,24 +727,31 @@ static void h_create_key(CPU *c)
 
     const int existed = find_key_locked(path) != NULL;
     ensure_key_and_parents_locked(path);
+    /* open_handle_locked releases the table lock after pinning the slot. */
+    pthread_mutex_lock(&g_open_table_lock);
     const uint32_t handle = open_handle_locked(path);
     if (!handle) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_NOT_ENOUGH_MEMORY;
         return;
     }
-    if ((out && !wc3_legacy_guest_ok(out, 4u)) ||
-        (disposition && !wc3_legacy_guest_ok(disposition, 4u))) {
-        RegOpenKey *open = find_open_locked(handle);
-        if (open) memset(open, 0, sizeof *open);
+    if (!out_valid || !disposition_valid) {
+        pthread_mutex_lock(&g_open_table_lock);
+        const int index = find_open_index_locked(handle);
+        if (index >= 0)
+            clear_open_slot_locked(index);
+        else
+            pthread_mutex_unlock(&g_open_table_lock);
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_PARAMETER;
         return;
     }
-    write_u32(out, handle);
-    write_u32(disposition, existed ? 2u : 1u);
+    const uint32_t disposition_value = existed ? 2u : 1u;
     copy_text(g_current_key, sizeof g_current_key, path);
     pthread_mutex_unlock(&g_lock);
+
+    write_u32(out, handle);
+    write_u32(disposition, disposition_value);
     c->eax = REG_SUCCESS;
 }
 
@@ -669,6 +763,7 @@ static void h_query_value(CPU *c)
     const uint32_t data_out = wc3_legacy_arg32(c, 4u);
     const uint32_t length_io = wc3_legacy_arg32(c, 5u);
     char name[REG_NAME_MAX];
+    char path[REG_PATH_MAX];
 
     if (!read_guest_string(name_address, name, sizeof name)) {
         c->eax = REG_INVALID_PARAMETER;
@@ -679,54 +774,63 @@ static void h_query_value(CPU *c)
         return;
     }
 
+    /* A private copy of the stored value is taken under g_lock; all guest
+     * reads and writes run after the unlock.  RegValue.len is capped at
+     * REG_DATA_MAX when the slot is written. */
+    uint32_t type = REG_SZ;
+    uint32_t length = 0u;
+    uint8_t snapshot[REG_DATA_MAX];
+
     pthread_mutex_lock(&g_lock);
     int invalid = 0;
-    const char *path = operation_path_locked(handle, &invalid);
+    operation_path_copy_locked(handle, path, sizeof path, &invalid);
     if (invalid) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_HANDLE;
         return;
     }
     RegValue *value = find_value_locked(path, name);
-#ifdef WC3_DEBUG
-    if (!value) {
-        fprintf(stderr, "[registry] get %s\\%s = missing\n", path, name);
-    } else {
-        uint32_t stored = 0u;
-        if (value->len >= 4u) memcpy(&stored, value->data, 4u);
-        fprintf(stderr, "[registry] get %s\\%s = %u (type=%u len=%u)\n",
-                path, name, stored, value->type, value->len);
-    }
-#endif
     if (!value) {
         pthread_mutex_unlock(&g_lock);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+        fprintf(stderr, "[registry] get %s\\%s = missing\n", path, name);
+#endif
         c->eax = REG_FILE_NOT_FOUND;
         return;
     }
+    type = value->type;
+    length = value->len;
+    if (length) memcpy(snapshot, value->data, length);
+    pthread_mutex_unlock(&g_lock);
 
-    write_u32(type_out, value->type);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    uint32_t stored = 0u;
+    if (length >= 4u) memcpy(&stored, snapshot, 4u);
+    fprintf(stderr, "[registry] get %s\\%s = %u (type=%u len=%u)\n",
+            path, name, stored, type, length);
+#endif
+
+    /* Preserve the original guest-visible order: the type is written before
+     * length_io is read, so overlapping type_out/length_io behave as before. */
+    write_u32(type_out, type);
     const uint32_t capacity = wc3_legacy_rd32g(length_io);
     if (!data_out) {
-        wc3_legacy_wr32g(length_io, value->len);
-        pthread_mutex_unlock(&g_lock);
+        wc3_legacy_wr32g(length_io, length);
         c->eax = REG_SUCCESS;
         return;
     }
-    if (capacity < value->len) {
-        wc3_legacy_wr32g(length_io, value->len);
-        pthread_mutex_unlock(&g_lock);
+    if (capacity < length) {
+        wc3_legacy_wr32g(length_io, length);
         c->eax = REG_MORE_DATA;
         return;
     }
-    if (value->len && !wc3_legacy_guest_ok(data_out, value->len)) {
-        pthread_mutex_unlock(&g_lock);
+    if (length && !wc3_legacy_guest_ok(data_out, length)) {
         c->eax = REG_INVALID_PARAMETER;
         return;
     }
-    for (uint32_t i = 0; i < value->len; i++)
-        wc3_legacy_wr8g(data_out + i, value->data[i]);
-    wc3_legacy_wr32g(length_io, value->len);
-    pthread_mutex_unlock(&g_lock);
+    for (uint32_t i = 0; i < length; i++)
+        wc3_legacy_wr8g(data_out + i, snapshot[i]);
+    wc3_legacy_wr32g(length_io, length);
     c->eax = REG_SUCCESS;
 }
 
@@ -738,6 +842,7 @@ static void h_set_value(CPU *c)
     const uint32_t data = wc3_legacy_arg32(c, 4u);
     const uint32_t length = wc3_legacy_arg32(c, 5u);
     char name[REG_NAME_MAX];
+    char path[REG_PATH_MAX];
 
     if (!read_guest_string(name_address, name, sizeof name)) {
         c->eax = REG_INVALID_PARAMETER;
@@ -752,9 +857,15 @@ static void h_set_value(CPU *c)
         return;
     }
 
+    /* Snapshot the caller's bytes before g_lock: the comparison and the store
+     * then use the same copy, and no guest memory is touched under the lock. */
+    uint8_t snapshot[REG_DATA_MAX];
+    for (uint32_t i = 0; i < length; i++)
+        snapshot[i] = wc3_legacy_rd8g(data + i);
+
     pthread_mutex_lock(&g_lock);
     int invalid = 0;
-    const char *path = operation_path_locked(handle, &invalid);
+    operation_path_copy_locked(handle, path, sizeof path, &invalid);
     if (invalid) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_HANDLE;
@@ -766,7 +877,7 @@ static void h_set_value(CPU *c)
     if (value) {
         changed = value->type != type || value->len != length;
         for (uint32_t i = 0; !changed && i < length; i++) {
-            if (value->data[i] != wc3_legacy_rd8g(data + i)) changed = 1;
+            if (value->data[i] != snapshot[i]) changed = 1;
         }
     } else {
         value = slot_value_locked(path, name);
@@ -778,18 +889,18 @@ static void h_set_value(CPU *c)
     }
     value->type = type;
     value->len = length;
-    memset(value->data, 0, sizeof value->data);
     for (uint32_t i = 0; i < length; i++)
-        value->data[i] = wc3_legacy_rd8g(data + i);
+        value->data[i] = snapshot[i];
     if (changed) g_store_dirty = 1;
-#ifdef WC3_DEBUG
-    uint32_t stored = 0u;
-    if (value->len >= 4u) memcpy(&stored, value->data, 4u);
-    fprintf(stderr, "[registry] set %s\\%s = %u (type=%u len=%u)\n",
-            path, name, stored, value->type, value->len);
-#endif
     maybe_persist_locked();
     pthread_mutex_unlock(&g_lock);
+
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    uint32_t stored = 0u;
+    if (length >= 4u) memcpy(&stored, snapshot, 4u);
+    fprintf(stderr, "[registry] set %s\\%s = %u (type=%u len=%u)\n",
+            path, name, stored, type, length);
+#endif
     c->eax = REG_SUCCESS;
 }
 
@@ -798,6 +909,7 @@ static void h_delete_value(CPU *c)
     const uint32_t handle = wc3_legacy_arg32(c, 0u);
     const uint32_t name_address = wc3_legacy_arg32(c, 1u);
     char name[REG_NAME_MAX];
+    char path[REG_PATH_MAX];
 
     if (!read_guest_string(name_address, name, sizeof name)) {
         c->eax = REG_INVALID_PARAMETER;
@@ -806,7 +918,7 @@ static void h_delete_value(CPU *c)
 
     pthread_mutex_lock(&g_lock);
     int invalid = 0;
-    const char *path = operation_path_locked(handle, &invalid);
+    operation_path_copy_locked(handle, path, sizeof path, &invalid);
     if (invalid) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_HANDLE;
@@ -827,6 +939,7 @@ static void h_delete_key(CPU *c)
     const uint32_t sub_address = wc3_legacy_arg32(c, 1u);
     char sub[REG_PATH_MAX];
     char path[REG_PATH_MAX];
+    char base[REG_PATH_MAX];
 
     if (!read_guest_string(sub_address, sub, sizeof sub)) {
         c->eax = REG_INVALID_PARAMETER;
@@ -835,7 +948,7 @@ static void h_delete_key(CPU *c)
 
     pthread_mutex_lock(&g_lock);
     int invalid = 0;
-    const char *base = parent_path_locked(parent, &invalid);
+    parent_path_copy_locked(parent, base, sizeof base, &invalid);
     if (invalid) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_HANDLE;
@@ -861,10 +974,10 @@ static void h_flush_key(CPU *c)
     const uint32_t handle = wc3_legacy_arg32(c, 0u);
     int invalid = 0;
 
-    pthread_mutex_lock(&g_lock);
-    if (is_handle_in_range(handle) && !find_open_locked(handle))
+    pthread_mutex_lock(&g_open_table_lock);
+    if (is_handle_in_range(handle) && find_open_index_locked(handle) < 0)
         invalid = 1;
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_open_table_lock);
     c->eax = invalid ? REG_INVALID_HANDLE : REG_SUCCESS;
 }
 
@@ -873,13 +986,14 @@ static void h_close_key(CPU *c)
     const uint32_t handle = wc3_legacy_arg32(c, 0u);
     int closed = 0;
 
-    pthread_mutex_lock(&g_lock);
-    RegOpenKey *open = find_open_locked(handle);
-    if (open) {
-        memset(open, 0, sizeof *open);
+    pthread_mutex_lock(&g_open_table_lock);
+    const int index = find_open_index_locked(handle);
+    if (index >= 0) {
+        clear_open_slot_locked(index);
         closed = 1;
+    } else {
+        pthread_mutex_unlock(&g_open_table_lock);
     }
-    pthread_mutex_unlock(&g_lock);
     c->eax = closed ? REG_SUCCESS
                     : (is_handle_in_range(handle) ? REG_INVALID_HANDLE
                                                   : REG_SUCCESS);
@@ -922,6 +1036,7 @@ static void h_enum_key(CPU *c)
     const uint32_t class_out = wc3_legacy_arg32(c, 5u);
     const uint32_t class_length = wc3_legacy_arg32(c, 6u);
     const uint32_t last_write = wc3_legacy_arg32(c, 7u);
+    char path[REG_PATH_MAX];
 
     if (!name_out || !name_length ||
         !wc3_legacy_guest_ok(name_length, 4u)) {
@@ -929,9 +1044,13 @@ static void h_enum_key(CPU *c)
         return;
     }
 
+    /* The name capacity is a guest value; read it before the lock so the
+     * locked span touches no guest memory. */
+    const uint32_t capacity = wc3_legacy_rd32g(name_length);
+
     pthread_mutex_lock(&g_lock);
     int invalid = 0;
-    const char *path = operation_path_locked(handle, &invalid);
+    operation_path_copy_locked(handle, path, sizeof path, &invalid);
     if (invalid) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_HANDLE;
@@ -947,12 +1066,13 @@ static void h_enum_key(CPU *c)
         return;
     }
 
-    const char *child = children[index];
+    char child[REG_NAME_MAX];
+    copy_text(child, sizeof child, children[index]);
     const uint32_t length = (uint32_t)strlen(child);
-    const uint32_t capacity = wc3_legacy_rd32g(name_length);
+    pthread_mutex_unlock(&g_lock);
+
     if (capacity < length + 1u) {
         wc3_legacy_wr32g(name_length, length + 1u);
-        pthread_mutex_unlock(&g_lock);
         c->eax = REG_MORE_DATA;
         return;
     }
@@ -969,7 +1089,6 @@ static void h_enum_key(CPU *c)
     if (last_write && wc3_legacy_guest_ok(last_write, 8u))
         wc3_legacy_guest_zero(last_write, 8u);
 
-    pthread_mutex_unlock(&g_lock);
     c->eax = REG_SUCCESS;
 }
 
@@ -986,10 +1105,11 @@ static void h_query_info(CPU *c)
     const uint32_t max_data_out = wc3_legacy_arg32(c, 9u);
     const uint32_t security_out = wc3_legacy_arg32(c, 10u);
     const uint32_t last_write = wc3_legacy_arg32(c, 11u);
+    char path[REG_PATH_MAX];
 
     pthread_mutex_lock(&g_lock);
     int invalid = 0;
-    const char *path = operation_path_locked(handle, &invalid);
+    operation_path_copy_locked(handle, path, sizeof path, &invalid);
     if (invalid) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_HANDLE;
@@ -1015,6 +1135,7 @@ static void h_query_info(CPU *c)
         if (name_length > max_name) max_name = name_length;
         if (g_values[i].len > max_data) max_data = g_values[i].len;
     }
+    pthread_mutex_unlock(&g_lock);
 
     write_u32(subkeys_out, child_count);
     write_u32(max_subkey_out, max_subkey);
@@ -1034,7 +1155,6 @@ static void h_query_info(CPU *c)
         wc3_legacy_wr32g(class_length, 0u);
     }
 
-    pthread_mutex_unlock(&g_lock);
     c->eax = REG_SUCCESS;
 }
 
@@ -1130,14 +1250,35 @@ static const RegAddition g_additions[] = {
 
 int wc3_hle_advapi32_registry_install(void)
 {
+    if (pthread_once(&g_open_locks_once, init_open_locks) != 0 ||
+        !g_open_locks_ready)
+        return -1;
+
     pthread_mutex_lock(&g_lock);
     memset(g_keys, 0, sizeof g_keys);
     memset(g_values, 0, sizeof g_values);
+    /* Install is bootstrap-only; taking the full table order also excludes
+     * any slot user while the open table is cleared. */
+    pthread_mutex_lock(&g_open_table_lock);
+    for (unsigned i = 0; i < REG_OPEN_MAX; i++)
+        pthread_mutex_lock(&g_open_locks[i]);
     memset(g_open, 0, sizeof g_open);
+    for (unsigned i = REG_OPEN_MAX; i > 0u; i--)
+        pthread_mutex_unlock(&g_open_locks[i - 1u]);
+    pthread_mutex_unlock(&g_open_table_lock);
     copy_text(g_current_key, sizeof g_current_key, REG_ROOT);
     seed_defaults_locked();
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    const int loaded = load_persisted_locked();
+#else
     load_persisted_locked();
+#endif
     pthread_mutex_unlock(&g_lock);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (loaded >= 0)
+        fprintf(stderr, "[registry] loaded %u persisted values\n",
+                (unsigned)loaded);
+#endif
 
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
         if (wc3_legacy_hle_override("ADVAPI32.dll", g_overrides[i].name,

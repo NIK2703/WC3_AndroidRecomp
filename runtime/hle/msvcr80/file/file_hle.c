@@ -49,10 +49,57 @@ enum {
 typedef struct FileSlot {
     uintptr_t handle;
     int used;
+    pthread_mutex_t lock;
 } FileSlot;
 
+/* Descriptor table locking.
+ *
+ * The only nested acquisition order is g_fd_table_lock -> FileSlot.lock, used
+ * by open.  Nothing acquires the table lock while holding a slot lock.  A
+ * read/write/seek/size takes only the slot lock.  Close takes the table lock
+ * briefly to publish/retire g_closing, then the slot lock, then the table lock
+ * again to return the slot; those table sections never overlap the slot lock.
+ *
+ * g_fd_table_lock protects only g_free_mask/g_closing and is never held across
+ * a Wc3FileApi callback.  A slot lock is the per-descriptor pin: read, write,
+ * seek, size and close hold it across the host call, so a close cannot release
+ * a handle that an in-flight operation is using, and the slot is not returned
+ * to the free bitmap until its close has finished.  open owns a slot by
+ * clearing its free bit under the table lock, then publishes handle/used under
+ * the slot lock.
+ *
+ * A close publishes g_closing before it marks the slot unused and keeps that
+ * count until the host close returns.  If an open finds the bitmap full while
+ * a close is in flight, it waits for the close to return its slot instead of
+ * reporting a false EMFILE.  A truly full table still returns -1.
+ *
+ * Wc3FileApi is a host-only platform seam (POSIX read/write/lseek or stdio).
+ * Its callbacks must not dispatch guest code or re-enter this module, so
+ * holding a slot lock across them does not run guest code under a host lock.
+ */
 static FileSlot g_slots[FD_LIMIT];
-static pthread_mutex_t g_fd_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_fd_table_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_fd_slot_freed = PTHREAD_COND_INITIALIZER;
+static pthread_once_t g_fd_once = PTHREAD_ONCE_INIT;
+
+_Static_assert(FD_LIMIT > 0u && FD_LIMIT <= 64u,
+               "descriptor free bitmap is 64 bits wide");
+
+/* Bit i set means slot i is free.  The bitmap makes allocation O(1) and keeps
+ * the previous linear scan's lowest-free descriptor choice. */
+static uint64_t g_free_mask = UINT64_MAX >> (64u - FD_LIMIT);
+static unsigned g_closing;
+
+static void init_fd_table(void)
+{
+    for (unsigned i = 0; i < FD_LIMIT; i++)
+        pthread_mutex_init(&g_slots[i].lock, NULL);
+}
+
+static void ensure_fd_table(void)
+{
+    (void)pthread_once(&g_fd_once, init_fd_table);
+}
 
 static const Wc3FileApi *file_api(void)
 {
@@ -76,10 +123,28 @@ int wc3_hle_msvcr80_read_guest_path(uint32_t address, char *buffer,
     while (i + 1u < capacity) {
         if (address > UINT32_MAX - (uint32_t)i) return 0;
         const uint32_t byte_address = address + (uint32_t)i;
-        if (!wc3_legacy_guest_ok(byte_address, 1u)) return 0;
-        const char ch = (char)wc3_legacy_rd8g(byte_address);
-        buffer[i++] = ch;
-        if (!ch) return 1;
+        const size_t remaining = capacity - 1u - i;
+        uint32_t chunk = remaining > 64u ? 64u : (uint32_t)remaining;
+        const uint64_t room = 0x100000000ull - byte_address;
+        if ((uint64_t)chunk > room) chunk = (uint32_t)room;
+
+        if (wc3_legacy_guest_ok(byte_address, chunk)) {
+            for (uint32_t j = 0; j < chunk; j++) {
+                const char ch = (char)wc3_legacy_rd8g(byte_address + j);
+                buffer[i++] = ch;
+                if (!ch) return 1;
+            }
+        } else {
+            /* A chunk that ends in an unmapped byte must keep the old
+             * all-or-nothing result: walk it byte by byte. */
+            for (uint32_t j = 0; j < chunk; j++) {
+                const uint32_t at = byte_address + j;
+                if (!wc3_legacy_guest_ok(at, 1u)) return 0;
+                const char ch = (char)wc3_legacy_rd8g(at);
+                buffer[i++] = ch;
+                if (!ch) return 1;
+            }
+        }
     }
     return 0;
 }
@@ -139,27 +204,45 @@ static int map_open_flags(int flags, int *mapped)
 int wc3_hle_msvcr80_fd_open(const char *host_path, int flags, int *fd_out)
 {
     if (!host_path || !fd_out) return -1;
+    ensure_fd_table();
     const Wc3FileApi *file = file_api();
     if (!file) return -1;
 
     uintptr_t handle = 0;
     if (file->open(file->ctx, host_path, flags, &handle) != 0) return -1;
 
-    pthread_mutex_lock(&g_fd_lock);
-    for (unsigned i = 0; i < FD_LIMIT; i++) {
-        if (g_slots[i].used) continue;
-        g_slots[i].used = 1;
-        g_slots[i].handle = handle;
-        pthread_mutex_unlock(&g_fd_lock);
-        *fd_out = (int)(FD_BASE + i);
-        return 0;
+    /* The host open is done before the table lock, so a slow filesystem call
+     * never serializes unrelated descriptor allocation. */
+    pthread_mutex_lock(&g_fd_table_lock);
+    /* A close keeps its slot unavailable until the host close returns.  If the
+     * bitmap is full only because such a close is in flight, wait for it rather
+     * than reporting a false EMFILE; a genuinely full table still fails. */
+    while (g_free_mask == 0u && g_closing != 0u)
+        (void)pthread_cond_wait(&g_fd_slot_freed, &g_fd_table_lock);
+    if (g_free_mask == 0u) {
+        /* Table full: discard the newly opened host handle exactly as the
+         * linear-scan version did. */
+        pthread_mutex_unlock(&g_fd_table_lock);
+        (void)file->close(file->ctx, handle);
+        return -1;
     }
-    pthread_mutex_unlock(&g_fd_lock);
-    (void)file->close(file->ctx, handle);
-    return -1;
+    const unsigned index = (unsigned)__builtin_ctzll(g_free_mask);
+    g_free_mask &= g_free_mask - 1u;
+
+    FileSlot *slot = &g_slots[index];
+    pthread_mutex_lock(&slot->lock);
+    slot->handle = handle;
+    slot->used = 1;
+    pthread_mutex_unlock(&slot->lock);
+    pthread_mutex_unlock(&g_fd_table_lock);
+
+    *fd_out = (int)(FD_BASE + index);
+    return 0;
 }
 
-static FileSlot *fd_slot_locked(int fd)
+/* Guest fd -> slot by direct index; no table lock is required for the lookup
+ * itself because the mapping is fixed.  Slot state is read under slot->lock. */
+static FileSlot *fd_slot(int fd)
 {
     const unsigned slot = (unsigned)fd;
     if (fd < (int)FD_BASE || slot - FD_BASE >= FD_LIMIT) return NULL;
@@ -176,16 +259,18 @@ int wc3_hle_msvcr80_fd_read(int fd, void *buffer, uint32_t count,
     if (!buffer || count > 0x7FFFFFFFu) return -1;
     const Wc3FileApi *file = file_api();
     if (!file) return -1;
+    FileSlot *slot = fd_slot(fd);
+    if (!slot) return -1;
 
-    pthread_mutex_lock(&g_fd_lock);
-    FileSlot *slot = fd_slot_locked(fd);
-    if (!slot || !slot->used) {
-        pthread_mutex_unlock(&g_fd_lock);
+    ensure_fd_table();
+    pthread_mutex_lock(&slot->lock);
+    if (!slot->used) {
+        pthread_mutex_unlock(&slot->lock);
         return -1;
     }
     uint32_t got = 0;
     const int rc = file->read(file->ctx, slot->handle, buffer, count, &got);
-    pthread_mutex_unlock(&g_fd_lock);
+    pthread_mutex_unlock(&slot->lock);
     if (rc != 0) return -1;
     if (read_out) *read_out = got;
     return 0;
@@ -201,17 +286,19 @@ int wc3_hle_msvcr80_fd_write(int fd, const void *buffer, uint32_t count,
     if (!buffer || count > 0x7FFFFFFFu) return -1;
     const Wc3FileApi *file = file_api();
     if (!file) return -1;
+    FileSlot *slot = fd_slot(fd);
+    if (!slot) return -1;
 
-    pthread_mutex_lock(&g_fd_lock);
-    FileSlot *slot = fd_slot_locked(fd);
-    if (!slot || !slot->used) {
-        pthread_mutex_unlock(&g_fd_lock);
+    ensure_fd_table();
+    pthread_mutex_lock(&slot->lock);
+    if (!slot->used) {
+        pthread_mutex_unlock(&slot->lock);
         return -1;
     }
     uint32_t written = 0;
     const int rc = file->write(file->ctx, slot->handle, buffer, count,
                                &written);
-    pthread_mutex_unlock(&g_fd_lock);
+    pthread_mutex_unlock(&slot->lock);
     if (rc != 0) return -1;
     if (written_out) *written_out = written;
     return 0;
@@ -223,17 +310,19 @@ int wc3_hle_msvcr80_fd_seek(int fd, int64_t offset, int whence,
     if (whence < 0 || whence > 2) return -1;
     const Wc3FileApi *file = file_api();
     if (!file) return -1;
+    FileSlot *slot = fd_slot(fd);
+    if (!slot) return -1;
 
-    pthread_mutex_lock(&g_fd_lock);
-    FileSlot *slot = fd_slot_locked(fd);
-    if (!slot || !slot->used) {
-        pthread_mutex_unlock(&g_fd_lock);
+    ensure_fd_table();
+    pthread_mutex_lock(&slot->lock);
+    if (!slot->used) {
+        pthread_mutex_unlock(&slot->lock);
         return -1;
     }
     uint64_t position = 0;
     const int rc = file->seek(file->ctx, slot->handle, offset, whence,
                               &position);
-    pthread_mutex_unlock(&g_fd_lock);
+    pthread_mutex_unlock(&slot->lock);
     if (rc != 0) return -1;
     if (position_out) *position_out = position;
     return 0;
@@ -244,15 +333,17 @@ int wc3_hle_msvcr80_fd_size(int fd, uint64_t *size_out)
     if (!size_out) return -1;
     const Wc3FileApi *file = file_api();
     if (!file || !file->size) return -1;
+    FileSlot *slot = fd_slot(fd);
+    if (!slot) return -1;
 
-    pthread_mutex_lock(&g_fd_lock);
-    FileSlot *slot = fd_slot_locked(fd);
-    if (!slot || !slot->used) {
-        pthread_mutex_unlock(&g_fd_lock);
+    ensure_fd_table();
+    pthread_mutex_lock(&slot->lock);
+    if (!slot->used) {
+        pthread_mutex_unlock(&slot->lock);
         return -1;
     }
     const int rc = file->size(file->ctx, slot->handle, size_out);
-    pthread_mutex_unlock(&g_fd_lock);
+    pthread_mutex_unlock(&slot->lock);
     return rc == 0 ? 0 : -1;
 }
 
@@ -260,18 +351,44 @@ int wc3_hle_msvcr80_fd_close(int fd)
 {
     const Wc3FileApi *file = file_api();
     if (!file) return -1;
+    FileSlot *slot = fd_slot(fd);
+    if (!slot) return -1;
 
-    pthread_mutex_lock(&g_fd_lock);
-    FileSlot *slot = fd_slot_locked(fd);
-    if (!slot || !slot->used) {
-        pthread_mutex_unlock(&g_fd_lock);
+    ensure_fd_table();
+    const unsigned index = (unsigned)(slot - g_slots);
+
+    /* Publish the in-flight close before the slot becomes unused.  An open that
+     * sees a full bitmap waits for this close to return its slot. */
+    pthread_mutex_lock(&g_fd_table_lock);
+    g_closing++;
+    pthread_mutex_unlock(&g_fd_table_lock);
+
+    pthread_mutex_lock(&slot->lock);
+    if (!slot->used) {
+        pthread_mutex_unlock(&slot->lock);
+        pthread_mutex_lock(&g_fd_table_lock);
+        g_closing--;
+        pthread_cond_signal(&g_fd_slot_freed);
+        pthread_mutex_unlock(&g_fd_table_lock);
         return -1;
     }
     const uintptr_t handle = slot->handle;
     slot->used = 0;
     slot->handle = 0;
+    /* The host close runs under the slot lock, so it waits for every in-flight
+     * read/write/seek/size on this descriptor and blocks new ones.  The slot
+     * stays out of the free bitmap until the close returns, which keeps open
+     * from reusing it while the old handle is being destroyed. */
     const int rc = file->close(file->ctx, handle);
-    pthread_mutex_unlock(&g_fd_lock);
+    pthread_mutex_unlock(&slot->lock);
+
+    /* Drop the slot lock before taking the table lock: table -> slot is the
+     * only nesting order in this module. */
+    pthread_mutex_lock(&g_fd_table_lock);
+    g_free_mask |= UINT64_C(1) << index;
+    g_closing--;
+    pthread_cond_signal(&g_fd_slot_freed);
+    pthread_mutex_unlock(&g_fd_table_lock);
     return rc == 0 ? 0 : -1;
 }
 

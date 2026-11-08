@@ -464,10 +464,11 @@ class Lifter:
             return [f"RECOMP_TODO(0x{ea:08X}, \"{m} {insn.op_str}\");"]
 
         # capstone keeps the `lock` prefix in the mnemonic. The instruction
-        # underneath is the one to translate; the atomicity is in the helper
-        # the xadd/cmpxchg cases below reach for, and for everything else a
-        # `lock` on a single store is what the hardware does anyway.
-        if m.startswith("lock "):
+        # underneath is the one to translate; the LOCK-prefixed read-modify-
+        # write forms are handled below, before their generic non-atomic
+        # counterparts.
+        locked = m.startswith("lock ")
+        if locked:
             m = m[5:]
 
         def two(): return ops[0], ops[1]
@@ -485,24 +486,25 @@ class Lifter:
                     % (self.md.reg_name(d.reg), idx, opnum)]
 
         # ---- LOCK-prefixed read-modify-write ----
-        # Capstone folds the prefix into the mnemonic. Only the forms that turn
-        # up are here: these are what libstdc++ compiles a reference count to,
-        # and a game with several threads sharing strings really does race on
-        # them. Anything else keeps its TODO rather than quietly losing the
-        # atomicity, which would fail as a use-after-free somewhere unrelated.
-        if m.startswith("lock "):
-            base = m[5:]
+        # Capstone folds the prefix into the mnemonic. Only the forms that the
+        # C lifter handles in its lock block are emitted here; xadd, cmpxchg,
+        # cmpxchg8b and xchg fall through to the generic handlers, which
+        # already use the atomic helpers.
+        if locked:
+            base = m
             d, s2 = (ops[0], ops[1]) if len(ops) > 1 else (ops[0], None)
-            if base in ("add", "xadd") and d.type == X86_OP_MEM and s2 is not None:
+            if base == "add" and d.type == X86_OP_MEM and \
+                    d.size == 4 and s2 is not None:
                 addr = self.addr_expr(insn, d)
                 val = self.src(insn, s2)
-                out = ["{ uint32_t _old = atomic_xadd32(%s, %s);" % (addr, val)]
-                if base == "xadd":
-                    # xadd hands the register the value memory held before.
-                    out[0] += " " + reg_write(self.md.reg_name(s2.reg), "_old")
-                out[0] += " flags_add(c, _old, %s, 4); }" % val
-                return out
-            return [f"RECOMP_TODO(0x{ea:08X}, \"{m} {insn.op_str}\");"]
+                return ["{ uint32_t _old = atomic_xadd32(%s, %s); "
+                        "flags_add(c, _old, %s, 4); }" % (addr, val, val)]
+            if base == "inc" and d.type == X86_OP_MEM and d.size == 4:
+                return ["{ uint32_t _old = atomic_xadd32(%s, 1u); "
+                        "flags_incs(c, _old, 4); }" % self.addr_expr(insn, d)]
+            if base == "dec" and d.type == X86_OP_MEM and d.size == 4:
+                return ["{ uint32_t _old = atomic_xadd32(%s, 0xFFFFFFFFu); "
+                        "flags_decs(c, _old, 4); }" % self.addr_expr(insn, d)]
 
         if m[0] == "f":
             return self.fpu(insn)
@@ -623,6 +625,16 @@ class Lifter:
             return ["c->eax = (uint32_t)(int32_t)(int16_t)R16(c->eax);"]
         if m == "xchg":
             d, s = two()
+            mem = d if d.type == X86_OP_MEM else (s if s.type == X86_OP_MEM else None)
+            reg = s if mem is d else d
+            if mem is not None and mem.size == 4 and reg.type != X86_OP_MEM:
+                # x86 xchg with a memory operand is implicitly locked.  The
+                # plain swap lets a waiter's stale store put "held" back after
+                # the holder wrote "free": the lock is held with no owner.
+                a = self.addr_expr(insn, mem)
+                return [f"{{ uint32_t _v = {self.src(insn, reg)};",
+                        f"  uint32_t _old = atomic_xchg32({a}, _v);",
+                        f"  {self.dst_write(insn, reg, '_old').rstrip(';')}; }}"]
             return [f"{{ uint32_t _t = {self._read_dst(insn,d)}; " +
                     self.dst_write(insn, d, self.src(insn, s)).rstrip(';') + "; " +
                     self.dst_write(insn, s, "_t").rstrip(';') + "; }"]

@@ -133,21 +133,42 @@ static inline int x87_is_snan(extFloat80_t v) {
 
 /* ---- control/status ----------------------------------------------------- */
 
+/* x87 control-word fields are two bits wide.  Tables keep the hot path
+ * branch-free; the switch forms compiled to a chain or an indirect branch on
+ * the ARM64 target. */
+static const uint8_t x87_round_mode_table[4] = {
+    softfloat_round_near_even,  /* 00 */
+    softfloat_round_min,        /* 01 */
+    softfloat_round_max,        /* 10 */
+    softfloat_round_minMag      /* 11 */
+};
+static const uint8_t x87_precision_table[4] = {
+    32,   /* 00: 24-bit significand */
+    80,   /* 01: reserved encoding, treated as 64-bit significand */
+    64,   /* 10: 53-bit significand */
+    80    /* 11: reserved encoding, treated as 64-bit significand */
+};
 static inline uint8_t x87_round_mode(const CPU *c) {
-    switch ((c->fpu_cw >> 10) & 3u) {
-    case 1:  return softfloat_round_min;
-    case 2:  return softfloat_round_max;
-    case 3:  return softfloat_round_minMag;
-    default: return softfloat_round_near_even;
-    }
+    return x87_round_mode_table[(c->fpu_cw >> 10) & 3u];
 }
 static inline uint8_t x87_precision(const CPU *c) {
-    switch ((c->fpu_cw >> 8) & 3u) {
-    case 0:  return 32;   /* 24-bit significand */
-    case 2:  return 64;   /* 53-bit significand */
-    default: return 80;   /* 64-bit significand; also the reserved encoding */
-    }
+    return x87_precision_table[(c->fpu_cw >> 8) & 3u];
 }
+/* x87 status bits raised from the SoftFloat exception flags.  The five flags
+ * are bits 0..4, so a 32-entry table replaces five tests and branches with one
+ * load and one OR.  x87 has no bit for softfloat_flag_denormal. */
+_Static_assert(softfloat_flag_inexact   == 0x01 &&
+               softfloat_flag_underflow == 0x02 &&
+               softfloat_flag_overflow  == 0x04 &&
+               softfloat_flag_infinite  == 0x08 &&
+               softfloat_flag_invalid   == 0x10,
+               "x87 status table assumes the SoftFloat flag encoding");
+static const uint8_t x87_status_from_flags[32] = {
+    0x00, 0x20, 0x10, 0x30, 0x08, 0x28, 0x18, 0x38,
+    0x04, 0x24, 0x14, 0x34, 0x0C, 0x2C, 0x1C, 0x3C,
+    0x01, 0x21, 0x11, 0x31, 0x09, 0x29, 0x19, 0x39,
+    0x05, 0x25, 0x15, 0x35, 0x0D, 0x2D, 0x1D, 0x3D
+};
 static inline void x87_set_top(CPU *c) {
     c->fpu_sw = (c->fpu_sw & ~0x3800u) | ((uint32_t)(c->fpu_top & 7) << 11);
 }
@@ -157,13 +178,9 @@ static inline void x87_begin(CPU *c) {
     softfloat_exceptionFlags = 0;
 }
 static inline void x87_end(CPU *c) {
-    uint_fast8_t f = softfloat_exceptionFlags;
+    uint_fast8_t f = softfloat_exceptionFlags & 0x1Fu;
     softfloat_exceptionFlags = 0;
-    if (f & softfloat_flag_invalid)  c->fpu_sw |= 0x01;
-    if (f & softfloat_flag_infinite) c->fpu_sw |= 0x04;   /* divide by zero */
-    if (f & softfloat_flag_overflow) c->fpu_sw |= 0x08;
-    if (f & softfloat_flag_underflow) c->fpu_sw |= 0x10;
-    if (f & softfloat_flag_inexact)  c->fpu_sw |= 0x20;
+    c->fpu_sw |= x87_status_from_flags[f];
 }
 static inline void x87_denorm_check(CPU *c, extFloat80_t a) {
     if (x87_is_denorm(a)) c->fpu_sw |= 0x02;

@@ -7,3 +7,11 @@
 # without this seed the dispatcher aborts on the first map load with
 # `unknown guest target 6F5FDEB0`.
 0x6F5FDEB0  vtable slot +0x248 reached from 0x6F685BC3 during map load
+#
+# 0x6F3C7FF0 is a CInfoPanelUnitDetail virtual method in vtable slot +0x6C
+# (vtable 0x6FABEF04, RTTI .?AVCInfoPanelUnitDetail@@).  The call site is
+# 0x6F3DA8DB (`call dword ptr [eax + 0x6c]`) in L_6F3DA860.  The preceding
+# instruction at 0x6F3C7FED is a tail `jmp dword ptr [eax + 0x64]`, so the
+# entry has no int3 padding and entry.exe does not see it; without this seed
+# the dispatcher aborts with `unknown guest target 6F3C7FF0`.
+0x6F3C7FF0  vtable slot +0x6C reached from 0x6F3DA8DB during main-building selection

@@ -48,7 +48,11 @@ android {
 
     packaging {
         jniLibs {
-            useLegacyPackaging = true
+            // O-12: keep the .so page-aligned and uncompressed inside the APK
+            // so the loader mmaps it from the archive instead of extracting a
+            // second copy on install.  The manifest sets extractNativeLibs
+            // false; build_apk.ps1 verifies both properties on the artifact.
+            useLegacyPackaging = false
         }
     }
 

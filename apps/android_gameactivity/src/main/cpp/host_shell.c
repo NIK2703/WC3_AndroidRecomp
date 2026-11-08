@@ -121,7 +121,38 @@ static _Atomic unsigned g_visual_gen;
 static _Atomic int g_visual_ready;
 
 static pthread_mutex_t g_overlay_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_overlay_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t g_overlay_cond;
+static pthread_once_t g_overlay_cond_once = PTHREAD_ONCE_INIT;
+static int g_overlay_cond_monotonic;
+
+/* E3.1: platform sync objects wait on CLOCK_MONOTONIC.  The overlay thread
+ * uses the same clock for its deadline so a wall-clock adjustment cannot make
+ * a 100 ms redraw wait last longer (or return immediately) by the size of the
+ * step.  The condition variable is initialized once, before either a signal
+ * or the wait can use it. */
+static void overlay_cond_init(void)
+{
+    pthread_condattr_t attr;
+    if (pthread_condattr_init(&attr) == 0) {
+#if defined(__ANDROID__)
+        if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0)
+            g_overlay_cond_monotonic = 1;
+#endif
+        if (pthread_cond_init(&g_overlay_cond, &attr) != 0) {
+            pthread_cond_init(&g_overlay_cond, NULL);
+            g_overlay_cond_monotonic = 0;
+        }
+        pthread_condattr_destroy(&attr);
+    } else {
+        pthread_cond_init(&g_overlay_cond, NULL);
+    }
+}
+
+static void overlay_cond_ensure(void)
+{
+    (void)pthread_once(&g_overlay_cond_once, overlay_cond_init);
+}
+
 static ANativeWindow *g_overlay_window;
 static int g_overlay_width;
 static int g_overlay_height;
@@ -417,6 +448,7 @@ static char *load_controls_profile(void)
 
 static void visual_signal(void)
 {
+    overlay_cond_ensure();
     pthread_mutex_lock(&g_overlay_lock);
     pthread_cond_broadcast(&g_overlay_cond);
     pthread_mutex_unlock(&g_overlay_lock);
@@ -462,6 +494,7 @@ static void cache_wake_render(void)
 {
     /* Wake the render thread without nesting the overlay lock inside the
      * cache lock.  Lock order remains overlay -> cache. */
+    overlay_cond_ensure();
     pthread_mutex_lock(&g_overlay_lock);
     atomic_fetch_add_explicit(&g_visual_gen, 1u, memory_order_release);
     pthread_cond_broadcast(&g_overlay_cond);
@@ -694,6 +727,7 @@ static void *overlay_thread_main(void *arg)
     unsigned seen = 0;
     int first = 1;
 
+    overlay_cond_ensure();
     for (;;) {
         pthread_mutex_lock(&g_overlay_lock);
         while (!atomic_load_explicit(&g_overlay_stop, memory_order_acquire)) {
@@ -701,7 +735,9 @@ static void *overlay_thread_main(void *arg)
                                                 memory_order_acquire);
             if (first || gen != seen) break;
             struct timespec deadline;
-            clock_gettime(CLOCK_REALTIME, &deadline);
+            clock_gettime(g_overlay_cond_monotonic ? CLOCK_MONOTONIC
+                                                   : CLOCK_REALTIME,
+                          &deadline);
             deadline.tv_nsec += 100000000L;
             if (deadline.tv_nsec >= 1000000000L) {
                 deadline.tv_sec++;
@@ -1738,6 +1774,9 @@ void android_main(struct android_app *app)
             LOGE("asset roots missing: %s", data_dir);
     }
     inspect_assets();
+    /* The static-arena page map is mapping-independent.  Build it before the
+     * guest threads exist so the shim fast path needs no lazy init race. */
+    wc3_guest_static_init();
 
 #if WC3_WITH_LEGACY_BOOT
     /* The boot path owns the fixed guest mappings and maps the PE images at

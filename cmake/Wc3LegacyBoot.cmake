@@ -59,6 +59,10 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 set(WC3_BOOT_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/legacy_boot_generated")
 set(WC3_BOOT_DISPATCH_LIST "${WC3_BOOT_GEN_DIR}/boot_dispatch_list.h")
+# O-24: the dispatcher hash table is published as a generated constant instead
+# of being rebuilt at every startup.  Both headers come from the same tool run
+# so the g_lift indices cannot drift between them.
+set(WC3_BOOT_DISPATCH_HASH "${WC3_BOOT_GEN_DIR}/boot_dispatch_hash.h")
 file(MAKE_DIRECTORY "${WC3_BOOT_GEN_DIR}")
 
 set(_wc3_prefix_args)
@@ -75,18 +79,22 @@ else()
 endif()
 
 add_custom_command(
-    OUTPUT "${WC3_BOOT_DISPATCH_LIST}"
+    OUTPUT
+        "${WC3_BOOT_DISPATCH_LIST}"
+        "${WC3_BOOT_DISPATCH_HASH}"
     COMMAND "${Python3_EXECUTABLE}" "${WC3_ROOT}/tools/gen_boot_dispatch.py"
             --list "${WC3_BOOT_LIST}"
             --out "${WC3_BOOT_DISPATCH_LIST}"
+            --hash-out "${WC3_BOOT_DISPATCH_HASH}"
             ${_wc3_prefix_args}
             ${_wc3_expect_args}
     DEPENDS
         "${WC3_ROOT}/tools/gen_boot_dispatch.py"
         "${WC3_BOOT_LIST}"
-    COMMENT "Generating boot dispatcher VA list"
+    COMMENT "Generating boot dispatcher VA list and hash table"
     VERBATIM)
-add_custom_target(wc3_boot_dispatch_gen DEPENDS "${WC3_BOOT_DISPATCH_LIST}")
+add_custom_target(wc3_boot_dispatch_gen
+    DEPENDS "${WC3_BOOT_DISPATCH_LIST}" "${WC3_BOOT_DISPATCH_HASH}")
 
 # --- target-side boot code (no quarantine headers) ------------------------
 add_library(wc3_boot STATIC
@@ -150,11 +158,15 @@ set_target_properties(wc3_boot PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # --- the one allowed door into runtime/legacy -----------------------------
 add_library(wc3_legacy_shim STATIC
-    "${WC3_ROOT}/runtime/hle/legacy_shim.c")
+    "${WC3_ROOT}/runtime/hle/legacy_shim.c"
+    "${WC3_ROOT}/runtime/hle/abi/hle_abi.c")
 target_include_directories(wc3_legacy_shim PRIVATE
     "${WC3_ROOT}/runtime/hle"
+    "${WC3_ROOT}/runtime/hle/abi"
     "${WC3_ROOT}/runtime/legacy"
     "${WC3_ROOT}/runtime/cpu"
+    "${WC3_ROOT}/runtime/guest"
+    "${WC3_ROOT}/runtime/platform"
     "${WC3_ROOT}/third_party/softfloat/source/include"
     "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
 target_compile_definitions(wc3_legacy_shim PRIVATE
@@ -370,6 +382,7 @@ target_link_libraries(wc3gameactivity PRIVATE
     wc3_boot
     wc3_hle_modules
     wc3_legacy_shim
+    wc3_guest
     wc3_legacy_boot
     ${WC3_CORPUS_LIBS}
     wc3_dxvk_entry

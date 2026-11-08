@@ -142,6 +142,34 @@ def gcc() -> str | None:
     return shutil.which("gcc") or shutil.which("clang")
 
 
+def test_cpu_helpers() -> int:
+    """T0: integer CPU helpers keep x86 flag and count semantics."""
+    cc = gcc()
+    if not cc:
+        print("cpu helpers: unavailable (no host C compiler)")
+        return 2
+    archive = ROOT / "third_party" / "softfloat" / "build-host" / "softfloat.a"
+    if not archive.is_file():
+        print("cpu helpers: unavailable (host SoftFloat archive missing)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "cpu_helpers_test.exe"
+    obj = BUILD / "cpu_helpers_test.o"
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    rc = run([cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+              *include, "-c", str(ROOT / "tests" / "cpu_helpers_test.c"),
+              "-o", str(obj)])
+    if rc != 0:
+        return rc
+    rc = run([cc, str(obj), str(archive), "-lm", "-o", str(exe)])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
 def test_hle_abi() -> int:
     cc = gcc()
     if not cc:
@@ -225,6 +253,39 @@ def test_corpus_identity() -> int:
                 "--layout", str(ROOT / "config" / "layout.1.27b.json"),
                 "--hash", str(digest),
                 "--evidence", str(ROOT / "reports" / "generated" / "gate_status.json")])
+
+
+def test_atomic_lift() -> int:
+    """T0/V5.9: relifted C uses atomic helpers for memory xchg and lock RMW."""
+    tool = ROOT / "build" / "lift-tools" / "atomiccheck.exe"
+    corpus = ROOT / "build" / "corpus-full"
+    manifest = corpus / "corpus_manifest.json"
+    if not tool.is_file() or not manifest.is_file():
+        print("atomic lift: unavailable (run build_tools.ps1 and relift)")
+        return 2
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"atomic lift: unavailable (manifest: {exc})")
+        return 2
+    files = []
+    for module in data.get("modules", []):
+        name = module.get("name")
+        if not name:
+            continue
+        for kind in ("seed", "closed"):
+            path = corpus / name / f"{kind}.c"
+            if path.is_file():
+                files.append(path)
+    if not files:
+        print("atomic lift: unavailable (manifest has no corpus sources)")
+        return 2
+    (ROOT / "reports" / "generated").mkdir(parents=True, exist_ok=True)
+    args = [str(tool), "--require-any",
+            "--report", str(ROOT / "reports" / "generated" / "corpus_atomic.json")]
+    for path in files:
+        args.extend(["--file", str(path)])
+    return run(args)
 
 
 def test_posix_shim() -> int:
@@ -1549,6 +1610,7 @@ def test_msvcr80_stdio() -> int:
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "diag"),
         "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "file"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "stdio"),
@@ -1776,7 +1838,9 @@ def test_legacy_shim() -> int:
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "abi"),
         "-I" + str(ROOT / "runtime" / "legacy"),
+        "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
@@ -1790,6 +1854,8 @@ def test_legacy_shim() -> int:
         "-Wno-sign-compare",
         *include,
         str(ROOT / "runtime" / "hle" / "legacy_shim.c"),
+        str(ROOT / "runtime" / "hle" / "abi" / "hle_abi.c"),
+        str(ROOT / "runtime" / "guest" / "guest_memory.c"),
         str(ROOT / "tests" / "legacy_shim_test.c"),
     ]
     for name, debug in (("legacy_shim_test_debug.exe", 1),
@@ -1894,6 +1960,7 @@ def test_overlay() -> int:
 
 
 TESTS = {
+    "cpu_helpers": test_cpu_helpers,
     "hle_abi": test_hle_abi,
     "direct_call": test_direct_call,
     "module_registry": test_module_registry,
@@ -1938,6 +2005,7 @@ TESTS = {
     "layout": test_layout,
     "config_schema": test_config_schema,
     "corpus_identity": test_corpus_identity,
+    "atomic_lift": test_atomic_lift,
     "posix_shim": test_posix_shim,
     "dispatch": test_dispatch,
     "imports": test_imports,

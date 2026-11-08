@@ -6,6 +6,15 @@
  * class, parent and placement it produced.  The query imports then answer from
  * that table.  No host lock is held while the as-built handler or guest memory
  * is touched.
+ *
+ * Class facts and window facts use separate table locks.  Each window slot also
+ * has its own mutex: the table lock only establishes slot identity (used,
+ * handle, parent, serial, menu and the fields written once by record_window),
+ * while the slot mutex protects the mutable placement, show command and title.
+ * A lookup pins a slot by taking its mutex before dropping the table lock, so
+ * DestroyWindow cannot clear or reuse the slot while the caller still owns the
+ * fact pointer.  Lock order is g_class_lock -> g_window_lock -> slot mutex;
+ * no operation takes a table lock while holding a slot mutex.
  */
 #include "window_facts_hle.h"
 
@@ -111,7 +120,17 @@ typedef struct WindowFact {
 static WindowClassFact g_classes[WINDOW_CLASS_MAX];
 static WindowFact g_windows[WINDOW_MAX];
 static uint32_t g_next_serial = 1u;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* g_class_lock owns g_classes.  g_window_lock owns the window table structure:
+ * used/handle/parent/serial/menu/class_name/style/ex_style/thread and process
+ * ids, all written at runtime only by record_window() and remove_window(),
+ * plus g_next_serial.  g_window_locks[i] owns window i's mutable placement,
+ * show command and title.  The only nesting is class -> window -> slot, and
+ * slot locks are never held while taking a table lock. */
+static pthread_mutex_t g_class_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_window_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_window_locks[WINDOW_MAX];
+static pthread_once_t g_window_locks_once = PTHREAD_ONCE_INIT;
 
 static const Wc3ThreadApi *g_thread;
 static uint32_t g_process_id;
@@ -143,10 +162,17 @@ static const BuiltinClassFact g_builtin_classes[] = {
 static int read_guest_string(uint32_t address, char *buffer, size_t capacity)
 {
     if (!address || !buffer || capacity < 2u) return 0;
+    buffer[0] = '\0';
     for (size_t i = 0; i + 1u < capacity; i++) {
-        if (address > UINT32_MAX - (uint32_t)i) return 0;
+        if (address > UINT32_MAX - (uint32_t)i) {
+            buffer[i] = '\0';
+            return 0;
+        }
         const uint32_t at = address + (uint32_t)i;
-        if (!wc3_legacy_guest_ok(at, 1u)) return 0;
+        if (!wc3_legacy_guest_ok(at, 1u)) {
+            buffer[i] = '\0';
+            return 0;
+        }
         const char ch = (char)wc3_legacy_rd8g(at);
         buffer[i] = ch;
         if (!ch) return 1;
@@ -185,26 +211,66 @@ static uint32_t current_thread_id(void)
     return (uint32_t)g_thread->id(g_thread->ctx, self);
 }
 
-static WindowFact *find_window(uint32_t handle)
+static void init_window_locks(void)
+{
+    for (unsigned i = 0; i < WINDOW_MAX; i++)
+        pthread_mutex_init(&g_window_locks[i], NULL);
+}
+
+static void ensure_window_locks(void)
+{
+    (void)pthread_once(&g_window_locks_once, init_window_locks);
+}
+
+/* Caller holds g_window_lock.  Slot identity changes only under that lock, so
+ * a resolved index can be pinned with g_window_locks[index] while the table
+ * lock is still held. */
+static unsigned find_window_index_locked(uint32_t handle)
 {
     for (unsigned i = 0; i < WINDOW_MAX; i++) {
         if (g_windows[i].used && g_windows[i].handle == handle)
-            return &g_windows[i];
+            return i;
     }
-    return NULL;
+    return WINDOW_MAX;
 }
 
-/* Caller holds g_lock.  Dialog item IDs are only unique among the children of
- * one parent; the newest child wins when a dialog reuses a control ID. */
-static WindowFact *find_dlg_item_locked(uint32_t parent, uint32_t id)
+/* Resolve a handle to a pinned slot.  The table lock is dropped before the
+ * caller sees the pointer; the slot mutex stays held, so remove_window() and
+ * record_window() cannot clear or reuse the slot underneath the caller. */
+static WindowFact *lock_window(uint32_t handle)
 {
-    WindowFact *best = NULL;
+    pthread_mutex_lock(&g_window_lock);
+    const unsigned index = find_window_index_locked(handle);
+    if (index >= WINDOW_MAX) {
+        pthread_mutex_unlock(&g_window_lock);
+        return NULL;
+    }
+    pthread_mutex_lock(&g_window_locks[index]);
+    pthread_mutex_unlock(&g_window_lock);
+    return &g_windows[index];
+}
+
+static void unlock_window(WindowFact *window)
+{
+    pthread_mutex_unlock(&g_window_locks[(unsigned)(window - g_windows)]);
+}
+
+/* Caller holds g_window_lock.  Dialog item IDs are only unique among the
+ * children of one parent; the newest child wins when a dialog reuses a control
+ * ID.  Only table-owned fields are read, so no slot lock is needed. */
+static unsigned find_dlg_item_index_locked(uint32_t parent, uint32_t id)
+{
+    unsigned best = WINDOW_MAX;
+    uint32_t best_serial = 0u;
     for (unsigned i = 0; i < WINDOW_MAX; i++) {
-        WindowFact *window = &g_windows[i];
+        const WindowFact *window = &g_windows[i];
         if (!window->used) continue;
         if (window->parent != parent) continue;
         if (window->menu != id) continue;
-        if (!best || window->serial > best->serial) best = window;
+        if (best >= WINDOW_MAX || window->serial > best_serial) {
+            best = i;
+            best_serial = window->serial;
+        }
     }
     return best;
 }
@@ -267,7 +333,7 @@ static void record_class(uint32_t atom, const char *name, uint32_t description,
         facts.icon_sm = is_ex ? wc3_legacy_rd32g(description + 44u) : 0u;
     }
 
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(&g_class_lock);
     WindowClassFact *existing = find_class_name(name);
     if (!existing) {
         for (unsigned i = 0; i < WINDOW_CLASS_MAX; i++) {
@@ -293,7 +359,7 @@ static void record_class(uint32_t atom, const char *name, uint32_t description,
         existing->icon_sm = facts.icon_sm;
         copy_text(existing->name, sizeof existing->name, name);
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_class_lock);
 }
 
 static void record_window(uint32_t handle, uint32_t parent,
@@ -303,16 +369,18 @@ static void record_window(uint32_t handle, uint32_t parent,
                           uint32_t thread_id, uint32_t process_id)
 {
     if (!handle) return;
-    pthread_mutex_lock(&g_lock);
-    WindowFact *window = find_window(handle);
-    if (!window) {
+    pthread_mutex_lock(&g_window_lock);
+    unsigned index = find_window_index_locked(handle);
+    if (index >= WINDOW_MAX) {
         for (unsigned i = 0; i < WINDOW_MAX; i++) {
             if (g_windows[i].used) continue;
-            window = &g_windows[i];
+            index = i;
             break;
         }
     }
-    if (window) {
+    if (index < WINDOW_MAX) {
+        WindowFact *window = &g_windows[index];
+        pthread_mutex_lock(&g_window_locks[index]);
         memset(window, 0, sizeof *window);
         window->used = 1u;
         window->handle = handle;
@@ -334,16 +402,21 @@ static void record_window(uint32_t handle, uint32_t parent,
         window->max_y = -1;
         copy_text(window->class_name, sizeof window->class_name, class_name);
         copy_text(window->title, sizeof window->title, title);
+        pthread_mutex_unlock(&g_window_locks[index]);
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_window_lock);
 }
 
 static void remove_window(uint32_t handle)
 {
-    pthread_mutex_lock(&g_lock);
-    WindowFact *window = find_window(handle);
-    if (window) memset(window, 0, sizeof *window);
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_lock(&g_window_lock);
+    const unsigned index = find_window_index_locked(handle);
+    if (index < WINDOW_MAX) {
+        pthread_mutex_lock(&g_window_locks[index]);
+        memset(&g_windows[index], 0, sizeof g_windows[index]);
+        pthread_mutex_unlock(&g_window_locks[index]);
+    }
+    pthread_mutex_unlock(&g_window_lock);
 }
 
 static uint32_t normalize_show_cmd(uint32_t command)
@@ -440,10 +513,10 @@ static void h_create_window_ex(CPU *c)
     title[0] = '\0';
 
     if (class_arg && class_arg < 0x10000u) {
-        pthread_mutex_lock(&g_lock);
+        pthread_mutex_lock(&g_class_lock);
         WindowClassFact *fact = find_class_atom(class_arg);
         if (fact) copy_text(class_name, sizeof class_name, fact->name);
-        pthread_mutex_unlock(&g_lock);
+        pthread_mutex_unlock(&g_class_lock);
     } else {
         read_guest_string(class_arg, class_name, sizeof class_name);
     }
@@ -485,10 +558,11 @@ static void h_show_window(CPU *c)
     if (g_previous_show_window)
         g_previous_show_window(c);
 
-    pthread_mutex_lock(&g_lock);
-    WindowFact *window = find_window(handle);
-    if (window) window->show_cmd = normalize_show_cmd(command);
-    pthread_mutex_unlock(&g_lock);
+    WindowFact *window = lock_window(handle);
+    if (window) {
+        window->show_cmd = normalize_show_cmd(command);
+        unlock_window(window);
+    }
 }
 
 static void h_set_window_pos(CPU *c)
@@ -502,8 +576,7 @@ static void h_set_window_pos(CPU *c)
     if (g_previous_set_window_pos)
         g_previous_set_window_pos(c);
 
-    pthread_mutex_lock(&g_lock);
-    WindowFact *window = find_window(handle);
+    WindowFact *window = lock_window(handle);
     if (window) {
         if (!(flags & SWP_NOMOVE)) {
             window->x = (int32_t)raw_x;
@@ -514,8 +587,8 @@ static void h_set_window_pos(CPU *c)
             window->width = raw_width;
             window->height = raw_height;
         }
+        unlock_window(window);
     }
-    pthread_mutex_unlock(&g_lock);
 }
 
 static void h_set_window_text(CPU *c)
@@ -531,10 +604,11 @@ static void h_set_window_text(CPU *c)
         g_previous_set_window_text(c);
     if (!c->eax) return;
 
-    pthread_mutex_lock(&g_lock);
-    WindowFact *window = find_window(handle);
-    if (window) copy_text(window->title, sizeof window->title, title);
-    pthread_mutex_unlock(&g_lock);
+    WindowFact *window = lock_window(handle);
+    if (window) {
+        copy_text(window->title, sizeof window->title, title);
+        unlock_window(window);
+    }
 }
 
 static void h_get_top_window(CPU *c)
@@ -543,7 +617,7 @@ static void h_get_top_window(CPU *c)
     uint32_t best_handle = 0u;
     uint32_t best_serial = 0u;
 
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(&g_window_lock);
     for (unsigned i = 0; i < WINDOW_MAX; i++) {
         const WindowFact *window = &g_windows[i];
         if (!window->used) continue;
@@ -556,7 +630,7 @@ static void h_get_top_window(CPU *c)
             best_handle = window->handle;
         }
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_window_lock);
     c->eax = best_handle;
 }
 
@@ -571,10 +645,13 @@ static void h_get_class_name(CPU *c)
     if (handle == DESKTOP_WINDOW_HANDLE) {
         copy_text(name, sizeof name, "#32769");
     } else {
-        pthread_mutex_lock(&g_lock);
-        WindowFact *window = find_window(handle);
-        if (window) copy_text(name, sizeof name, window->class_name);
-        pthread_mutex_unlock(&g_lock);
+        /* class_name is written only by record_window() under the table
+         * lock, so the table lock alone is enough to copy it. */
+        pthread_mutex_lock(&g_window_lock);
+        const unsigned index = find_window_index_locked(handle);
+        if (index < WINDOW_MAX)
+            copy_text(name, sizeof name, g_windows[index].class_name);
+        pthread_mutex_unlock(&g_window_lock);
     }
 
     if (!name[0] || !buffer || capacity == 0u ||
@@ -598,9 +675,9 @@ static void h_is_window(CPU *c)
         c->eax = 1u;
         return;
     }
-    pthread_mutex_lock(&g_lock);
-    c->eax = find_window(handle) ? 1u : 0u;
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_lock(&g_window_lock);
+    c->eax = find_window_index_locked(handle) < WINDOW_MAX ? 1u : 0u;
+    pthread_mutex_unlock(&g_window_lock);
 }
 
 static void h_get_window_thread_process_id(CPU *c)
@@ -624,14 +701,16 @@ static void h_get_window_thread_process_id(CPU *c)
     uint32_t thread_id = 0u;
     uint32_t owner_process = 0u;
     int found = 0;
-    pthread_mutex_lock(&g_lock);
-    const WindowFact *window = find_window(handle);
-    if (window) {
+    /* The owner ids are written once by record_window() under the table
+     * lock, so no slot lock is needed to read them. */
+    pthread_mutex_lock(&g_window_lock);
+    const unsigned index = find_window_index_locked(handle);
+    if (index < WINDOW_MAX) {
         found = 1;
-        thread_id = window->thread_id;
-        owner_process = window->process_id;
+        thread_id = g_windows[index].thread_id;
+        owner_process = g_windows[index].process_id;
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_window_lock);
 
     if (!found) {
         wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
@@ -653,26 +732,12 @@ static void h_find_window_ex(CPU *c)
     char title[WINDOW_TEXT_MAX];
     int class_filter = 0;
     int title_filter = 0;
+    int class_locked = 0;
     class_name[0] = '\0';
     title[0] = '\0';
 
-    if (class_arg) {
-        if (class_arg < 0x10000u) {
-            pthread_mutex_lock(&g_lock);
-            const WindowClassFact *fact = find_class_atom(class_arg);
-            if (fact) copy_text(class_name, sizeof class_name, fact->name);
-            pthread_mutex_unlock(&g_lock);
-            if (!class_name[0]) {
-                c->eax = 0u;
-                return;
-            }
-        } else if (!read_guest_string(class_arg, class_name,
-                                      sizeof class_name)) {
-            c->eax = 0u;
-            return;
-        }
-        class_filter = 1;
-    }
+    /* Both filters are guest strings and reading them has no side effects, so
+     * read both before taking the class lock for an atom lookup. */
     if (title_arg) {
         if (!read_guest_string(title_arg, title, sizeof title)) {
             c->eax = 0u;
@@ -680,33 +745,65 @@ static void h_find_window_ex(CPU *c)
         }
         title_filter = 1;
     }
+    const int class_from_guest = class_arg >= 0x10000u;
+    if (class_from_guest &&
+        !read_guest_string(class_arg, class_name, sizeof class_name)) {
+        c->eax = 0u;
+        return;
+    }
+    if (class_arg) {
+        if (!class_from_guest) {
+            pthread_mutex_lock(&g_class_lock);
+            class_locked = 1;
+            const WindowClassFact *fact = find_class_atom(class_arg);
+            if (fact) copy_text(class_name, sizeof class_name, fact->name);
+            if (!class_name[0]) {
+                pthread_mutex_unlock(&g_class_lock);
+                c->eax = 0u;
+                return;
+            }
+        }
+        class_filter = 1;
+    }
 
     uint32_t best_handle = 0u;
     uint32_t best_serial = 0u;
-    pthread_mutex_lock(&g_lock);
+    /* The scan keeps the table lock so the parent/child_after validation and
+     * the visible used/handle/serial set stay one snapshot.  Only the mutable
+     * title needs the slot lock; class_name is table-owned.  An atom filter
+     * keeps g_class_lock across the scan so class removal cannot split the
+     * lookup from the scan, matching the former single-lock behaviour. */
+    pthread_mutex_lock(&g_window_lock);
 
     if (parent != 0u && parent != DESKTOP_WINDOW_HANDLE &&
-        !find_window(parent)) {
-        pthread_mutex_unlock(&g_lock);
+        find_window_index_locked(parent) >= WINDOW_MAX) {
+        pthread_mutex_unlock(&g_window_lock);
+        if (class_locked) pthread_mutex_unlock(&g_class_lock);
         c->eax = 0u;
         return;
     }
-    const WindowFact *after = child_after ? find_window(child_after) : NULL;
-    if (child_after && !after) {
-        pthread_mutex_unlock(&g_lock);
+    const unsigned after_index = child_after
+        ? find_window_index_locked(child_after)
+        : WINDOW_MAX;
+    if (child_after && after_index >= WINDOW_MAX) {
+        pthread_mutex_unlock(&g_window_lock);
+        if (class_locked) pthread_mutex_unlock(&g_class_lock);
         c->eax = 0u;
         return;
     }
-    if (after) {
+    if (after_index < WINDOW_MAX) {
         const int top_scope = is_top_parent(parent);
-        if ((top_scope && !is_top_parent(after->parent)) ||
-            (!top_scope && after->parent != parent)) {
-            pthread_mutex_unlock(&g_lock);
+        if ((top_scope && !is_top_parent(g_windows[after_index].parent)) ||
+            (!top_scope && g_windows[after_index].parent != parent)) {
+            pthread_mutex_unlock(&g_window_lock);
+            if (class_locked) pthread_mutex_unlock(&g_class_lock);
             c->eax = 0u;
             return;
         }
     }
-    const uint32_t after_serial = after ? after->serial : UINT32_MAX;
+    const uint32_t after_serial = after_index < WINDOW_MAX
+        ? g_windows[after_index].serial
+        : UINT32_MAX;
 
     for (unsigned i = 0; i < WINDOW_MAX; i++) {
         const WindowFact *window = &g_windows[i];
@@ -718,14 +815,20 @@ static void h_find_window_ex(CPU *c)
         if (window->serial >= after_serial) continue;
         if (class_filter && !text_equal_ci(window->class_name, class_name))
             continue;
-        if (title_filter && !text_equal_ci(window->title, title))
-            continue;
+        if (title_filter) {
+            int title_match;
+            pthread_mutex_lock(&g_window_locks[i]);
+            title_match = text_equal_ci(window->title, title);
+            pthread_mutex_unlock(&g_window_locks[i]);
+            if (!title_match) continue;
+        }
         if (window->serial > best_serial) {
             best_serial = window->serial;
             best_handle = window->handle;
         }
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_window_lock);
+    if (class_locked) pthread_mutex_unlock(&g_class_lock);
     c->eax = best_handle;
 }
 
@@ -762,7 +865,7 @@ static void h_get_class_info(CPU *c)
         have_name = 1;
     }
 
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(&g_class_lock);
     const WindowClassFact *fact = class_arg < 0x10000u
         ? find_class_atom(class_arg)
         : find_class_name(name);
@@ -770,7 +873,7 @@ static void h_get_class_info(CPU *c)
         snapshot = *fact;
         found = 1;
     }
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_class_lock);
 
     if (!found && have_name) {
         const BuiltinClassFact *builtin_fact = find_builtin_class(name);
@@ -831,9 +934,9 @@ static void h_get_update_rgn(CPU *c)
         return;
     }
 
-    pthread_mutex_lock(&g_lock);
-    const int found = find_window(handle) != NULL;
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_lock(&g_window_lock);
+    const int found = find_window_index_locked(handle) < WINDOW_MAX;
+    pthread_mutex_unlock(&g_window_lock);
     if (!found) {
         wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
@@ -879,10 +982,8 @@ static void h_set_window_placement(CPU *c)
         return;
     }
 
-    pthread_mutex_lock(&g_lock);
-    WindowFact *window = find_window(handle);
+    WindowFact *window = lock_window(handle);
     if (!window) {
-        pthread_mutex_unlock(&g_lock);
         wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
@@ -902,7 +1003,7 @@ static void h_set_window_placement(CPU *c)
     window->y = top;
     window->width = (uint32_t)(right - left);
     window->height = (uint32_t)(bottom - top);
-    pthread_mutex_unlock(&g_lock);
+    unlock_window(window);
     c->eax = 1u;
 }
 
@@ -910,11 +1011,11 @@ static void h_get_dlg_ctrl_id(CPU *c)
 {
     const uint32_t handle = wc3_legacy_arg32(c, 0u);
     uint32_t id = 0u;
-    pthread_mutex_lock(&g_lock);
-    const WindowFact *window = find_window(handle);
-    if (window && !is_top_parent(window->parent))
-        id = window->menu;
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_lock(&g_window_lock);
+    const unsigned index = find_window_index_locked(handle);
+    if (index < WINDOW_MAX && !is_top_parent(g_windows[index].parent))
+        id = g_windows[index].menu;
+    pthread_mutex_unlock(&g_window_lock);
     c->eax = id;
 }
 
@@ -924,17 +1025,21 @@ static void h_get_dlg_item(CPU *c)
     const uint32_t id = wc3_legacy_arg32(c, 1u);
 
     uint32_t handle = 0u;
-    pthread_mutex_lock(&g_lock);
-    if (parent != DESKTOP_WINDOW_HANDLE && !find_window(parent)) {
-        pthread_mutex_unlock(&g_lock);
+    int parent_invalid = 0;
+    unsigned item_index = WINDOW_MAX;
+    pthread_mutex_lock(&g_window_lock);
+    parent_invalid = parent != DESKTOP_WINDOW_HANDLE &&
+        find_window_index_locked(parent) >= WINDOW_MAX;
+    if (!parent_invalid)
+        item_index = find_dlg_item_index_locked(parent, id);
+    if (item_index < WINDOW_MAX) handle = g_windows[item_index].handle;
+    pthread_mutex_unlock(&g_window_lock);
+
+    if (parent_invalid) {
         wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
-    const WindowFact *item = find_dlg_item_locked(parent, id);
-    if (item) handle = item->handle;
-    pthread_mutex_unlock(&g_lock);
-
     if (!handle) {
         wc3_legacy_set_last_error(ERROR_CONTROL_ID_NOT_FOUND);
         c->eax = 0u;
@@ -965,19 +1070,29 @@ static void h_get_dlg_item_text(CPU *c)
     char title[WINDOW_TEXT_MAX];
     title[0] = '\0';
     int found = 0;
-    pthread_mutex_lock(&g_lock);
-    if (parent != DESKTOP_WINDOW_HANDLE && !find_window(parent)) {
-        pthread_mutex_unlock(&g_lock);
+    int parent_invalid = 0;
+    unsigned item_index = WINDOW_MAX;
+    pthread_mutex_lock(&g_window_lock);
+    parent_invalid = parent != DESKTOP_WINDOW_HANDLE &&
+        find_window_index_locked(parent) >= WINDOW_MAX;
+    if (!parent_invalid) {
+        item_index = find_dlg_item_index_locked(parent, id);
+        if (item_index < WINDOW_MAX) {
+            pthread_mutex_lock(&g_window_locks[item_index]);
+            found = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_window_lock);
+
+    if (found) {
+        copy_text(title, sizeof title, g_windows[item_index].title);
+        pthread_mutex_unlock(&g_window_locks[item_index]);
+    }
+    if (parent_invalid) {
         wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
-    const WindowFact *item = find_dlg_item_locked(parent, id);
-    if (item) {
-        copy_text(title, sizeof title, item->title);
-        found = 1;
-    }
-    pthread_mutex_unlock(&g_lock);
 
     if (!found) {
         wc3_legacy_set_last_error(ERROR_CONTROL_ID_NOT_FOUND);
@@ -1011,19 +1126,30 @@ static void h_set_dlg_item_text(CPU *c)
     }
 
     int found = 0;
-    pthread_mutex_lock(&g_lock);
-    if (parent != DESKTOP_WINDOW_HANDLE && !find_window(parent)) {
-        pthread_mutex_unlock(&g_lock);
+    int parent_invalid = 0;
+    unsigned item_index = WINDOW_MAX;
+    pthread_mutex_lock(&g_window_lock);
+    parent_invalid = parent != DESKTOP_WINDOW_HANDLE &&
+        find_window_index_locked(parent) >= WINDOW_MAX;
+    if (!parent_invalid) {
+        item_index = find_dlg_item_index_locked(parent, id);
+        if (item_index < WINDOW_MAX) {
+            pthread_mutex_lock(&g_window_locks[item_index]);
+            found = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_window_lock);
+
+    if (found) {
+        copy_text(g_windows[item_index].title,
+                  sizeof g_windows[item_index].title, title);
+        pthread_mutex_unlock(&g_window_locks[item_index]);
+    }
+    if (parent_invalid) {
         wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
-    WindowFact *item = find_dlg_item_locked(parent, id);
-    if (item) {
-        copy_text(item->title, sizeof item->title, title);
-        found = 1;
-    }
-    pthread_mutex_unlock(&g_lock);
 
     if (!found) {
         wc3_legacy_set_last_error(ERROR_CONTROL_ID_NOT_FOUND);
@@ -1049,8 +1175,7 @@ static void h_get_window_placement(CPU *c)
     uint32_t flags = 0u;
     int found = 0;
 
-    pthread_mutex_lock(&g_lock);
-    WindowFact *window = find_window(handle);
+    WindowFact *window = lock_window(handle);
     if (window) {
         found = 1;
         x = window->x;
@@ -1063,8 +1188,8 @@ static void h_get_window_placement(CPU *c)
         min_y = window->min_y;
         max_x = window->max_x;
         max_y = window->max_y;
+        unlock_window(window);
     }
-    pthread_mutex_unlock(&g_lock);
 
     if (!found) {
         wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
@@ -1090,10 +1215,12 @@ static void h_get_window_placement(CPU *c)
 static void h_is_iconic(CPU *c)
 {
     const uint32_t handle = wc3_legacy_arg32(c, 0u);
-    pthread_mutex_lock(&g_lock);
-    WindowFact *window = find_window(handle);
-    c->eax = window && window->show_cmd == SW_SHOWMINIMIZED ? 1u : 0u;
-    pthread_mutex_unlock(&g_lock);
+    c->eax = 0u;
+    WindowFact *window = lock_window(handle);
+    if (window) {
+        c->eax = window->show_cmd == SW_SHOWMINIMIZED ? 1u : 0u;
+        unlock_window(window);
+    }
 }
 
 static void h_adjust_window_rect_ex(CPU *c)
@@ -1112,37 +1239,46 @@ static void h_unregister_class(CPU *c)
 {
     const uint32_t class_arg = wc3_legacy_arg32(c, 0u);
     char name[WINDOW_TEXT_MAX];
+    int class_locked = 0;
     name[0] = '\0';
 
     if (!class_arg) {
         c->eax = 0u;
         return;
     }
-    if (class_arg < 0x10000u) {
-        pthread_mutex_lock(&g_lock);
+    if (class_arg >= 0x10000u) {
+        read_guest_string(class_arg, name, sizeof name);
+    } else {
+        pthread_mutex_lock(&g_class_lock);
+        class_locked = 1;
         WindowClassFact *fact = find_class_atom(class_arg);
         if (fact) copy_text(name, sizeof name, fact->name);
-        pthread_mutex_unlock(&g_lock);
-    } else {
-        read_guest_string(class_arg, name, sizeof name);
     }
     if (!name[0]) {
+        if (class_locked) pthread_mutex_unlock(&g_class_lock);
         c->eax = 0u;
         return;
     }
 
-    pthread_mutex_lock(&g_lock);
+    if (!class_locked) pthread_mutex_lock(&g_class_lock);
+    /* The window scan and the class removal stay under one class lock, as in
+     * the former single-lock version, so a concurrent RegisterClassA cannot
+     * slip a same-named class in between.  Only table-owned class_name is
+     * read, so the window scan needs no slot lock. */
+    pthread_mutex_lock(&g_window_lock);
     for (unsigned i = 0; i < WINDOW_MAX; i++) {
         if (g_windows[i].used &&
             text_equal_ci(g_windows[i].class_name, name)) {
-            pthread_mutex_unlock(&g_lock);
+            pthread_mutex_unlock(&g_window_lock);
+            pthread_mutex_unlock(&g_class_lock);
             c->eax = 0u;
             return;
         }
     }
     WindowClassFact *fact = find_class_name(name);
     if (fact) memset(fact, 0, sizeof *fact);
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_window_lock);
+    pthread_mutex_unlock(&g_class_lock);
     c->eax = fact ? 1u : 0u;
 }
 
@@ -1154,14 +1290,12 @@ static int window_origin(uint32_t handle, int32_t *x, int32_t *y)
         return 1;
     }
 
-    pthread_mutex_lock(&g_lock);
-    const WindowFact *window = find_window(handle);
-    if (window) {
-        *x = window->x;
-        *y = window->y;
-    }
-    pthread_mutex_unlock(&g_lock);
-    return window != NULL;
+    WindowFact *window = lock_window(handle);
+    if (!window) return 0;
+    *x = window->x;
+    *y = window->y;
+    unlock_window(window);
+    return 1;
 }
 
 static void h_map_window_points(CPU *c)
@@ -1227,11 +1361,11 @@ static void h_monitor_from_window(CPU *c)
     if (handle == DESKTOP_WINDOW_HANDLE) {
         intersects = 1;
     } else if (handle) {
-        pthread_mutex_lock(&g_lock);
-        const WindowFact *window = find_window(handle);
-        if (window)
+        WindowFact *window = lock_window(handle);
+        if (window) {
             intersects = window_intersects_monitor(window, width, height);
-        pthread_mutex_unlock(&g_lock);
+            unlock_window(window);
+        }
     }
 
     /* Android exposes one monitor.  A valid window on that monitor maps to it;
@@ -1348,11 +1482,22 @@ int wc3_hle_user32_window_facts_install(void)
     g_process_id = (uint32_t)g_thread->id(g_thread->ctx,
                                           g_thread->self(g_thread->ctx));
 
-    pthread_mutex_lock(&g_lock);
+    ensure_window_locks();
+
+    /* Install is a bootstrap step.  Holding both table locks and every slot
+     * lock gives the reset the same exclusivity the former single lock had,
+     * and follows the class -> window -> slot order used at runtime. */
+    pthread_mutex_lock(&g_class_lock);
+    pthread_mutex_lock(&g_window_lock);
+    for (unsigned i = 0; i < WINDOW_MAX; i++)
+        pthread_mutex_lock(&g_window_locks[i]);
     memset(g_classes, 0, sizeof g_classes);
     memset(g_windows, 0, sizeof g_windows);
     g_next_serial = 1u;
-    pthread_mutex_unlock(&g_lock);
+    for (unsigned i = 0; i < WINDOW_MAX; i++)
+        pthread_mutex_unlock(&g_window_locks[i]);
+    pthread_mutex_unlock(&g_window_lock);
+    pthread_mutex_unlock(&g_class_lock);
 
     for (unsigned i = 0; i < sizeof g_chain / sizeof g_chain[0]; i++) {
         if (wc3_legacy_hle_chain("USER32.dll", g_chain[i].name,

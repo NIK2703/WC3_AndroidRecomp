@@ -36,6 +36,13 @@ const char *wc3_legacy_hle_describe(uint32_t thunk);
 int wc3_legacy_hle_override(const char *dll, const char *name,
                             void (*impl)(CPU *c));
 
+/* Bind an existing as-built row to the fast HLE bridge without replacing its
+ * handler.  `argc` and `cdecl_abi` come from the as-built HleEnt, so the
+ * frozen stack-cleanup formula is unchanged and the as-built row itself is not
+ * modified.  Must run before the first guest thread; returns 0 on success,
+ * -1 when the row is absent or has no handler. */
+int wc3_legacy_hle_fast_bind(const char *dll, const char *name);
+
 /* Install a target handler and return the as-built handler it replaced.  The
  * wrapper may call the previous handler and then extend the observable state;
  * this is the strangler seam for calls whose side effects still live in the

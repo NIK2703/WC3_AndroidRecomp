@@ -15,7 +15,10 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "guest_layout.h"
+/* The target ABI always uses the runtime/guest layout.  A plain
+ * "guest_layout.h" is ambiguous: the legacy shim target also has
+ * runtime/legacy on its include path, and that copy predates GUEST_HLE_MAX. */
+#include "../../guest/guest_layout.h"
 
 #ifndef WC3_DEBUG
 #define WC3_DEBUG 0
@@ -94,13 +97,17 @@ HleEntry *hle_entry_for(HleRegistry *r, uint32_t thunk);
 #if WC3_DEBUG
 HleEntry *hle_find(HleRegistry *r, const char *dll, const char *name,
                    uint16_t ordinal);
-const char *hle_describe(HleRegistry *r, uint32_t thunk);
+const char *hle_abi_describe(HleRegistry *r, uint32_t thunk);
 #endif
 
 /* Guest -> HLE call.  The guest stack contains the return address at c->esp
  * on entry.  The bridge removes exactly stack_cleanup bytes; a handler that
- * changes esp is corrected back to the caller frame before cleanup. */
-void hle_call(HleRegistry *r, uint32_t thunk, CPU *c);
+ * changes esp is corrected back to the caller frame before cleanup.
+ *
+ * The name differs from the as-built hle_call(uint32_t, CPU*) on purpose:
+ * both translation units are linked into the product during the M5 cutover,
+ * and C has no overloads. */
+void hle_abi_call(HleRegistry *r, uint32_t thunk, CPU *c);
 
 /* Mandatory import that is not in the table.  This is a startup fatal, never
  * a stub and never a no-op. */

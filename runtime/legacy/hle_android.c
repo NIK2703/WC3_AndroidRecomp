@@ -3402,6 +3402,15 @@ typedef struct {
 static GuestTimer g_timers[TIMER_MAX];
 static pthread_mutex_t g_timer_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_timer_next_id = 0xA000;
+/* A timer callback is not reentrant.  timer_service() is called from every
+ * blocking guest wait so Miles' mixer keeps running while the game thread is
+ * parked; the callback itself waits on the Miles mixer mutex, which means the
+ * wait path re-enters timer_service() and would dispatch the same callback
+ * again.  On the save freeze the main thread then stayed inside
+ * L_35112A90/L_35114200 forever while the digital-driver thread owned the
+ * mixer mutex.  Win32 serialises WM_TIMER callbacks on the owning thread;
+ * this per-thread guard enforces the same rule. */
+static __thread int g_timer_in_service;
 #ifdef WC3_DEBUG
 static unsigned g_timer_cb_log;
 #endif
@@ -3412,6 +3421,8 @@ static unsigned g_timer_hle_log;
 static void timer_service(CPU *c)
 {
     if (!c || !g_wave_ret_thunk) return;
+    if (g_timer_in_service) return;
+    g_timer_in_service = 1;
 
     uint32_t now = wave_now_ms();
     const uint64_t played = wave_clock_frames();
@@ -3489,6 +3500,7 @@ static void timer_service(CPU *c)
         c->esp = sa; c->ebx = sbx; c->esi = ssi;
         c->edi = sdi; c->ebp = sbp;
     }
+    g_timer_in_service = 0;
 }
 
 static void timer_set(CPU *c)

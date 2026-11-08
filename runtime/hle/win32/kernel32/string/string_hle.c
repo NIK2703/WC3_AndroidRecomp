@@ -25,13 +25,46 @@
 #include "cpu.h"
 #include "legacy_shim.h"
 
+/* Largest chunk to validate with one guest_ok() call.  The chunk stays inside
+ * the 32-bit address space and never exceeds the caller's byte budget. */
+static uint32_t guest_string_chunk(uint32_t address, uint32_t remaining)
+{
+    uint32_t chunk = remaining < 64u ? remaining : 64u;
+    const uint64_t room = 0x100000000ull - address;
+    if ((uint64_t)chunk > room) chunk = (uint32_t)room;
+    return chunk;
+}
+
 static void h_lstrlen_a(CPU *c)
 {
     uint32_t p = wc3_legacy_arg32(c, 0);
     uint32_t n = 0;
-    while (p && wc3_legacy_guest_ok(p, 1) && wc3_legacy_rd8g(p)) {
-        n++;
-        p++;
+
+    while (p) {
+        const uint32_t chunk = guest_string_chunk(p, UINT32_MAX);
+        if (wc3_legacy_guest_ok(p, chunk)) {
+            for (uint32_t j = 0; j < chunk; j++) {
+                if (!wc3_legacy_rd8g(p + j)) {
+                    c->eax = n;
+                    return;
+                }
+                n++;
+            }
+            p += chunk;
+        } else {
+            for (uint32_t j = 0; j < chunk; j++) {
+                if (!wc3_legacy_guest_ok(p, 1u) || !wc3_legacy_rd8g(p)) {
+                    c->eax = n;
+                    return;
+                }
+                n++;
+                p++;
+                if (!p) {
+                    c->eax = n;
+                    return;
+                }
+            }
+        }
     }
     c->eax = n;
 }
@@ -45,13 +78,38 @@ static void h_lstrcpyn_a(CPU *c)
     if (dst && max && wc3_legacy_guest_ok(dst, max)) {
         uint32_t i = 0;
         while (i + 1u < max) {
-            if (!src || src > UINT32_MAX - i ||
-                !wc3_legacy_guest_ok(src + i, 1))
-                break;
-            const uint8_t ch = wc3_legacy_rd8g(src + i);
-            if (!ch) break;
-            wc3_legacy_wr8g(dst + i, ch);
-            i++;
+            if (!src || src > UINT32_MAX - i) break;
+            const uint32_t at = src + i;
+            const uint32_t chunk = guest_string_chunk(at, max - 1u - i);
+            int stop = 0;
+
+            if (wc3_legacy_guest_ok(at, chunk)) {
+                for (uint32_t j = 0; j < chunk; j++) {
+                    const uint8_t ch = wc3_legacy_rd8g(at + j);
+                    if (!ch) {
+                        stop = 1;
+                        break;
+                    }
+                    wc3_legacy_wr8g(dst + i, ch);
+                    i++;
+                }
+            } else {
+                for (uint32_t j = 0; j < chunk; j++) {
+                    const uint32_t byte = at + j;
+                    if (!wc3_legacy_guest_ok(byte, 1u)) {
+                        stop = 1;
+                        break;
+                    }
+                    const uint8_t ch = wc3_legacy_rd8g(byte);
+                    if (!ch) {
+                        stop = 1;
+                        break;
+                    }
+                    wc3_legacy_wr8g(dst + i, ch);
+                    i++;
+                }
+            }
+            if (stop) break;
         }
         wc3_legacy_wr8g(dst + i, 0);
     }
@@ -69,12 +127,43 @@ static void h_lstrcat_a(CPU *c)
     }
 
     uint32_t end = dst;
-    while (wc3_legacy_guest_ok(end, 1) && wc3_legacy_rd8g(end)) {
-        if (end == UINT32_MAX) {
-            c->eax = dst;
-            return;
+    int found = 0;
+    while (!found) {
+        const uint32_t chunk = guest_string_chunk(end, UINT32_MAX);
+        if (wc3_legacy_guest_ok(end, chunk)) {
+            for (uint32_t j = 0; j < chunk; j++) {
+                if (!wc3_legacy_rd8g(end)) {
+                    found = 1;
+                    break;
+                }
+                if (end == UINT32_MAX) {
+                    c->eax = dst;
+                    return;
+                }
+                end++;
+            }
+        } else {
+            int bad = 0;
+            for (uint32_t j = 0; j < chunk; j++) {
+                if (!wc3_legacy_guest_ok(end, 1u)) {
+                    bad = 1;
+                    break;
+                }
+                if (!wc3_legacy_rd8g(end)) {
+                    found = 1;
+                    break;
+                }
+                if (end == UINT32_MAX) {
+                    c->eax = dst;
+                    return;
+                }
+                end++;
+            }
+            if (bad) {
+                c->eax = dst;
+                return;
+            }
         }
-        end++;
     }
     if (!wc3_legacy_guest_ok(end, 1)) {
         c->eax = dst;
@@ -83,15 +172,45 @@ static void h_lstrcat_a(CPU *c)
 
     uint32_t i = 0;
     while (src <= UINT32_MAX - i && end <= UINT32_MAX - i) {
-        if (!wc3_legacy_guest_ok(src + i, 1)) {
-            wc3_legacy_wr8g(end + i, 0);
-            break;
+        const uint32_t src_at = src + i;
+        const uint32_t dst_at = end + i;
+        uint32_t chunk = guest_string_chunk(src_at, UINT32_MAX);
+        const uint32_t dst_chunk = guest_string_chunk(dst_at, UINT32_MAX);
+        if (chunk > dst_chunk) chunk = dst_chunk;
+
+        if (wc3_legacy_guest_ok(src_at, chunk)) {
+            for (uint32_t j = 0; j < chunk; j++) {
+                const uint8_t ch = wc3_legacy_rd8g(src_at + j);
+                if (!wc3_legacy_guest_ok(dst_at + j, 1u)) {
+                    c->eax = dst;
+                    return;
+                }
+                wc3_legacy_wr8g(dst_at + j, ch);
+                if (!ch) {
+                    c->eax = dst;
+                    return;
+                }
+            }
+        } else {
+            for (uint32_t j = 0; j < chunk; j++) {
+                if (!wc3_legacy_guest_ok(src_at + j, 1u)) {
+                    wc3_legacy_wr8g(dst_at + j, 0);
+                    c->eax = dst;
+                    return;
+                }
+                const uint8_t ch = wc3_legacy_rd8g(src_at + j);
+                if (!wc3_legacy_guest_ok(dst_at + j, 1u)) {
+                    c->eax = dst;
+                    return;
+                }
+                wc3_legacy_wr8g(dst_at + j, ch);
+                if (!ch) {
+                    c->eax = dst;
+                    return;
+                }
+            }
         }
-        const uint8_t ch = wc3_legacy_rd8g(src + i);
-        if (!wc3_legacy_guest_ok(end + i, 1)) break;
-        wc3_legacy_wr8g(end + i, ch);
-        if (!ch) break;
-        i++;
+        i += chunk;
     }
     c->eax = dst;
 }
@@ -109,15 +228,37 @@ static void h_is_bad_string_ptr_a(CPU *c)
         c->eax = 0;
         return;
     }
-    for (uint32_t i = 0; i < max; i++) {
-        if (p > UINT32_MAX - i || !wc3_legacy_guest_ok(p + i, 1)) {
+    for (uint32_t i = 0; i < max; ) {
+        if (p > UINT32_MAX - i) {
             c->eax = 1;
             return;
         }
-        if (!wc3_legacy_rd8g(p + i)) {
-            c->eax = 0;
-            return;
+        const uint32_t at = p + i;
+        const uint32_t chunk = guest_string_chunk(at, max - i);
+
+        if (wc3_legacy_guest_ok(at, chunk)) {
+            for (uint32_t j = 0; j < chunk; j++) {
+                if (!wc3_legacy_rd8g(at + j)) {
+                    c->eax = 0;
+                    return;
+                }
+            }
+        } else {
+            /* Fall back to the per-byte form when the chunk crosses an
+             * unmapped page; the result stays all-or-nothing. */
+            for (uint32_t j = 0; j < chunk; j++) {
+                const uint32_t byte = at + j;
+                if (!wc3_legacy_guest_ok(byte, 1u)) {
+                    c->eax = 1;
+                    return;
+                }
+                if (!wc3_legacy_rd8g(byte)) {
+                    c->eax = 0;
+                    return;
+                }
+            }
         }
+        i += chunk;
     }
     c->eax = 0;
 }

@@ -3,8 +3,9 @@
  *
  * The generated corpus names one C function per guest VA (L_<va>).  This file
  * owns the mapping from a guest target to that function and the HLE window
- * check.  It deliberately has no dependency on the old host tree: the only
- * generated input is boot_dispatch_list.h, which is a list of guest VAs.
+ * check.  It deliberately has no dependency on the old host tree: the
+ * generated inputs are boot_dispatch_list.h (the guest VA list) and, since
+ * O-24, boot_dispatch_hash.h (the same open-addressing table as a constant).
  *
  * The boot list is generated from the active corpus manifest: the legacy
  * probe list in transitional mode, or the merged multi-module list when
@@ -48,9 +49,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#ifndef WC3_DEBUG
-#define WC3_DEBUG 0
-#endif
+#include "wc3_debug.h"
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
 /* Temporary hang watchdog hook; see wc3_watch_dispatch() in hle_android.c. */
@@ -76,9 +75,15 @@ static const LiftEnt g_lift[] = {
 #undef X
 };
 
-#define LIFT_HASH_BITS 19
-#define LIFT_HASH_SIZE (1u << LIFT_HASH_BITS)
-static uint32_t g_lift_hash[LIFT_HASH_SIZE];
+/* O-24: the dispatch hash used to be rebuilt from g_lift[] on every startup
+ * (one linear probe sequence per entry into a 2 MiB table).
+ * tools/gen_boot_dispatch.py now publishes exactly the same table as a
+ * constant, so each slot still stores (index into g_lift[]) + 1.
+ * LIFT_HASH_BITS/LIFT_HASH_SIZE, the Knuth multiplier, the linear probe order
+ * and find_lifted() are unchanged;
+ * only the publication point moved from wc3_dispatch_init() to .rodata.  No
+ * speed claim is made until G-10/PM-19 measures cold_start. */
+#include "boot_dispatch_hash.h"
 
 void wc3_dispatch_init(void)
 {
@@ -89,11 +94,17 @@ void wc3_dispatch_init(void)
      * the math slice owns the x87/SSE2 return conventions, and the time slice
      * reads both clocks through Wc3TimeApi.  The rest of msvcr80 remains
      * quarantined for its later H6.2 step. */
+#if WC3_DEBUG && WC3_DEBUG_HLE
 #define WC3_INSTALL_STEP(fn) do { \
         int _r = (fn); \
         fprintf(stderr, "[hle] install %s -> %d\n", #fn, _r); \
         if (_r < 0) abort(); \
     } while (0)
+#else
+#define WC3_INSTALL_STEP(fn) do { \
+        if ((fn) < 0) abort(); \
+    } while (0)
+#endif
     WC3_INSTALL_STEP(wc3_hle_kernel32_time_install());
     WC3_INSTALL_STEP(wc3_hle_comctl32_imagelist_install());
     WC3_INSTALL_STEP(wc3_hle_shell32_dragdrop_install());
@@ -136,13 +147,9 @@ void wc3_dispatch_init(void)
     wc3_lock_trace_start();
 #endif
 
-    size_t count = sizeof g_lift / sizeof g_lift[0];
-    for (size_t i = 0; i < count; i++) {
-        uint32_t h = (g_lift[i].va * 2654435761u) >> (32 - LIFT_HASH_BITS);
-        while (g_lift_hash[h])
-            h = (h + 1) & (LIFT_HASH_SIZE - 1);
-        g_lift_hash[h] = (uint32_t)(i + 1);
-    }
+    /* O-24: g_lift_hash is a generated constant; there is nothing to build
+     * here.  Hash and probe semantics are unchanged from the loop that used
+     * to run at this point. */
 }
 
 void wc3_dispatch_shutdown(void)

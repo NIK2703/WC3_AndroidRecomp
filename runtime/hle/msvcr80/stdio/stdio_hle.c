@@ -18,6 +18,7 @@
 
 #include <ctype.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -46,13 +47,15 @@
 #define CRT_O_U8TEXT 0x40000
 
 typedef struct Stream {
-    int used;
-    int closed;
-    int std_index; /* 0..2 for stdin/stdout/stderr, -1 for a file */
+    int used;       /* slot allocation bit, owned by g_stream_lock */
+    int closed;     /* owned by Stream.lock; 1 = closed or never opened */
+    int std_index;  /* 0..2 for stdin/stdout/stderr, -1 for a file */
     int fd;
     int eof;
     int error;
     int mode;
+    _Atomic uint64_t generation; /* bumped on slot reuse */
+    _Atomic int fd_hint;         /* advisory file-fd slot hint, -1 otherwise */
     pthread_mutex_t lock;
 #if WC3_DEBUG && WC3_DEBUG_SAVE
     /* Host path kept only for the save path trace.  It is not part of the
@@ -61,16 +64,118 @@ typedef struct Stream {
 #endif
 } Stream;
 
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+/* The save trace is collected while Stream.lock is held, then printed by the
+ * caller after the unlock.  The trace is per-thread because different guest
+ * threads may be inside different stream handlers at the same time. */
+#define STREAM_TRACE_MAX 400u
+typedef struct StreamTraceEvent {
+    uint32_t count;
+    uint32_t result;
+    int done;
+} StreamTraceEvent;
+
+typedef struct StreamTrace {
+    int fd;
+    char path[STREAM_PATH_MAX];
+    unsigned events;
+    StreamTraceEvent event[STREAM_TRACE_MAX];
+} StreamTrace;
+
+static _Thread_local StreamTrace *g_stream_trace;
+
+static void stream_trace_begin(StreamTrace *trace, const Stream *stream)
+{
+    trace->fd = stream->fd;
+    memcpy(trace->path, stream->save_path, sizeof trace->path);
+    trace->events = 0u;
+    g_stream_trace = trace;
+}
+
+static void stream_trace_event(uint32_t count, uint32_t result, int done)
+{
+    StreamTrace *trace = g_stream_trace;
+    if (!trace || trace->events >= STREAM_TRACE_MAX) return;
+    trace->event[trace->events].count = count;
+    trace->event[trace->events].result = result;
+    trace->event[trace->events].done = done;
+    trace->events++;
+}
+
+static void stream_trace_flush(StreamTrace *trace, int write)
+{
+    g_stream_trace = NULL;
+    for (unsigned i = 0; i < trace->events; i++) {
+        const StreamTraceEvent *event = &trace->event[i];
+        if (write)
+            fprintf(stderr, "[savecrt] write begin fd=%d n=%u path=\"%s\"\n",
+                    trace->fd, event->count, trace->path);
+        else
+            fprintf(stderr, "[savecrt] read begin fd=%d n=%u path=\"%s\"\n",
+                    trace->fd, event->count, trace->path);
+        if (!event->done) continue;
+        if (write)
+            fprintf(stderr, "[savecrt] write done n=%u -> %u\n",
+                    event->count, event->result);
+        else
+            fprintf(stderr, "[savecrt] read done n=%u -> %u\n",
+                    event->count, event->result);
+    }
+}
+#endif
+
+/* Stream table locking.
+ *
+ * g_stream_lock owns slot lifecycle: the `used` allocation bits, the _fdopen
+ * in-use scan, the standard-fd duplicate fallback, and the short claim/retire
+ * transitions.  An operation on a live stream never takes it, and it is never
+ * held across a Wc3FileApi callback.
+ *
+ * A live stream is pinned by its own mutex.  stream_acquire() and
+ * stream_by_fd_acquire() return with stream->lock held; the read/write/seek/
+ * tell/flush/attribute handlers run under it and release it.  fclose() holds
+ * the same mutex across the host close, so an in-flight operation finishes
+ * before the descriptor is closed and the slot cannot be recycled underneath
+ * it.
+ *
+ * stream_finish() clears the guest record magic before the slot is retired,
+ * and stream_new() bumps `generation` under the slot mutex.  Acquire reads the
+ * generation before validating the magic and rechecks it under the mutex, so a
+ * stale record that raced with close-and-reuse is rejected instead of
+ * operating on the slot's new occupant.
+ *
+ * `fd_hint` is an advisory, never-cleared file fd -> slot hint published by
+ * stream_new() under the slot mutex; stream_by_fd_acquire() revalidates the
+ * slot identity under that same mutex, so a stale hint costs one lock and can
+ * never select the wrong stream.  The file-fd lookup therefore no longer needs
+ * g_stream_lock.
+ *
+ * Lock order: g_stream_lock -> Stream.lock (stream_new only).  stream_finish()
+ * drops Stream.lock before taking g_stream_lock, so the order never inverts.
+ * Stream.lock may nest over a file_hle descriptor lock through the fd_* seam;
+ * that module never calls back into this one.  Wc3FileApi is a host-only
+ * platform seam (POSIX file I/O): it never dispatches guest code or re-enters
+ * this module, so holding a Stream mutex across it does not run guest code
+ * under a host lock.
+ */
 static Stream g_streams[STREAM_LIMIT];
 static pthread_mutex_t g_stream_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t g_stream_once = PTHREAD_ONCE_INIT;
 
 static void init_streams(void)
 {
-    for (unsigned i = 0; i < STREAM_LIMIT; i++)
+    for (unsigned i = 0; i < STREAM_LIMIT; i++) {
         pthread_mutex_init(&g_streams[i].lock, NULL);
+        /* A slot that was never owned is not acquirable.  `closed` is the
+         * per-object gate now that acquire does not take g_stream_lock;
+         * stream_new() clears it last, after every other field is set. */
+        g_streams[i].closed = 1;
+        atomic_store_explicit(&g_streams[i].fd_hint, -1,
+                              memory_order_relaxed);
+    }
     for (unsigned i = 0; i < 3u; i++) {
         g_streams[i].used = 1;
+        g_streams[i].closed = 0;
         g_streams[i].std_index = (int)i;
         g_streams[i].fd = -1;
         g_streams[i].mode = CRT_O_BINARY;
@@ -91,23 +196,31 @@ static FILE *std_file(int index)
 }
 
 /* The guest record is opaque; it carries the same magic and slot as the
- * as-built table so __iob_func()'s three records continue to work. */
+ * as-built table so __iob_func()'s three records continue to work.
+ *
+ * Resolve a record to a pinned stream.  The generation is sampled before the
+ * mutex; after locking, both the generation and the record magic are checked.
+ * stream_finish() clears the magic under this mutex before the slot is
+ * retired, and stream_new() bumps the generation under it, so a stale record
+ * that raced with close-and-reuse is rejected instead of operating on the
+ * slot's new occupant.  Only a live slot has closed == 0, which also replaces
+ * the old `used` test for never-opened slots. */
 static Stream *stream_acquire(uint32_t record)
 {
     ensure_streams();
     if (!record || !wc3_legacy_guest_ok(record, 8u)) return NULL;
-    if (wc3_legacy_rd32g(record) != STREAM_MAGIC) return NULL;
+
     const uint32_t slot = wc3_legacy_rd32g(record + 4u);
     if (slot >= STREAM_LIMIT) return NULL;
-
-    pthread_mutex_lock(&g_stream_lock);
     Stream *stream = &g_streams[slot];
-    const int used = stream->used;
-    pthread_mutex_unlock(&g_stream_lock);
-    if (!used) return NULL;
+    const uint64_t generation = atomic_load_explicit(
+        &stream->generation, memory_order_relaxed);
 
     pthread_mutex_lock(&stream->lock);
-    if (stream->closed) {
+    if (stream->closed ||
+        atomic_load_explicit(&stream->generation, memory_order_relaxed) !=
+            generation ||
+        wc3_legacy_rd32g(record) != STREAM_MAGIC) {
         pthread_mutex_unlock(&stream->lock);
         return NULL;
     }
@@ -119,30 +232,53 @@ static Stream *stream_by_fd_acquire(int fd)
     ensure_streams();
     if (fd < 0) return NULL;
 
-    pthread_mutex_lock(&g_stream_lock);
-    Stream *candidate = NULL;
-    for (unsigned i = 0; i < STREAM_LIMIT; i++) {
-        Stream *stream = &g_streams[i];
-        if (!stream->used) continue;
-        if (fd < 3) {
-            if (stream->std_index == fd) {
-                candidate = stream;
-                break;
-            }
-        } else if (stream->std_index < 0 && stream->fd == fd) {
-            candidate = stream;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_stream_lock);
-    if (!candidate) return NULL;
+    /* The three standard slots have a fixed identity and are never recycled,
+     * so printf's stdout lookup needs neither the table lock nor a scan. */
+    if (fd < (int)STREAM_FIRST) {
+        Stream *stream = &g_streams[fd];
+        pthread_mutex_lock(&stream->lock);
+        if (!stream->closed) return stream;
+        pthread_mutex_unlock(&stream->lock);
 
-    pthread_mutex_lock(&candidate->lock);
-    if (candidate->closed) {
-        pthread_mutex_unlock(&candidate->lock);
-        return NULL;
+        /* fclose(stdout) retires the fixed slot, but _fdopen() may have bound
+         * the same standard fd to a later record.  The as-built scan skipped
+         * a slot only after `used` was cleared and stopped at the first used
+         * match, so keep it verbatim on this rare fallback; the hot printf
+         * lookup above never reaches it. */
+        pthread_mutex_lock(&g_stream_lock);
+        Stream *candidate = NULL;
+        if (!g_streams[fd].used) {
+            for (unsigned i = STREAM_FIRST; i < STREAM_LIMIT; i++) {
+                if (g_streams[i].used && g_streams[i].std_index == fd) {
+                    candidate = &g_streams[i];
+                    break;
+                }
+            }
+        }
+        pthread_mutex_unlock(&g_stream_lock);
+        if (!candidate) return NULL;
+
+        pthread_mutex_lock(&candidate->lock);
+        if (candidate->closed || candidate->std_index != fd) {
+            pthread_mutex_unlock(&candidate->lock);
+            return NULL;
+        }
+        return candidate;
     }
-    return candidate;
+
+    for (unsigned i = STREAM_FIRST; i < STREAM_LIMIT; i++) {
+        Stream *stream = &g_streams[i];
+        if (atomic_load_explicit(&stream->fd_hint, memory_order_acquire) != fd)
+            continue;
+        pthread_mutex_lock(&stream->lock);
+        if (stream->closed) {
+            pthread_mutex_unlock(&stream->lock);
+            continue;
+        }
+        if (stream->std_index < 0 && stream->fd == fd) return stream;
+        pthread_mutex_unlock(&stream->lock);
+    }
+    return NULL;
 }
 
 static int stream_fd_in_use(int fd)
@@ -172,12 +308,21 @@ static uint32_t stream_new(int fd, int std_index, int mode)
         Stream *stream = &g_streams[i];
         if (stream->used) continue;
         stream->used = 1;
-        stream->closed = 0;
+        /* g_stream_lock -> Stream.lock is the only nesting order.  The slot
+         * has no user yet, so this wait is never a host I/O call. */
+        pthread_mutex_lock(&stream->lock);
+        atomic_fetch_add_explicit(&stream->generation, 1u,
+                                  memory_order_relaxed);
         stream->std_index = std_index;
         stream->fd = fd;
         stream->eof = 0;
         stream->error = 0;
         stream->mode = mode;
+        atomic_store_explicit(&stream->fd_hint,
+                              std_index < 0 ? fd : -1,
+                              memory_order_release);
+        stream->closed = 0;
+        pthread_mutex_unlock(&stream->lock);
         pthread_mutex_unlock(&g_stream_lock);
 
         wc3_legacy_wr32g(record, STREAM_MAGIC);
@@ -190,18 +335,19 @@ static uint32_t stream_new(int fd, int std_index, int mode)
 }
 
 /* The caller holds stream->lock.  Closing is terminal even when the host
- * close reports an error, matching fclose's stream-closing contract. */
+ * close reports an error, matching fclose's stream-closing contract.  The
+ * record magic is cleared before the slot is retired, so stream_acquire()
+ * cannot pair the old record with a later occupant of this slot. */
 static void stream_finish(Stream *stream, uint32_t record)
 {
     stream->closed = 1;
+    if (record && wc3_legacy_guest_ok(record, 4u))
+        wc3_legacy_wr32g(record, 0u);
     pthread_mutex_unlock(&stream->lock);
 
     pthread_mutex_lock(&g_stream_lock);
     stream->used = 0;
     pthread_mutex_unlock(&g_stream_lock);
-
-    if (record && wc3_legacy_guest_ok(record, 4u))
-        wc3_legacy_wr32g(record, 0u);
 }
 
 #if WC3_DEBUG && WC3_DEBUG_SAVE
@@ -232,18 +378,18 @@ static int stream_read(Stream *stream, void *buffer, uint32_t count,
 #if WC3_DEBUG && WC3_DEBUG_SAVE
     const int trace_save = save_trace_path(stream->save_path);
     static unsigned save_trace_reads;
-    if (trace_save && save_trace_reads++ < 120)
-        fprintf(stderr, "[savecrt] read begin fd=%d n=%u path=\"%s\"\n",
-                stream->fd, count, stream->save_path);
+    const int trace_event = trace_save && save_trace_reads++ < 120;
 #endif
     uint32_t got = 0;
     if (wc3_hle_msvcr80_fd_read(stream->fd, buffer, count, &got) != 0) {
         stream->error = 1;
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+        if (trace_event) stream_trace_event(count, got, 0);
+#endif
         return -1;
     }
 #if WC3_DEBUG && WC3_DEBUG_SAVE
-    if (trace_save && save_trace_reads <= 120)
-        fprintf(stderr, "[savecrt] read done n=%u -> %u\n", count, got);
+    if (trace_event) stream_trace_event(count, got, 1);
 #endif
     if (read_out) *read_out = got;
     if (got < count) stream->eof = 1;
@@ -272,19 +418,19 @@ static int stream_write(Stream *stream, const void *buffer, uint32_t count,
 #if WC3_DEBUG && WC3_DEBUG_SAVE
     const int trace_save = save_trace_path(stream->save_path);
     static unsigned save_trace_writes;
-    if (trace_save && save_trace_writes++ < 400)
-        fprintf(stderr, "[savecrt] write begin fd=%d n=%u path=\"%s\"\n",
-                stream->fd, count, stream->save_path);
+    const int trace_event = trace_save && save_trace_writes++ < 400;
 #endif
     uint32_t put = 0;
     if (wc3_hle_msvcr80_fd_write(stream->fd, buffer, count, &put) != 0 ||
         put != count) {
         stream->error = 1;
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+        if (trace_event) stream_trace_event(count, put, 0);
+#endif
         return -1;
     }
 #if WC3_DEBUG && WC3_DEBUG_SAVE
-    if (trace_save && save_trace_writes <= 400)
-        fprintf(stderr, "[savecrt] write done n=%u -> %u\n", count, put);
+    if (trace_event) stream_trace_event(count, put, 1);
 #endif
     if (written_out) *written_out = put;
     return 0;
@@ -332,18 +478,16 @@ static int stream_flush(Stream *stream)
     return 0;
 }
 
-/* fflush(NULL) drains the two writable standard streams.  The slot is looked
- * up without holding a stream lock, then the stream is revalidated after its
- * lock is acquired so a concurrent fclose(stdout) cannot leave us flushing a
+/* fflush(NULL) drains the two writable standard streams.  Slots 0..2 have a
+ * fixed identity, so the slot is indexed directly; `closed` is revalidated
+ * under its mutex so a concurrent fclose(stdout) cannot leave us flushing a
  * closed FILE*. */
 static int flush_standard_stream(unsigned slot)
 {
-    pthread_mutex_lock(&g_stream_lock);
-    Stream *stream = &g_streams[slot];
-    const int used = stream->used;
-    pthread_mutex_unlock(&g_stream_lock);
-    if (!used) return 0;
+    ensure_streams();
+    if (slot >= STREAM_LIMIT) return 0;
 
+    Stream *stream = &g_streams[slot];
     pthread_mutex_lock(&stream->lock);
     int result = 0;
     if (!stream->closed) result = stream_flush(stream);
@@ -353,11 +497,6 @@ static int flush_standard_stream(unsigned slot)
 
 static int stream_close(Stream *stream)
 {
-#if WC3_DEBUG && WC3_DEBUG_SAVE
-    if (stream->std_index < 0 && save_trace_path(stream->save_path))
-        fprintf(stderr, "[savecrt] close fd=%d path=\"%s\"\n",
-                stream->fd, stream->save_path);
-#endif
     if (stream->std_index < 0)
         return wc3_hle_msvcr80_fd_close(stream->fd);
 
@@ -473,13 +612,32 @@ static uint32_t open_stream(const char *guest_path, const char *mode)
 static int read_wide_string(uint32_t address, uint16_t *buffer, size_t capacity)
 {
     if (!address || !buffer || capacity < 2u) return 0;
-    for (size_t i = 0; i + 1u < capacity; i++) {
+    for (size_t i = 0; i + 1u < capacity; ) {
         if (address > UINT32_MAX - (uint32_t)(i * 2u)) return 0;
         const uint32_t at = address + (uint32_t)(i * 2u);
-        if (!wc3_legacy_guest_ok(at, 2u)) return 0;
-        const uint16_t ch = wc3_legacy_rd16g(at);
-        buffer[i] = ch;
-        if (!ch) return 1;
+        const size_t remaining = capacity - 1u - i;
+        uint32_t units = remaining > 32u ? 32u : (uint32_t)remaining;
+        const uint64_t room = (0x100000000ull - at) / 2u;
+        if (units > room) units = (uint32_t)room;
+        if (units == 0u) return 0;
+
+        if (wc3_legacy_guest_ok(at, units * 2u)) {
+            for (uint32_t j = 0; j < units; j++) {
+                const uint16_t ch = wc3_legacy_rd16g(at + j * 2u);
+                buffer[i++] = ch;
+                if (!ch) return 1;
+            }
+        } else {
+            /* A chunk that crosses a page or arena boundary keeps the old
+             * all-or-nothing result: walk its wide units one at a time. */
+            for (uint32_t j = 0; j < units; j++) {
+                const uint32_t unit = at + j * 2u;
+                if (!wc3_legacy_guest_ok(unit, 2u)) return 0;
+                const uint16_t ch = wc3_legacy_rd16g(unit);
+                buffer[i++] = ch;
+                if (!ch) return 1;
+            }
+        }
     }
     return 0;
 }
@@ -701,10 +859,17 @@ static int write_stdout(const char *buffer, size_t length)
     if (length > 0x7FFFFFFFu) return -1;
     Stream *stream = stream_by_fd_acquire(1);
     if (!stream) return -1;
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    StreamTrace trace;
+    stream_trace_begin(&trace, stream);
+#endif
     uint32_t put = 0;
     const int result =
         stream_write(stream, buffer, (uint32_t)length, &put);
     pthread_mutex_unlock(&stream->lock);
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    stream_trace_flush(&trace, 1);
+#endif
     return result == 0 && put == length ? 0 : -1;
 }
 
@@ -766,8 +931,21 @@ static void h_fclose(CPU *c)
         c->eax = 0xFFFFFFFFu;
         return;
     }
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    const int trace_close =
+        stream->std_index < 0 && save_trace_path(stream->save_path);
+    const int trace_fd = stream->fd;
+    char trace_path[STREAM_PATH_MAX];
+    if (trace_close) memcpy(trace_path, stream->save_path,
+                             sizeof trace_path);
+#endif
     const int result = stream_close(stream);
     stream_finish(stream, record);
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    if (trace_close)
+        fprintf(stderr, "[savecrt] close fd=%d path=\"%s\"\n",
+                trace_fd, trace_path);
+#endif
     c->eax = result == 0 ? 0u : 0xFFFFFFFFu;
 }
 
@@ -786,11 +964,18 @@ static void h_fread(CPU *c)
 
     Stream *stream = stream_acquire(record);
     if (!stream) return;
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    StreamTrace trace;
+    stream_trace_begin(&trace, stream);
+#endif
     uint32_t got = 0;
     if (stream_read(stream, (void *)(uintptr_t)buffer, (uint32_t)total,
                     &got) == 0)
         c->eax = got / size;
     pthread_mutex_unlock(&stream->lock);
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    stream_trace_flush(&trace, 0);
+#endif
 }
 
 static void h_fwrite(CPU *c)
@@ -808,11 +993,18 @@ static void h_fwrite(CPU *c)
 
     Stream *stream = stream_acquire(record);
     if (!stream) return;
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    StreamTrace trace;
+    stream_trace_begin(&trace, stream);
+#endif
     uint32_t put = 0;
     if (stream_write(stream, (const void *)(uintptr_t)buffer,
                      (uint32_t)total, &put) == 0)
         c->eax = put / size;
     pthread_mutex_unlock(&stream->lock);
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    stream_trace_flush(&trace, 1);
+#endif
 }
 
 static void h_fseek(CPU *c)
@@ -884,11 +1076,18 @@ static void h_putc(CPU *c)
     c->eax = 0xFFFFFFFFu;
     Stream *stream = stream_acquire(record);
     if (!stream) return;
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    StreamTrace trace;
+    stream_trace_begin(&trace, stream);
+#endif
     const unsigned char byte = (unsigned char)ch;
     uint32_t put = 0;
     if (stream_write(stream, &byte, 1u, &put) == 0 && put == 1u)
         c->eax = (uint32_t)byte;
     pthread_mutex_unlock(&stream->lock);
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    stream_trace_flush(&trace, 1);
+#endif
 }
 
 static void h_fputc(CPU *c)
@@ -908,6 +1107,10 @@ static void h_fputs(CPU *c)
     if (!string) return;
     Stream *stream = stream_acquire(record);
     if (!stream) return;
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    StreamTrace trace;
+    stream_trace_begin(&trace, stream);
+#endif
 
     for (;;) {
         if (at >= STREAM_STRING_LIMIT || at > UINT32_MAX - string)
@@ -935,6 +1138,9 @@ static void h_fputs(CPU *c)
     c->eax = 0u;
 done:
     pthread_mutex_unlock(&stream->lock);
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    stream_trace_flush(&trace, 1);
+#endif
 }
 
 static void h_fgets(CPU *c)
@@ -955,6 +1161,10 @@ static void h_fgets(CPU *c)
 
     Stream *stream = stream_acquire(record);
     if (!stream) return;
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    StreamTrace trace;
+    stream_trace_begin(&trace, stream);
+#endif
 
     int at = 0;
     int failed = 0;
@@ -979,6 +1189,9 @@ static void h_fgets(CPU *c)
     if (!failed) c->eax = string;
 done:
     pthread_mutex_unlock(&stream->lock);
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    stream_trace_flush(&trace, 0);
+#endif
 }
 
 static void h_fileno(CPU *c)

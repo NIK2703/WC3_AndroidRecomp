@@ -73,7 +73,55 @@ typedef struct GdiDcPos {
 static GdiRegion g_regions[REGION_COUNT];
 static GdiPen g_pens[PEN_COUNT];
 static GdiDcPos g_positions[DC_POS_COUNT];
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Regions, pens and DC positions each use a table mutex for identity
+ * (used/handle or used/hdc and first-free selection) and one mutex per slot
+ * for payload.  A handler pins the slot under the table mutex, releases the
+ * table mutex, and touches payload only under the slot mutex; slot holders
+ * never acquire a table mutex.  Region creation keeps the table lock through
+ * its single add so a failed add can clear identity under the table lock.
+ * CombineRgn pins its unique participating region slots in ascending order
+ * under the table lock and releases them in reverse.  Runtime nested orders
+ * are region table -> pen table (h_fill_rgn), pen table -> pen slot
+ * (create/delete), position table -> position slot (MoveToEx/LineTo) and
+ * region table -> region slot (create/delete/RectInRegion/CombineRgn).
+ * Install takes the three table locks in the order region -> pen -> position
+ * before registration.  No guest memory is accessed while any mutex is held.
+ */
+static pthread_mutex_t g_region_table_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_pen_table_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_position_table_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_region_locks[REGION_COUNT];
+static pthread_mutex_t g_pen_locks[PEN_COUNT];
+static pthread_mutex_t g_position_locks[DC_POS_COUNT];
+
+/*
+ * Slot mutexes are initialised once, before any handler is registered.
+ * g_slot_locks_ready is written by the once routine and read after
+ * pthread_once() returns; a failed init makes install refuse to register.
+ */
+static pthread_once_t g_slot_locks_once = PTHREAD_ONCE_INIT;
+static int g_slot_locks_ready;
+
+static void init_slot_locks(void)
+{
+    int ready = 1;
+
+    for (unsigned i = 0; i < REGION_COUNT; i++) {
+        if (pthread_mutex_init(&g_region_locks[i], NULL) != 0)
+            ready = 0;
+    }
+    for (unsigned i = 0; i < PEN_COUNT; i++) {
+        if (pthread_mutex_init(&g_pen_locks[i], NULL) != 0)
+            ready = 0;
+    }
+    for (unsigned i = 0; i < DC_POS_COUNT; i++) {
+        if (pthread_mutex_init(&g_position_locks[i], NULL) != 0)
+            ready = 0;
+    }
+    g_slot_locks_ready = ready;
+}
 
 static void normalize_rect(GdiRect *rect)
 {
@@ -136,6 +184,8 @@ static GdiRect rect_union(const GdiRect *a, const GdiRect *b)
     return out;
 }
 
+/* Region payload helpers operate on rects/count.  Callers must hold the slot
+ * lock for every g_regions[] object passed in; stack temporaries need none. */
 static void region_remove_at(GdiRegion *region, unsigned index)
 {
     if (index + 1u < region->count) {
@@ -278,6 +328,7 @@ static int region_subtract_op(GdiRegion *dst, const GdiRegion *a,
     return 1;
 }
 
+/* Caller must hold g_region_table_lock.  Identity-only lookup. */
 static GdiRegion *find_region(uint32_t handle)
 {
     for (unsigned i = 0; i < REGION_COUNT; i++) {
@@ -287,11 +338,13 @@ static GdiRegion *find_region(uint32_t handle)
     return NULL;
 }
 
+/* Caller must hold g_region_table_lock.  Initialises identity only; the
+ * caller must pin g_region_locks[slot] and clear count/rects under the slot
+ * lock. */
 static GdiRegion *new_region(uint32_t *handle_out)
 {
     for (unsigned i = 0; i < REGION_COUNT; i++) {
         if (g_regions[i].used) continue;
-        memset(&g_regions[i], 0, sizeof g_regions[i]);
         g_regions[i].used = 1u;
         g_regions[i].handle = REGION_HANDLE_BASE + i * REGION_HANDLE_STRIDE;
         *handle_out = g_regions[i].handle;
@@ -300,6 +353,28 @@ static GdiRegion *new_region(uint32_t *handle_out)
     return NULL;
 }
 
+/* Caller must hold g_region_table_lock.  Inserts one slot index into a unique
+ * ascending set of at most three; CombineRgn then pins the set in order. */
+static void add_region_slot_ascending(const GdiRegion *region,
+                                      unsigned *slots,
+                                      unsigned *slot_count)
+{
+    const unsigned slot = (unsigned)(region - g_regions);
+    unsigned at = 0u;
+
+    while (at < *slot_count && slots[at] < slot)
+        at++;
+    if (at < *slot_count && slots[at] == slot)
+        return;
+    for (unsigned i = *slot_count; i > at; i--)
+        slots[i] = slots[i - 1u];
+    slots[at] = slot;
+    (*slot_count)++;
+}
+
+/* Caller must hold g_pen_table_lock.  If payload is needed, the caller must
+ * pin g_pen_locks[slot] while still holding the table lock, then release the
+ * table lock before touching style/width/color. */
 static GdiPen *find_pen(uint32_t handle)
 {
     for (unsigned i = 0; i < PEN_COUNT; i++) {
@@ -309,11 +384,13 @@ static GdiPen *find_pen(uint32_t handle)
     return NULL;
 }
 
+/* Caller must hold g_pen_table_lock.  Initialises identity only; the caller
+ * must pin g_pen_locks[slot] before releasing the table lock, then write
+ * style/width/color under the slot lock. */
 static GdiPen *new_pen(uint32_t *handle_out)
 {
     for (unsigned i = 0; i < PEN_COUNT; i++) {
         if (g_pens[i].used) continue;
-        memset(&g_pens[i], 0, sizeof g_pens[i]);
         g_pens[i].used = 1u;
         g_pens[i].handle = PEN_HANDLE_BASE + i * PEN_HANDLE_STRIDE;
         *handle_out = g_pens[i].handle;
@@ -350,16 +427,42 @@ static int read_guest_rect(uint32_t address, GdiRect *rect)
     return 1;
 }
 
+/* Creates one rectangle region.  The table lock publishes identity and pins
+ * the new slot; the payload is then initialised under the slot lock only.
+ * region_add() writes the first rectangle, so only the unused tail needs
+ * clearing.  A fresh count=0 slot cannot fail; the identity-only retirement
+ * keeps a defensive path without clearing payload under the table lock.
+ * Returns 0 on failure.  No guest access. */
 static uint32_t create_rect_region(const GdiRect *rect)
 {
     uint32_t handle = 0u;
-    GdiRegion *region = new_region(&handle);
-    if (!region) return 0u;
-    if (!region_add(region, rect)) {
-        memset(region, 0, sizeof *region);
-        return 0u;
+    GdiRegion *region;
+    unsigned slot = 0u;
+
+    pthread_mutex_lock(&g_region_table_lock);
+    region = new_region(&handle);
+    if (region) {
+        slot = (unsigned)(region - g_regions);
+        pthread_mutex_lock(&g_region_locks[slot]);
+
+        region->count = 0u;
+        if (region_add(region, rect)) {
+            pthread_mutex_unlock(&g_region_table_lock);
+            if (region->count < REGION_RECT_MAX)
+                memset(region->rects + region->count, 0,
+                       (REGION_RECT_MAX - region->count) * sizeof region->rects[0]);
+            pthread_mutex_unlock(&g_region_locks[slot]);
+            return handle;
+        }
+
+        /* Unreachable for a fresh region; retire identity under both locks
+         * instead of zeroing the payload.  Reuse initialises it again. */
+        region->used = 0u;
+        region->handle = 0u;
+        pthread_mutex_unlock(&g_region_locks[slot]);
     }
-    return handle;
+    pthread_mutex_unlock(&g_region_table_lock);
+    return 0u;
 }
 
 static void h_create_rect_rgn(CPU *c)
@@ -371,10 +474,7 @@ static void h_create_rect_rgn(CPU *c)
         (int32_t)wc3_legacy_arg32(c, 3u)
     };
     normalize_rect(&rect);
-
-    pthread_mutex_lock(&g_lock);
     c->eax = create_rect_region(&rect);
-    pthread_mutex_unlock(&g_lock);
 }
 
 static void h_create_rect_rgn_indirect(CPU *c)
@@ -386,9 +486,7 @@ static void h_create_rect_rgn_indirect(CPU *c)
         return;
     }
 
-    pthread_mutex_lock(&g_lock);
     c->eax = create_rect_region(&rect);
-    pthread_mutex_unlock(&g_lock);
 }
 
 static void h_combine_rgn(CPU *c)
@@ -397,20 +495,36 @@ static void h_combine_rgn(CPU *c)
     const uint32_t src1_handle = wc3_legacy_arg32(c, 1u);
     const uint32_t src2_handle = wc3_legacy_arg32(c, 2u);
     const uint32_t mode = wc3_legacy_arg32(c, 3u);
+    unsigned slots[3];
+    unsigned slot_count = 0u;
+    GdiRegion *dest;
+    GdiRegion *src1;
+    GdiRegion *src2;
+    GdiRegion result;
+    int ok = 0;
+    uint32_t classification = RGN_ERROR;
 
-    pthread_mutex_lock(&g_lock);
-    GdiRegion *dest = find_region(dest_handle);
-    GdiRegion *src1 = find_region(src1_handle);
-    GdiRegion *src2 = mode == RGN_COPY ? NULL : find_region(src2_handle);
+    pthread_mutex_lock(&g_region_table_lock);
+    dest = find_region(dest_handle);
+    src1 = find_region(src1_handle);
+    src2 = mode == RGN_COPY ? NULL : find_region(src2_handle);
     if (!dest || !src1 || (mode != RGN_COPY && !src2)) {
-        pthread_mutex_unlock(&g_lock);
+        pthread_mutex_unlock(&g_region_table_lock);
         c->eax = RGN_ERROR;
         return;
     }
 
-    GdiRegion result;
+    /* Pin every unique participant in ascending slot order while the table
+     * lock is still held; no table lock is taken after this point. */
+    add_region_slot_ascending(dest, slots, &slot_count);
+    add_region_slot_ascending(src1, slots, &slot_count);
+    if (src2)
+        add_region_slot_ascending(src2, slots, &slot_count);
+    for (unsigned i = 0; i < slot_count; i++)
+        pthread_mutex_lock(&g_region_locks[slots[i]]);
+    pthread_mutex_unlock(&g_region_table_lock);
+
     memset(&result, 0, sizeof result);
-    int ok = 0;
     switch (mode) {
     case RGN_AND:
         ok = region_intersection_op(&result, src1, src2);
@@ -438,7 +552,8 @@ static void h_combine_rgn(CPU *c)
     }
 
     if (!ok) {
-        pthread_mutex_unlock(&g_lock);
+        for (unsigned i = slot_count; i > 0u; i--)
+            pthread_mutex_unlock(&g_region_locks[slots[i - 1u]]);
         c->eax = RGN_ERROR;
         return;
     }
@@ -447,10 +562,11 @@ static void h_combine_rgn(CPU *c)
     if (result.count)
         memcpy(dest->rects, result.rects,
                result.count * sizeof dest->rects[0]);
-    const uint32_t classification = dest->count == 0u ? RGN_NULL
-                                     : dest->count == 1u ? RGN_SIMPLE
-                                                         : RGN_COMPLEX;
-    pthread_mutex_unlock(&g_lock);
+    classification = dest->count == 0u ? RGN_NULL
+                   : dest->count == 1u ? RGN_SIMPLE
+                                       : RGN_COMPLEX;
+    for (unsigned i = slot_count; i > 0u; i--)
+        pthread_mutex_unlock(&g_region_locks[slots[i - 1u]]);
     c->eax = classification;
 }
 
@@ -459,18 +575,28 @@ static void h_fill_rgn(CPU *c)
     const uint32_t hdc = wc3_legacy_arg32(c, 0u);
     const uint32_t region_handle = wc3_legacy_arg32(c, 1u);
     const uint32_t brush = wc3_legacy_arg32(c, 2u);
-
-    pthread_mutex_lock(&g_lock);
-    GdiRegion *region = find_region(region_handle);
+    int region_ok;
     int brush_ok = 1;
-    if (is_region_handle(brush))
+
+    /*
+     * The only cross-table order in this file is region table -> pen table.
+     * The region table lock is held for both region lookups; the pen table
+     * lock is taken only for a pen brush and never in the opposite order.
+     * FillRgn needs existence only, so it takes no region or pen slot lock.
+     */
+    pthread_mutex_lock(&g_region_table_lock);
+    region_ok = find_region(region_handle) != NULL;
+    if (is_region_handle(brush)) {
         brush_ok = find_region(brush) != NULL;
-    else if (is_pen_handle(brush))
+    } else if (is_pen_handle(brush)) {
+        pthread_mutex_lock(&g_pen_table_lock);
         brush_ok = find_pen(brush) != NULL;
-    else if (!brush)
+        pthread_mutex_unlock(&g_pen_table_lock);
+    } else if (!brush) {
         brush_ok = 0;
-    c->eax = (hdc && region && brush_ok) ? 1u : 0u;
-    pthread_mutex_unlock(&g_lock);
+    }
+    pthread_mutex_unlock(&g_region_table_lock);
+    c->eax = (hdc && region_ok && brush_ok) ? 1u : 0u;
 }
 
 static void h_rect_in_region(CPU *c)
@@ -478,14 +604,24 @@ static void h_rect_in_region(CPU *c)
     const uint32_t region_handle = wc3_legacy_arg32(c, 0u);
     const uint32_t rect_address = wc3_legacy_arg32(c, 1u);
     GdiRect query;
+    GdiRegion *region;
+    unsigned slot = 0u;
+    int inside = 0;
+
     if (!read_guest_rect(rect_address, &query)) {
         c->eax = 0u;
         return;
     }
 
-    pthread_mutex_lock(&g_lock);
-    GdiRegion *region = find_region(region_handle);
-    int inside = 0;
+    /* Pin the slot under the table, then scan payload after releasing it. */
+    pthread_mutex_lock(&g_region_table_lock);
+    region = find_region(region_handle);
+    if (region) {
+        slot = (unsigned)(region - g_regions);
+        pthread_mutex_lock(&g_region_locks[slot]);
+    }
+    pthread_mutex_unlock(&g_region_table_lock);
+
     if (region) {
         for (unsigned i = 0; i < region->count; i++) {
             GdiRect intersection;
@@ -494,8 +630,8 @@ static void h_rect_in_region(CPU *c)
                 break;
             }
         }
+        pthread_mutex_unlock(&g_region_locks[slot]);
     }
-    pthread_mutex_unlock(&g_lock);
     c->eax = inside ? 1u : 0u;
 }
 
@@ -504,16 +640,27 @@ static void h_create_pen(CPU *c)
     const uint32_t style = wc3_legacy_arg32(c, 0u);
     const uint32_t width = wc3_legacy_arg32(c, 1u);
     const uint32_t color = wc3_legacy_arg32(c, 2u);
-
-    pthread_mutex_lock(&g_lock);
     uint32_t handle = 0u;
-    GdiPen *pen = new_pen(&handle);
+    GdiPen *pen;
+    unsigned slot = 0u;
+
+    /* Publish identity and pin the slot while the table is still held. */
+    pthread_mutex_lock(&g_pen_table_lock);
+    pen = new_pen(&handle);
+    if (pen) {
+        slot = (unsigned)(pen - g_pens);
+        pthread_mutex_lock(&g_pen_locks[slot]);
+    }
+    pthread_mutex_unlock(&g_pen_table_lock);
+
+    /* Payload only; identity is already published under the table lock.
+     * Any handler that needs this payload waits on the slot here. */
     if (pen) {
         pen->style = style;
         pen->width = width;
         pen->color = color;
+        pthread_mutex_unlock(&g_pen_locks[slot]);
     }
-    pthread_mutex_unlock(&g_lock);
     c->eax = handle;
 }
 
@@ -522,27 +669,61 @@ static void h_delete_object(CPU *c)
     const uint32_t handle = wc3_legacy_arg32(c, 0u);
     int deleted = 0;
 
-    pthread_mutex_lock(&g_lock);
     if (is_region_handle(handle)) {
-        GdiRegion *region = find_region(handle);
+        GdiRegion *region;
+        unsigned slot = 0u;
+
+        pthread_mutex_lock(&g_region_table_lock);
+        region = find_region(handle);
         if (region) {
-            memset(region, 0, sizeof *region);
+            slot = (unsigned)(region - g_regions);
+            pthread_mutex_lock(&g_region_locks[slot]);
+            /* Identity is cleared while the table lock is still held. */
+            region->used = 0u;
+            region->handle = 0u;
+        }
+        pthread_mutex_unlock(&g_region_table_lock);
+
+        if (region) {
+            region->count = 0u;
+            memset(region->rects, 0, sizeof region->rects);
+            pthread_mutex_unlock(&g_region_locks[slot]);
             deleted = 1;
         }
     } else if (is_pen_handle(handle)) {
-        GdiPen *pen = find_pen(handle);
+        GdiPen *pen;
+        unsigned slot = 0u;
+
+        pthread_mutex_lock(&g_pen_table_lock);
+        pen = find_pen(handle);
         if (pen) {
-            memset(pen, 0, sizeof *pen);
+            slot = (unsigned)(pen - g_pens);
+            pthread_mutex_lock(&g_pen_locks[slot]);
+            /* Identity is cleared while the table lock is still held. */
+            pen->used = 0u;
+            pen->handle = 0u;
+        }
+        pthread_mutex_unlock(&g_pen_table_lock);
+
+        /* Only payload is cleared here.  The slot stays pinned, so a creator
+         * that has already claimed this free slot waits before writing. */
+        if (pen) {
+            pen->style = 0u;
+            pen->width = 0u;
+            pen->color = 0u;
+            pthread_mutex_unlock(&g_pen_locks[slot]);
             deleted = 1;
         }
     } else if (handle) {
         /* Stock and as-built GDI objects live outside this table. */
         deleted = 1;
     }
-    pthread_mutex_unlock(&g_lock);
     c->eax = deleted ? 1u : 0u;
 }
 
+/* Caller must hold g_position_table_lock.  If x/y are needed, the caller must
+ * pin g_position_locks[slot] while still holding the table lock, then release
+ * the table lock before touching them. */
 static GdiDcPos *find_position(uint32_t hdc)
 {
     for (unsigned i = 0; i < DC_POS_COUNT; i++) {
@@ -552,17 +733,24 @@ static GdiDcPos *find_position(uint32_t hdc)
     return NULL;
 }
 
-static GdiDcPos *ensure_position(uint32_t hdc)
+/* Caller must hold g_position_table_lock.  Initialises identity only and
+ * reports whether the slot was newly allocated; x/y are initialised by the
+ * caller under the slot lock. */
+static GdiDcPos *ensure_position(uint32_t hdc, int *created)
 {
     GdiDcPos *position = find_position(hdc);
-    if (position) return position;
+    if (position) {
+        *created = 0;
+        return position;
+    }
     for (unsigned i = 0; i < DC_POS_COUNT; i++) {
         if (g_positions[i].used) continue;
-        memset(&g_positions[i], 0, sizeof g_positions[i]);
         g_positions[i].used = 1u;
         g_positions[i].hdc = hdc;
+        *created = 1;
         return &g_positions[i];
     }
+    *created = 0;
     return NULL;
 }
 
@@ -572,19 +760,43 @@ static void h_move_to_ex(CPU *c)
     const int32_t x = (int32_t)wc3_legacy_arg32(c, 1u);
     const int32_t y = (int32_t)wc3_legacy_arg32(c, 2u);
     const uint32_t old = wc3_legacy_arg32(c, 3u);
+    GdiDcPos *position = NULL;
+    unsigned slot = 0u;
+    int created = 0;
+    int have_position = 0;
+    int32_t old_x = 0;
+    int32_t old_y = 0;
 
-    pthread_mutex_lock(&g_lock);
-    GdiDcPos *position = hdc ? ensure_position(hdc) : NULL;
+    /* Pin the slot under the table, then release the table before x/y work. */
+    pthread_mutex_lock(&g_position_table_lock);
+    if (hdc) {
+        position = ensure_position(hdc, &created);
+    }
     if (position) {
-        if (old && wc3_legacy_guest_ok(old, 8u)) {
-            wc3_legacy_wr32g(old, (uint32_t)position->x);
-            wc3_legacy_wr32g(old + 4u, (uint32_t)position->y);
+        slot = (unsigned)(position - g_positions);
+        pthread_mutex_lock(&g_position_locks[slot]);
+        have_position = 1;
+    }
+    pthread_mutex_unlock(&g_position_table_lock);
+
+    if (have_position) {
+        if (created) {
+            position->x = 0;
+            position->y = 0;
         }
+        old_x = position->x;
+        old_y = position->y;
         position->x = x;
         position->y = y;
+        pthread_mutex_unlock(&g_position_locks[slot]);
     }
-    pthread_mutex_unlock(&g_lock);
-    c->eax = position ? 1u : 0u;
+
+    /* Guest memory is written only after all host locks are released. */
+    if (have_position && old && wc3_legacy_guest_ok(old, 8u)) {
+        wc3_legacy_wr32g(old, (uint32_t)old_x);
+        wc3_legacy_wr32g(old + 4u, (uint32_t)old_y);
+    }
+    c->eax = have_position ? 1u : 0u;
 }
 
 static void h_line_to(CPU *c)
@@ -592,15 +804,33 @@ static void h_line_to(CPU *c)
     const uint32_t hdc = wc3_legacy_arg32(c, 0u);
     const int32_t x = (int32_t)wc3_legacy_arg32(c, 1u);
     const int32_t y = (int32_t)wc3_legacy_arg32(c, 2u);
+    GdiDcPos *position = NULL;
+    unsigned slot = 0u;
+    int created = 0;
+    int have_position = 0;
 
-    pthread_mutex_lock(&g_lock);
-    GdiDcPos *position = hdc ? ensure_position(hdc) : NULL;
+    /* Pin the slot under the table, then release the table before x/y work. */
+    pthread_mutex_lock(&g_position_table_lock);
+    if (hdc) {
+        position = ensure_position(hdc, &created);
+    }
     if (position) {
+        slot = (unsigned)(position - g_positions);
+        pthread_mutex_lock(&g_position_locks[slot]);
+        have_position = 1;
+    }
+    pthread_mutex_unlock(&g_position_table_lock);
+
+    if (have_position) {
+        if (created) {
+            position->x = 0;
+            position->y = 0;
+        }
         position->x = x;
         position->y = y;
+        pthread_mutex_unlock(&g_position_locks[slot]);
     }
-    pthread_mutex_unlock(&g_lock);
-    c->eax = position ? 1u : 0u;
+    c->eax = have_position ? 1u : 0u;
 }
 
 static void h_rectangle(CPU *c)
@@ -643,11 +873,25 @@ static const GdiObjectAddition g_additions[] = {
 
 int wc3_hle_gdi32_objects_install(void)
 {
-    pthread_mutex_lock(&g_lock);
-    memset(g_regions, 0, sizeof g_regions);
+    if (pthread_once(&g_slot_locks_once, init_slot_locks) != 0 ||
+        !g_slot_locks_ready)
+        return -1;
+
+    /* Installation runs before guest threads exist; the slot mutexes are
+     * already initialised and the three table locks are always taken in the
+     * order region -> pen -> position. */
+    pthread_mutex_lock(&g_region_table_lock);
+    pthread_mutex_lock(&g_pen_table_lock);
+    pthread_mutex_lock(&g_position_table_lock);
+    for (unsigned i = 0; i < REGION_COUNT; i++) {
+        g_regions[i].used = 0u;
+        g_regions[i].handle = 0u;
+    }
     memset(g_pens, 0, sizeof g_pens);
     memset(g_positions, 0, sizeof g_positions);
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_position_table_lock);
+    pthread_mutex_unlock(&g_pen_table_lock);
+    pthread_mutex_unlock(&g_region_table_lock);
 
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
         if (wc3_legacy_hle_override("GDI32.dll", g_overrides[i].name,

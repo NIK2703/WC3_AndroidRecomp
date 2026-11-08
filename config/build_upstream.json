@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "corpus": "1.27b",
-  "note": "BP-4.2: pinned read-only upstream for the M5 toolchain migration. Verified by tools/lift/check_upstream.py.",
+  "note": "BP-4.2: pinned read-only upstream for the M5 toolchain migration. Verified by tools/lift/check_upstream.py. Local vendor patch in liftcore.c: xchg with a memory operand is emitted as atomic_xchg32, restoring the x86 implicitly-locked semantics for the guest lock gate; lock-prefixed inc/dec/add with a 32-bit memory destination is emitted as atomic_xadd32; the pin below covers the patched bytes.",
   "upstream": {
     "path": "E:/projects/warcraft3_recomp",
     "revision": "791bdbaf313520f3fa2e1b49df87ebb354b9b340",
@@ -81,8 +81,8 @@
         },
         {
           "name": "liftcore.c",
-          "bytes": 42095,
-          "sha256": "7c239efdc755bd701b724daaa1fe1f3102121c50a5b5826c6a1db54f9a716966"
+          "bytes": 44395,
+          "sha256": "56a87f2510af2b47d307d11008460371de127bafd47925529d535d821dd12751"
         },
         {
           "name": "liftemit.c",

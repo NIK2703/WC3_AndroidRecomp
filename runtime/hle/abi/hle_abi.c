@@ -1,8 +1,33 @@
 #include "hle_abi.h"
+#include "hle_fast.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The guest HLE window has HLE_MAX slots, but only a small startup subset is
+ * overridden by the new HLE modules.  Keep those entries dense and map a guest
+ * slot to its dense index; HLE_FAST_UNBOUND means the legacy path owns it. */
+#define HLE_FAST_MAX 4096u
+#define HLE_FAST_UNBOUND 0xFFFFu
+
+_Static_assert(HLE_FAST_MAX <= 0xFFFFu,
+               "fast registry index must fit the uint16_t sentinel");
+
+static HleEntry g_fast_entry[HLE_FAST_MAX];
+static uint16_t g_fast_slot_to_index[HLE_MAX];
+static uint32_t g_fast_count;
+static int g_fast_ready;
+#if WC3_DEBUG
+static uint32_t g_fast_calls[HLE_FAST_MAX];
+#endif
+
+static void hle_fast_init(void)
+{
+    for (uint32_t i = 0; i < HLE_MAX; i++)
+        g_fast_slot_to_index[i] = HLE_FAST_UNBOUND;
+    g_fast_ready = 1;
+}
 
 #if WC3_DEBUG
 static int hle_ascii_lower(int ch)
@@ -117,7 +142,7 @@ HleEntry *hle_find(HleRegistry *r, const char *dll, const char *name,
     return NULL;
 }
 
-const char *hle_describe(HleRegistry *r, uint32_t thunk)
+const char *hle_abi_describe(HleRegistry *r, uint32_t thunk)
 {
     uint32_t idx = hle_index_for(r, thunk);
     if (idx == HLE_MAX) return "";
@@ -127,7 +152,55 @@ const char *hle_describe(HleRegistry *r, uint32_t thunk)
 }
 #endif
 
-void hle_call(HleRegistry *r, uint32_t thunk, CPU *c)
+#if WC3_DEBUG
+static void hle_debug_note_stack_move(const HleEntry *e, uint32_t esp_out,
+                                      CPU *c, const char *dll,
+                                      const char *name)
+{
+    const uint32_t esp_in = c->esp - e->stack_cleanup;
+    if (esp_out == esp_in) return;
+    fprintf(stderr, "[hle] stack moved by %s!%s: %+d\n",
+            dll ? dll : "?",
+            name ? name : "?",
+            (int)(esp_out - esp_in));
+}
+#endif
+
+/* Common thunk body.  Returns the handler's esp after impl so debug callers
+ * can report a moved stack with their own symbol names. */
+static uint32_t hle_abi_call_entry(HleEntry *e, uint32_t thunk, CPU *c)
+{
+    if (!e || !e->impl || !c) abort();
+
+    /* Win32 callee-saved registers are part of the guest ABI: a handler must
+     * leave ebx/esi/edi/ebp unchanged.  The source audit of all target HLE
+     * handlers found exactly one writer, waveout_hle.c's w2_invoke(), and it
+     * saves/restores the four fields itself around its guest callback.  The
+     * bridge restores them here as the frozen ABI requires; a new handler
+     * must still preserve them itself rather than rely on that safety net. */
+    uint32_t saved_ebx = c->ebx;
+    uint32_t saved_esi = c->esi;
+    uint32_t saved_edi = c->edi;
+    uint32_t saved_ebp = c->ebp;
+    uint32_t esp_in = c->esp;
+
+    c->eip = thunk;
+    e->impl(c);
+
+    uint32_t esp_out = c->esp;
+
+    c->ebx = saved_ebx;
+    c->esi = saved_esi;
+    c->edi = saved_edi;
+    c->ebp = saved_ebp;
+
+    /* Force the caller frame instead of adding cleanup to a handler that
+     * already moved esp; the latter compounds a corrupted guest stack. */
+    c->esp = esp_in + e->stack_cleanup;
+    return esp_out;
+}
+
+void hle_abi_call(HleRegistry *r, uint32_t thunk, CPU *c)
 {
     uint32_t idx = hle_index_for(r, thunk);
     if (idx == HLE_MAX) abort();
@@ -139,32 +212,68 @@ void hle_call(HleRegistry *r, uint32_t thunk, CPU *c)
     if (d->calls != UINT32_MAX) d->calls++;
 #endif
 
-    uint32_t saved_ebx = c->ebx;
-    uint32_t saved_esi = c->esi;
-    uint32_t saved_edi = c->edi;
-    uint32_t saved_ebp = c->ebp;
-    uint32_t esp_in = c->esp;
-
-    c->eip = thunk;
-    e->impl(c);
-
-    c->ebx = saved_ebx;
-    c->esi = saved_esi;
-    c->edi = saved_edi;
-    c->ebp = saved_ebp;
+    uint32_t esp_out = hle_abi_call_entry(e, thunk, c);
 
 #if WC3_DEBUG
-    if (c->esp != esp_in) {
-        fprintf(stderr, "[hle] stack moved by %s!%s: %+d\n",
-                d->dll ? d->dll : "?",
-                d->name ? d->name : "?",
-                (int)(c->esp - esp_in));
-    }
+    hle_debug_note_stack_move(e, esp_out, c, d->dll, d->name);
+#else
+    (void)esp_out;
 #endif
+}
 
-    /* Force the caller frame instead of adding cleanup to a handler that
-     * already moved esp; the latter compounds a corrupted guest stack. */
-    c->esp = esp_in + e->stack_cleanup;
+void wc3_hle_fast_bind(uint32_t slot, void (*impl)(CPU *), uint16_t argc,
+                       uint8_t cdecl_abi)
+{
+    if (slot >= HLE_MAX || !impl) return;
+    if (!g_fast_ready) hle_fast_init();
+
+    uint16_t index = g_fast_slot_to_index[slot];
+    int is_new = 0;
+    if (index == HLE_FAST_UNBOUND) {
+        if (g_fast_count >= HLE_FAST_MAX) return;
+        index = (uint16_t)g_fast_count;
+        is_new = 1;
+    }
+
+    HleEntry *e = &g_fast_entry[index];
+    e->argc = argc;
+    e->flags = cdecl_abi ? HLE_CALL_CDECL : 0u;
+    e->reserved = 0;
+    e->impl = impl;
+    e->user = NULL;
+    e->stack_cleanup = 4u +
+        ((e->flags & HLE_CALL_CDECL) ? 0u : (uint32_t)argc * 4u);
+
+    if (is_new) {
+        g_fast_slot_to_index[slot] = index;
+        g_fast_count = (uint32_t)index + 1u;
+    }
+}
+
+int wc3_hle_fast_call(uint32_t thunk, CPU *c)
+{
+    if (!g_fast_ready) return 0;
+    if (thunk < GUEST_HLE_BASE) return 0;
+    uint32_t off = thunk - GUEST_HLE_BASE;
+    if (off % HLE_STRIDE) return 0;
+    uint32_t slot = off / HLE_STRIDE;
+    if (slot >= HLE_MAX) return 0;
+
+    uint16_t index = g_fast_slot_to_index[slot];
+    if (index == HLE_FAST_UNBOUND) return 0;
+
+    HleEntry *e = &g_fast_entry[index];
+#if WC3_DEBUG
+    if (g_fast_calls[index] != UINT32_MAX) g_fast_calls[index]++;
+#endif
+    uint32_t esp_out = hle_abi_call_entry(e, thunk, c);
+
+#if WC3_DEBUG
+    hle_debug_note_stack_move(e, esp_out, c, NULL, NULL);
+#else
+    (void)esp_out;
+#endif
+    return 1;
 }
 
 void hle_fatal_missing(const char *dll, const char *name, uint16_t ordinal)

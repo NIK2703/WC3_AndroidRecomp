@@ -13,7 +13,8 @@ param(
     [switch]$Launch,
     [string]$Serial = '',
     [string]$GamesActivityAar = '',
-    [string]$DebugTags = ''
+    [string]$DebugTags = '',
+    [string]$CorpusRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -116,6 +117,7 @@ $nativeParams = @{ Variant = $variant }
 if ($Clean) { $nativeParams['Clean'] = $true }
 if ($GamesActivityAar) { $nativeParams['GamesActivityAar'] = $GamesActivityAar }
 if ($DebugTags) { $nativeParams['DebugTags'] = $DebugTags }
+if ($CorpusRoot) { $nativeParams['CorpusRoot'] = $CorpusRoot }
 $ErrorActionPreference = 'Continue'
 & $nativeScript @nativeParams 2>&1 | ForEach-Object { Write-Host $_ }
 $nativeRc = $LASTEXITCODE
@@ -202,6 +204,14 @@ if (-not $apk -or -not (Test-Path $apk)) { Write-Host '[apk] no APK produced'; e
 $final = Join-Path $outDir "wc3-$variant.apk"
 Copy-Item $apk $final -Force
 
+# O-12: extractNativeLibs=false requires uncompressed libraries at 16 KiB page
+# boundaries.  AGP 8.8 emits them that way when useLegacyPackaging is false;
+# verify the artifact rather than trusting the build configuration.
+$zipalign = Join-Path $buildTools 'zipalign.exe'
+if (-not (Test-Path $zipalign)) { Write-Host '[apk] unavailable: zipalign not found'; exit 2 }
+& $zipalign -c -P 16 4 $final 2>&1 | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0) { Write-Host '[apk] APK is not 16 KiB page aligned'; exit 1 }
+
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::OpenRead($final)
 try {
@@ -212,7 +222,11 @@ try {
     foreach ($name in $required) {
         $entry = $zip.Entries | Where-Object { $_.FullName -eq $name }
         if (-not $entry) { Write-Host "[apk] APK lacks $name"; exit 1 }
-        Write-Host "[apk] lib     $($entry.FullName) ($($entry.Length) bytes)"
+        if ($entry.CompressedLength -ne $entry.Length) {
+            Write-Host "[apk] $name is compressed; extractNativeLibs=false needs a stored library"
+            exit 1
+        }
+        Write-Host "[apk] lib     $($entry.FullName) ($($entry.Length) bytes, stored)"
     }
     Write-Host "[apk] apk     $final ($((Get-Item $final).Length) bytes)"
 } finally {

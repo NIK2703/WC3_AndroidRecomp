@@ -58,6 +58,7 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
     char mbuf[64];
     const char *m;
     int i;
+    int locked = 0;
 
     strncpy(mbuf, insn->mnemonic, sizeof mbuf - 1);
     mbuf[sizeof mbuf - 1] = 0;
@@ -75,7 +76,33 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
     }
 
     /* capstone keeps the `lock` prefix in the mnemonic. */
-    if (!strncmp(m, "lock ", 5)) m += 5;
+    if (!strncmp(m, "lock ", 5)) { locked = 1; m += 5; }
+
+    /* ---- lock-prefixed read-modify-write ---- */
+    /* x86 `lock inc/dec/add [mem]` is one atomic operation.  The generic
+     * arithmetic path is a plain load and store, so emit the atomic form
+     * before it; otherwise two guest threads can lose an update. */
+    if (locked && nops > 0 && OP(insn, 0)->type == X86_OP_MEM &&
+        OP(insn, 0)->size == 4) {
+        cs_x86_op *d = OP(insn, 0);
+        char *a = lf_addr_expr(L, insn, d);
+        if (!strcmp(m, "inc")) {
+            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, 1u); "
+                                "flags_incs(c, _old, 4); }", a));
+            return e;
+        }
+        if (!strcmp(m, "dec")) {
+            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, 0xFFFFFFFFu); "
+                                "flags_decs(c, _old, 4); }", a));
+            return e;
+        }
+        if (!strcmp(m, "add") && nops > 1) {
+            char *v = lf_src(L, insn, OP(insn, 1));
+            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, %s); "
+                                "flags_add(c, _old, %s, 4); }", a, v, v));
+            return e;
+        }
+    }
 
     /* ---- bit test ---- */
     if (LST(m, "bt", "bts", "btr", "btc")) {
@@ -260,6 +287,25 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
         return e;
     }
     if (!strcmp(m, "xchg")) {
+        cs_x86_op *op0 = OP(insn, 0), *op1 = OP(insn, 1);
+        cs_x86_op *mem = NULL, *reg = NULL;
+        if (op0->type == X86_OP_MEM && op0->size == 4) {
+            mem = op0; reg = op1;
+        } else if (op1->type == X86_OP_MEM && op1->size == 4) {
+            mem = op1; reg = op0;
+        }
+        if (mem != NULL && reg != NULL && reg->type != X86_OP_MEM) {
+            /* x86 xchg with a memory operand is implicitly locked, even
+             * without a LOCK prefix.  A plain read/write pair is not: a
+             * waiter can read "held", be preempted, the holder writes
+             * "free", and the waiter's stale store writes "held" back.
+             * The lock is then held with no owner and no release wakes it. */
+            char *a = lf_addr_expr(L, insn, mem);
+            lf_push(&e, lf_afmt("{ uint32_t _v = %s;", lf_src(L, insn, reg)));
+            lf_push(&e, lf_afmt("  uint32_t _old = atomic_xchg32(%s, _v);", a));
+            lf_push(&e, lf_afmt("  %s }", lf_dst_write(L, insn, reg, "_old")));
+            return e;
+        }
         char *t = lf_read_dst(L, insn, OP(insn, 0));
         char *w1 = strip_semi(lf_dst_write(L, insn, OP(insn, 0), lf_src(L, insn, OP(insn, 1))));
         char *w2 = strip_semi(lf_dst_write(L, insn, OP(insn, 1), "_t"));

@@ -22,6 +22,11 @@
 extern "C" {
 #endif
 
+/* Build the immutable static-arena page map without owning any mapping.  The
+ * legacy boot path calls this before guest threads start; the new path gets
+ * it from wc3_guest_memory_init(). */
+void wc3_guest_static_init(void);
+
 /* Map the core arenas required before any guest code runs.  Returns 0 on
  * success, -1 on a missing platform or an address conflict. */
 int wc3_guest_memory_init(const Wc3Platform *platform);

@@ -61,7 +61,7 @@ int main(void)
         return fail("case-insensitive lookup");
     if (hle_find(&g_registry, "KERNEL32.dll", "missing", 0) != NULL)
         return fail("missing lookup");
-    if (strcmp(hle_describe(&g_registry, thunk), "TestCdecl") != 0)
+    if (strcmp(hle_abi_describe(&g_registry, thunk), "TestCdecl") != 0)
         return fail("describe");
 #endif
 
@@ -73,7 +73,7 @@ int main(void)
     cpu.edi = 3u;
     cpu.ebp = 4u;
 
-    hle_call(&g_registry, GUEST_HLE_BASE, &cpu);
+    hle_abi_call(&g_registry, GUEST_HLE_BASE, &cpu);
     if (g_hits != 1u) return fail("stdcall handler count");
     if (g_seen_esp != 0x31080000u) return fail("stdcall entry esp");
     if (cpu.esp != 0x31080000u + 16u) return fail("stdcall exit esp");
@@ -81,7 +81,7 @@ int main(void)
     if (cpu.ebx != 1u || cpu.esi != 2u || cpu.edi != 3u || cpu.ebp != 4u)
         return fail("callee-saved registers");
 
-    hle_call(&g_registry, thunk, &cpu);
+    hle_abi_call(&g_registry, thunk, &cpu);
     if (g_hits != 2u) return fail("cdecl handler count");
     if (cpu.esp != 0x31080000u + 16u + 4u) return fail("cdecl exit esp");
     if (cpu.eax != 0xC0DEC0DEu) return fail("cdecl eax");

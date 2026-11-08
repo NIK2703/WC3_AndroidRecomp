@@ -29,6 +29,15 @@ find_program(WC3_MANIFEST_TOOL
     HINTS "${WC3_ROOT}/build/lift-tools"
     NO_DEFAULT_PATH)
 
+find_program(WC3_ATOMICCHECK_EXE
+    NAMES atomiccheck atomiccheck.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+if(NOT WC3_ATOMICCHECK_EXE)
+    message(FATAL_ERROR
+        "atomiccheck.exe missing; run tools/lift/build_tools.ps1 before configuring")
+endif()
+
 file(READ "${WC3_RELIFTED_MANIFEST}" _wc3_manifest)
 string(JSON _wc3_nmod LENGTH "${_wc3_manifest}" modules)
 if(_wc3_nmod LESS 1)
@@ -38,6 +47,37 @@ endif()
 set(WC3_RELIFTED_SOURCES)
 set(_wc3_check_commands)
 math(EXPR _wc3_last_mod "${_wc3_nmod} - 1")
+
+# V5.9: a stale lift tool used to drop the atomic lowering while the corpus
+# still looked structurally valid.  Check the generated source before the split
+# and before compilation, so the bad corpus cannot become a product.  The
+# checker reads the guest instruction comments and rejects any memory xchg or
+# lock-prefixed RMW that was lowered through plain rd32/wr32.
+set(_wc3_atomic_args)
+foreach(_mi RANGE 0 ${_wc3_last_mod})
+    string(JSON _name GET "${_wc3_manifest}" modules ${_mi} name)
+    foreach(_kind seed closed)
+        list(APPEND _wc3_atomic_args
+             --file "${WC3_RELIFTED_ROOT_ABS}/${_name}/${_kind}.c")
+    endforeach()
+endforeach()
+file(MAKE_DIRECTORY "${WC3_ROOT}/reports/generated")
+execute_process(
+    COMMAND "${WC3_ATOMICCHECK_EXE}" ${_wc3_atomic_args}
+            --require-any
+            --report "${WC3_ROOT}/reports/generated/corpus_atomic.json"
+    RESULT_VARIABLE _wc3_atomic_rc
+    OUTPUT_VARIABLE _wc3_atomic_out
+    ERROR_VARIABLE _wc3_atomic_err)
+if(NOT _wc3_atomic_rc EQUAL 0)
+    message(FATAL_ERROR
+        "relifted corpus has non-atomic memory operations (rc=${_wc3_atomic_rc}).\n"
+        "${_wc3_atomic_out}\n${_wc3_atomic_err}\n"
+        "Rebuild the lift toolchain (tools/lift/build_tools.ps1 -Force) and "
+        "relift; never hand-edit generated C.")
+endif()
+string(STRIP "${_wc3_atomic_out}" _wc3_atomic_out)
+message(STATUS "${_wc3_atomic_out}")
 foreach(_mi RANGE 0 ${_wc3_last_mod})
     string(JSON _name GET "${_wc3_manifest}" modules ${_mi} name)
     set(_module_dir "${WC3_RELIFTED_ROOT_ABS}/${_name}")
@@ -96,8 +136,22 @@ target_compile_definitions(wc3_corpus_relifted PRIVATE
     LITTLEENDIAN
     THREAD_LOCAL=_Thread_local
     WC3_DEBUG=${WC3_DEBUG_DEFINE})
+# The relifted corpus is guest code with a frozen ABI.  Build it at -O2, not
+# -O0: the header-only runtime (cpu.h, x87.h) must inline, and generated bodies
+# run once per guest instruction.  The stack protector and _FORTIFY_SOURCE add
+# host canary/check calls that the legacy guest-memory targets already disable;
+# no speed claim follows until G-10/PM-19 measure this corpus.
+# O-32: the NDK passes -g in CMAKE_C_FLAGS, and target options are appended
+# after it, so -g0 here (next to -O2) wins for the generated corpus only.
+# Expected effect is compile time, link peak RSS, .a size and disk I/O
+# (PM-22); no frame-time claim until G-10/PM-19, and the L_<va> set plus the
+# G-15 body check must stay unchanged.
 target_compile_options(wc3_corpus_relifted PRIVATE
-    -O0
+    -O2
+    -g0
+    -fno-stack-protector
+    -U_FORTIFY_SOURCE
+    -D_FORTIFY_SOURCE=0
     -fno-strict-aliasing
     -fwrapv
     -ffp-contract=off
