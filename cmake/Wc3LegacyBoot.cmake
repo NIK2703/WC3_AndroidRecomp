@@ -8,6 +8,10 @@
 # Set WC3_WITH_LEGACY_BOOT=OFF for configurations that only build platform
 # targets; the product path in this milestone needs the corpus.
 
+if(NOT DEFINED WC3_FLAGS_FAST_PF_AF_DEFINE)
+    set(WC3_FLAGS_FAST_PF_AF_DEFINE 0)
+endif()
+
 if(WC3_RELIFTED_CORPUS_ROOT)
     get_filename_component(WC3_RELIFTED_ROOT_ABS "${WC3_RELIFTED_CORPUS_ROOT}"
                            ABSOLUTE BASE_DIR "${WC3_ROOT}")
@@ -126,6 +130,7 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/gdi32/objects"
     "${WC3_ROOT}/runtime/hle/win32/gdi32/palette"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/memory"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/file"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/process"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/resource"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/string"
@@ -144,7 +149,9 @@ target_include_directories(wc3_boot PRIVATE
 target_compile_definitions(wc3_boot PRIVATE
     SOFTFLOAT_FAST_INT64
     LITTLEENDIAN
-    THREAD_LOCAL=_Thread_local)
+    THREAD_LOCAL=_Thread_local
+    GVA_DELTA=0
+    WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE})
 if(WC3_DEBUG)
     target_compile_definitions(wc3_boot PRIVATE WC3_DEBUG=1)
 endif()
@@ -207,6 +214,7 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/gdi32/objects/gdi_obj_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/gdi32/palette/gdi_palette_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/memory/memory_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/file/kernel32_file_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/process/process_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/process/system_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/resource/resource_hle.c"
@@ -242,6 +250,7 @@ target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/gdi32/objects"
     "${WC3_ROOT}/runtime/hle/win32/gdi32/palette"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/memory"
+    "${WC3_ROOT}/runtime/hle/win32/kernel32/file"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/process"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/resource"
     "${WC3_ROOT}/runtime/hle/win32/kernel32/string"
@@ -261,7 +270,9 @@ target_include_directories(wc3_hle_modules PRIVATE
 target_compile_definitions(wc3_hle_modules PRIVATE
     SOFTFLOAT_FAST_INT64
     LITTLEENDIAN
-    THREAD_LOCAL=_Thread_local)
+    THREAD_LOCAL=_Thread_local
+    GVA_DELTA=0
+    WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE})
 if(WC3_DEBUG)
     target_compile_definitions(wc3_hle_modules PRIVATE WC3_DEBUG=1)
 endif()
@@ -291,6 +302,8 @@ target_compile_definitions(wc3_legacy_boot PRIVATE
     SOFTFLOAT_FAST_INT64
     LITTLEENDIAN
     THREAD_LOCAL=_Thread_local
+    GVA_DELTA=0
+    WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
     WC3_NO_MAIN=1)
 if(WC3_DEBUG)
     target_compile_definitions(wc3_legacy_boot PRIVATE WC3_DEBUG=1)
@@ -375,6 +388,7 @@ endforeach()
 
 target_sources(wc3gameactivity PRIVATE
     "${WC3_ROOT}/runtime/app/overlay_actions_legacy.c"
+    "${WC3_ROOT}/runtime/gfx/dxvk_probe_cache.c"
     ${WC3_CORPUS_OBJECTS}
     ${WC3_D3D9_OBJECTS})
 
@@ -403,6 +417,7 @@ target_link_libraries(wc3gameactivity PRIVATE
 target_link_options(wc3gameactivity PRIVATE
     -Wl,--wrap=L_6F126E30
     -Wl,--wrap=L_6F654E20
+    -Wl,--wrap=wc3_vulkan_major_minor
     -nostdlib++)
 
 target_compile_definitions(wc3gameactivity PRIVATE WC3_WITH_LEGACY_BOOT=1)

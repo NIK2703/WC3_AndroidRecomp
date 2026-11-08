@@ -44,6 +44,7 @@
 #include "platform.h"
 #include "platform_android.h"
 #include "wc3_debug.h"
+#include "window_settle.h"
 
 #if WC3_WITH_LEGACY_BOOT
 #include "overlay_actions_legacy.h"
@@ -76,10 +77,13 @@ static int g_game_mapped;
 static int g_asset_missing_count;
 static char g_asset_missing[256];
 
+#define WINDOW_SETTLE_MS 300u
+
 static pthread_mutex_t g_window_lock = PTHREAD_MUTEX_INITIALIZER;
 static ANativeWindow *g_window;
 static uint32_t g_surface_w;
 static uint32_t g_surface_h;
+static uint64_t g_window_since_ms;
 static int g_boot_started;
 static pthread_t g_boot_thread;
 
@@ -1297,17 +1301,32 @@ static void *boot_thread(void *arg)
     uint32_t height = 0;
 
     /* GameActivity can replace the starting surface once the activity is laid
-     * out.  Wait for a pointer that survives one settle interval rather than
-     * publishing a surface that is about to be destroyed. */
-    for (int attempt = 0; attempt < 8 && !window; attempt++) {
-        usleep(300000);
+     * out.  The pointer must still survive one settle interval, but a surface
+     * published before this thread starts has already done so: sleep only for
+     * the remaining part of that interval instead of always waiting 300 ms. */
+    int stable = 0;
+    for (int attempt = 0; attempt < 8; attempt++) {
         pthread_mutex_lock(&g_window_lock);
         window = g_window;
         width = g_surface_w;
         height = g_surface_h;
+        uint64_t since = g_window_since_ms;
         pthread_mutex_unlock(&g_window_lock);
+
+        if (!window || !width || !height) {
+            usleep(WINDOW_SETTLE_MS * 1000u);
+            continue;
+        }
+
+        uint64_t remaining = wc3_window_settle_remaining_ms(
+            since, host_now_ms(), WINDOW_SETTLE_MS);
+        if (remaining == 0u) {
+            stable = 1;
+            break;
+        }
+        usleep((useconds_t)(remaining * 1000u));
     }
-    if (!window || !width || !height) {
+    if (!stable || !window || !width || !height) {
         LOGE("no stable ANativeWindow for the guest");
         return NULL;
     }
@@ -1331,6 +1350,7 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
             g_window = app->window;
             g_surface_w = width;
             g_surface_h = height;
+            g_window_since_ms = host_now_ms();
             pthread_mutex_unlock(&g_window_lock);
             /* Republish every replacement surface to the DXVK shim.  Without
              * this, Present keeps skipping frames after the activity comes
@@ -1385,6 +1405,7 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
         g_window = NULL;
         g_surface_w = 0;
         g_surface_h = 0;
+        g_window_since_ms = 0;
         pthread_mutex_unlock(&g_window_lock);
         if (!window)
             window = app->window;
@@ -1403,6 +1424,7 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
             g_window = app->window;
             g_surface_w = width;
             g_surface_h = height;
+            g_window_since_ms = host_now_ms();
             pthread_mutex_unlock(&g_window_lock);
             wc3_legacy_set_screen_size(width, height);
             wc3_android_set_window(app->window, width, height);
@@ -1427,6 +1449,7 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
         g_window = NULL;
         g_surface_w = 0;
         g_surface_h = 0;
+        g_window_since_ms = 0;
         pthread_mutex_unlock(&g_window_lock);
         if (!window)
             window = app->window;

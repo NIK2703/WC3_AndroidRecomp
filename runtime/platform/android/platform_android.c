@@ -45,6 +45,14 @@
 #include <sys/syscall.h>
 #endif
 
+#if defined(__ANDROID__) && defined(__ANDROID_API__) && __ANDROID_API__ < 28
+/* bionic only declares this API 28 entry point for __ANDROID_API__ >= 28.
+ * P0-9 keeps it optional: on older devices the weak reference resolves to
+ * NULL and android_sync_init() falls back to a normal mutex. */
+extern int pthread_mutexattr_setprotocol(pthread_mutexattr_t *, int)
+    __attribute__((weak));
+#endif
+
 #ifndef MAP_NORESERVE
 #define MAP_NORESERVE 0
 #endif
@@ -394,9 +402,17 @@ static int android_thread_create(void *ctx, const Wc3ThreadDesc *desc,
     }
 
     pthread_attr_t attr;
-    (void)pthread_attr_init(&attr);
-    if (desc->stack_size >= (uint32_t)PTHREAD_STACK_MIN)
-        (void)pthread_attr_setstacksize(&attr, (size_t)desc->stack_size);
+    if (pthread_attr_init(&attr) != 0) {
+        pthread_cond_destroy(&t->cond);
+        pthread_mutex_destroy(&t->lock);
+        free(t);
+        return -1;
+    }
+    uint32_t stack_size = desc->stack_size
+                              ? desc->stack_size
+                              : (uint32_t)WC3_HOST_THREAD_STACK_SIZE;
+    if (stack_size >= (uint32_t)PTHREAD_STACK_MIN)
+        (void)pthread_attr_setstacksize(&attr, (size_t)stack_size);
     int rc = pthread_create(&t->thread, &attr, android_thread_main, t);
     (void)pthread_attr_destroy(&attr);
     if (rc != 0) {
@@ -588,7 +604,19 @@ static pthread_cond_t g_sync_cond;
 static pthread_key_t g_owner_key;
 static int g_owner_key_ready;
 static int g_sync_monotonic;
-static AndroidSync *g_sync_head;
+
+/* P0-4, first step: the handle registry is direct-mapped instead of one
+ * linear list.  The platform lock is still held for lifecycle changes, so
+ * close/free races keep the existing contract; lookup no longer scans every
+ * live object.  A later per-object sync pass can remove the lock itself. */
+#define ANDROID_SYNC_BUCKETS 1024u
+static AndroidSync *g_sync_buckets[ANDROID_SYNC_BUCKETS];
+
+static uint32_t android_sync_bucket(Wc3SyncHandle handle)
+{
+    uintptr_t v = (uintptr_t)handle;
+    return (uint32_t)((v >> 4) * 2654435761u) & (ANDROID_SYNC_BUCKETS - 1u);
+}
 
 static void android_owner_thread_exit(void *value);
 
@@ -651,7 +679,23 @@ static void android_owner_remove(AndroidSync *p)
 
 static void android_sync_init(void)
 {
-    pthread_mutex_init(&g_sync_lock, NULL);
+    /* P0-9: priority inheritance on the one platform lock.  It is optional
+     * (bionic may return ENOTSUP on some devices), so failure falls back to
+     * a normal mutex rather than changing the sync contract. */
+    pthread_mutexattr_t mattr;
+    if (pthread_mutexattr_init(&mattr) == 0) {
+#if defined(__ANDROID__)
+#if defined(__ANDROID_API__) && __ANDROID_API__ < 28
+        if (pthread_mutexattr_setprotocol)
+#endif
+            (void)pthread_mutexattr_setprotocol(&mattr, PTHREAD_PRIO_INHERIT);
+#endif
+        if (pthread_mutex_init(&g_sync_lock, &mattr) != 0)
+            pthread_mutex_init(&g_sync_lock, NULL);
+        pthread_mutexattr_destroy(&mattr);
+    } else {
+        pthread_mutex_init(&g_sync_lock, NULL);
+    }
     if (pthread_key_create(&g_owner_key, android_owner_thread_exit) == 0)
         g_owner_key_ready = 1;
     pthread_condattr_t attr;
@@ -673,7 +717,9 @@ static void android_sync_init(void)
 static AndroidSync *android_sync_lookup(Wc3SyncHandle handle)
 {
     AndroidSync *p = (AndroidSync *)(uintptr_t)handle;
-    for (AndroidSync *it = g_sync_head; it; it = it->next) {
+    if (!p) return NULL;
+    for (AndroidSync *it = g_sync_buckets[android_sync_bucket(handle)];
+         it; it = it->next) {
         if (it == p) return it;
     }
     return NULL;
@@ -685,8 +731,9 @@ static AndroidSync *android_sync_new(uint32_t kind)
     if (!p) return NULL;
     p->magic = WC3_SYNC_MAGIC;
     p->kind = kind;
-    p->next = g_sync_head;
-    g_sync_head = p;
+    uint32_t bucket = android_sync_bucket((Wc3SyncHandle)(uintptr_t)p);
+    p->next = g_sync_buckets[bucket];
+    g_sync_buckets[bucket] = p;
     return p;
 }
 
@@ -999,7 +1046,7 @@ static int android_sync_close(void *ctx, Wc3SyncHandle handle)
     (void)ctx;
     (void)pthread_once(&g_sync_once, android_sync_init);
     (void)pthread_mutex_lock(&g_sync_lock);
-    AndroidSync **pp = &g_sync_head;
+    AndroidSync **pp = &g_sync_buckets[android_sync_bucket(handle)];
     AndroidSync *p = NULL;
     while (*pp) {
         if ((Wc3SyncHandle)(uintptr_t)*pp == handle) {

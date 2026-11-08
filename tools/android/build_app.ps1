@@ -16,7 +16,8 @@ param(
     [switch]$Clean,
     [string]$GamesActivityAar = '',
     [string]$CorpusRoot = '',
-    [string]$DebugTags = ''
+    [string]$DebugTags = '',
+    [switch]$PackDynRelocs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -146,7 +147,13 @@ $configure = @(
 if ($CorpusRoot) {
     $configure += "-DWC3_RELIFTED_CORPUS_ROOT=$CorpusRoot"
 }
+if ($PackDynRelocs) {
+    # O-43 experiment: the product default stays unpacked until T2 proves the
+    # bionic API 26 loader and PM-22/GB-5.2 show a benefit.
+    $configure += '-DWC3_PACK_DYN_RELOCS=ON'
+}
 Write-Host "[app] ndk   $($ndk.Root)"
+Write-Host "[app] pack_dyn_relocs $($PackDynRelocs.IsPresent)"
 Write-Host "[app] aar   $GamesActivityAar"
 Write-Host "[app] debug $($NativeDebug.IsPresent)"
 $ErrorActionPreference = 'Continue'

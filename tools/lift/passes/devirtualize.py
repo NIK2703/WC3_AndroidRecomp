@@ -29,6 +29,7 @@ Exit codes: 0 pass, 1 verification failure, 2 unavailable/invalid input.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -43,8 +44,13 @@ CALL_RE = re.compile(
     r"\bdispatch\s*\(\s*c\s*,\s*0x([0-9A-Fa-f]{8})u?\s*\)")
 TAIL_RE = re.compile(
     r"\bdispatch_jmp\s*\(\s*c\s*,\s*0x([0-9A-Fa-f]{8})u?\s*\)")
+# One pass so a match position stays valid; CALL_RE/TAIL_RE document the two
+# accepted rewrites and stay useful for focused checks.
+SITE_RE = re.compile(
+    r"\b(dispatch_jmp|dispatch)\s*\(\s*c\s*,\s*0x([0-9A-Fa-f]{8})u?\s*\)")
 FUNC_START_RE = re.compile(
-    r"^void\s+L_([0-9A-Fa-f]{8})\s*\(\s*CPU\s*\*\s*c\s*\)", re.MULTILINE)
+    r"^void\s+L_([0-9A-Fa-f]{8})\s*\(\s*CPU\s*\*\s*c\s*\)\s*\{",
+    re.MULTILINE)
 LIST_X_RE = re.compile(r"\bX\(([0-9A-Fa-f]{8})\)")
 LIST_ROW_RE = re.compile(r"\{\s*0x([0-9A-Fa-f]{8})u\s*,\s*L_")
 INCLUDE_CPU_RE = re.compile(r'^[ \t]*#include[ \t]+"cpu\.h"[ \t]*$',
@@ -68,6 +74,9 @@ class FileReport:
     call_sites_whose_callee_tail_jumps: int = 0
     functions_indexed: int = 0
     converted_targets: list[str] = field(default_factory=list)
+    # ABI-11.2: legal, body-free review artifact.  Only changed functions are
+    # listed; every entry is checked by reversing the two allowed macros.
+    change_set: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -99,6 +108,67 @@ def index_functions(text: str) -> dict[str, dict[str, bool]]:
     return out
 
 
+COMMENT_BLOCK_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+COMMENT_LINE_RE = re.compile(r"//[^\n]*")
+REVERSE_CALL_RE = re.compile(
+    r"WC3_DIRECT_CALL\s*\(\s*L_([0-9A-Fa-f]{8})\s*,\s*c\s*\)")
+REVERSE_TAIL_RE = re.compile(
+    r"WC3_DIRECT_TAIL\s*\(\s*L_([0-9A-Fa-f]{8})\s*,\s*c\s*\)")
+
+
+def function_bodies(text: str) -> dict[str, str]:
+    """VA -> raw body text (everything after the opening brace)."""
+    matches = list(FUNC_START_RE.finditer(text))
+    out: dict[str, str] = {}
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        out[m.group(1).upper()] = text[m.end():end]
+    return out
+
+
+def normalize_body(body: str) -> str:
+    plain = COMMENT_BLOCK_RE.sub(" ", body)
+    plain = COMMENT_LINE_RE.sub(" ", plain)
+    return " ".join(plain.split())
+
+
+def body_sha(body: str) -> str:
+    return hashlib.sha256(normalize_body(body).encode("utf-8")).hexdigest()
+
+
+def reverse_allowed_macros(body: str) -> str:
+    body = REVERSE_CALL_RE.sub(
+        lambda m: f"dispatch(c, 0x{m.group(1)}u)", body)
+    return REVERSE_TAIL_RE.sub(
+        lambda m: f"dispatch_jmp(c, 0x{m.group(1)}u)", body)
+
+
+def build_change_set(before: str, after: str, report: FileReport) -> None:
+    """Publish ABI-11.2 entries and reject anything but the two rewrites."""
+    before_bodies = function_bodies(before)
+    after_bodies = function_bodies(after)
+    for va in sorted(set(before_bodies) | set(after_bodies)):
+        b = before_bodies.get(va)
+        a = after_bodies.get(va)
+        if b is None or a is None:
+            report.errors.append(f"function set changed for L_{va}")
+            continue
+        b_norm = normalize_body(b)
+        a_norm = normalize_body(a)
+        if b_norm == a_norm:
+            continue
+        if normalize_body(reverse_allowed_macros(a)) != b_norm:
+            report.errors.append(f"unexpected body change in L_{va}")
+            continue
+        report.change_set.append({
+            "va": va,
+            "pass_id": "devirtualize",
+            "before_sha256": body_sha(b),
+            "after_sha256": body_sha(a),
+            "reason": "constant dispatch -> direct call/tail",
+        })
+
+
 def ensure_include(text: str) -> str:
     if INCLUDE_DIRECT_RE.search(text):
         return text
@@ -125,50 +195,109 @@ def insert_prototypes(text: str, targets: set[str]) -> str:
         + prototypes + text[end:]
 
 
+def function_body_mask(text: str) -> bytearray:
+    """Mark only bytes inside a lifted function definition (not prototypes)."""
+    mask = bytearray(len(text))
+    matches = list(FUNC_START_RE.finditer(text))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        mask[m.end():end] = b"\x01" * (end - m.end())
+    return mask
+
+
+def code_mask(text: str) -> bytearray:
+    """Mask function-body bytes that are code, not comments or literals.
+
+    Generated C is data as well as code: a guest string may legitimately
+    contain the text ``dispatch(c, 0x...)``.  Rewriting such a literal would
+    silently change guest data, so the pass only touches matches whose whole
+    span is inside a lifted body and outside comments/strings/chars.
+    """
+    mask = function_body_mask(text)
+    i = 0
+    n = len(text)
+    while i < n:
+        if not mask[i]:
+            i += 1
+            continue
+        c = text[i]
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            mask[i:end] = b"\x00" * (end - i)
+            i = end
+        elif c == "/" and i + 1 < n and text[i + 1] == "/":
+            end = text.find("\n", i + 2)
+            end = n if end < 0 else end
+            mask[i:end] = b"\x00" * (end - i)
+            i = end
+        elif c == '"' or c == "'":
+            quote = c
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            mask[i:j] = b"\x00" * (j - i)
+            i = j
+        else:
+            i += 1
+    return mask
+
+
+def is_code_match(m: re.Match[str], text: str, mask: bytearray) -> bool:
+    for i in range(m.start(), m.end()):
+        if not mask[i] and not text[i].isspace():
+            return False
+    return True
+
+
 def transform_text(text: str, lift_set: set[str],
                    index: dict[str, dict[str, bool]],
                    report: FileReport) -> str:
     converted_targets: set[str] = set()
+    mask = code_mask(text)
 
-    def repl_call(m: re.Match[str]) -> str:
-        report.constant_calls += 1
-        va = int(m.group(1), 16)
+    def repl_site(m: re.Match[str]) -> str:
+        if not is_code_match(m, text, mask):
+            return m.group(0)
+        kind = m.group(1)
+        key = m.group(2).upper()
+        va = int(key, 16)
+        if kind == "dispatch":
+            report.constant_calls += 1
+        else:
+            report.constant_tail_calls += 1
         if HLE_LO <= va < HLE_HI:
             report.skipped_hle_window += 1
             return m.group(0)
-        if m.group(1).upper() not in lift_set:
+        if key not in lift_set:
             report.skipped_unknown += 1
             return m.group(0)
-        key = m.group(1).upper()
-        info = index.get(key, {})
-        if info.get("tail") or info.get("indirect"):
-            report.call_sites_needing_depth_accounting += 1
-        if info.get("tail"):
-            report.call_sites_whose_callee_tail_jumps += 1
-        report.converted_calls += 1
-        converted_targets.add(key)
-        return f"WC3_DIRECT_CALL(L_{m.group(1)}, c)"
-
-    def repl_tail(m: re.Match[str]) -> str:
-        report.constant_tail_calls += 1
-        va = int(m.group(1), 16)
-        if HLE_LO <= va < HLE_HI:
-            report.skipped_hle_window += 1
-            return m.group(0)
-        if m.group(1).upper() not in lift_set:
-            report.skipped_unknown += 1
-            return m.group(0)
+        if kind == "dispatch":
+            info = index.get(key, {})
+            if info.get("tail") or info.get("indirect"):
+                report.call_sites_needing_depth_accounting += 1
+            if info.get("tail"):
+                report.call_sites_whose_callee_tail_jumps += 1
+            report.converted_calls += 1
+            converted_targets.add(key)
+            return f"WC3_DIRECT_CALL(L_{m.group(2)}, c)"
         report.converted_tails += 1
-        converted_targets.add(m.group(1).upper())
-        return f"WC3_DIRECT_TAIL(L_{m.group(1)}, c)"
+        converted_targets.add(key)
+        return f"WC3_DIRECT_TAIL(L_{m.group(2)}, c)"
 
-    out = CALL_RE.sub(repl_call, text)
-    out = TAIL_RE.sub(repl_tail, out)
+    out = SITE_RE.sub(repl_site, text)
     report.converted_targets = sorted(converted_targets,
                                       key=lambda v: int(v, 16))
     if converted_targets:
         out = ensure_include(out)
         out = insert_prototypes(out, converted_targets)
+    build_change_set(text, out, report)
     return out
 
 
@@ -195,6 +324,8 @@ def verify_text(text: str, report: FileReport) -> list[str]:
             errors.append("WC3_DIRECT_TAIL without a following return;")
             break
     if report.converted:
+        if not report.change_set:
+            errors.append("converted sites but no function-level change set")
         if not INCLUDE_DIRECT_RE.search(text):
             errors.append("converted file does not include direct_call.h")
         for va in report.converted_targets:
@@ -210,7 +341,7 @@ def process_file(src: Path, out: Path | None, lift_set: set[str]) -> FileReport:
                         output=out.as_posix() if out else None,
                         functions_indexed=len(index))
     transformed = transform_text(text, lift_set, index, report)
-    report.errors = verify_text(transformed, report)
+    report.errors.extend(verify_text(transformed, report))
     if out is not None and not report.errors:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(transformed, encoding="utf-8", newline="")
@@ -223,8 +354,14 @@ void L_00401000(CPU *c) { dispatch(c, 0x00401010u); return; }
 void L_00401010(CPU *c) { dispatch_jmp(c, 0x00401020u); return; }
 void L_00401020(CPU *c) { dispatch(c, 0x7F000010u); return; }
 void L_00401030(CPU *c) { dispatch(c, 0xDEADBEEFu); return; }
+void L_00401040(CPU *c)
+{
+    /* dispatch(c, 0x00401010u); */
+    const char *s = "dispatch(c, 0x00401010u)";
+    (void)s;
+}
 """
-    lift_set = {"00401000", "00401010", "00401020", "00401030"}
+    lift_set = {"00401000", "00401010", "00401020", "00401030", "00401040"}
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / "fixture.c"
         out = Path(td) / "out.c"
@@ -241,6 +378,8 @@ void L_00401030(CPU *c) { dispatch(c, 0xDEADBEEFu); return; }
             "unknown skipped": "dispatch(c, 0xDEADBEEFu)" in text,
             "include": '#include "direct_call.h"' in text,
             "prototype": "void L_00401010(CPU *c);" in text,
+            # A comment and a string literal must keep the original text.
+            "literal untouched": text.count("dispatch(c, 0x00401010u)") == 2,
         }
         bad = [name for name, ok in checks.items() if not ok]
         if bad:
@@ -248,6 +387,24 @@ void L_00401030(CPU *c) { dispatch(c, 0xDEADBEEFu); return; }
             return 1
         if report.converted_calls != 1 or report.converted_tails != 1:
             print("devirtualize self-test: FAIL conversion counts", file=sys.stderr)
+            return 1
+        changed = {entry["va"] for entry in report.change_set}
+        if changed != {"00401000", "00401010"}:
+            print("devirtualize self-test: FAIL change set", file=sys.stderr)
+            return 1
+        required = {"va", "pass_id", "before_sha256", "after_sha256", "reason"}
+        if any(not required.issubset(entry) for entry in report.change_set):
+            print("devirtualize self-test: FAIL change set schema",
+                  file=sys.stderr)
+            return 1
+        if any(entry["before_sha256"] == entry["after_sha256"]
+               for entry in report.change_set):
+            print("devirtualize self-test: FAIL unchanged body hash",
+                  file=sys.stderr)
+            return 1
+        if report.errors:
+            print("devirtualize self-test: FAIL errors", report.errors,
+                  file=sys.stderr)
             return 1
     print("devirtualize self-test: OK")
     return 0
@@ -300,13 +457,24 @@ def main(argv: list[str] | None = None) -> int:
 
     reports = [process_file(src, out, lift_set) for src, out in jobs]
     errors = [f"{r.lift_file}: {e}" for r in reports for e in r.errors]
+    changes = [
+        {"file": r.lift_file, **entry}
+        for r in reports for entry in r.change_set
+    ]
     summary = {
+        "schema": 1,
+        "pass_id": "devirtualize",
         "files": len(reports),
         "converted": sum(r.converted for r in reports),
         "skipped_unknown": sum(r.skipped_unknown for r in reports),
         "skipped_hle_window": sum(r.skipped_hle_window for r in reports),
+        "changed_functions": len(changes),
+        "change_set": changes,
         "errors": errors,
-        "files_detail": [r.__dict__ for r in reports],
+        "files_detail": [
+            {k: v for k, v in r.__dict__.items() if k != "change_set"}
+            for r in reports
+        ],
         "verdict": "pass" if not errors else "fail",
     }
     if args.json:

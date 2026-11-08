@@ -55,6 +55,43 @@ option(WC3_DEBUG "Build with debug-only diagnostics" OFF)
 # must be paired with the golden equivalence report.
 option(WC3_DEVIRTUALIZE_P0_1
        "Apply the P0-1 direct-call LiftPass to relifted corpus chunks" OFF)
+# P0-2 is the conservative, straight-line subset of dead-flag elimination.  It
+# is OFF until the G-15 golden report covers this pass as well; a pass that is
+# not applied to the corpus cannot be mistaken for a measured speedup.
+option(WC3_DEAD_FLAGS_P0_2
+       "Apply the P0-2 dead-flag LiftPass to relifted corpus chunks" OFF)
+# P0-10 stays OFF until a corpus audit proves no live PF/AF read; it is a
+# semantic variant, not a free compiler flag.
+option(WC3_FLAGS_FAST_PF_AF
+       "P0-10: skip PF/AF computation in flag helpers" OFF)
+set(WC3_FLAGS_FAST_PF_AF_AUDIT "" CACHE FILEPATH
+    "flag_read_audit.py JSON for the active corpus (required by P0-10)")
+if(WC3_FLAGS_FAST_PF_AF)
+    if(NOT WC3_FLAGS_FAST_PF_AF_AUDIT OR
+       NOT EXISTS "${WC3_FLAGS_FAST_PF_AF_AUDIT}")
+        message(FATAL_ERROR
+            "P0-10 requires WC3_FLAGS_FAST_PF_AF_AUDIT=<report.json> from "
+            "tools/flag_read_audit.py; an unaudited build must keep the "
+            "option OFF.")
+    endif()
+    file(READ "${WC3_FLAGS_FAST_PF_AF_AUDIT}" _wc3_pf_af_audit)
+    if(NOT "${_wc3_pf_af_audit}" MATCHES "\"status\": \"pass\"")
+        message(FATAL_ERROR
+            "P0-10 audit is not a pass: ${WC3_FLAGS_FAST_PF_AF_AUDIT}")
+    endif()
+    set(WC3_FLAGS_FAST_PF_AF_DEFINE 1)
+    message(WARNING
+        "P0-10 skips PF/AF computation.  Keep the audit report tied to the "
+        "exact corpus and keep a full CPU flag snapshot (PM-10); Storm "
+        "currently fails the audit.")
+else()
+    set(WC3_FLAGS_FAST_PF_AF_DEFINE 0)
+endif()
+# O-43 experiment.  Packed dynamic relocations are supported by bionic on the
+# product's minSdk 26, but the size/startup effect is unmeasured (PM-19/GB-5.2),
+# so the product link keeps the unpacked table unless this option is enabled.
+option(WC3_PACK_DYN_RELOCS
+       "Experimental: pack dynamic relocations with lld (Android only)" OFF)
 if(WC3_DEBUG)
     set(WC3_DEBUG_DEFINE 1)
 else()
@@ -191,6 +228,15 @@ if(WC3_BUILD_APP)
         -Wl,-z,max-page-size=16384
         -Wl,-Bsymbolic
         -Wl,-u,JNI_OnLoad)
+    if(WC3_PACK_DYN_RELOCS)
+        if(NOT ANDROID)
+            message(FATAL_ERROR "WC3_PACK_DYN_RELOCS requires the Android toolchain")
+        endif()
+        # O-43: keep this opt-in until a T2 run proves bionic API 26 loads the
+        # packed table and PM-22/GB-5.2 show a benefit over the unpacked image.
+        target_link_options(wc3gameactivity PRIVATE
+            -Wl,--pack-dyn-relocs=android)
+    endif()
     set_target_properties(wc3gameactivity PROPERTIES
         OUTPUT_NAME wc3gameactivity
         PREFIX "lib")

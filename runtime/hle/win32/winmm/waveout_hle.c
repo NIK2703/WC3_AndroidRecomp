@@ -1107,8 +1107,10 @@ int wc3_hle_winmm_waveout_install(void)
 #endif
             }
         }
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
         fprintf(stderr, "[wave2] disabled: as-built WINMM path; "
                         "rev 6 needs S5 device acceptance\n");
+#endif
         installed = 1;
         return 0;
     }

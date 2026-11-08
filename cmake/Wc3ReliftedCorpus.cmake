@@ -15,6 +15,10 @@ if(NOT WC3_RELIFTED_ROOT_ABS)
     message(FATAL_ERROR "Wc3ReliftedCorpus.cmake included without WC3_RELIFTED_ROOT_ABS")
 endif()
 
+if(NOT DEFINED WC3_FLAGS_FAST_PF_AF_DEFINE)
+    set(WC3_FLAGS_FAST_PF_AF_DEFINE 0)
+endif()
+
 find_program(WC3_SPLITCORPUS_EXE
     NAMES splitcorpus splitcorpus.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -116,6 +120,8 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             # P0-1 LiftPass runs after splitcorpus, so every chunk receives the
             # direct_call.h include and prototypes for cross-TU targets.  This
             # is gated OFF by default until G-14/G-15 are green (ABI-6).
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                "${WC3_ROOT}/tools/lift/passes/devirtualize.py")
             set(_devirt_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/devirtualized/${_name}/${_kind}")
             file(MAKE_DIRECTORY "${_devirt_dir}")
@@ -142,6 +148,39 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             endforeach()
             set(_chunks "${_transformed_chunks}")
         endif()
+        if(WC3_DEAD_FLAGS_P0_2)
+            # P0-2 runs after P0-1 when both are enabled, so its input is the
+            # direct-call form.  It is a straight-line, per-flag kill analysis;
+            # control flow and calls are barriers (see the pass header).  Gated
+            # OFF until G-15 publishes the per-module golden report.
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                "${WC3_ROOT}/tools/lift/passes/dead_flags.py")
+            set(_dead_dir
+                "${CMAKE_CURRENT_BINARY_DIR}/dead_flags/${_name}/${_kind}")
+            file(MAKE_DIRECTORY "${_dead_dir}")
+            set(_dead_chunks)
+            foreach(_chunk IN LISTS _chunks)
+                get_filename_component(_chunk_name "${_chunk}" NAME)
+                set(_dead_out "${_dead_dir}/${_chunk_name}")
+                execute_process(
+                    COMMAND "${Python3_EXECUTABLE}"
+                            "${WC3_ROOT}/tools/lift/passes/dead_flags.py"
+                            --lift "${_chunk}"
+                            --out "${_dead_out}"
+                            --json "${_dead_out}.json"
+                            --quiet
+                    RESULT_VARIABLE _dead_rc
+                    OUTPUT_VARIABLE _dead_stdout
+                    ERROR_VARIABLE _dead_stderr)
+                if(NOT _dead_rc EQUAL 0)
+                    message(FATAL_ERROR
+                        "dead_flags failed for ${_chunk} (rc=${_dead_rc}):\n"
+                        "${_dead_stdout}\n${_dead_stderr}")
+                endif()
+                list(APPEND _dead_chunks "${_dead_out}")
+            endforeach()
+            set(_chunks "${_dead_chunks}")
+        endif()
         list(APPEND WC3_RELIFTED_SOURCES ${_chunks})
     endforeach()
 
@@ -166,6 +205,8 @@ target_compile_definitions(wc3_corpus_relifted PRIVATE
     SOFTFLOAT_FAST_INT64
     LITTLEENDIAN
     THREAD_LOCAL=_Thread_local
+    GVA_DELTA=0
+    WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
     WC3_DEBUG=${WC3_DEBUG_DEFINE})
 # The relifted corpus is guest code with a frozen ABI.  Build it at -O2, not
 # -O0: the header-only runtime (cpu.h, x87.h) must inline, and generated bodies

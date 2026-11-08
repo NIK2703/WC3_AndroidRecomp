@@ -5335,21 +5335,181 @@ static void h_get_proc_address(CPU *c)
 }
 
 /* ---- strings / locale ---- */
+
+/* The guest's ANSI code page is 1251 (GetACP below), and the load-game menu
+ * stores/reads save and map names as UTF-8.  h_widechar_to_multibyte has
+ * always produced UTF-8; the old read side widened every byte on its own, so
+ * a UTF-8 name such as "об" (D0 BE D0 B1) appeared as the Latin-1 mojibake
+ * "Ð¾Ð±".  Decode UTF-8 for the code pages the guest actually uses and keep
+ * CP1251 as the ANSI fallback for non-UTF-8 data (for example a save copied
+ * from a Windows profile). */
+static const uint16_t wc3_cp1251_high[128] = {
+    0x0402, 0x0403, 0x201A, 0x0453, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x20AC, 0x2030, 0x0409, 0x2039, 0x040A, 0x040C, 0x040B, 0x040F,
+    0x0452, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x0098, 0x2122, 0x0459, 0x203A, 0x045A, 0x045C, 0x045B, 0x045F,
+    0x00A0, 0x040E, 0x045E, 0x0408, 0x00A4, 0x0490, 0x00A6, 0x00A7,
+    0x0401, 0x00A9, 0x0404, 0x00AB, 0x00AC, 0x00AD, 0x00AE, 0x0407,
+    0x00B0, 0x00B1, 0x0406, 0x0456, 0x0491, 0x00B5, 0x00B6, 0x00B7,
+    0x0451, 0x2116, 0x0454, 0x00BB, 0x0458, 0x0405, 0x0455, 0x0457,
+    0x0410, 0x0411, 0x0412, 0x0413, 0x0414, 0x0415, 0x0416, 0x0417,
+    0x0418, 0x0419, 0x041A, 0x041B, 0x041C, 0x041D, 0x041E, 0x041F,
+    0x0420, 0x0421, 0x0422, 0x0423, 0x0424, 0x0425, 0x0426, 0x0427,
+    0x0428, 0x0429, 0x042A, 0x042B, 0x042C, 0x042D, 0x042E, 0x042F,
+    0x0430, 0x0431, 0x0432, 0x0433, 0x0434, 0x0435, 0x0436, 0x0437,
+    0x0438, 0x0439, 0x043A, 0x043B, 0x043C, 0x043D, 0x043E, 0x043F,
+    0x0440, 0x0441, 0x0442, 0x0443, 0x0444, 0x0445, 0x0446, 0x0447,
+    0x0448, 0x0449, 0x044A, 0x044B, 0x044C, 0x044D, 0x044E, 0x044F,
+};
+
+static const uint16_t wc3_cp1252_high[32] = {
+    0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
+    0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
+};
+
+static uint16_t ansi_to_unicode(uint32_t cp, uint8_t b)
+{
+    if (b < 0x80u) return b;
+    if (cp == 1252u)
+        return b < 0xA0u ? wc3_cp1252_high[b - 0x80u] : b;
+    if (cp == 0u || cp == 1251u)
+        return wc3_cp1251_high[b - 0x80u];
+    return b;
+}
+
+/* Decode one UTF-8 code point.  Returns 0 for a malformed sequence; the
+ * caller decides whether that is an error or a replacement character. */
+static int utf8_decode_one(const uint8_t *s, uint32_t len,
+                           uint16_t out[2], uint32_t *units,
+                           uint32_t *used)
+{
+    uint8_t b = s[0];
+    uint32_t cp, need;
+    if (b < 0x80u) {
+        out[0] = b;
+        *units = 1;
+        *used = 1;
+        return 1;
+    }
+    if (b >= 0xC2u && b <= 0xDFu) {
+        need = 2;
+        cp = b & 0x1Fu;
+    } else if (b >= 0xE0u && b <= 0xEFu) {
+        need = 3;
+        cp = b & 0x0Fu;
+    } else if (b >= 0xF0u && b <= 0xF4u) {
+        need = 4;
+        cp = b & 0x07u;
+    } else {
+        return 0;
+    }
+    if (len < need) return 0;
+    for (uint32_t i = 1; i < need; i++) {
+        if ((s[i] & 0xC0u) != 0x80u) return 0;
+        cp = (cp << 6) | (s[i] & 0x3Fu);
+    }
+    if (need == 2 && cp < 0x80u) return 0;
+    if (need == 3 && (cp < 0x800u ||
+                      (cp >= 0xD800u && cp <= 0xDFFFu))) return 0;
+    if (need == 4 && (cp < 0x10000u || cp > 0x10FFFFu)) return 0;
+    if (cp >= 0x10000u) {
+        uint32_t v = cp - 0x10000u;
+        out[0] = (uint16_t)(0xD800u + (v >> 10));
+        out[1] = (uint16_t)(0xDC00u + (v & 0x3FFu));
+        *units = 2;
+    } else {
+        out[0] = (uint16_t)cp;
+        *units = 1;
+    }
+    *used = need;
+    return 1;
+}
+
+static int utf8_valid(const uint8_t *s, uint32_t len)
+{
+    uint32_t i = 0;
+    while (i < len) {
+        uint16_t wc[2];
+        uint32_t units, used;
+        if (!utf8_decode_one(s + i, len - i, wc, &units, &used))
+            return 0;
+        i += used;
+    }
+    return 1;
+}
+
+static uint32_t mb_to_wide(uint32_t cp, uint32_t flags, const uint8_t *s,
+                           uint32_t len, uint32_t dst, uint32_t cap)
+{
+    int utf8 = 0;
+    if (cp == 65001u) {
+        utf8 = 1;
+        if (!utf8_valid(s, len) && (flags & 8u))
+            return 0;
+    } else if (cp == 0u || cp == 1251u) {
+        utf8 = utf8_valid(s, len);
+    }
+    int write = dst != 0 && cap != 0;
+    uint32_t out = 0;
+    for (uint32_t i = 0; i < len; ) {
+        uint16_t wc[2];
+        uint32_t units = 1;
+        uint32_t used = 1;
+        if (utf8) {
+            if (!utf8_decode_one(s + i, len - i, wc, &units, &used)) {
+                wc[0] = 0xFFFDu;
+                units = 1;
+                used = 1;
+            }
+        } else {
+            wc[0] = ansi_to_unicode(cp, s[i]);
+        }
+        if (write) {
+            for (uint32_t k = 0; k < units && out < cap; k++)
+                wr16g(dst + out++ * 2, wc[k]);
+            if (out >= cap) break;
+        } else {
+            out += units;
+        }
+        i += used;
+    }
+    return out;
+}
+
 static void h_multibyte_to_widechar(CPU *c)
 {
-    /* MultiByteToWideChar(cp, flags, src, cbMultiByte, dst, cchWideChar) -
-     * src is argument 2 (same off-by-one as WideCharToMultiByte). */
-    uint32_t cp = arg32(c, 0), src = arg32(c, 2), n = arg32(c, 3),
-             dst = arg32(c, 4), cap = arg32(c, 5);
-    (void)cp;
+    /* MultiByteToWideChar(cp, flags, src, cbMultiByte, dst, cchWideChar).
+     * The guest writes save and map names as UTF-8; read them back as UTF-8
+     * instead of widening each byte.  CP1251 remains the fallback for
+     * non-UTF-8 ANSI data, so a Windows save copied to the device still
+     * decodes. */
+    uint32_t cp = arg32(c, 0), flags = arg32(c, 1), src = arg32(c, 2),
+             n = arg32(c, 3), dst = arg32(c, 4), cap = arg32(c, 5);
     if (!src || !guest_ok(src, 1)) { c->eax = 0; return; }
-    const char *s = (const char *)(uintptr_t)src;
-    int len = (n == 0xFFFFFFFFu) ? (int)strlen(s) : (int)n;
-    if (!dst || !cap) { c->eax = (uint32_t)len; return; }
-    uint32_t count = (uint32_t)len < cap ? (uint32_t)len : cap;
-    if (!guest_ok(dst, count * 2)) { c->eax = 0; return; }
-    for (uint32_t i = 0; i < count; i++) wr16g(dst + i * 2, (uint16_t)(uint8_t)s[i]);
-    c->eax = count;
+    const uint8_t *s = (const uint8_t *)(uintptr_t)src;
+    uint32_t len = (n == 0xFFFFFFFFu)
+                       ? (uint32_t)strlen((const char *)s)
+                       : n;
+    if (len && !guest_ok(src, len)) { c->eax = 0; return; }
+    if (cap > 0x7FFFFFFFu) { c->eax = 0; return; }
+    uint32_t max_out = len < cap ? len : cap;
+    if (dst && cap && max_out && !guest_ok(dst, max_out * 2)) {
+        c->eax = 0;
+        return;
+    }
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    static unsigned mb2wc_logs;
+    if (len && s[0] >= 0x80u && mb2wc_logs < 64) {
+        mb2wc_logs++;
+        fprintf(stderr,
+                "[mb2wc] cp=%u flags=%u len=%u first=%02X%02X%02X%02X\n",
+                cp, flags, len, s[0], len > 1 ? s[1] : 0,
+                len > 2 ? s[2] : 0, len > 3 ? s[3] : 0);
+    }
+#endif
+    c->eax = mb_to_wide(cp, flags, s, len, dst, cap);
 }
 
 static void h_widechar_to_multibyte(CPU *c)

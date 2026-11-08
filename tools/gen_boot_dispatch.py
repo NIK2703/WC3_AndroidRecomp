@@ -78,10 +78,60 @@ def render_hash_header(values: list[str]) -> str:
     return "\n".join(lines)
 
 
+def self_test() -> int:
+    """Check the generator against the lookup loop it replaced.
+
+    No project build is involved.  The test forces one real 19-bit hash
+    collision, so the linear-probe path and the ``i + 1`` payload are both
+    exercised instead of only the happy path.
+    """
+    seen: dict[int, str] = {}
+    first = second = ""
+    for i in range(1_000_000):
+        value = f"{0x00400000 + i * 4:08X}"
+        h = ((int(value, 16) * LIFT_HASH_MULTIPLIER) & 0xFFFFFFFF) >> (
+            32 - LIFT_HASH_BITS
+        )
+        if h in seen:
+            first, second = seen[h], value
+            break
+        seen[h] = value
+    if not first:
+        raise SystemExit("self-test: could not find a hash collision")
+
+    slots = build_hash_slots([first, second])
+    if len(slots) != 2 or sorted(slots.values()) != [1, 2]:
+        raise SystemExit(f"self-test: bad collision slots: {slots}")
+
+    values = [f"{0x00400000 + i * 4:08X}" for i in range(4096)]
+    slots = build_hash_slots(values)
+    if len(slots) != len(values):
+        raise SystemExit("self-test: hash table lost entries")
+    if sorted(slots.values()) != list(range(1, len(values) + 1)):
+        raise SystemExit("self-test: payload is not g_lift index + 1")
+    for index, value in enumerate(values):
+        h = ((int(value, 16) * LIFT_HASH_MULTIPLIER) & 0xFFFFFFFF) >> (
+            32 - LIFT_HASH_BITS
+        )
+        while h in slots and slots[h] != index + 1:
+            h = (h + 1) & (LIFT_HASH_SIZE - 1)
+        if slots.get(h) != index + 1:
+            raise SystemExit(
+                f"self-test: lookup failed for {value} at slot 0x{h:05X}")
+    header = render_hash_header(values)
+    rendered = len(re.findall(r"^\s*\[0x[0-9A-F]+\] = \d+u,$", header, re.M))
+    if rendered != len(values) or "g_lift_hash[LIFT_HASH_SIZE]" not in header:
+        raise SystemExit("self-test: rendered header does not match the table")
+    print(f"gen_boot_dispatch self-test: OK ({len(values)} entries, "
+          f"collision {first}/{second})")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--list", required=True, type=Path)
-    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--list", type=Path)
+    ap.add_argument("--out", type=Path)
+    ap.add_argument("--self-test", action="store_true")
     ap.add_argument(
         "--hash-out",
         type=Path,
@@ -91,6 +141,11 @@ def main() -> int:
     ap.add_argument("--prefix", action="append", default=[])
     ap.add_argument("--expect-count", type=int, default=None)
     args = ap.parse_args()
+
+    if args.self_test:
+        return self_test()
+    if args.list is None or args.out is None:
+        ap.error("--list and --out are required unless --self-test is given")
 
     prefixes = tuple(args.prefix) if args.prefix else ("004", "350")
     text = args.list.read_text(encoding="ascii", errors="ignore")

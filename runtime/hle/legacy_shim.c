@@ -51,6 +51,75 @@ static int ascii_equal_ci(const char *a, const char *b)
     return *a == '\0' && *b == '\0';
 }
 
+/* O-57: startup override matching used to scan up to HLE_MAX rows for every
+ * wc3_legacy_hle_override/chain/add call.  The registry is append-only and its
+ * names do not change after registration, so a case-folded open-addressed
+ * index is enough.  g_hle_index_count records how many rows the table covers;
+ * if the quarantine appends directly, the next lookup sees the mismatch and
+ * rebuilds once.  This is startup-only; the registry has no hot-path lock. */
+#define HLE_INDEX_CAP (1u << 13)
+_Static_assert(HLE_MAX <= HLE_INDEX_CAP, "HLE index too small");
+_Static_assert((HLE_INDEX_CAP & (HLE_INDEX_CAP - 1u)) == 0u,
+               "HLE index must be a power of two");
+_Static_assert(HLE_MAX <= 0xFFFF, "HLE row does not fit in index");
+
+static uint16_t g_hle_index[HLE_INDEX_CAP];
+static unsigned g_hle_index_count;
+
+static uint32_t hle_name_hash(const char *dll, const char *name)
+{
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)dll; *p; p++) {
+        unsigned c = *p;
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        h = (h ^ c) * 16777619u;
+    }
+    h = (h ^ 0xFFu) * 16777619u;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        unsigned c = *p;
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        h = (h ^ c) * 16777619u;
+    }
+    return h;
+}
+
+static void hle_index_insert(unsigned row)
+{
+    uint32_t h = hle_name_hash(g_hle[row].dll, g_hle[row].name);
+    for (unsigned probe = 0; probe < HLE_INDEX_CAP; probe++) {
+        uint16_t *slot = &g_hle_index[(h + probe) & (HLE_INDEX_CAP - 1u)];
+        if (*slot == 0u) {
+            *slot = (uint16_t)(row + 1u);
+            return;
+        }
+    }
+}
+
+static void hle_index_ensure(void)
+{
+    if (g_hle_index_count == g_hle_count) return;
+    memset(g_hle_index, 0, sizeof g_hle_index);
+    for (unsigned i = 0; i < g_hle_count; i++) hle_index_insert(i);
+    g_hle_index_count = g_hle_count;
+}
+
+static int find_hle_row(const char *dll, const char *name)
+{
+    if (!dll || !name) return -1;
+    hle_index_ensure();
+    uint32_t h = hle_name_hash(dll, name);
+    for (unsigned probe = 0; probe < HLE_INDEX_CAP; probe++) {
+        uint16_t v = g_hle_index[(h + probe) & (HLE_INDEX_CAP - 1u)];
+        if (v == 0u) return -1;
+        unsigned row = (unsigned)v - 1u;
+        if (row >= g_hle_count) continue;
+        HleEnt *e = &g_hle[row];
+        if (ascii_equal_ci(e->dll, dll) && ascii_equal_ci(e->name, name))
+            return (int)row;
+    }
+    return -1;
+}
+
 static void bind_fast_slot(HleEnt *e)
 {
     if (!e || !e->fn) return;
@@ -62,29 +131,23 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
                             void (*impl)(CPU *c))
 {
     if (!dll || !name || !impl) return -1;
-    for (unsigned i = 0; i < g_hle_count; i++) {
-        HleEnt *e = &g_hle[i];
-        if (!ascii_equal_ci(e->dll, dll)) continue;
-        if (!ascii_equal_ci(e->name, name)) continue;
-        e->fn = impl;
-        bind_fast_slot(e);
-        return 0;
-    }
-    return -1;
+    int row = find_hle_row(dll, name);
+    if (row < 0) return -1;
+    HleEnt *e = &g_hle[row];
+    e->fn = impl;
+    bind_fast_slot(e);
+    return 0;
 }
 
 int wc3_legacy_hle_fast_bind(const char *dll, const char *name)
 {
     if (!dll || !name) return -1;
-    for (unsigned i = 0; i < g_hle_count; i++) {
-        HleEnt *e = &g_hle[i];
-        if (!ascii_equal_ci(e->dll, dll)) continue;
-        if (!ascii_equal_ci(e->name, name)) continue;
-        if (!e->fn) return -1;
-        bind_fast_slot(e);
-        return 0;
-    }
-    return -1;
+    int row = find_hle_row(dll, name);
+    if (row < 0) return -1;
+    HleEnt *e = &g_hle[row];
+    if (!e->fn) return -1;
+    bind_fast_slot(e);
+    return 0;
 }
 
 int wc3_legacy_hle_chain(const char *dll, const char *name,
@@ -92,29 +155,20 @@ int wc3_legacy_hle_chain(const char *dll, const char *name,
                          void (**previous)(CPU *c))
 {
     if (!dll || !name || !impl || !previous) return -1;
-    for (unsigned i = 0; i < g_hle_count; i++) {
-        HleEnt *e = &g_hle[i];
-        if (!ascii_equal_ci(e->dll, dll)) continue;
-        if (!ascii_equal_ci(e->name, name)) continue;
-        if (!e->fn) return -1;
-        *previous = e->fn;
-        e->fn = impl;
-        bind_fast_slot(e);
-        return 0;
-    }
-    return -1;
+    int row = find_hle_row(dll, name);
+    if (row < 0) return -1;
+    HleEnt *e = &g_hle[row];
+    if (!e->fn) return -1;
+    *previous = e->fn;
+    e->fn = impl;
+    bind_fast_slot(e);
+    return 0;
 }
 
 static HleFn find_hle_fn(const char *dll, const char *name)
 {
-    if (!dll || !name) return NULL;
-    for (unsigned i = 0; i < g_hle_count; i++) {
-        HleEnt *e = &g_hle[i];
-        if (!ascii_equal_ci(e->dll, dll)) continue;
-        if (!ascii_equal_ci(e->name, name)) continue;
-        return e->fn;
-    }
-    return NULL;
+    int row = find_hle_row(dll, name);
+    return row < 0 ? NULL : g_hle[row].fn;
 }
 
 /* The as-built last-error cell is thread-local static state in the quarantine.
@@ -158,10 +212,9 @@ int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
 {
     if (!dll || !name || !impl || argc < 0 || argc > 0xFFFF) return -1;
 
-    for (unsigned i = 0; i < g_hle_count; i++) {
-        HleEnt *e = &g_hle[i];
-        if (!ascii_equal_ci(e->dll, dll)) continue;
-        if (!ascii_equal_ci(e->name, name)) continue;
+    int row = find_hle_row(dll, name);
+    if (row >= 0) {
+        HleEnt *e = &g_hle[row];
         e->fn = impl;
         e->argc = (uint16_t)argc;
         e->cdecl_abi = cdecl_abi ? 1u : 0u;
@@ -170,6 +223,7 @@ int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
     }
 
     if (g_hle_count >= HLE_MAX) return -1;
+    unsigned old_count = g_hle_count;
     HleEnt *e = &g_hle[g_hle_count++];
     memset(e, 0, sizeof *e);
     copy_bounded(e->dll, sizeof e->dll, dll);
@@ -178,6 +232,10 @@ int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
     e->argc = (uint16_t)argc;
     e->cdecl_abi = cdecl_abi ? 1u : 0u;
     e->used = 1;
+    if (g_hle_index_count == old_count) {
+        hle_index_insert(old_count);
+        g_hle_index_count = g_hle_count;
+    }
     bind_fast_slot(e);
     return 0;
 }

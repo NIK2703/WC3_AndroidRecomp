@@ -444,6 +444,31 @@ int main(void)
     CHECK(wc3_legacy_guest_size(p) == 0u, "guest_free");
     CHECK(wc3_legacy_guest_size(0xFFFFFFFFu) == 0u, "guest_size invalid");
 
+    /* O-57: a row appended by the quarantine after the lookup index was built
+     * must be found on the next lookup, not only after a fresh process start. */
+    HleEnt *direct = &g_hle[g_hle_count++];
+    memset(direct, 0, sizeof *direct);
+    strncpy(direct->dll, "Direct.dll", sizeof direct->dll - 1u);
+    strncpy(direct->name, "DirectRow", sizeof direct->name - 1u);
+    direct->fn = fn_a;
+    direct->argc = 1;
+    direct->used = 1;
+    CHECK(wc3_legacy_hle_override("DIRECT.DLL", "directrow", fn_b) == 0,
+          "index rebuild after direct append");
+    CHECK(direct->fn == fn_b, "index rebuild updates row");
+
+    /* Exercise append and update beyond the two hand-written rows.  The names
+     * are unique, so a missed index entry makes the override return -1. */
+    for (unsigned i = 0; i < 512u; i++) {
+        char dll[32];
+        char name[32];
+        snprintf(dll, sizeof dll, "Dll%u.dll", i & 7u);
+        snprintf(name, sizeof name, "Name%u", i);
+        CHECK(wc3_legacy_hle_add(dll, name, 1, 1, fn_a) == 0, "index add");
+        CHECK(wc3_legacy_hle_override(dll, name, fn_b) == 0,
+              "index override");
+    }
+
     printf("legacy shim OK (registry + guest memory)\n");
     return 0;
 }

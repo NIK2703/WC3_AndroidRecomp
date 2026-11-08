@@ -173,13 +173,23 @@ static inline void x87_set_top(CPU *c) {
     c->fpu_sw = (c->fpu_sw & ~0x3800u) | ((uint32_t)(c->fpu_top & 7) << 11);
 }
 static inline void x87_begin(CPU *c) {
-    softfloat_roundingMode = x87_round_mode(c);
-    extF80_roundingPrecision = x87_precision(c);
-    softfloat_exceptionFlags = 0;
+    /* O-22 publication guard: the SoftFloat state is thread-local and is
+     * usually already at the guest's current CW.  Skip a store only when it
+     * would write the same value; this is bit-exact (no native FP replaces
+     * SoftFloat) and leaves E4 as the final exactness gate. */
+    const uint8_t mode = x87_round_mode(c);
+    const uint8_t precision = x87_precision(c);
+    if (softfloat_roundingMode != mode)
+        softfloat_roundingMode = mode;
+    if (extF80_roundingPrecision != precision)
+        extF80_roundingPrecision = precision;
+    if (softfloat_exceptionFlags)
+        softfloat_exceptionFlags = 0;
 }
 static inline void x87_end(CPU *c) {
     uint_fast8_t f = softfloat_exceptionFlags & 0x1Fu;
-    softfloat_exceptionFlags = 0;
+    if (softfloat_exceptionFlags)
+        softfloat_exceptionFlags = 0;
     c->fpu_sw |= x87_status_from_flags[f];
 }
 static inline void x87_denorm_check(CPU *c, extFloat80_t a) {

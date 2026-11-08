@@ -11,10 +11,11 @@
  * Functions are ordered by their call graph before the cut.  The generated
  * bodies do not call each other directly; they use dispatch(c, 0x...) and
  * dispatch_jmp(c, 0x...), so those literals are the call edges.  Connected
- * components are emitted together, then the normal function/size caps split
- * them into translation units.  This is the P1-12/O-03 input point: a later
- * devirtualisation pass gets caller and callee in the same TU instead of
- * relying on the old counter-based order.
+ * components are emitted together; a component that fits in a fresh chunk is
+ * kept on one side of the cap boundary, and only an oversized component falls
+ * back to the normal function/size split.  This is the P1-12/O-03 input point:
+ * a later devirtualisation pass gets caller and callee in the same TU instead
+ * of relying on the old counter-based order.
  *
  * The original file header is replaced by a minimal header that includes
  * "cpu.h" for every chunk.  Lines before the first function are dropped.
@@ -180,7 +181,8 @@ int main(int argc, char **argv)
     uint32_t *adj = NULL;
     uint32_t *order = NULL, *queue = NULL;
     unsigned char *seen = NULL;
-    size_t i, k, norder = 0;
+    size_t *comp_end = NULL;
+    size_t i, j, k, ci, norder = 0, ncomp = 0, comp_start = 0;
     int rc = 1;
 
     if (argc < 4 || argc > 6) {
@@ -267,7 +269,9 @@ int main(int argc, char **argv)
     order = (uint32_t *)malloc(nfunc * sizeof *order);
     queue = (uint32_t *)malloc(nfunc * sizeof *queue);
     seen = (unsigned char *)calloc(nfunc, 1);
-    if (!vamap || !adj_start || !adj_fill || !order || !queue || !seen) {
+    comp_end = (size_t *)malloc(nfunc * sizeof *comp_end);
+    if (!vamap || !adj_start || !adj_fill || !order || !queue || !seen ||
+        !comp_end) {
         fprintf(stderr, "splitcorpus: out of memory\n");
         goto done;
     }
@@ -318,6 +322,10 @@ int main(int argc, char **argv)
                 }
             }
         }
+        /* Components are contiguous in order[].  Record the end index so the
+         * chunk writer can avoid cutting through a component that fits in a
+         * fresh translation unit. */
+        comp_end[ncomp++] = norder;
     }
 
     /* Pass 2: write the same function blocks in graph order. */
@@ -327,35 +335,58 @@ int main(int argc, char **argv)
              base_name(src));
     header_len = strlen(header);
 
-    for (i = 0; i < norder; i++) {
-        Func *f = &funcs[order[i]];
-        long len = f->len;
-        if (!out || count >= per ||
-            (max_mb > 0 && count > 0 &&
-             written + (size_t)len > (size_t)max_mb * 1024u * 1024u)) {
-            if (out) fclose(out);
-            snprintf(outpath, sizeof outpath, "%s/%s_%04ld.c",
-                     outdir, prefix, chunk++);
-            out = fopen(outpath, "wb");
-            if (!out) {
-                fprintf(stderr, "splitcorpus: cannot write %s\n", outpath);
+    for (ci = 0; ci < ncomp; ci++) {
+        size_t comp_stop = comp_end[ci];
+        size_t cbytes = 0;
+        int fits_fresh;
+        for (j = comp_start; j < comp_stop; j++)
+            cbytes += (size_t)funcs[order[j]].len;
+        fits_fresh = (long)(comp_stop - comp_start) <= per &&
+            (max_mb <= 0 ||
+             header_len + cbytes <= (size_t)max_mb * 1024u * 1024u);
+
+        /* Keep a component that fits in a fresh chunk on one side of the
+         * boundary.  Small components still pack together; an oversized
+         * component keeps the old per-function split. */
+        if (out && fits_fresh && count > 0 &&
+            (count + (long)(comp_stop - comp_start) > per ||
+             (max_mb > 0 &&
+              written + cbytes > (size_t)max_mb * 1024u * 1024u))) {
+            fclose(out);
+            out = NULL;
+        }
+
+        for (j = comp_start; j < comp_stop; j++) {
+            Func *f = &funcs[order[j]];
+            long len = f->len;
+            if (!out || count >= per ||
+                (max_mb > 0 && count > 0 &&
+                 written + (size_t)len > (size_t)max_mb * 1024u * 1024u)) {
+                if (out) fclose(out);
+                snprintf(outpath, sizeof outpath, "%s/%s_%04ld.c",
+                         outdir, prefix, chunk++);
+                out = fopen(outpath, "wb");
+                if (!out) {
+                    fprintf(stderr, "splitcorpus: cannot write %s\n", outpath);
+                    goto done;
+                }
+                if (fwrite(header, 1, header_len, out) != header_len) {
+                    fprintf(stderr, "splitcorpus: write failed: %s\n", outpath);
+                    fclose(out);
+                    out = NULL;
+                    goto done;
+                }
+                written = header_len;
+                count = 0;
+            }
+            if (copy_block(in, out, f->off, len, copy) != 0) {
+                fprintf(stderr, "splitcorpus: read/write failed: %s\n", outpath);
                 goto done;
             }
-            if (fwrite(header, 1, header_len, out) != header_len) {
-                fprintf(stderr, "splitcorpus: write failed: %s\n", outpath);
-                fclose(out);
-                out = NULL;
-                goto done;
-            }
-            written = header_len;
-            count = 0;
+            written += (size_t)len;
+            count++;
         }
-        if (copy_block(in, out, f->off, len, copy) != 0) {
-            fprintf(stderr, "splitcorpus: read/write failed: %s\n", outpath);
-            goto done;
-        }
-        written += (size_t)len;
-        count++;
+        comp_start = comp_stop;
     }
 
     printf("splitcorpus: %s: %ld functions -> %ld file(s) of <=%ld%s in %s\n",
@@ -377,5 +408,6 @@ done:
     free(order);
     free(queue);
     free(seen);
+    free(comp_end);
     return rc;
 }

@@ -29,6 +29,7 @@
 #include "dragdrop_hle.h"
 #include "heap_hle.h"
 #include "imagelist_hle.h"
+#include "kernel32_file_hle.h"
 #include "math_hle.h"
 #include "memory_hle.h"
 #include "menu_hle.h"
@@ -112,6 +113,7 @@ void wc3_dispatch_init(void)
     WC3_INSTALL_STEP(wc3_hle_kernel32_process_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_system_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_memory_install());
+    WC3_INSTALL_STEP(wc3_hle_kernel32_file_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_resource_install());
     WC3_INSTALL_STEP(wc3_hle_kernel32_string_install());
     WC3_INSTALL_STEP(wc3_hle_advapi32_registry_install());
@@ -173,6 +175,10 @@ static inline void (*find_lifted(uint32_t va))(CPU *)
 
 static void dispatch_unknown(CPU *c, uint32_t target, int tail)
 {
+    /* The dump is diagnostic only.  Release keeps the fatal outcome above
+     * all, but must not retain the target/stack formatter or its string
+     * literals (BV-10, O-72). */
+#if WC3_DEBUG && WC3_DEBUG_HLE
     uint32_t *sp = (uint32_t *)(uintptr_t)c->esp;
     fprintf(stderr,
             "[dispatch] %s unknown guest target %08X (eip=%08X esp=%08X ra=%08X %s)\n",
@@ -181,6 +187,11 @@ static void dispatch_unknown(CPU *c, uint32_t target, int tail)
     if (sp)
         fprintf(stderr, "[dispatch]   stk: %08X %08X %08X %08X %08X %08X\n",
                 sp[0], sp[1], sp[2], sp[3], sp[4], sp[5]);
+#else
+    (void)c;
+    (void)target;
+    (void)tail;
+#endif
     abort();
 }
 

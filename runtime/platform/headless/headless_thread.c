@@ -120,9 +120,18 @@ static int headless_thread_create(void *ctx, const Wc3ThreadDesc *desc,
     }
 
     pthread_attr_t attr;
-    (void)pthread_attr_init(&attr);
-    if (desc->stack_size >= (uint32_t)PTHREAD_STACK_MIN)
-        (void)pthread_attr_setstacksize(&attr, (size_t)desc->stack_size);
+    if (pthread_attr_init(&attr) != 0) {
+        headless_sched_unregister(st, t->sched);
+        pthread_cond_destroy(&t->cond);
+        pthread_mutex_destroy(&t->lock);
+        free(t);
+        return -1;
+    }
+    uint32_t stack_size = desc->stack_size
+                              ? desc->stack_size
+                              : (uint32_t)WC3_HOST_THREAD_STACK_SIZE;
+    if (stack_size >= (uint32_t)PTHREAD_STACK_MIN)
+        (void)pthread_attr_setstacksize(&attr, (size_t)stack_size);
     int rc = pthread_create(&t->thread, &attr, headless_thread_main, t);
     (void)pthread_attr_destroy(&attr);
     if (rc != 0) {

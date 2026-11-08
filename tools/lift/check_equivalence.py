@@ -84,15 +84,52 @@ def compare(c_text: str, py_text: str) -> dict:
     }
 
 
+def checker_self_test() -> int:
+    """Prove the normalizer/comparator detects a corrupted body without assets.
+
+    This is the executable part of G-15 that does not need a licensed image or
+    the C lifter.  It is not a substitute for the per-module golden set; it
+    only proves the checker fails closed when a body changes.
+    """
+    reference = (
+        'void L_00401000(CPU *c) { c->eax = 1u; return; }\n'
+        'void L_00401010(CPU *c) { dispatch(c, 0x00401000u); return; }\n'
+    )
+    identical = compare(reference, reference)
+    if identical["verdict"] != "pass" or identical["mismatches"] != 0:
+        print("equivalence checker self-test: FAIL identical input",
+              file=sys.stderr)
+        return 1
+    corrupted = reference.replace("c->eax = 1u", "c->eax = 2u", 1)
+    poisoned = compare(corrupted, reference)
+    if poisoned["verdict"] != "fail" or poisoned["mismatches"] != 1:
+        print("equivalence checker self-test: FAIL corruption not detected",
+              file=sys.stderr)
+        return 1
+    missing = compare(reference.splitlines()[0] + "\n", reference)
+    if not any(c["reason"] == "missing_in_c" for c in missing["change_set"]):
+        print("equivalence checker self-test: FAIL missing function not detected",
+              file=sys.stderr)
+        return 1
+    print("equivalence checker self-test: OK")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--image", required=True, help="licensed PE32 module (local only)")
-    ap.add_argument("--funcs", required=True, help="catalog: 0xADDR size name per line")
+    ap.add_argument("--image", help="licensed PE32 module (local only)")
+    ap.add_argument("--funcs", help="catalog: 0xADDR size name per line")
     ap.add_argument("--json", type=Path, help="report path")
     ap.add_argument("--self-test", action="store_true",
                     help="prove fail on a deliberately corrupted body (V5.4)")
+    ap.add_argument("--checker-self-test", action="store_true",
+                    help="asset-free normalizer/comparator self-test")
     args = ap.parse_args(argv)
 
+    if args.checker_self_test:
+        return checker_self_test()
+    if not args.image or not args.funcs:
+        ap.error("--image and --funcs are required unless --checker-self-test")
     if not C_TOOL.is_file():
         print("equivalence: unavailable (build/lift-tools/lift32.exe missing; run build_tools.ps1)",
               file=sys.stderr)

@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -241,6 +242,185 @@ def test_profile_corpus() -> int:
     """O-19/O-30: static profile counters and identity checks are sane."""
     return run([sys.executable, str(ROOT / "tools" / "profile_corpus.py"),
                 "--self-test"])
+
+
+def test_boot_dispatch_hash() -> int:
+    """O-24: the generated constant table matches the runtime lookup."""
+    return run([sys.executable, str(ROOT / "tools" / "gen_boot_dispatch.py"),
+                "--self-test"])
+
+
+def test_x87_publication_guard() -> int:
+    """O-22: SoftFloat publication keeps the reviewed exactness shape."""
+    return run([sys.executable, str(ROOT / "tools" / "check_x87_guard.py")])
+
+
+def test_splitcorpus_packing() -> int:
+    """O-23: keep the component-aware planner in the splitter source."""
+    return run([sys.executable, str(ROOT / "tools" / "check_splitcorpus_packing.py")])
+
+
+def test_splitcorpus_order() -> int:
+    """O-23: splitcorpus must emit caller/callee neighbours together."""
+    exe = ROOT / "build" / "lift-tools" / "splitcorpus.exe"
+    if not exe.is_file():
+        print("splitcorpus_order: unavailable (prebuilt splitcorpus.exe missing)")
+        return 2
+    work = BUILD / "splitcorpus_order"
+    if work.exists():
+        shutil.rmtree(work)
+    outdir = work / "out"
+    outdir.mkdir(parents=True)
+    src = work / "fixture.c"
+    src.write_text(
+        "void L_00401000(CPU *c) {\n"
+        "    dispatch(c, 0x00404000u);\n"
+        "}\n"
+        "void L_00402000(CPU *c) {\n"
+        "    dispatch(c, 0x00402010u);\n"
+        "}\n"
+        "void L_00404000(CPU *c) {\n"
+        "    dispatch(c, 0x00401000u);\n"
+        "}\n"
+        "void L_00403000(CPU *c) {\n"
+        "    dispatch(c, 0x00403010u);\n"
+        "}\n",
+        encoding="ascii")
+    rc = run([str(exe), str(src), str(outdir), "o23", "500", "16"])
+    if rc != 0:
+        return rc
+    chunks = sorted(outdir.glob("o23_*.c"))
+    if len(chunks) != 1:
+        print(f"splitcorpus_order: expected 1 chunk, got {len(chunks)}")
+        return 1
+    order = re.findall(r"^void L_([0-9A-Fa-f]+)\(",
+                       chunks[0].read_text(encoding="ascii"), re.M)
+    expected = ["00401000", "00404000", "00402000", "00403000"]
+    if order != expected:
+        print(f"splitcorpus_order: got {order}, expected {expected}")
+        return 1
+    print("splitcorpus_order: graph order verified")
+    return 0
+
+
+def test_splitcorpus_source_order() -> int:
+    """O-23: rebuild splitcorpus from source and verify the graph order."""
+    cc = gcc()
+    if not cc:
+        print("splitcorpus_source_order: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "splitcorpus_source.exe"
+    source = ROOT / "tools" / "lift" / "csrc_local" / "splitcorpus.c"
+    dirwalk = ROOT / "tools" / "lift" / "csrc_local" / "dirwalk.c"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra",
+        "-I" + str(source.parent),
+        str(source), str(dirwalk), "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    work = BUILD / "splitcorpus_source_order"
+    if work.exists():
+        shutil.rmtree(work)
+    outdir = work / "out"
+    outdir.mkdir(parents=True)
+    src = work / "fixture.c"
+    src.write_text(
+        "void L_00401000(CPU *c) {\n"
+        "    dispatch(c, 0x00404000u);\n"
+        "}\n"
+        "void L_00402000(CPU *c) {\n"
+        "    dispatch(c, 0x00402010u);\n"
+        "}\n"
+        "void L_00404000(CPU *c) {\n"
+        "    dispatch(c, 0x00401000u);\n"
+        "}\n"
+        "void L_00403000(CPU *c) {\n"
+        "    dispatch(c, 0x00403010u);\n"
+        "}\n",
+        encoding="ascii")
+    rc = run([str(exe), str(src), str(outdir), "o23src", "500", "16"])
+    if rc != 0:
+        return rc
+    chunks = sorted(outdir.glob("o23src_*.c"))
+    if len(chunks) != 1:
+        print(f"splitcorpus_source_order: expected 1 chunk, got {len(chunks)}")
+        return 1
+    order = re.findall(r"^void L_([0-9A-Fa-f]+)\(",
+                       chunks[0].read_text(encoding="ascii"), re.M)
+    expected = ["00401000", "00404000", "00402000", "00403000"]
+    if order != expected:
+        print(f"splitcorpus_source_order: got {order}, expected {expected}")
+        return 1
+    print("splitcorpus_source_order: source graph order verified")
+    return 0
+
+
+def test_dxvk_probe_cache() -> int:
+    """O-25: a second Vulkan probe is served from the process memo."""
+    cc = gcc()
+    if not cc:
+        print("dxvk_probe_cache: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "dxvk_probe_cache_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        str(ROOT / "runtime" / "gfx" / "dxvk_probe_cache.c"),
+        str(ROOT / "tests" / "dxvk_probe_cache_test.c"),
+        str(ROOT / "tests" / "dxvk_probe_cache_real_stub.c"),
+        "-pthread", "-Wl,--wrap=wc3_vulkan_major_minor",
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_kernel32_file() -> int:
+    """O-26/O-27: leaf-case cache and live invalidation on the M5 seam."""
+    cc = gcc()
+    if not cc:
+        print("kernel32_file: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "diag"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "file"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "file"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "file" /
+            "kernel32_file_hle.c"),
+        str(ROOT / "tests" / "kernel32_file_test.c"),
+        "-pthread",
+        "-Wl,--wrap=access",
+    ]
+    for name, debug, tag in (
+            ("kernel32_file_test_debug.exe", 1, 1),
+            ("kernel32_file_test_release.exe", 0, 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}",
+                  f"-DWC3_DEBUG_HLE={tag}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
 
 
 def test_corpus_identity() -> int:
@@ -490,6 +670,159 @@ def test_guest_memory() -> int:
     return run([str(exe)])
 
 
+def test_window_settle() -> int:
+    """T0: cold-start surface settle rule shared with the Android shell."""
+    cc = gcc()
+    if not cc:
+        print("window settle: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "apps" / "android_gameactivity" / "src" / "main" /
+                    "cpp"),
+    ]
+    for name, debug in (("window_settle_test_debug.exe", 1),
+                        ("window_settle_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([
+            cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+            *include, f"-DWC3_DEBUG={debug}",
+            str(ROOT / "tests" / "window_settle_test.c"),
+            "-o", str(exe),
+        ])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
+def test_waveout_install() -> int:
+    """T0: WINMM install selection, including both rollback triggers."""
+    cc = gcc()
+    if not cc:
+        print("waveout install: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "diag"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "winmm"),
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "waveout_hle.c"),
+        str(ROOT / "tests" / "waveout_install_test.c"),
+    ]
+    cases = (
+        ("disabled", 0, "disabled", None),
+        ("enabled", 1, "enabled", None),
+        ("trigger_on", 0, "enabled", "wave2_v2_on"),
+        ("trigger_off", 1, "disabled", "wave2_v2_off"),
+    )
+    saved_data_dir = os.environ.pop("WC3_DATA_DIR", None)
+    saved_audio_v2 = os.environ.pop("WC3_AUDIO_V2", None)
+    try:
+        for mode, enabled, expected, trigger in cases:
+            for debug in (1, 0):
+                exe = BUILD / f"waveout_install_test_{mode}_{debug}.exe"
+                rc = run([*common, f"-DWC3_AUDIO_V2_ENABLED={enabled}",
+                          f"-DWC3_DEBUG={debug}",
+                          f"-DWC3_DEBUG_AUDIO={debug}", "-o", str(exe)])
+                if rc != 0:
+                    return rc
+                marker = BUILD / trigger if trigger else None
+                if marker:
+                    marker.write_text("", encoding="utf-8")
+                    os.environ["WC3_DATA_DIR"] = str(BUILD)
+                try:
+                    rc = run([str(exe), expected])
+                finally:
+                    if marker:
+                        marker.unlink(missing_ok=True)
+                    os.environ.pop("WC3_DATA_DIR", None)
+                if rc != 0:
+                    return rc
+    finally:
+        os.environ.pop("WC3_DATA_DIR", None)
+        if saved_data_dir is not None:
+            os.environ["WC3_DATA_DIR"] = saved_data_dir
+        if saved_audio_v2 is not None:
+            os.environ["WC3_AUDIO_V2"] = saved_audio_v2
+    return 0
+
+
+def test_waveout_runtime() -> int:
+    """T0: real WINMM handlers for WOM_DONE, WM_TIMER, spill, NOMEM."""
+    cc = gcc()
+    if not cc:
+        print("waveout runtime: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "diag"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "winmm"),
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "waveout_hle.c"),
+        str(ROOT / "tests" / "waveout_runtime_test.c"),
+    ]
+    saved_data_dir = os.environ.pop("WC3_DATA_DIR", None)
+    saved_audio_v2 = os.environ.pop("WC3_AUDIO_V2", None)
+    try:
+        for name, debug in (("waveout_runtime_test_debug.exe", 1),
+                            ("waveout_runtime_test_release.exe", 0)):
+            exe = BUILD / name
+            rc = run([*common, "-DWC3_AUDIO_V2_ENABLED=1",
+                      f"-DWC3_DEBUG={debug}", f"-DWC3_DEBUG_AUDIO={debug}",
+                      "-o", str(exe)])
+            if rc != 0:
+                return rc
+            rc = run([str(exe)])
+            if rc != 0:
+                return rc
+    finally:
+        if saved_data_dir is not None:
+            os.environ["WC3_DATA_DIR"] = saved_data_dir
+        if saved_audio_v2 is not None:
+            os.environ["WC3_AUDIO_V2"] = saved_audio_v2
+    return 0
+
+
+def test_release_hygiene() -> int:
+    """T0: BV-10 checker self-test; artifact scan is a separate command."""
+    return run([
+        sys.executable,
+        str(ROOT / "tools" / "check_release_hygiene.py"),
+        "--self-test",
+    ])
+
+
 def test_null_gfx() -> int:
     """T0: canonical D3D9 stream and the three V5.9 invariants."""
     cc = gcc()
@@ -586,6 +919,55 @@ def test_direct_call() -> int:
     if rc != 0:
         return rc
     return run([str(exe)])
+
+
+def test_devirtualize_pass() -> int:
+    """P0-1/G-15 source check: only constant dispatch sites are rewritten."""
+    return run([sys.executable,
+                str(ROOT / "tools" / "lift" / "passes" / "devirtualize.py"),
+                "--self-test"])
+
+
+def test_dead_flags_pass() -> int:
+    """P0-2 source check: only fully overwritten flag writes are elided."""
+    return run([sys.executable,
+                str(ROOT / "tools" / "lift" / "passes" / "dead_flags.py"),
+                "--self-test"])
+
+
+def test_flag_read_audit() -> int:
+    """P0-10 proof step: a live PF/AF read must fail the audit."""
+    return run([sys.executable,
+                str(ROOT / "tools" / "flag_read_audit.py"),
+                "--self-test"])
+
+
+def test_gva_fold() -> int:
+    """P0-3 source invariant: the default path must not load g_image_delta."""
+    cpu_h = (ROOT / "runtime" / "cpu" / "cpu.h").read_text(
+        encoding="utf-8", errors="replace")
+    missing = []
+    if "#define GVA_DELTA 0" not in cpu_h:
+        missing.append("cpu.h: GVA_DELTA default is not 0")
+    if "#define GVA(abs) ((uint32_t)(abs))" not in cpu_h:
+        missing.append("cpu.h: GVA does not fold the delta")
+    for rel in ("cmake/Wc3ReliftedCorpus.cmake", "cmake/Wc3LegacyBoot.cmake"):
+        text = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
+        if "GVA_DELTA=0" not in text:
+            missing.append(f"{rel}: no explicit GVA_DELTA=0")
+    if missing:
+        for item in missing:
+            print(f"gva_fold: {item}", file=sys.stderr)
+        return 1
+    print("gva_fold: OK")
+    return 0
+
+
+def test_lift_equivalence_checker() -> int:
+    """G-15 checker self-test: a corrupted body must fail closed."""
+    return run([sys.executable,
+                str(ROOT / "tools" / "lift_equivalence.py"),
+                "--checker-self-test"])
 
 
 def test_direct_call_multi_tu() -> int:
@@ -2041,6 +2423,11 @@ TESTS = {
     "hle_abi": test_hle_abi,
     "direct_call": test_direct_call,
     "direct_call_multi_tu": test_direct_call_multi_tu,
+    "devirtualize_pass": test_devirtualize_pass,
+    "dead_flags_pass": test_dead_flags_pass,
+    "flag_read_audit": test_flag_read_audit,
+    "gva_fold": test_gva_fold,
+    "lift_equivalence_checker": test_lift_equivalence_checker,
     "module_registry": test_module_registry,
     "corpus_binding": test_corpus_binding,
     "mailbox_set": test_mailbox_set,
@@ -2084,6 +2471,13 @@ TESTS = {
     "config_schema": test_config_schema,
     "corpus_identity": test_corpus_identity,
     "profile_corpus": test_profile_corpus,
+    "boot_dispatch_hash": test_boot_dispatch_hash,
+    "x87_publication_guard": test_x87_publication_guard,
+    "splitcorpus_packing": test_splitcorpus_packing,
+    "splitcorpus_order": test_splitcorpus_order,
+    "splitcorpus_source_order": test_splitcorpus_source_order,
+    "dxvk_probe_cache": test_dxvk_probe_cache,
+    "kernel32_file": test_kernel32_file,
     "atomic_lift": test_atomic_lift,
     "posix_shim": test_posix_shim,
     "dispatch": test_dispatch,
@@ -2094,6 +2488,10 @@ TESTS = {
     "platform_contract": test_platform_contract,
     "platform_headless": test_platform_headless,
     "guest_memory": test_guest_memory,
+    "window_settle": test_window_settle,
+    "waveout_install": test_waveout_install,
+    "waveout_runtime": test_waveout_runtime,
+    "release_hygiene": test_release_hygiene,
     "null_gfx": test_null_gfx,
     "difftest": test_difftest,
 }

@@ -11,6 +11,7 @@ param(
     [switch]$NativeDebug,
     [switch]$Install,
     [switch]$Launch,
+    [switch]$PackDynRelocs,
     [string]$Serial = '',
     [string]$GamesActivityAar = '',
     [string]$DebugTags = '',
@@ -118,6 +119,7 @@ if ($Clean) { $nativeParams['Clean'] = $true }
 if ($GamesActivityAar) { $nativeParams['GamesActivityAar'] = $GamesActivityAar }
 if ($DebugTags) { $nativeParams['DebugTags'] = $DebugTags }
 if ($CorpusRoot) { $nativeParams['CorpusRoot'] = $CorpusRoot }
+if ($PackDynRelocs) { $nativeParams['PackDynRelocs'] = $true }
 $ErrorActionPreference = 'Continue'
 & $nativeScript @nativeParams 2>&1 | ForEach-Object { Write-Host $_ }
 $nativeRc = $LASTEXITCODE
@@ -152,6 +154,31 @@ if (-not (Test-Path $libcxx)) {
     exit 2
 }
 Copy-Item $libcxx (Join-Path $jniDir 'libc++_shared.so') -Force
+
+# O-41: AGP's stripReleaseDebugSymbols is a no-op for this prebuilt library in
+# the useLegacyPackaging=false layout.  Strip only the release copy and only
+# non-PT_LOAD metadata: .symtab/.strtab/.debug_* go away, while .dynsym and
+# .dynstr stay because the crash handler resolves L_<va> through dladdr (O-42).
+# The debug copy intentionally keeps symbols for the wc3.recomp.debug package.
+if ($variant -eq 'release') {
+    $jniSo = Join-Path $jniDir 'libwc3gameactivity.so'
+    $strip = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe'
+    $readelf = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-readelf.exe'
+    if (-not (Test-Path $strip) -or -not (Test-Path $readelf)) {
+        Write-Host '[apk] unavailable: NDK llvm-strip/llvm-readelf not found'
+        exit 2
+    }
+    & $strip --strip-all $jniSo
+    if ($LASTEXITCODE -ne 0) { Write-Host '[apk] llvm-strip failed'; exit 1 }
+    $sections = (& $readelf -S $jniSo) -join "`n"
+    if ($LASTEXITCODE -ne 0) { Write-Host '[apk] llvm-readelf failed'; exit 1 }
+    if ($sections -notmatch '\.dynsym' -or $sections -match '\.symtab' -or
+        $sections -match '\.debug_') {
+        Write-Host '[apk] release strip removed .dynsym or kept .symtab/.debug_*'
+        exit 1
+    }
+    Write-Host "[apk] stripped release .so: $((Get-Item $jniSo).Length) bytes"
+}
 
 # A local Maven repository keeps the build offline and independent of a
 # network cache descriptor.  games-activity has no POM dependencies, so this

@@ -384,21 +384,51 @@ static inline uint32_t pop32(CPU *c) { uint32_t v = rd32(STACK_BASE(c) + c->esp)
 #define RECOMP_TODO(va, text) abort()
 #endif
 
-/* ---- absolute image references: abs VA at preferred base -> live address ---- */
-extern uint32_t g_image_delta;   /* live_base - PE ImageBase (0 if loaded where it wanted) */
+/* ---- absolute image references: abs VA at preferred base -> live address ----
+ *
+ * P0-3: both shipped targets use a fixed identity mapping for the corpus
+ * (docs/GUEST_ABI.md ABI-1/ABI-2), so the delta is a compile-time zero.  The
+ * mutable global remains defined for the legacy HLE diagnostics and for a
+ * future relocatable build, but the hot path no longer loads it.  Define
+ * GVA_DELTA=1 to opt back into the run-time delta; that is a relocation
+ * decision and requires a new corpus identity (GUEST_ABI ABI-9).
+ */
+#ifndef GVA_DELTA
+#define GVA_DELTA 0
+#endif
+#if GVA_DELTA
+extern uint32_t g_image_delta;   /* live_base - PE ImageBase */
 #define GVA(abs) ((uint32_t)((abs) + g_image_delta))
+#else
+#define GVA(abs) ((uint32_t)(abs))
+#endif
 
 /* ---- flag helpers ---- */
+/* P0-10 field-level DFE.  PF and AF are read by almost no lifted instruction;
+ * when a corpus audit proves there is no read, the arithmetic helpers can
+ * leave both fields alone and skip parity8().  The switch is OFF by default:
+ * without that audit the change is a semantic change, not an optimization. */
+#ifndef WC3_FLAGS_FAST_PF_AF
+#define WC3_FLAGS_FAST_PF_AF 0
+#endif
+#if WC3_FLAGS_FAST_PF_AF
+#define WC3_SET_PF(c, v) ((void)0)
+#define WC3_SET_AF(c, v) ((void)0)
+#else
+#define WC3_SET_PF(c, v) ((c)->pf = (v))
+#define WC3_SET_AF(c, v) ((c)->af = (v))
+#endif
+
 static inline uint32_t parity8(uint8_t v) {
     v ^= v >> 4; v ^= v >> 2; v ^= v >> 1; return (~v) & 1;
 }
 
 /* logical ops (AND/OR/XOR/TEST): CF=OF=0 */
 static inline void flags_logic32(CPU *c, uint32_t r) {
-    c->cf = 0; c->of = 0; c->sf = r >> 31; c->zf = (r == 0); c->pf = parity8((uint8_t)r);
+    c->cf = 0; c->of = 0; c->sf = r >> 31; c->zf = (r == 0); WC3_SET_PF(c, parity8((uint8_t)r));
 }
 static inline void flags_logic8(CPU *c, uint8_t r) {
-    c->cf = 0; c->of = 0; c->sf = (r >> 7) & 1; c->zf = (r == 0); c->pf = parity8(r);
+    c->cf = 0; c->of = 0; c->sf = (r >> 7) & 1; c->zf = (r == 0); WC3_SET_PF(c, parity8(r));
 }
 /* cmp/sub (a - b) */
 static inline uint32_t flags_sub32(CPU *c, uint32_t a, uint32_t b) {
@@ -407,8 +437,8 @@ static inline uint32_t flags_sub32(CPU *c, uint32_t a, uint32_t b) {
     c->zf = (r == 0);
     c->sf = r >> 31;
     c->of = (((a ^ b) & (a ^ r)) >> 31) & 1;
-    c->af = ((a ^ b ^ r) >> 4) & 1;
-    c->pf = parity8((uint8_t)r);
+    WC3_SET_AF(c, ((a ^ b ^ r) >> 4) & 1);
+    WC3_SET_PF(c, parity8((uint8_t)r));
     return r;
 }
 /* add (a + b) */
@@ -418,8 +448,8 @@ static inline uint32_t flags_add32(CPU *c, uint32_t a, uint32_t b) {
     c->zf = (r == 0);
     c->sf = r >> 31;
     c->of = ((~(a ^ b) & (a ^ r)) >> 31) & 1;
-    c->af = ((a ^ b ^ r) >> 4) & 1;
-    c->pf = parity8((uint8_t)r);
+    WC3_SET_AF(c, ((a ^ b ^ r) >> 4) & 1);
+    WC3_SET_PF(c, parity8((uint8_t)r));
     return r;
 }
 /* inc/dec: like add/sub by 1 but CF preserved */
@@ -438,20 +468,20 @@ static inline uint32_t flags_sub(CPU *c, uint32_t a, uint32_t b, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz);
     a &= m; b &= m; uint32_t r = (a - b) & m;
     c->cf = (a < b); c->zf = (r == 0); c->sf = (r & s) != 0;
-    c->of = (((a ^ b) & (a ^ r)) & s) != 0; c->af = ((a ^ b ^ r) & 0x10) != 0;
-    c->pf = parity8((uint8_t)r); return r;
+    c->of = (((a ^ b) & (a ^ r)) & s) != 0; WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
+    WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 static inline uint32_t flags_add(CPU *c, uint32_t a, uint32_t b, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz);
     a &= m; b &= m; uint32_t r = (a + b) & m;
     c->cf = (r < a); c->zf = (r == 0); c->sf = (r & s) != 0;
-    c->of = ((~(a ^ b) & (a ^ r)) & s) != 0; c->af = ((a ^ b ^ r) & 0x10) != 0;
-    c->pf = parity8((uint8_t)r); return r;
+    c->of = ((~(a ^ b) & (a ^ r)) & s) != 0; WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
+    WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 static inline uint32_t flags_logicz(CPU *c, uint32_t r, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz); r &= m;
     c->cf = 0; c->of = 0; c->sf = (r & s) != 0; c->zf = (r == 0);
-    c->pf = parity8((uint8_t)r); return r;
+    WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 static inline uint32_t flags_incs(CPU *c, uint32_t a, int sz) {
     uint32_t keep = c->cf, r = flags_add(c, a, 1, sz); c->cf = keep; return r;
@@ -463,32 +493,32 @@ static inline uint32_t flags_adc(CPU *c, uint32_t a, uint32_t b, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz), cin = c->cf & 1;
     a &= m; b &= m; uint64_t full = (uint64_t)a + b + cin; uint32_t r = (uint32_t)full & m;
     c->cf = (full >> (sz * 8)) & 1; c->zf = (r == 0); c->sf = (r & s) != 0;
-    c->of = ((~(a ^ b) & (a ^ r)) & s) != 0; c->af = ((a ^ b ^ r) & 0x10) != 0;
-    c->pf = parity8((uint8_t)r); return r;
+    c->of = ((~(a ^ b) & (a ^ r)) & s) != 0; WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
+    WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 static inline uint32_t flags_sbb(CPU *c, uint32_t a, uint32_t b, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz), bin = c->cf & 1;
     a &= m; b &= m; uint64_t full = (uint64_t)a - b - bin; uint32_t r = (uint32_t)full & m;
     c->cf = (full >> (sz * 8)) & 1; c->zf = (r == 0); c->sf = (r & s) != 0;
-    c->of = (((a ^ b) & (a ^ r)) & s) != 0; c->af = ((a ^ b ^ r) & 0x10) != 0;
-    c->pf = parity8((uint8_t)r); return r;
+    c->of = (((a ^ b) & (a ^ r)) & s) != 0; WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
+    WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 
 static inline uint32_t op_shl(CPU *c, uint32_t v, uint32_t cnt, int sz) {
     uint32_t m = mask_sz(sz); cnt &= 31; if (!cnt) return v & m;
     c->cf = (v >> (sz * 8 - cnt)) & 1; uint32_t r = (v << cnt) & m;
-    c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; c->pf = parity8((uint8_t)r); return r;
+    c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 static inline uint32_t op_shr(CPU *c, uint32_t v, uint32_t cnt, int sz) {
     uint32_t m = mask_sz(sz); v &= m; cnt &= 31; if (!cnt) return v;
     c->cf = (v >> (cnt - 1)) & 1; uint32_t r = v >> cnt;
-    c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; c->pf = parity8((uint8_t)r); return r;
+    c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 static inline uint32_t op_sar(CPU *c, uint32_t v, uint32_t cnt, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz); v &= m; cnt &= 31; if (!cnt) return v;
     uint32_t ext = (v & s) ? (m << (sz * 8 - cnt)) & m : 0;
     c->cf = (v >> (cnt - 1)) & 1; uint32_t r = ((v >> cnt) | ext) & m;
-    c->zf = (r == 0); c->sf = (r & s) != 0; c->pf = parity8((uint8_t)r); return r;
+    c->zf = (r == 0); c->sf = (r & s) != 0; WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 
 /* ---- rotates. Unlike the shifts these leave ZF/SF/PF alone, which is not an
@@ -532,7 +562,7 @@ static inline uint32_t op_shld(CPU *c, uint32_t d, uint32_t s, uint32_t cnt, int
     if (!cnt || cnt > (uint32_t)w) return d;      /* count > width is undefined */
     uint32_t r = ((d << cnt) | (s >> (w - cnt))) & m;
     c->cf = (d >> (w - cnt)) & 1;
-    c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; c->pf = parity8((uint8_t)r);
+    c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; WC3_SET_PF(c, parity8((uint8_t)r));
     return r;
 }
 /* BSF/BSR: the index of the lowest (or highest) set bit. The flag is the
@@ -632,7 +662,7 @@ static inline uint32_t op_shrd(CPU *c, uint32_t d, uint32_t s, uint32_t cnt, int
     if (!cnt || cnt > (uint32_t)w) return d;
     uint32_t r = ((d >> cnt) | (s << (w - cnt))) & m;
     c->cf = (d >> (cnt - 1)) & 1;
-    c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; c->pf = parity8((uint8_t)r);
+    c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; WC3_SET_PF(c, parity8((uint8_t)r));
     return r;
 }
 
@@ -641,21 +671,21 @@ static inline uint32_t shr32(CPU *c, uint32_t v, uint32_t cnt) {
     cnt &= 31; if (!cnt) return v;
     c->cf = (v >> (cnt - 1)) & 1;
     uint32_t r = v >> cnt;
-    c->zf = (r == 0); c->sf = r >> 31; c->pf = parity8((uint8_t)r);
+    c->zf = (r == 0); c->sf = r >> 31; WC3_SET_PF(c, parity8((uint8_t)r));
     return r;
 }
 static inline uint32_t shl32(CPU *c, uint32_t v, uint32_t cnt) {
     cnt &= 31; if (!cnt) return v;
     c->cf = (v >> (32 - cnt)) & 1;
     uint32_t r = v << cnt;
-    c->zf = (r == 0); c->sf = r >> 31; c->pf = parity8((uint8_t)r);
+    c->zf = (r == 0); c->sf = r >> 31; WC3_SET_PF(c, parity8((uint8_t)r));
     return r;
 }
 static inline uint8_t shr8(CPU *c, uint8_t v, uint32_t cnt) {
     cnt &= 31; if (!cnt) return v;
     if (cnt <= 8) c->cf = (v >> (cnt - 1)) & 1;
     uint8_t r = (cnt < 8) ? (uint8_t)(v >> cnt) : 0;
-    c->zf = (r == 0); c->sf = (r >> 7) & 1; c->pf = parity8(r);
+    c->zf = (r == 0); c->sf = (r >> 7) & 1; WC3_SET_PF(c, parity8(r));
     return r;
 }
 
