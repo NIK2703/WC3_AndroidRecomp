@@ -171,6 +171,8 @@ static void test_stale_hint_cannot_widen(void)
      * genuinely present. */
     atomic_store_explicit(&g_dyn_page_id[0x40001000u >> GUEST_PAGE_SHIFT],
                           GUEST_DYN_PAGE_OVERFLOW, memory_order_relaxed);
+    g_cached_range = 0u;
+    g_cached_epoch = 0u;
     expect_ok(0x40001000u, 0x1000u, 1);
 
     range_remove(0x40001000u, 0x1000u);

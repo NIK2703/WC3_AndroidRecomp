@@ -458,6 +458,32 @@ def test_platform_headless() -> int:
     return 0
 
 
+def test_guest_memory() -> int:
+    """T0: dynamic range page hints stay hints and are updated on remove."""
+    cc = gcc()
+    if not cc:
+        print("guest memory: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+    ]
+    exe = BUILD / "guest_memory_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        *include,
+        str(ROOT / "tests" / "guest_memory_test.c"),
+        "-pthread",
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
 def test_null_gfx() -> int:
     """T0: canonical D3D9 stream and the three V5.9 invariants."""
     cc = gcc()
@@ -2014,6 +2040,7 @@ TESTS = {
     "asset_api": test_asset_api,
     "platform_contract": test_platform_contract,
     "platform_headless": test_platform_headless,
+    "guest_memory": test_guest_memory,
     "null_gfx": test_null_gfx,
     "difftest": test_difftest,
 }
