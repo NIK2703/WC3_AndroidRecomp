@@ -22,13 +22,14 @@
  * State is per guest thread and lives in CPU (ABI-4).  Do not add a TLS copy
  * here: the corpus is split into translation units, and one header-level
  * `static` copy per TU would make a tail target from a neighbour invisible.
+ * WC3_DIRECT_CALL also keeps a saved transition frame on the *host stack*
+ * (TA-13): a nested direct call owns its pending slot, drains it before
+ * returning, and cannot leak a tail target into the caller's drain loop.
+ * The saved frame is a local of the macro, so call depth is limited by the
+ * real host stack rather than by an arbitrary fixed array.
+ *
  * Include this header after cpu.h.  The CPU must be zero-initialised by its
  * owner before the first dispatch (memset or `CPU c = {0}`).
- *
- * The header is self-contained for type checking, but the inline bodies need
- * the complete CPU definition.  It is deliberately not guarded by a separate
- * "cpu.h was included" macro: a missing definition is a compile error at the
- * first field access, which is the desired failure mode.
  */
 #ifndef WC3_GUEST_DIRECT_CALL_H
 #define WC3_GUEST_DIRECT_CALL_H
@@ -40,10 +41,20 @@ extern "C" {
 #endif
 
 #ifndef WC3_CPU_DEFINED
-typedef struct CPU CPU;
+#error "direct_call.h requires cpu.h first (WC3_CPU_DEFINED)"
 #endif
 
 typedef void (*wc3_lifted_fn)(CPU *);
+
+/* Host-stack snapshot of CPU.disp_* (ABI-4).  WC3_DIRECT_CALL uses one local
+ * per call; the fields are copied back on leave. */
+typedef struct Wc3DispFrame {
+    uint32_t depth;
+    uint32_t pending_valid;
+    uint32_t pending_kind;
+    uintptr_t pending_target;
+    uint32_t draining;
+} Wc3DispFrame;
 
 static inline uint32_t wc3_guest_depth_get(const CPU *c)
 {
@@ -59,8 +70,8 @@ static inline void wc3_guest_set_pending_fn(CPU *c, wc3_lifted_fn fn)
 
 static inline void wc3_guest_drain(CPU *c)
 {
-    /* Re-entrancy guard: a lifted function reached from the drain loop may
-     * itself perform direct calls.  The outermost loop owns the pending slot. */
+    /* Re-entrancy guard for this transition frame.  A nested direct call has
+     * its own frame (see WC3_DIRECT_CALL), so it is not blocked here. */
     if (c->disp_draining) return;
     c->disp_draining = 1u;
     while (c->disp_pending_valid) {
@@ -78,23 +89,49 @@ static inline void wc3_guest_drain(CPU *c)
     c->disp_draining = 0u;
 }
 
-static inline void wc3_guest_enter(CPU *c)
+static inline void wc3_guest_enter(CPU *c, Wc3DispFrame *saved)
 {
-    c->disp_depth++;
+    saved->depth = c->disp_depth;
+    saved->pending_valid = c->disp_pending_valid;
+    saved->pending_kind = c->disp_pending_kind;
+    saved->pending_target = c->disp_pending_target;
+    saved->draining = c->disp_draining;
+
+    /* Enter the callee at the caller's depth + 1.  The callee gets a fresh
+     * pending slot; the caller's slot is restored on leave. */
+    c->disp_depth = saved->depth + 1u;
+    c->disp_pending_valid = 0u;
+    c->disp_pending_kind = WC3_DISP_PENDING_VA;
+    c->disp_pending_target = 0u;
+    c->disp_draining = 0u;
 }
 
-static inline void wc3_guest_leave(CPU *c)
+static inline void wc3_guest_leave(CPU *c, const Wc3DispFrame *saved)
 {
-    if (c->disp_depth) c->disp_depth--;
+    /* The callee's host frame is finished.  Drain its tail target at the
+     * caller's depth, then restore the caller's transition state. */
+    c->disp_depth = saved->depth;
     wc3_guest_drain(c);
+    c->disp_depth = saved->depth;
+    c->disp_pending_valid = saved->pending_valid;
+    c->disp_pending_kind = saved->pending_kind;
+    c->disp_pending_target = saved->pending_target;
+    c->disp_draining = saved->draining;
 }
 
-#define WC3_DIRECT_CALL(fn, c) \
-    do { wc3_guest_enter(c); fn(c); wc3_guest_leave(c); } while (0)
+#define WC3_DIRECT_CALL(fn, c)                                               \
+    do {                                                                     \
+        Wc3DispFrame wc3_saved_frame_;                                       \
+        wc3_guest_enter((c), &wc3_saved_frame_);                             \
+        (fn)(c);                                                             \
+        wc3_guest_leave((c), &wc3_saved_frame_);                             \
+    } while (0)
 
 /* Generated C keeps its own `return;` immediately after this macro. */
-#define WC3_DIRECT_TAIL(fn, c) \
-    do { wc3_guest_set_pending_fn((c), (fn)); } while (0)
+#define WC3_DIRECT_TAIL(fn, c)                                               \
+    do {                                                                     \
+        wc3_guest_set_pending_fn((c), (fn));                                 \
+    } while (0)
 
 /* Top-level guest entry must drain any pending target left by an indirect
  * dispatch_jmp before the guest frame is considered finished. */

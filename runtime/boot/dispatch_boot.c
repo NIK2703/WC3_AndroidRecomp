@@ -170,10 +170,6 @@ static inline void (*find_lifted(uint32_t va))(CPU *)
     return NULL;
 }
 
-static THREAD_LOCAL int g_disp_depth;
-static THREAD_LOCAL int g_tail_pending;
-static THREAD_LOCAL uint32_t g_tail_target;
-
 static void dispatch_unknown(CPU *c, uint32_t target, int tail)
 {
     uint32_t *sp = (uint32_t *)(uintptr_t)c->esp;
@@ -190,6 +186,8 @@ static void dispatch_unknown(CPU *c, uint32_t target, int tail)
 static void dispatch_common(CPU *c, uint32_t target, int tail)
 {
     int chained = 0;
+    int have_fn = 0;
+    void (*pending_fn)(CPU *) = NULL;
 #if WC3_DEBUG && WC3_DEBUG_HLE
     uint32_t lt_op = 0, lt_lock = 0, lt_arg = 0;
     uint32_t lt_ra = 0, lt_caller = 0, lt_gid = 0;
@@ -197,30 +195,40 @@ static void dispatch_common(CPU *c, uint32_t target, int tail)
                                           &lt_arg, &lt_ra, &lt_caller,
                                           &lt_gid);
 #endif
-    g_disp_depth++;
+    c->disp_depth++;
     for (;;) {
-        g_tail_pending = 0;
-#if WC3_DEBUG && WC3_DEBUG_HLE
-        wc3_watch_dispatch(c, target);
-#endif
-        if (target >= GUEST_HLE_BASE &&
-            target < GUEST_HLE_BASE + WC3_LEGACY_HLE_MAX *
-                                      WC3_LEGACY_HLE_STRIDE) {
-            wc3_legacy_hle_call(target, c);
-            break;
-        }
-        void (*fn)(CPU *) = find_lifted(target);
-        if (fn) {
+        c->disp_pending_valid = 0;
+        if (have_fn) {
+            void (*fn)(CPU *) = pending_fn;
+            have_fn = 0;
+            pending_fn = NULL;
             fn(c);
-            if (!g_tail_pending)
+        } else {
+#if WC3_DEBUG && WC3_DEBUG_HLE
+            wc3_watch_dispatch(c, target);
+#endif
+            if (target >= GUEST_HLE_BASE &&
+                target < GUEST_HLE_BASE + WC3_LEGACY_HLE_MAX *
+                                          WC3_LEGACY_HLE_STRIDE) {
+                wc3_legacy_hle_call(target, c);
                 break;
-            chained = 1;
-            target = g_tail_target;
-            continue;
+            }
+            void (*fn)(CPU *) = find_lifted(target);
+            if (!fn)
+                dispatch_unknown(c, target, tail || chained);
+            fn(c);
         }
-        dispatch_unknown(c, target, tail || chained);
+        if (!c->disp_pending_valid)
+            break;
+        chained = 1;
+        if (c->disp_pending_kind == WC3_DISP_PENDING_FN) {
+            pending_fn = (wc3_lifted_fn)c->disp_pending_target;
+            have_fn = 1;
+        } else {
+            target = (uint32_t)c->disp_pending_target;
+        }
     }
-    g_disp_depth--;
+    c->disp_depth--;
 #if WC3_DEBUG && WC3_DEBUG_HLE
     if (lt_tracked)
         wc3_lock_trace_leave(lt_op, lt_lock, lt_arg, lt_ra, lt_caller,
@@ -235,9 +243,10 @@ void dispatch(CPU *c, uint32_t target)
 
 void dispatch_jmp(CPU *c, uint32_t target)
 {
-    if (g_disp_depth > 0) {
-        g_tail_pending = 1;
-        g_tail_target = target;
+    if (c->disp_depth > 0) {
+        c->disp_pending_valid = 1u;
+        c->disp_pending_kind = WC3_DISP_PENDING_VA;
+        c->disp_pending_target = target;
         return;
     }
     dispatch_common(c, target, 1);

@@ -1514,6 +1514,19 @@ static void h_close_handle(CPU *c)
  * real port would wake it. */
 static void iocp_complete_file(uint32_t file, uint32_t bytes, uint32_t ov);
 
+/* The guest opens save files with FILE_FLAG_OVERLAPPED and carries the file
+ * position in OVERLAPPED.Offset/OffsetHigh, not in the host file pointer.
+ * Honor it with pread/pwrite: the save writer lays out header at 0 and body at
+ * 0x44, and a plain sequential write appends the header after the body. */
+static int h_ov_offset(uint32_t ov, off_t *off)
+{
+    if (!ov || !guest_ok(ov, 0x14)) return 0;
+    uint32_t lo = rd32g(ov + 8), hi = rd32g(ov + 0xc);
+    if (lo == 0xFFFFFFFFu && hi == 0xFFFFFFFFu) return 0;  /* current position */
+    *off = (off_t)(((uint64_t)hi << 32) | (uint64_t)lo);
+    return 1;
+}
+
 static void h_read_file(CPU *c)
 {
     uint32_t h = arg32(c, 0), buf = arg32(c, 1), n = arg32(c, 2), got = arg32(c, 3);
@@ -1521,12 +1534,17 @@ static void h_read_file(CPU *c)
     GHandle *g = gh_get(h);
     if (got && guest_ok(got, 4)) wr32g(got, 0);
     if (!g || g->fd < 0 || !guest_ok(buf, n)) { g_last_error = 6; c->eax = 0; return; }
-    ssize_t r = read(g->fd, (void *)(uintptr_t)buf, n);
+    off_t off = -1;
+    ssize_t r;
+    if (g->overlapped && h_ov_offset(ov, &off))
+        r = pread(g->fd, (void *)(uintptr_t)buf, n, off);
+    else
+        r = read(g->fd, (void *)(uintptr_t)buf, n);
 #if WC3_DEBUG && WC3_DEBUG_HLE
     static unsigned save_reads;
     if (g->save_trace && save_reads++ < 400)
-        fprintf(stderr, "[save] read h=%08X n=%u -> %d errno=%d\n",
-                h, n, (int)r, r < 0 ? errno : 0);
+        fprintf(stderr, "[save] read h=%08X n=%u off=%lld -> %d errno=%d\n",
+                h, n, (long long)off, (int)r, r < 0 ? errno : 0);
 #endif
     if (r < 0) { g_last_error = 3; c->eax = 0; return; }
     if (got && guest_ok(got, 4)) wr32g(got, (uint32_t)r);
@@ -1547,12 +1565,17 @@ static void h_write_file(CPU *c)
     GHandle *g = gh_get(h);
     if (put && guest_ok(put, 4)) wr32g(put, 0);
     if (!g || g->fd < 0 || !guest_ok(buf, n)) { c->eax = 0; return; }
-    ssize_t r = write(g->fd, (void *)(uintptr_t)buf, n);
+    off_t off = -1;
+    ssize_t r;
+    if (g->overlapped && h_ov_offset(ov, &off))
+        r = pwrite(g->fd, (void *)(uintptr_t)buf, n, off);
+    else
+        r = write(g->fd, (void *)(uintptr_t)buf, n);
 #if WC3_DEBUG && WC3_DEBUG_HLE
     static unsigned save_writes;
     if (g->save_trace && save_writes++ < 400)
-        fprintf(stderr, "[save] write h=%08X n=%u -> %d errno=%d\n",
-                h, n, (int)r, r < 0 ? errno : 0);
+        fprintf(stderr, "[save] write h=%08X n=%u off=%lld -> %d errno=%d\n",
+                h, n, (long long)off, (int)r, r < 0 ? errno : 0);
 #endif
     if (r < 0) { c->eax = 0; return; }
     if (put && guest_ok(put, 4)) wr32g(put, (uint32_t)r);

@@ -136,6 +136,9 @@ typedef struct {
     uint32_t disp_draining;
 } CPU;
 
+/* direct_call.h uses this to require the complete CPU definition. */
+#define WC3_CPU_DEFINED 1
+
 /* Values of CPU.disp_pending_kind (ABI-5.2). */
 #define WC3_DISP_PENDING_VA 0u
 #define WC3_DISP_PENDING_FN 1u
