@@ -990,6 +990,7 @@ typedef struct {
     uint32_t iocp_port;      /* CreateIoCompletionPort association */
     uint32_t iocp_key;
     int      save_trace;     /* opened under Save/ or a .w3z/.w3v path */
+    int      overlapped;     /* FILE_FLAG_OVERLAPPED: use OVERLAPPED offsets */
 } GHandle;
 
 static GHandle g_handles[GH_MAX];
@@ -1415,7 +1416,7 @@ static int save_path(const char *p)
 static void h_create_file(CPU *c)
 {
     const char *name = gstr(arg32(c, 0));
-    uint32_t access = arg32(c, 1), disp = arg32(c, 4), flags = arg32(c, 6);
+    uint32_t access = arg32(c, 1), disp = arg32(c, 4), flags = arg32(c, 5);
     char host[512], real[512];
     win_path(name, host, sizeof host);
     ci_resolve(host, real, sizeof real);
@@ -1450,6 +1451,7 @@ static void h_create_file(CPU *c)
     if (!g) { close(fd); c->eax = GH_INVALID; return; }
     g->fd = fd;
     g->save_trace = is_save;
+    g->overlapped = (flags & 0x40000000u) != 0;   /* FILE_FLAG_OVERLAPPED */
     g_last_error = 0;
 #if WC3_DEBUG && WC3_DEBUG_HLE
     if (is_save)

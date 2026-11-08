@@ -212,6 +212,12 @@ static Stream *stream_acquire(uint32_t record)
 
     const uint32_t slot = wc3_legacy_rd32g(record + 4u);
     if (slot >= STREAM_LIMIT) return NULL;
+
+    /* Read the guest-owned magic before taking the slot lock.  The generation
+     * and closed checks below catch a close/reuse that races this read; a
+     * guest memory access under a host lock is forbidden by O-34. */
+    if (wc3_legacy_rd32g(record) != STREAM_MAGIC) return NULL;
+
     Stream *stream = &g_streams[slot];
     const uint64_t generation = atomic_load_explicit(
         &stream->generation, memory_order_relaxed);
@@ -219,8 +225,7 @@ static Stream *stream_acquire(uint32_t record)
     pthread_mutex_lock(&stream->lock);
     if (stream->closed ||
         atomic_load_explicit(&stream->generation, memory_order_relaxed) !=
-            generation ||
-        wc3_legacy_rd32g(record) != STREAM_MAGIC) {
+            generation) {
         pthread_mutex_unlock(&stream->lock);
         return NULL;
     }

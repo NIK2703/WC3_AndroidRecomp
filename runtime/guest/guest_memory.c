@@ -90,8 +90,8 @@ static void dyn_page_mark(uint32_t base, uint32_t size, uint32_t id)
         uint8_t cur = atomic_load_explicit(&g_dyn_page_id[p],
                                            memory_order_acquire);
         for (;;) {
+            if (cur == (uint8_t)id) break;
             uint8_t want = cur == 0u ? (uint8_t)id : GUEST_DYN_PAGE_OVERFLOW;
-            if (cur == want) break;
             if (atomic_compare_exchange_weak_explicit(
                     &g_dyn_page_id[p], &cur, want, memory_order_acq_rel,
                     memory_order_acquire))
