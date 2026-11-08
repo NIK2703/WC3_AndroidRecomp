@@ -54,7 +54,8 @@ android {
 
     buildTypes {
         getByName("debug") {
-            // ADR-030 / BV-2: wc3.recomp.debug, installable next to release.
+            // ADR-030 / BV-2: wc3.recomp.debug is the only debug id; all
+            // diagnostics run inside this package, installable next to release.
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
         }

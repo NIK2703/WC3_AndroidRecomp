@@ -361,6 +361,16 @@ static void test_locale(const Wc3LocaleApi *l)
     check(latin[0] == 0x00E9u, "1252 to wide value");
 }
 
+static uint64_t g_audio_consumed_seen;
+static int g_audio_consumed_calls;
+
+static void audio_consumed_probe(void *opaque, uint64_t total)
+{
+    (void)opaque;
+    g_audio_consumed_seen = total;
+    g_audio_consumed_calls++;
+}
+
 static void test_audio_surface(const Wc3Platform *p)
 {
     uintptr_t stream = 0;
@@ -374,6 +384,33 @@ static void test_audio_surface(const Wc3Platform *p)
     check(written == sizeof frames, "audio written");
     check(p->audio.set_callback(p->audio.ctx, stream, NULL, NULL) == 0,
           "audio callback");
+
+    /* A-12.4 S1: the virtual device clock must be steppable and must never
+     * report more consumed bytes than were written.  This is the T1 side of
+     * the completion pump (Android drives it from the RT callback instead). */
+    check(p->audio.set_consumed && p->audio.consumed_bytes &&
+              p->audio.advance && p->audio.latency_frames,
+          "audio device-clock API");
+    check(p->audio.latency_frames(p->audio.ctx, stream) == 0,
+          "headless has no hardware queue");
+    g_audio_consumed_seen = 0;
+    g_audio_consumed_calls = 0;
+    check(p->audio.set_consumed(p->audio.ctx, stream, audio_consumed_probe,
+                                NULL) == 0,
+          "audio consumed callback");
+    check(p->audio.consumed_bytes(p->audio.ctx, stream) == 0,
+          "device clock starts at zero");
+    check(p->audio.advance(p->audio.ctx, stream, 2) == 0,
+          "advance half a block");
+    check(g_audio_consumed_calls == 1 && g_audio_consumed_seen == 2,
+          "consumed pump fired for 2 bytes");
+    check(p->audio.advance(p->audio.ctx, stream, 100) == 0,
+          "advance past queued bytes");
+    check(g_audio_consumed_seen == 4,
+          "device clock bounded by written bytes");
+    check(p->audio.consumed_bytes(p->audio.ctx, stream) == 4,
+          "consumed counter");
+
     check(p->audio.close(p->audio.ctx, stream) == 0, "audio close");
 
     uintptr_t surface = 0;
@@ -935,7 +972,10 @@ int main(void)
     check(p.mem.reserve && p.file.open && p.file.stat && p.time.monotonic_ns &&
               p.thread.create && p.sync.wait && p.input.push &&
               p.input.set_text_focus && p.surface.acquire && p.audio.open &&
-              p.audio.set_callback && p.config.get && p.asset.init &&
+              p.audio.set_callback && p.audio.set_consumed &&
+              p.audio.consumed_bytes && p.audio.advance &&
+              p.audio.latency_frames &&
+              p.config.get && p.asset.init &&
               p.window.create && p.clipboard.get_text && p.locale.to_wide,
           "platform table");
 

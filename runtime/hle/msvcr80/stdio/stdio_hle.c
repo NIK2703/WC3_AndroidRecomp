@@ -26,6 +26,7 @@
 #include "file_hle.h"
 #include "legacy_shim.h"
 #include "platform.h"
+#include "wc3_debug.h"
 
 #define STREAM_MAGIC 0x47465354u /* 'GFST' */
 #define STREAM_LIMIT 64u
@@ -53,6 +54,11 @@ typedef struct Stream {
     int error;
     int mode;
     pthread_mutex_t lock;
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    /* Host path kept only for the save path trace.  It is not part of the
+     * guest record and never changes stream semantics. */
+    char save_path[STREAM_PATH_MAX];
+#endif
 } Stream;
 
 static Stream g_streams[STREAM_LIMIT];
@@ -198,6 +204,10 @@ static void stream_finish(Stream *stream, uint32_t record)
         wc3_legacy_wr32g(record, 0u);
 }
 
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+static int save_trace_path(const char *path);
+#endif
+
 static int stream_read(Stream *stream, void *buffer, uint32_t count,
                        uint32_t *read_out)
 {
@@ -219,11 +229,22 @@ static int stream_read(Stream *stream, void *buffer, uint32_t count,
         return ferror(file) ? -1 : 0;
     }
 
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    const int trace_save = save_trace_path(stream->save_path);
+    static unsigned save_trace_reads;
+    if (trace_save && save_trace_reads++ < 120)
+        fprintf(stderr, "[savecrt] read begin fd=%d n=%u path=\"%s\"\n",
+                stream->fd, count, stream->save_path);
+#endif
     uint32_t got = 0;
     if (wc3_hle_msvcr80_fd_read(stream->fd, buffer, count, &got) != 0) {
         stream->error = 1;
         return -1;
     }
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    if (trace_save && save_trace_reads <= 120)
+        fprintf(stderr, "[savecrt] read done n=%u -> %u\n", count, got);
+#endif
     if (read_out) *read_out = got;
     if (got < count) stream->eof = 1;
     return 0;
@@ -248,12 +269,23 @@ static int stream_write(Stream *stream, const void *buffer, uint32_t count,
         return 0;
     }
 
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    const int trace_save = save_trace_path(stream->save_path);
+    static unsigned save_trace_writes;
+    if (trace_save && save_trace_writes++ < 400)
+        fprintf(stderr, "[savecrt] write begin fd=%d n=%u path=\"%s\"\n",
+                stream->fd, count, stream->save_path);
+#endif
     uint32_t put = 0;
     if (wc3_hle_msvcr80_fd_write(stream->fd, buffer, count, &put) != 0 ||
         put != count) {
         stream->error = 1;
         return -1;
     }
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    if (trace_save && save_trace_writes <= 400)
+        fprintf(stderr, "[savecrt] write done n=%u -> %u\n", count, put);
+#endif
     if (written_out) *written_out = put;
     return 0;
 }
@@ -321,6 +353,11 @@ static int flush_standard_stream(unsigned slot)
 
 static int stream_close(Stream *stream)
 {
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    if (stream->std_index < 0 && save_trace_path(stream->save_path))
+        fprintf(stderr, "[savecrt] close fd=%d path=\"%s\"\n",
+                stream->fd, stream->save_path);
+#endif
     if (stream->std_index < 0)
         return wc3_hle_msvcr80_fd_close(stream->fd);
 
@@ -383,6 +420,24 @@ static int parse_mode(const char *mode, int *flags_out, int *text_out)
     return 1;
 }
 
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+static int save_trace_path(const char *path)
+{
+    return path && (strstr(path, "Save") || strstr(path, ".w3z") ||
+                    strstr(path, ".w3v") || strstr(path, ".w3p"));
+}
+
+static void save_trace_note(uint32_t record, const char *path)
+{
+    if (!record || !path) return;
+    const uint32_t slot = wc3_legacy_rd32g(record + 4u);
+    if (slot >= STREAM_LIMIT) return;
+    pthread_mutex_lock(&g_stream_lock);
+    snprintf(g_streams[slot].save_path, STREAM_PATH_MAX, "%s", path);
+    pthread_mutex_unlock(&g_stream_lock);
+}
+#endif
+
 static uint32_t open_stream(const char *guest_path, const char *mode)
 {
     int flags = 0;
@@ -392,11 +447,26 @@ static uint32_t open_stream(const char *guest_path, const char *mode)
     char host_path[STREAM_PATH_MAX];
     wc3_hle_msvcr80_map_path(guest_path, host_path, sizeof host_path);
 
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    const int trace_save = save_trace_path(host_path);
+    if (trace_save)
+        fprintf(stderr, "[savecrt] open guest=\"%s\" host=\"%s\" mode=%s\n",
+                guest_path ? guest_path : "", host_path, mode ? mode : "");
+#endif
     int fd = -1;
-    if (wc3_hle_msvcr80_fd_open(host_path, flags, &fd) != 0) return 0;
+    if (wc3_hle_msvcr80_fd_open(host_path, flags, &fd) != 0) {
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+        if (trace_save) fprintf(stderr, "[savecrt] open failed host=\"%s\"\n", host_path);
+#endif
+        return 0;
+    }
 
     const uint32_t record = stream_new(fd, -1, text ? CRT_O_TEXT : CRT_O_BINARY);
     if (!record) (void)wc3_hle_msvcr80_fd_close(fd);
+#if WC3_DEBUG && WC3_DEBUG_SAVE
+    else save_trace_note(record, host_path);
+    if (trace_save) fprintf(stderr, "[savecrt] open fd=%d record=%08X\n", fd, record);
+#endif
     return record;
 }
 

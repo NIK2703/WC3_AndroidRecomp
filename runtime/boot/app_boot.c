@@ -13,6 +13,8 @@
 #include <android/native_window.h>
 
 #include <errno.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +62,63 @@ static void redirect_output(const char *state_dir)
     if (f)
         setvbuf(stderr, NULL, _IOLBF, 0);
 }
+
+#if WC3_DEBUG && WC3_DEBUG_HLE
+/* On-device diagnostics: SIGUSR1 dumps the HLE last-call ring and the last
+ * dispatch targets into run.txt without stopping the guest.  The crash
+ * handler already calls the same reporter from a signal context. */
+extern void hle_android_report(void);
+
+static void report_signal(int sig)
+{
+    (void)sig;
+    hle_android_report();
+}
+
+static void install_report_signal(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = report_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGUSR1, &sa, NULL);
+}
+
+/* Some Android runtimes keep SIGUSR1 blocked on the main thread, so a file
+ * trigger is the reliable path.  Creating <state>/hle_report_on makes this
+ * thread print a report every ten seconds; the file can be removed without
+ * restarting the app. */
+static char g_report_dir[1024];
+
+static void *hle_report_thread(void *unused)
+{
+    (void)unused;
+    char path[1200];
+    int n = snprintf(path, sizeof path, "%s/hle_report_on", g_report_dir);
+    if (n <= 0 || (size_t)n >= sizeof path)
+        return NULL;
+    for (;;) {
+        sleep(10);
+        if (access(path, F_OK) == 0) {
+            hle_android_report();
+            sleep(2);
+        }
+    }
+    return NULL;
+}
+
+static void start_report_thread(const char *state_dir)
+{
+    snprintf(g_report_dir, sizeof g_report_dir, "%s", state_dir);
+    pthread_t t;
+    if (pthread_create(&t, NULL, hle_report_thread, NULL) == 0)
+        pthread_detach(t);
+}
+#else
+static void install_report_signal(void) {}
+static void start_report_thread(const char *state_dir) { (void)state_dir; }
+#endif
 
 /* The Windows Reign of Chaos launcher starts war3.exe with -classic; the
  * Frozen Throne launcher starts it with no game switch.  Keep the switch in
@@ -117,6 +176,8 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
     }
 
     redirect_output(state_dir);
+    install_report_signal();
+    start_report_thread(state_dir);
     set_game_args(roc);
     write_game_mode_marker(state_dir, roc);
 

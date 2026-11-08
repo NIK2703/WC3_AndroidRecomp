@@ -175,8 +175,9 @@ def audit(path):
              percentile([int(x) for x in rms], 0.99),
              max(rms) if rms else 0))
     print()
-    return dict(kind='pcm', blocks=nb, silent=len(zero_blocks),
-                dups=dup_blocks, seam_bad=len(seam_bad))
+    return dict(kind='pcm', blocks=nb, nbytes=nbytes,
+                silent=len(zero_blocks), dups=dup_blocks,
+                seam_bad=len(seam_bad))
 
 
 ZERO_HASH = 'E2BA14A5'
@@ -250,6 +251,130 @@ def audit_log(path):
                 dups=len(dups), cycle5=cycle5)
 
 
+def decode_device_log(path):
+    """Device logs are sometimes UTF-16LE with a swapped byte-order marker.
+
+    A plain utf-8 decode silently produces CJK mojibake (湡牤楯) and the
+    interesting lines disappear.  Pick the encoding that actually contains a
+    known audio tag instead of trusting the extension.
+    """
+    raw = open(path, 'rb').read()
+    best = ''
+    for enc in ('utf-8', 'utf-16-le', 'utf-16-be'):
+        try:
+            candidate = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        score = candidate.count('[wave2]') + candidate.count('[timer]') + \
+                candidate.count('[wave]')
+        if score and score > best.count('[wave2]') + best.count('[timer]') + \
+                best.count('[wave]'):
+            best = candidate
+    return best
+
+
+def sync_check(log_path, dump_bytes, pcm_bytes_per_second=44100 * 4):
+    """Reject a "win" that is actually producer starvation.
+
+    A dump only contains the bytes we handed to AAudio.  If the guest stalls,
+    the speaker hears silence that never appears in the dump, so the duplicate
+    and silence percentages look better while the audio is worse.  Compare the
+    dump duration with the wall-clock span of mixer ticks in the device log.
+    Returns (span_s, dump_s, ratio) or None when the log has no timestamps.
+    """
+    import re
+    text = decode_device_log(log_path)
+    if not text:
+        return None
+    ticks = [int(v) for v in re.findall(r'\]\s*tick\s+t=(\d+)', text)]
+    if len(ticks) < 2:
+        ticks = [int(v) for v in re.findall(r'\[timer\][^\n]*?t=(\d+)', text)]
+    if len(ticks) < 2:
+        return None
+    span = (ticks[-1] - ticks[0]) / 1000.0
+    if span <= 0:
+        return None
+    dump_s = dump_bytes / float(pcm_bytes_per_second)
+    return span, dump_s, dump_s / span
+
+
+MILES_RE = None
+
+
+def miles_state_check(log_path):
+    """A-12.4 S0: verify Miles' two-thread SPSC contract directly.
+
+    The lifted Mss32.dll keeps a ring at [dev+0x7C] with N=[dev+0x78],
+    w=[dev+0x80] (producer = waveOutProc / WOM_DONE) and r=[dev+0x84]
+    (consumer = WM_TIMER service).  waveout_hle.c logs the three indices and
+    the guest thread id at every write / WOM_DONE / timer tick.
+
+    w and r wrap modulo N, so a raw `r > w` is NOT a violation.  Reconstruct
+    cumulative producer/consumer counters from modulo-N deltas and require
+    0 <= W - R <= N at every observation.  Also reject a TimerProc that jumps
+    to another guest thread and any waveOutWrite issued from inside
+    waveOutProc (winmm forbids it: deadlock).
+    """
+    import re
+    global MILES_RE
+    if MILES_RE is None:
+        MILES_RE = re.compile(
+            r'\[wave2\]\s+miles\s+t=(\d+)\s+ev=(\w+)\s+'
+            r'w=(\d+)\s+r=(\d+)\s+N=(\d+)\s+gid=(\d+)')
+    text = decode_device_log(log_path)
+    rows = MILES_RE.findall(text) if text else []
+    violations = []
+    events = collections.Counter()
+    timer_gids = set()
+    W = R = 0
+    max_backlog = 0
+    N_prev = None
+    w_prev = r_prev = None
+    for t, ev, ws, rs, Ns, gids in rows:
+        ev = ev.lower()
+        events[ev] += 1
+        w, r, N, gid = int(ws), int(rs), int(Ns), int(gids)
+        if ev == 'violation':
+            violations.append('t=%s explicit waveOutWrite-from-waveOutProc' % t)
+        if ev == 'timer':
+            timer_gids.add(gid)
+        if N <= 0:
+            violations.append('t=%s N=%d (ring size not readable)' % (t, N))
+            continue
+        if N != N_prev:
+            # Ring resized / device re-opened: restart the counters.
+            W = R = w_prev = r_prev = 0
+            N_prev = N
+        if w_prev is not None:
+            W += (w - w_prev) % N
+            R += (r - r_prev) % N
+            backlog = W - R
+            max_backlog = max(max_backlog, backlog)
+            if backlog < 0 or backlog > N:
+                violations.append(
+                    't=%s ev=%s w-r invariant broken: W-R=%d N=%d'
+                    % (t, ev, backlog, N))
+        w_prev, r_prev = w, r
+    if not rows:
+        violations.append('no [wave2] miles state rows in log')
+    if len(timer_gids) > 1:
+        violations.append('TimerProc gid changed: %s' %
+                          sorted(timer_gids))
+    if events['done'] == 0 or events['timer'] == 0:
+        violations.append('incomplete actors: done=%d timer=%d'
+                          % (events['done'], events['timer']))
+    print('=== %s (miles state) ===' % log_path)
+    print('rows=%d events=%s N=%s max W-R=%d timer_gids=%s'
+          % (len(rows), dict(events), N_prev, max_backlog,
+             sorted(timer_gids)))
+    if violations:
+        print('  violations (%d): %s' % (len(violations), violations[:6]))
+    else:
+        print('  SPSC invariant 0 <= W-R <= N holds at every observation')
+    print()
+    return violations
+
+
 def gate(m):
     """Content criteria.  Transport counters are deliberately absent."""
     bad = []
@@ -275,22 +400,53 @@ def gate(m):
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('paths', nargs='+', help='PCM dumps or [wave] Write logs')
+    ap.add_argument('paths', nargs='*', help='PCM dumps or [wave] Write logs')
     ap.add_argument('--gate', action='store_true',
                     help='exit 1 when the content criteria fail (CI mode)')
+    ap.add_argument('--sync-log', metavar='RUN_TXT',
+                    help='device log with [wave2] tick t=<ms>; gate fails when '
+                         'the dump is shorter than the real audio time '
+                         '(starvation hides silence from the PCM audit)')
+    ap.add_argument('--miles-state', metavar='RUN_TXT',
+                    help='device log with [wave2] miles w/r/N/gid rows; gate '
+                         'fails when the SPSC contract w-r<=N, a stable '
+                         'TimerProc gid or the no-waveOutWrite-in-callback '
+                         'rule is broken (A-12.4 S0)')
     args = ap.parse_args()
     failed = []
+    if args.miles_state:
+        try:
+            for v in miles_state_check(args.miles_state):
+                failed.append('%s: miles state: %s' % (args.miles_state, v))
+        except Exception as e:
+            failed.append('%s: miles state FAILED %s' % (args.miles_state, e))
     for p in args.paths:
         try:
             m = (audit_log(p) if p.lower().endswith(('.txt', '.log'))
                  else audit(p))
+            if args.sync_log and m['kind'] == 'pcm':
+                sync = sync_check(args.sync_log, m['nbytes'])
+                if sync:
+                    span, dump_s, ratio = sync
+                    print('SYNC: audio active %.2f s | dump %.2f s | '
+                          'ratio %.2f %s' %
+                          (span, dump_s, ratio,
+                           'OK' if ratio >= 0.90 else 'STARVATION'))
+                    m['sync_ratio'] = ratio
             if args.gate:
                 bad = gate(m)
+                if args.sync_log and m['kind'] == 'pcm':
+                    if 'sync_ratio' not in m:
+                        bad.append('no sync timestamps in log')
+                    elif m['sync_ratio'] < 0.90:
+                        bad.append('dump/audio-time ratio %.2f < 0.90: '
+                                   'producer starvation (silence not in dump)'
+                                   % m['sync_ratio'])
                 if bad:
                     failed.append('%s: %s' % (p, '; '.join(bad)))
         except Exception as e:
             failed.append('%s: FAILED %s' % (p, e))
-    if args.gate:
+    if args.gate or args.miles_state:
         for line in failed:
             print('GATE FAIL ' + line)
         print('GATE %s (%d input(s))' % ('FAILED' if failed else 'PASS',

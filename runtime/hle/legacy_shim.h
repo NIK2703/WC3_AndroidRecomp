@@ -59,6 +59,35 @@ uint32_t wc3_legacy_get_last_error(void);
 int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
                        int cdecl_abi, void (*impl)(CPU *c));
 
+/* Guest VA of a registry row, or 0 when the row is absent.  A row can be used
+ * as a guest thread start address: dispatch() recognises the HLE window and
+ * calls the registered handler with that thread's own CPU. */
+uint32_t wc3_legacy_hle_thunk_of(const char *dll, const char *name);
+
+/*
+ * A-12.4 S2 / A-6.4: a genuine winmm callback thread.
+ *
+ * winmm delivers WOM_DONE from its own serialised thread, with its own TEB,
+ * TLS and dispatcher state; Miles relies on that (waveOutProc must never call
+ * waveOutWrite).  The as-built guest_thread_spawn() is static in the
+ * read-only quarantine, so this shim reaches it through its registered
+ * KERNEL32!CreateThread row instead of editing runtime/legacy.  A private HLE
+ * row is registered as the thread's start address; its handler runs `body`
+ * with the new thread's CPU.  The body is expected to loop for the process
+ * lifetime and wait with wc3_legacy_guest_callback_wait().
+ *
+ * Returns 0 when the thread is running (or already running), -1 on failure.
+ * Idempotent: exactly one callback thread exists.
+ */
+typedef void (*Wc3LegacyGuestLoop)(CPU *c, void *opaque);
+int  wc3_legacy_guest_callback_thread_start(Wc3LegacyGuestLoop body,
+                                            void *opaque);
+/* Lock-free from the real-time audio path: only sem_post()/sem_wait(), no
+ * mutex, no allocation, no guest memory access.  wait() returns 0 when woken
+ * and -1 when the callback thread was never started. */
+void wc3_legacy_guest_callback_wake(void);
+int  wc3_legacy_guest_callback_wait(void);
+
 /* Guest memory and argument accessors, served by the quarantine until the
  * guest layer moves into the target tree.  They keep one range table: a target
  * module must not link a second copy of runtime/guest during the migration. */

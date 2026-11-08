@@ -43,6 +43,7 @@
 #include "user_object_hle.h"
 #include "window_facts_hle.h"
 #include "window_hle.h"
+#include "waveout_hle.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,6 +125,9 @@ void wc3_dispatch_init(void)
     WC3_INSTALL_STEP(wc3_hle_msvcr80_string_install());
     WC3_INSTALL_STEP(msvcr80_convert_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_time_install());
+    /* WINMM on a dedicated audio thread (A-6.2/A-6.3).  Installed last so
+     * the pump chains sit above the already-installed USER32 handlers. */
+    WC3_INSTALL_STEP(wc3_hle_winmm_waveout_install());
 #undef WC3_INSTALL_STEP
 
 #if WC3_DEBUG && WC3_DEBUG_HLE

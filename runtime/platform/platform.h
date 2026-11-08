@@ -143,6 +143,25 @@ typedef struct Wc3AudioApi {
     int (*set_callback)(void *ctx, uintptr_t stream,
                         void (*callback)(void *opaque, void *frames, uint32_t bytes),
                         void *opaque);
+    /* A-12.4 S1: device-clock feedback.  The platform publishes the number of
+     * bytes the REAL-TIME callback actually took from the ring with atomics
+     * only; a non-RT pump thread then invokes `on_consumed` with the new
+     * cumulative total.  The callback may touch guest memory and wake a guest
+     * thread, but must never allocate or hold a host lock on the RT path.
+     * `consumed_bytes` is the same counter, safe from any thread. */
+    int (*set_consumed)(void *ctx, uintptr_t stream,
+                        void (*on_consumed)(void *opaque, uint64_t total),
+                        void *opaque);
+    uint64_t (*consumed_bytes)(void *ctx, uintptr_t stream);
+    /* Headless/difftest only: step the virtual device clock by `bytes` so a
+     * T1 test can drive WOM_DONE deterministically.  Android returns -1:
+     * its clock belongs to the hardware. */
+    int (*advance)(void *ctx, uintptr_t stream, uint32_t bytes);
+    /* MEASURED hardware queue depth in frames (0 on headless).  This is the
+     * AAudio "latency" knob: WC3_AUDIO_LATENCY_MS asks for a buffer duration
+     * and this reports what AAudio actually granted.  It is an A/B input,
+     * never a claim that a larger buffer fixes clicks. */
+    uint32_t (*latency_frames)(void *ctx, uintptr_t stream);
 } Wc3AudioApi;
 
 typedef struct Wc3ClipboardApi {

@@ -1533,7 +1533,12 @@ int wc3_android_config_load(const char *path)
  * stall, while the failure is recorded in debug builds.
  */
 
-#define WC3_AUDIO_RING_BYTES   (1u << 20)
+/* A-12.4 S1: the completion feedback loop is the five-WAVEHDR pool, not the
+ * ring.  64 KiB is the smallest power of two that still holds all five 50 ms
+ * headers (5 * 8832 = 44160 B) and is ~4.6 AAudio bursts on the reference
+ * device (3536 frames).  The old 1 MiB ring was 5.7 s of audio and let the
+ * guest run arbitrarily far ahead of the speaker. */
+#define WC3_AUDIO_RING_BYTES   (1u << 16)
 #define WC3_AUDIO_REOPEN_MAX   5
 
 #if WC3_DEBUG
@@ -1545,6 +1550,9 @@ int wc3_android_config_load(const char *path)
 
 typedef void (*AndroidAudioCallback)(void *opaque, void *frames,
                                      uint32_t bytes);
+/* A-12.4 S1: invoked from the NON-RT supervisor pump, never from the AAudio
+ * real-time callback. */
+typedef void (*AndroidAudioConsumed)(void *opaque, uint64_t total);
 
 typedef struct AndroidAudioStream {
     _Atomic uint32_t read_pos;
@@ -1557,6 +1565,16 @@ typedef struct AndroidAudioStream {
     _Atomic uint32_t lost_events;
     _Atomic AndroidAudioCallback callback;
     _Atomic(void *) callback_opaque;
+
+    /* Device clock: bytes the RT callback actually removed from the ring.
+     * The RT path only ever does an atomic add, an atomic store and sem_post;
+     * the supervisor turns that into one on_consumed() per wake. */
+    _Atomic uint64_t consumed;
+    _Atomic int wake_consumed;
+    _Atomic AndroidAudioConsumed consumed_cb;
+    _Atomic(void *) consumed_opaque;
+    /* Measured AAudio buffer depth after applying WC3_AUDIO_LATENCY_MS. */
+    _Atomic int32_t buffer_frames;
 
     /* stream is written by the supervisor and read by close under lifecycle. */
     AAudioStream *stream;
@@ -1631,6 +1649,15 @@ static aaudio_data_callback_result_t audio_data_callback(
     memset(audio_data, 0, need);
     if (!atomic_load_explicit(&st->silent, memory_order_acquire)) {
         uint32_t got = audio_ring_read(st, audio_data, need);
+        if (got) {
+            /* Publish device time.  No locks, no allocation, no guest memory
+             * and no callback invocation on the RT thread. */
+            atomic_fetch_add_explicit(&st->consumed, got,
+                                      memory_order_relaxed);
+            atomic_store_explicit(&st->wake_consumed, 1,
+                                  memory_order_release);
+            (void)sem_post(&st->wake);
+        }
         if (got < need) {
             AndroidAudioCallback cb = atomic_load_explicit(
                 &st->callback, memory_order_acquire);
@@ -1659,6 +1686,40 @@ static void audio_error_callback(AAudioStream *stream, void *user,
     (void)sem_post(&st->wake);
     AUDIO_LOG("AAudio error %d", (int)error);
     atomic_fetch_sub_explicit(&st->callback_users, 1, memory_order_acq_rel);
+}
+
+/* The Winlator/ALSA equivalent of "set the audio latency to 60 ms".
+ *
+ * Unlike the rev-4 `wave2_delay_*` experiment (which delayed WOM_DONE and
+ * starved the producer), this changes ONLY the hardware queue depth.  The
+ * requested duration comes from the runtime config key (or the debug env)
+ * WC3_AUDIO_LATENCY_MS; 0 keeps AAudio's own default.  The value AAudio
+ * actually grants is measured and published through latency_frames(), so a
+ * device A/B can never mistake a request for a result. */
+static int32_t audio_apply_latency(AAudioStream *stream, int32_t rate)
+{
+    int ms = android_config_get_int(NULL, "WC3_AUDIO_LATENCY_MS", 0);
+    const char *env = getenv("WC3_AUDIO_LATENCY_MS");
+    if (env && *env) {
+        char *end = NULL;
+        long v = strtol(env, &end, 10);
+        if (end && end != env && *end == '\0') ms = (int)v;
+    }
+    int32_t actual = AAudioStream_getBufferSizeInFrames(stream);
+    if (ms <= 0) return actual;
+    if (ms > 500) ms = 500;
+    if (ms < 1) ms = 1;
+    int32_t want = (int32_t)((int64_t)rate * ms / 1000);
+    int32_t burst = AAudioStream_getFramesPerBurst(stream);
+    int32_t cap = AAudioStream_getBufferCapacityInFrames(stream);
+    if (want < burst) want = burst;
+    if (cap > 0 && want > cap) want = cap;
+    int32_t granted = AAudioStream_setBufferSizeInFrames(stream, want);
+    if (granted > 0) actual = granted;
+    else actual = AAudioStream_getBufferSizeInFrames(stream);
+    AUDIO_LOG("AAudio latency requested=%d ms frames=%d granted=%d "
+              "burst=%d cap=%d", ms, want, actual, burst, cap);
+    return actual;
 }
 
 static AAudioStream *audio_create_stream(AndroidAudioStream *st)
@@ -1694,6 +1755,10 @@ static AAudioStream *audio_create_stream(AndroidAudioStream *st)
             continue;
         }
 
+        int32_t granted = audio_apply_latency(stream, (int32_t)st->sample_rate);
+        atomic_store_explicit(&st->buffer_frames, granted,
+                              memory_order_release);
+
         result = AAudioStream_requestStart(stream);
         if (result != AAUDIO_OK) {
             AUDIO_LOG("AAudio start mode %d failed %d", (int)m, (int)result);
@@ -1701,9 +1766,9 @@ static AAudioStream *audio_create_stream(AndroidAudioStream *st)
             continue;
         }
 
-        AUDIO_LOG("AAudio opened mode=%d rate=%d/%d ch=%d",
+        AUDIO_LOG("AAudio opened mode=%d rate=%d/%d ch=%d buffer=%d",
                   (int)m, (int)AAudioStream_getSampleRate(stream),
-                  (int)st->sample_rate, (int)st->channels);
+                  (int)st->sample_rate, (int)st->channels, (int)granted);
         return stream;
     }
     return NULL;
@@ -1735,6 +1800,21 @@ static void *audio_supervisor(void *arg)
         } while (wait_result != 0 && errno == EINTR);
         if (wait_result != 0) break;
         if (atomic_load_explicit(&st->closing, memory_order_acquire)) break;
+
+        /* A-12.4 S1 layer 2: the completion pump.  One coalesced call per
+         * wake, on a normal host thread, so the callee may safely write guest
+         * memory, walk its header pool and wake the winmm callback thread. */
+        if (atomic_exchange_explicit(&st->wake_consumed, 0,
+                                     memory_order_acq_rel)) {
+            AndroidAudioConsumed cb = atomic_load_explicit(
+                &st->consumed_cb, memory_order_acquire);
+            if (cb) {
+                void *opaque = atomic_load_explicit(
+                    &st->consumed_opaque, memory_order_acquire);
+                cb(opaque, atomic_load_explicit(&st->consumed,
+                                                memory_order_acquire));
+            }
+        }
         if (atomic_load_explicit(&st->silent, memory_order_acquire)) continue;
         if (!atomic_load_explicit(&st->lost, memory_order_acquire)) continue;
 
@@ -1840,6 +1920,11 @@ static int android_audio_open(void *ctx, uint32_t sample_rate,
     atomic_init(&st->lost_events, 0);
     atomic_init(&st->callback, (AndroidAudioCallback)NULL);
     atomic_init(&st->callback_opaque, NULL);
+    atomic_init(&st->consumed, 0);
+    atomic_init(&st->wake_consumed, 0);
+    atomic_init(&st->consumed_cb, (AndroidAudioConsumed)NULL);
+    atomic_init(&st->consumed_opaque, NULL);
+    atomic_init(&st->buffer_frames, 0);
 
     AAudioStream *stream = audio_create_stream(st);
     if (!stream) {
@@ -1885,13 +1970,62 @@ static int android_audio_write(void *ctx, uintptr_t handle, const void *frames,
 
     uint32_t accepted;
     if (atomic_load_explicit(&st->silent, memory_order_acquire)) {
+        /* Explicit silent sink: the bytes are "played" as silence immediately
+         * so completions keep their device-clock cadence instead of stalling
+         * the five-header pool forever. */
         accepted = bytes;
+        atomic_fetch_add_explicit(&st->consumed, accepted,
+                                  memory_order_relaxed);
+        atomic_store_explicit(&st->wake_consumed, 1, memory_order_release);
+        (void)sem_post(&st->wake);
     } else {
         accepted = audio_ring_write(st, frames, bytes);
     }
     if (written) *written = accepted;
     atomic_fetch_sub_explicit(&st->writers, 1, memory_order_acq_rel);
     return 0;
+}
+
+static int android_audio_set_consumed(
+    void *ctx, uintptr_t handle,
+    void (*on_consumed)(void *opaque, uint64_t total), void *opaque)
+{
+    (void)ctx;
+    AndroidAudioStream *st = (AndroidAudioStream *)handle;
+    if (!st) return -1;
+    if (atomic_load_explicit(&st->closing, memory_order_acquire)) return -1;
+    atomic_store_explicit(&st->consumed_opaque, opaque, memory_order_release);
+    atomic_store_explicit(&st->consumed_cb, on_consumed,
+                          memory_order_release);
+    /* Catch bytes consumed before the callback was installed. */
+    atomic_store_explicit(&st->wake_consumed, 1, memory_order_release);
+    (void)sem_post(&st->wake);
+    return 0;
+}
+
+static uint64_t android_audio_consumed_bytes(void *ctx, uintptr_t handle)
+{
+    (void)ctx;
+    AndroidAudioStream *st = (AndroidAudioStream *)handle;
+    if (!st) return 0;
+    return atomic_load_explicit(&st->consumed, memory_order_acquire);
+}
+
+static int android_audio_advance(void *ctx, uintptr_t handle, uint32_t bytes)
+{
+    (void)ctx; (void)handle; (void)bytes;
+    /* The Android device owns its clock; only the headless DUT can step it. */
+    return -1;
+}
+
+static uint32_t android_audio_latency_frames(void *ctx, uintptr_t handle)
+{
+    (void)ctx;
+    AndroidAudioStream *st = (AndroidAudioStream *)handle;
+    if (!st) return 0u;
+    int32_t frames = atomic_load_explicit(&st->buffer_frames,
+                                          memory_order_acquire);
+    return frames > 0 ? (uint32_t)frames : 0u;
 }
 
 static int android_audio_set_callback(void *ctx, uintptr_t handle,
@@ -2030,6 +2164,10 @@ int wc3_android_platform_init(Wc3Platform *platform)
     platform->audio.write = android_audio_write;
     platform->audio.close = android_audio_close;
     platform->audio.set_callback = android_audio_set_callback;
+    platform->audio.set_consumed = android_audio_set_consumed;
+    platform->audio.consumed_bytes = android_audio_consumed_bytes;
+    platform->audio.advance = android_audio_advance;
+    platform->audio.latency_frames = android_audio_latency_frames;
 
     platform->log.ctx = NULL;
     platform->log.write = android_log_write;

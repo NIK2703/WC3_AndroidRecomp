@@ -1473,7 +1473,7 @@ static void h_create_file(CPU *c)
     c->eax = h;
 }
 
-static void ev_close(uint32_t h);   /* defined with the sync objects below */
+static int ev_close(uint32_t h);    /* defined with the sync objects below */
 static int ev_close_if_used(uint32_t h);
 static int mutex_close(uint32_t h);
 static int iocp_close(uint32_t h);  /* defined with the completion ports below */
@@ -2234,6 +2234,8 @@ typedef struct {
     int used;
     int manual;
     int signalled;
+    int closing;    /* CloseHandle seen: wake every waiter, never reuse early */
+    int refs;       /* live HLE accesses; destroy only when closing && refs == 0 */
     pthread_mutex_t m;
     pthread_cond_t  cv;
 } GEvent;
@@ -2277,22 +2279,65 @@ static GEvent *ev_get(uint32_t h)
     return &g_events[i];
 }
 
-static void ev_close(uint32_t h)
+/*
+ * A guest CloseHandle may race with another guest thread blocked in
+ * WaitForSingleObject on the same event.  Destroying the pthread condvar under
+ * that waiter corrupts the host stack and lets the guest continue into freed
+ * game state.  Take a reference for every HLE access; CloseHandle marks the
+ * object closing and broadcasts, and only the last reference destroys it.
+ */
+static GEvent *ev_ref(uint32_t h)
 {
-    GEvent *e = ev_get(h);
-    if (!e) return;
+    if (h < SYNC_MID || h >= SYNC_END) return NULL;
+    uint32_t i = (h - SYNC_MID) / 4u;
+    if (i >= EV_MAX) return NULL;
     pthread_mutex_lock(&g_ev_lock);
-    pthread_mutex_destroy(&e->m);
-    pthread_cond_destroy(&e->cv);
-    memset(e, 0, sizeof *e);
+    GEvent *e = &g_events[i];
+    if (!e->used) {
+        pthread_mutex_unlock(&g_ev_lock);
+        return NULL;
+    }
+    e->refs++;
     pthread_mutex_unlock(&g_ev_lock);
+    return e;
+}
+
+static void ev_unref(GEvent *e)
+{
+    pthread_mutex_lock(&g_ev_lock);
+    if (--e->refs == 0 && e->closing) {
+        pthread_mutex_destroy(&e->m);
+        pthread_cond_destroy(&e->cv);
+        memset(e, 0, sizeof *e);
+    }
+    pthread_mutex_unlock(&g_ev_lock);
+}
+
+#if WC3_DEBUG && WC3_DEBUG_HLE
+static unsigned g_sync_close_log;
+#endif
+
+static int ev_close(uint32_t h)
+{
+    GEvent *e = ev_ref(h);
+    if (!e) return 0;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (g_sync_close_log++ < 64)
+        fprintf(stderr, "[hle] CloseHandle event h=%08X refs=%d closing=%d\n",
+                h, e->refs, e->closing);
+#endif
+    pthread_mutex_lock(&e->m);
+    e->closing = 1;
+    e->signalled = 1;
+    pthread_cond_broadcast(&e->cv);
+    pthread_mutex_unlock(&e->m);
+    ev_unref(e);
+    return 1;
 }
 
 static int ev_close_if_used(uint32_t h)
 {
-    if (!ev_get(h)) return 0;
-    ev_close(h);
-    return 1;
+    return ev_close(h);
 }
 
 /* ---- real guest mutexes ------------------------------------------------
@@ -2309,6 +2354,8 @@ typedef struct {
     int owner_valid;
     pthread_t owner;
     int count;
+    int closing;    /* CloseHandle seen: wake every waiter, never reuse early */
+    int refs;       /* live HLE accesses; destroy only when closing && refs == 0 */
     pthread_mutex_t m;
     pthread_cond_t cv;
 } GMutex;
@@ -2322,6 +2369,35 @@ static GMutex *mutex_get(uint32_t h)
     uint32_t i = (h - MUTEX_BASE) / 4u;
     if (i >= MUTEX_MAX || !g_mutexes[i].used) return NULL;
     return &g_mutexes[i];
+}
+
+/* Same lifetime rule as ev_ref: a waiter may still be inside the mutex when
+ * CloseHandle arrives, so destroy only after the last reference leaves. */
+static GMutex *mutex_ref(uint32_t h)
+{
+    if (h < MUTEX_BASE || h >= MUTEX_END) return NULL;
+    uint32_t i = (h - MUTEX_BASE) / 4u;
+    if (i >= MUTEX_MAX) return NULL;
+    pthread_mutex_lock(&g_mutex_lock);
+    GMutex *mx = &g_mutexes[i];
+    if (!mx->used) {
+        pthread_mutex_unlock(&g_mutex_lock);
+        return NULL;
+    }
+    mx->refs++;
+    pthread_mutex_unlock(&g_mutex_lock);
+    return mx;
+}
+
+static void mutex_unref(GMutex *mx)
+{
+    pthread_mutex_lock(&g_mutex_lock);
+    if (--mx->refs == 0 && mx->closing) {
+        pthread_mutex_destroy(&mx->m);
+        pthread_cond_destroy(&mx->cv);
+        memset(mx, 0, sizeof *mx);
+    }
+    pthread_mutex_unlock(&g_mutex_lock);
 }
 
 #ifdef WC3_DEBUG_HLE_SYNC
@@ -2424,13 +2500,18 @@ static uint32_t mutex_new(int initial_owner)
 
 static int mutex_close(uint32_t h)
 {
-    GMutex *mx = mutex_get(h);
+    GMutex *mx = mutex_ref(h);
     if (!mx) return 0;
-    pthread_mutex_lock(&g_mutex_lock);
-    pthread_mutex_destroy(&mx->m);
-    pthread_cond_destroy(&mx->cv);
-    memset(mx, 0, sizeof *mx);
-    pthread_mutex_unlock(&g_mutex_lock);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    if (g_sync_close_log++ < 64)
+        fprintf(stderr, "[hle] CloseHandle mutex h=%08X refs=%d owner=%d closing=%d\n",
+                h, mx->refs, mx->owner_valid, mx->closing);
+#endif
+    pthread_mutex_lock(&mx->m);
+    mx->closing = 1;
+    pthread_cond_broadcast(&mx->cv);
+    pthread_mutex_unlock(&mx->m);
+    mutex_unref(mx);
     return 1;
 }
 
@@ -2440,22 +2521,24 @@ static void h_create_event(CPU *c)
 }
 static void h_set_event(CPU *c)
 {
-    GEvent *e = ev_get(arg32(c, 0));
+    GEvent *e = ev_ref(arg32(c, 0));
     if (e) {
         pthread_mutex_lock(&e->m);
         e->signalled = 1;
         pthread_cond_broadcast(&e->cv);
         pthread_mutex_unlock(&e->m);
+        ev_unref(e);
     }
     c->eax = 1;
 }
 static void h_reset_event(CPU *c)
 {
-    GEvent *e = ev_get(arg32(c, 0));
+    GEvent *e = ev_ref(arg32(c, 0));
     if (e) {
         pthread_mutex_lock(&e->m);
         e->signalled = 0;
         pthread_mutex_unlock(&e->m);
+        ev_unref(e);
     }
     c->eax = 1;
 }
@@ -2467,9 +2550,19 @@ static void h_reset_event(CPU *c)
  * behaviour for guests that use events only as decoration. */
 #define WAIT_CAP_MS 3000
 static void waveout_service(CPU *c);
+static void waveout_deliver(CPU *c);
 static void timer_service(CPU *c);
 static uint32_t wave_now_ms(void);
 static volatile int g_wave_pending;
+
+/* Guest thread handles are real joinable host threads.  The object itself is
+ * declared with the thread arena below; these forward declarations let the
+ * wait paths distinguish a thread handle from an unmodelled handle before the
+ * thread implementation is visible. */
+struct GThread;
+static struct GThread *guest_thread_get(uint32_t h);
+static int guest_thread_is_done(struct GThread *t);
+static int guest_thread_wait(struct GThread *t, int32_t ms);
 
 #ifdef WC3_DEBUG_HLE_SLEEP
 /* Case-specific probe for Sleep(0), SwitchToThread and the INFINITE wait cap.
@@ -2515,9 +2608,12 @@ static void h_wait_mutex(CPU *c, GMutex *mx, int32_t ms, uint32_t ra)
     /* Miles' waveOut completion is delivered by the guest thread that pumps
      * messages.  A thread blocked here on a mutex is not pumping, so the
      * WOM_DONE callback that Miles is waiting for would never run and the
-     * whole device teardown/open cycle would stall.  Service the queue before
-     * taking the mutex, exactly as the message pump does. */
-    if (g_wave_pending) waveout_service(c);
+     * whole device teardown/open cycle would stall.  Deliver completions
+     * before taking the mutex, then run this thread's timer.  A timer that
+     * blocks on the mixer mutex must not run before the completion callback
+     * that releases the mixer's completion event. */
+    if (g_wave_pending) waveout_deliver(c);
+    timer_service(c);
 
 #ifdef WC3_DEBUG
     if (ms == 0 || g_wait_no_block) {
@@ -2525,6 +2621,11 @@ static void h_wait_mutex(CPU *c, GMutex *mx, int32_t ms, uint32_t ra)
     if (ms == 0) {
 #endif
         pthread_mutex_lock(&mx->m);
+        if (mx->closing) {
+            pthread_mutex_unlock(&mx->m);
+            c->eax = 0;
+            return;
+        }
         if (!mx->owner_valid) {
             mx->owner = self;
             mx->owner_valid = 1;
@@ -2557,7 +2658,9 @@ static void h_wait_mutex(CPU *c, GMutex *mx, int32_t ms, uint32_t ra)
 
     pthread_mutex_lock(&mx->m);
     while (mx->owner_valid && !pthread_equal(mx->owner, self)) {
+        if (mx->closing) break;
         int rc = pthread_cond_timedwait(&mx->cv, &mx->m, &end);
+        if (mx->closing) break;
         if (rc == ETIMEDOUT && mx->owner_valid &&
             !pthread_equal(mx->owner, self)) {
             pthread_mutex_unlock(&mx->m);
@@ -2569,6 +2672,11 @@ static void h_wait_mutex(CPU *c, GMutex *mx, int32_t ms, uint32_t ra)
             c->eax = 258;
             return;
         }
+    }
+    if (mx->closing) {
+        pthread_mutex_unlock(&mx->m);
+        c->eax = 0;
+        return;
     }
     if (!mx->owner_valid) {
         mx->owner = self;
@@ -2589,16 +2697,31 @@ static void h_wait_one(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_HLE
     watch_note_wait(ra, h, 0, 1);
 #endif
-    GMutex *mx = mutex_get(h);
+    GMutex *mx = mutex_ref(h);
     if (mx) {
         h_wait_mutex(c, mx, ms, ra);
+        mutex_unref(mx);
 #ifdef WC3_DEBUG_HLE_SYNC
         sync_trace_wait1(h, ms, ra, c->eax);
 #endif
         return;
     }
-    GEvent *e = ev_get(h);
-    if (!e) {                           /* thread/semaphore handle: nothing to wait on */
+    GEvent *e = ev_ref(h);
+    if (!e) {
+        /* A thread handle becomes signalled when the guest thread returns.
+         * Returning WAIT_OBJECT_0 for every unknown handle made the save path
+         * believe its worker had finished, so it released a mutex the worker
+         * still owned and spun forever (the pause-menu freeze). */
+        struct GThread *gt = guest_thread_get(h);
+        if (gt) {
+            int done = guest_thread_wait(gt, ms);
+            c->eax = done ? 0u : 258u;
+#ifdef WC3_DEBUG_HLE_SYNC
+            sync_trace_wait1(h, ms, ra, c->eax);
+#endif
+            return;
+        }
+        /* Unknown thread/semaphore handle: nothing to wait on. */
 #ifdef WC3_DEBUG_HLE_SYNC
         sync_trace_wait1(h, ms, ra, 0);
 #endif
@@ -2612,10 +2735,12 @@ static void h_wait_one(CPU *c)
     if (ms == 0) {
 #endif
         pthread_mutex_lock(&e->m);
+        int closed = e->closing;
         int sig = e->signalled;
         if (sig && !e->manual) e->signalled = 0;
         pthread_mutex_unlock(&e->m);
-        c->eax = sig ? 0u : 258u;
+        ev_unref(e);
+        c->eax = closed ? 0u : (sig ? 0u : 258u);
 #ifdef WC3_DEBUG_HLE_SYNC
         sync_trace_wait1(h, ms, ra, c->eax);
 #endif
@@ -2633,8 +2758,10 @@ static void h_wait_one(CPU *c)
                       (uint64_t)start.tv_nsec / 1000000u + (uint32_t)ms;
 
     int sig = 0;
+    int closed = 0;
     pthread_mutex_lock(&e->m);
     for (;;) {
+        if (e->closing) { closed = 1; break; }
         if (e->signalled) break;
 
         struct timespec now, slice;
@@ -2653,6 +2780,7 @@ static void h_wait_one(CPU *c)
             slice.tv_nsec -= 1000000000L;
         }
         int rc = pthread_cond_timedwait(&e->cv, &e->m, &slice);
+        if (e->closing) { closed = 1; break; }
         if (e->signalled) break;
         if (rc == ETIMEDOUT) {
             /* Miles' waveOut completion and its 50 ms mixer timer are
@@ -2660,15 +2788,29 @@ static void h_wait_one(CPU *c)
              * still the only thread allowed to run its own timer callbacks,
              * so service both queues here with the event mutex released. */
             pthread_mutex_unlock(&e->m);
+            if (g_wave_pending) waveout_deliver(c);
             timer_service(c);
-            if (g_wave_pending) waveout_service(c);
+            if (g_wave_pending) waveout_deliver(c);
             pthread_mutex_lock(&e->m);
         }
     }
-    sig = e->signalled;
-    if (sig && !e->manual) e->signalled = 0;
+    if (!closed) {
+        sig = e->signalled;
+        if (sig && !e->manual) e->signalled = 0;
+    }
     pthread_mutex_unlock(&e->m);
+    ev_unref(e);
 
+    if (closed) {
+        /* The guest closed the handle while this thread was waiting.  Win32
+         * leaves this undefined; returning WAIT_OBJECT_0 lets the audio thread
+         * leave the mixer loop instead of touching the destroyed object. */
+        c->eax = 0;
+#ifdef WC3_DEBUG_HLE_SYNC
+        sync_trace_wait1(h, ms, ra, c->eax);
+#endif
+        return;
+    }
     if (!sig) {
         if (g_wait_timeouts++ < 8)
             fprintf(stderr, "[hle] WaitForSingleObject(%08X) timed out after %d ms "
@@ -2699,16 +2841,17 @@ static void h_wait_one(CPU *c)
  *
  * WAIT_OBJECT_0 + index is returned for the first signalled object; a mutex is
  * actually acquired (recursively, like Win32) before it is reported, because
- * the guest releases it after mixing.  Unsupported handles stay "always
- * signalled", matching h_wait_one's pass-through for thread/semaphore handles
- * that this HLE does not model. */
-enum { WK_EVENT, WK_MUTEX, WK_OTHER };
+ * the guest releases it after mixing.  Guest thread handles are signalled once
+ * the worker has returned; other unsupported handles stay "always signalled",
+ * matching h_wait_one's pass-through. */
+enum { WK_EVENT, WK_MUTEX, WK_THREAD, WK_OTHER };
 
 typedef struct {
     uint32_t h;
     int kind;
     GEvent *e;
     GMutex *mx;
+    struct GThread *t;
 } WaitItem;
 
 static int wait_item_acquire(WaitItem *w)
@@ -2716,6 +2859,10 @@ static int wait_item_acquire(WaitItem *w)
     if (w->kind == WK_EVENT) {
         int sig;
         pthread_mutex_lock(&w->e->m);
+        if (w->e->closing) {
+            pthread_mutex_unlock(&w->e->m);
+            return 1;          /* closed handle: report it as signalled */
+        }
         sig = w->e->signalled;
         if (sig && !w->e->manual) w->e->signalled = 0;
         pthread_mutex_unlock(&w->e->m);
@@ -2724,6 +2871,10 @@ static int wait_item_acquire(WaitItem *w)
     if (w->kind == WK_MUTEX) {
         int sig;
         pthread_mutex_lock(&w->mx->m);
+        if (w->mx->closing) {
+            pthread_mutex_unlock(&w->mx->m);
+            return 1;          /* closed handle: let the waiter leave */
+        }
         sig = !w->mx->owner_valid ||
               pthread_equal(w->mx->owner, pthread_self());
         if (sig) {
@@ -2734,6 +2885,8 @@ static int wait_item_acquire(WaitItem *w)
         pthread_mutex_unlock(&w->mx->m);
         return sig;
     }
+    if (w->kind == WK_THREAD)
+        return guest_thread_is_done(w->t);
     return 1;
 }
 
@@ -2743,11 +2896,12 @@ static void wait_item_release(WaitItem *w)
 {
     if (w->kind == WK_EVENT) {
         pthread_mutex_lock(&w->e->m);
-        if (!w->e->manual) w->e->signalled = 1;
+        if (!w->e->closing && !w->e->manual) w->e->signalled = 1;
         pthread_mutex_unlock(&w->e->m);
     } else if (w->kind == WK_MUTEX) {
         pthread_mutex_lock(&w->mx->m);
-        if (w->mx->owner_valid && pthread_equal(w->mx->owner, pthread_self()) &&
+        if (!w->mx->closing && w->mx->owner_valid &&
+            pthread_equal(w->mx->owner, pthread_self()) &&
             w->mx->count > 0) {
             if (--w->mx->count == 0) {
                 w->mx->owner_valid = 0;
@@ -2755,6 +2909,14 @@ static void wait_item_release(WaitItem *w)
             }
         }
         pthread_mutex_unlock(&w->mx->m);
+    }
+}
+
+static void wait_items_unref(WaitItem *it, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        if (it[i].e) ev_unref(it[i].e);
+        if (it[i].mx) mutex_unref(it[i].mx);
     }
 }
 
@@ -2781,9 +2943,12 @@ static void h_wait_many(CPU *c)
     for (uint32_t i = 0; i < n; i++) {
         uint32_t h = rd32g(hp + i * 4u);
         it[i].h = h;
-        it[i].e = ev_get(h);
-        it[i].mx = it[i].e ? NULL : mutex_get(h);
-        it[i].kind = it[i].e ? WK_EVENT : (it[i].mx ? WK_MUTEX : WK_OTHER);
+        it[i].e = ev_ref(h);
+        it[i].mx = it[i].e ? NULL : mutex_ref(h);
+        it[i].t = (it[i].e || it[i].mx) ? NULL : guest_thread_get(h);
+        it[i].kind = it[i].e ? WK_EVENT :
+                     (it[i].mx ? WK_MUTEX :
+                      (it[i].t ? WK_THREAD : WK_OTHER));
     }
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
@@ -2826,9 +2991,13 @@ static void h_wait_many(CPU *c)
          * The mutex is normally free, so the wait would return index 1
          * immediately and never reach the service calls below.  Deliver any
          * pending waveOut callback first: that callback signals the
-         * completion event, which must win the wait when both are ready. */
+         * completion event, which must win the wait when both are ready.
+         * Completions go before the timer callback: the 50 ms Miles timer
+         * can itself block on the mixer mutex, and running it first leaves
+         * the completion event unsignalled (save freeze). */
+        if (g_wave_pending) waveout_deliver(c);
         timer_service(c);
-        if (g_wave_pending) waveout_service(c);
+        if (g_wave_pending) waveout_deliver(c);
 
         if (!wait_all) {
             for (uint32_t i = 0; i < n; i++) {
@@ -2840,6 +3009,7 @@ static void h_wait_many(CPU *c)
                                 n, i, n > 0 ? it[0].h : 0,
                                 n > 1 ? it[1].h : 0, ra);
 #endif
+                    wait_items_unref(it, n);
                     c->eax = i;    /* WAIT_OBJECT_0 + index */
                     return;
                 }
@@ -2853,6 +3023,7 @@ static void h_wait_many(CPU *c)
                     fprintf(stderr, "[hle] WaitForMultipleObjects n=%u "
                                     "all=1 -> 0 ra=%08X\n", n, ra);
 #endif
+                wait_items_unref(it, n);
                 c->eax = 0;        /* WAIT_OBJECT_0 */
                 return;
             }
@@ -2860,6 +3031,7 @@ static void h_wait_many(CPU *c)
         }
 
         if (no_block) {
+            wait_items_unref(it, n);
             c->eax = 258;          /* WAIT_TIMEOUT */
             return;
         }
@@ -2871,15 +3043,19 @@ static void h_wait_many(CPU *c)
                                 "timed out after %d ms ra=%08X esp=%08X\n",
                         n, wait_all, (int)ms, ra, c->esp);
 #endif
+            wait_items_unref(it, n);
             c->eax = 258;
             return;
         }
 
         /* While this guest thread is blocked, it is still the thread that
          * must deliver Miles' 50 ms mixer timer and waveOut WOM_DONE
-         * callbacks.  Without this a held mutex would never be released. */
+         * callbacks.  Completions first, then timers, then any completion
+         * raised by the timer; the timer callback may need the mixer mutex
+         * that the completion callback releases. */
+        if (g_wave_pending) waveout_deliver(c);
         timer_service(c);
-        if (g_wave_pending) waveout_service(c);
+        if (g_wave_pending) waveout_deliver(c);
         usleep(1000);
     }
 }
@@ -2911,10 +3087,11 @@ static void h_open_mutex(CPU *c)
 }
 static void h_release_mutex(CPU *c)
 {
-    GMutex *mx = mutex_get(arg32(c, 0));
+    GMutex *mx = mutex_ref(arg32(c, 0));
     if (!mx) { c->eax = 0; return; }
     pthread_mutex_lock(&mx->m);
-    if (mx->owner_valid && pthread_equal(mx->owner, pthread_self())) {
+    if (!mx->closing && mx->owner_valid &&
+        pthread_equal(mx->owner, pthread_self())) {
         if (--mx->count == 0) {
             mx->owner_valid = 0;
             pthread_cond_broadcast(&mx->cv);
@@ -2924,6 +3101,7 @@ static void h_release_mutex(CPU *c)
         c->eax = 0;
     }
     pthread_mutex_unlock(&mx->m);
+    mutex_unref(mx);
 }
 static void h_create_semaphore(CPU *c)
 {
@@ -3131,6 +3309,44 @@ static int wave_trace(void)
     return g_wave_trace;
 }
 #endif
+
+/* A-13.7: the Winlator/ALSA "audio latency" knob for the PRODUCT path.
+ *
+ * rev 6 (Wc3AudioApi) was measured worse than as-built WINMM and is off, but
+ * the legacy waveOut sink owns its own AAudio stream, so WC3_AUDIO_LATENCY_MS
+ * from the platform layer never reached it.  AAudio's default buffer on the
+ * reference device is 5316 frames = 120.5 ms, 2.4x the guest's 50 ms header.
+ * This is the ONE transport parameter that was never A/B-tested here.
+ *
+ * Default 0 = leave AAudio alone.  Opt in with WC3_AUDIO_LATENCY_MS=<ms> or
+ * a state-dir trigger <WC3_DATA_DIR>/audio_latency_{30,60,90,120}, matching
+ * the existing audio_trace_on / wave_dump_on convention.  The granted size is
+ * always logged: a request is never mistaken for a measurement. */
+static int wave_latency_ms(void)
+{
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    cached = 0;
+    const char *env = getenv("WC3_AUDIO_LATENCY_MS");
+    if (env && *env) {
+        long v = strtol(env, NULL, 10);
+        if (v > 0 && v <= 500) cached = (int)v;
+    }
+    if (!cached) {
+        static const int options[] = { 30, 60, 90, 120 };
+        const char *dir = getenv("WC3_DATA_DIR");
+        char trigger[1200];
+        for (unsigned i = 0; i < sizeof options / sizeof options[0]; i++) {
+            snprintf(trigger, sizeof trigger, "%s/audio_latency_%d",
+                     (dir && *dir) ? dir : ".", options[i]);
+            if (access(trigger, F_OK) == 0) {
+                cached = options[i];
+                break;
+            }
+        }
+    }
+    return cached;
+}
 
 static uint32_t wave_now_ms(void)
 {
@@ -3812,6 +4028,32 @@ static int wave_open_aaudio(WaveDev *d)
              * buffer has pre-filled the ring (WAVE_PREFILL_BURSTS). */
             d->started = 0;
             d->burst_frames = AAudioStream_getFramesPerBurst(d->stream);
+
+            /* A-13.7: measured AAudio buffer duration.  Only the hardware
+             * queue depth changes; WOM_DONE pacing and the guest header pool
+             * stay exactly as they are.  Always log the granted value. */
+            {
+                int ms = wave_latency_ms();
+                int32_t granted = AAudioStream_getBufferSizeInFrames(d->stream);
+                int32_t burst = d->burst_frames;
+                int32_t cap = AAudioStream_getBufferCapacityInFrames(d->stream);
+                if (ms > 0) {
+                    int32_t want = (int32_t)((int64_t)d->rate * ms / 1000);
+                    if (want < burst) want = burst;
+                    if (cap > 0 && want > cap) want = cap;
+                    int32_t set = AAudioStream_setBufferSizeInFrames(d->stream,
+                                                                     want);
+                    granted = set > 0 ? set :
+                              AAudioStream_getBufferSizeInFrames(d->stream);
+                }
+                fprintf(stderr,
+                        "[wave] AAudio latency requested=%d ms granted=%d "
+                        "frames (%.1f ms) burst=%d cap=%d rate=%d\n",
+                        ms, (int)granted,
+                        d->rate > 0
+                            ? (double)granted * 1000.0 / (double)d->rate : 0.0,
+                        (int)burst, (int)cap, (int)d->rate);
+            }
 #ifdef WC3_DEBUG
             int32_t actual = AAudioStream_getSampleRate(d->stream);
             if (actual != d->rate)
@@ -3849,19 +4091,15 @@ static void wave_init(void)
 
 /* Deliver queued WOM_DONE callbacks on this guest thread.  The message pump
  * calls this; a WOM_DONE callback may re-enter GetMessage, so the completion
- * token is non-blocking.  Per-thread timers are serviced BEFORE that token —
- * a busy peer can no longer starve this thread's 50 ms mixer tick.  No host
+ * token is non-blocking.  The timer callback is NOT run here: callers choose
+ * the order (waveout_service() runs timers first; the blocking wait paths
+ * deliver completions first so the mixer event is signalled before the timer
+ * callback takes the mixer mutex).  No host
  * lock is held across dispatch(): g_wave_lock is dropped before every
  * callback, as the lock invariant requires. */
-static void waveout_service(CPU *c)
+static void waveout_deliver(CPU *c)
 {
     if (!c) return;
-    /* Miles' 50 ms mixer timer is per-thread and has its own lock.  It runs
-     * before ANY completion work: a long WOM_DONE dispatch on another thread
-     * used to make this thread skip its tick entirely (a 50 ms timer measured
-     * at 70 ms median / 652 ms worst case).  timer_service() is a no-op until
-     * wave_init() has installed the return thunk. */
-    timer_service(c);
     if (__atomic_exchange_n(&g_wave_service_lock, 1, __ATOMIC_ACQ_REL)) {
 #ifdef WC3_DEBUG
         if (wave_trace() && g_wave_service_log++ < 64)
@@ -3991,6 +4229,16 @@ static void waveout_service(CPU *c)
 #ifdef WC3_DEBUG
     wave_audio_stats_report();
 #endif
+}
+
+/* Default service order: this thread's 50 ms mixer timer first, then any
+ * queued WOM_DONE.  Callers that are about to enter the timer callback use
+ * waveout_deliver() first instead; see h_wait_one()/h_wait_many(). */
+static void waveout_service(CPU *c)
+{
+    if (!c) return;
+    timer_service(c);
+    waveout_deliver(c);
 }
 
 static void h_wave_out_get_num_devs(CPU *c)
@@ -4246,7 +4494,9 @@ static void wave_probe_pump(CPU *c, uint32_t need, int fake)
     } else {
         for (int i = 0; i < 20 && !g_wave_pending; i++) usleep(500);
     }
-    waveout_service(c);
+    if (g_wave_pending) waveout_deliver(c);
+    timer_service(c);
+    waveout_deliver(c);
 }
 
 static void h_wave_out_write(CPU *c)
@@ -4257,9 +4507,12 @@ static void h_wave_out_write(CPU *c)
      * of the reuse of the same WAVEHDR, as it is on Windows.  Running the
      * callback on this thread also makes its SuspendThread(self) harmless.
      * The 50 ms mixer timer runs unconditionally: tying it to
-     * g_wave_pending made it skip ticks whenever no completion was queued. */
+     * g_wave_pending made it skip ticks whenever no completion was queued.
+     * Completions are delivered before the timer callback: the timer can
+     * block on the mixer mutex until the completion callback signals it. */
+    if (g_wave_pending) waveout_deliver(c);
     timer_service(c);
-    if (g_wave_pending) waveout_service(c);
+    if (g_wave_pending) waveout_deliver(c);
 
     uint32_t gh = arg32(c, 0), hdr = arg32(c, 1);
     if (!hdr || !guest_ok(hdr, 32)) { c->eax = MMSYSERR_INVALPARAM; return; }
@@ -4314,7 +4567,7 @@ static void h_wave_out_write(CPU *c)
                                need == 0 ? "empty" : "probe");
         pthread_mutex_unlock(&g_wave_lock);
         c->eax = MMSYSERR_NOERROR;
-        waveout_service(c);
+        waveout_deliver(c);
         return;
     }
 
@@ -6360,6 +6613,7 @@ static void cr_ctime64(CPU *c)
 typedef struct GThread {
     int          used;
     uint32_t     guest_id;
+    uint32_t     handle;          /* Win32 thread handle returned by CreateThread */
     uint32_t     teb, stack_base, stack_size;
     uint32_t     start, arg;
     pthread_t    host;
@@ -6378,6 +6632,48 @@ typedef struct GThread {
 static GThread g_threads[GUEST_THREAD_MAX];
 static pthread_mutex_t g_thread_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_next_thread_id = 0x1000;
+
+/* Thread handles are looked up by the Win32 handle stored in the arena slot.
+ * A slot stays reserved after the thread exits (used is never cleared), so the
+ * pointer cannot be recycled underneath a waiter. */
+static struct GThread *guest_thread_get(uint32_t h)
+{
+    struct GThread *found = NULL;
+    if (!h) return NULL;
+    pthread_mutex_lock(&g_thread_lock);
+    for (int i = 0; i < GUEST_THREAD_MAX; i++) {
+        GThread *t = &g_threads[i];
+        if (t->used && __atomic_load_n(&t->handle, __ATOMIC_ACQUIRE) == h) {
+            found = t;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_thread_lock);
+    return found;
+}
+
+static int guest_thread_is_done(struct GThread *t)
+{
+    if (!t) return 1;
+    return !__atomic_load_n(&t->running, __ATOMIC_ACQUIRE);
+}
+
+/* WaitForSingleObject on a thread handle.  The handle is signalled when the
+ * guest thread returns, so this must actually wait instead of reporting every
+ * unknown handle as WAIT_OBJECT_0.  INFINITE is capped like the other waits. */
+static int guest_thread_wait(struct GThread *t, int32_t ms)
+{
+    if (!t) return 1;
+    if (ms < 0 || ms > WAIT_CAP_MS) ms = WAIT_CAP_MS;
+    if (guest_thread_is_done(t)) return 1;
+    if (ms == 0) return 0;
+    uint32_t start = wave_now_ms();
+    for (;;) {
+        if (guest_thread_is_done(t)) return 1;
+        if ((uint32_t)(wave_now_ms() - start) >= (uint32_t)ms) return 0;
+        usleep(1000);
+    }
+}
 
 static uint32_t hle_current_guest_id(void)
 {
@@ -6515,6 +6811,19 @@ static uint32_t cpu_live_eip(CPU *c)
     return c ? __atomic_load_n(&c->eip, __ATOMIC_RELAXED) : 0;
 }
 
+/* The last 64 HLE entries are a global ring, so a stall dump shows which host
+ * calls the guest made immediately before it stopped dispatching.  This is
+ * cheaper than hle_android_report() and does not reset the call counters. */
+static void hle_dump_ring(const char *why)
+{
+    fprintf(stderr, "[hle] ring %s len=%u\n", why, g_ring_len);
+    for (unsigned i = 0; i < g_ring_len; i++) {
+        unsigned p = (g_ring_pos + HLE_RING - g_ring_len + i) % HLE_RING;
+        fprintf(stderr, "[hle]   %s ra=%08X esp=%08X\n",
+                g_ring[p].name, g_ring[p].ra, g_ring[p].esp);
+    }
+}
+
 static void *hang_watch_proc(void *arg)
 {
     (void)arg;
@@ -6527,14 +6836,18 @@ static void *hang_watch_proc(void *arg)
         CPU *mc = __atomic_load_n(&g_main_cpu, __ATOMIC_RELAXED);
         uint32_t mn = __atomic_load_n(&g_main_dispatch_count, __ATOMIC_RELAXED);
         if (mn == prev_main_n) stalled++; else { stalled = 0; prev_main_n = mn; }
-        if (stalled == 5 && !g_main_wait_active)
-            fprintf(stderr, "[watch] STALL t=%u n=%u pc=%08X last=%08X "
+        const char *mn_name = hle_describe(g_main_last_target);
+        if (stalled == 5 && !g_main_wait_active) {
+            fprintf(stderr, "[watch] STALL t=%u n=%u pc=%08X last=%08X(%s) "
                             "esp=%08X ebp=%08X\n",
                     wave_now_ms(), mn, cpu_live_eip(mc), g_main_last_target,
-                    g_main_last_esp, g_main_last_ebp);
-        fprintf(stderr, "[watch] t=%u main last=%08X pc=%08X eip=%08X esp=%08X "
+                    mn_name[0] ? mn_name : "-", g_main_last_esp, g_main_last_ebp);
+            hle_dump_ring("main stall");
+        }
+        fprintf(stderr, "[watch] t=%u main last=%08X(%s) pc=%08X eip=%08X esp=%08X "
                         "ebp=%08X n=%u wait=%d ra=%08X h0=%08X h1=%08X stall=%d\n",
-                wave_now_ms(), g_main_last_target, cpu_live_eip(mc),
+                wave_now_ms(), g_main_last_target, mn_name[0] ? mn_name : "-",
+                cpu_live_eip(mc),
                 g_main_last_eip, g_main_last_esp, g_main_last_ebp, mn,
                 g_main_wait_active, g_main_wait_ra, g_main_wait_h0,
                 g_main_wait_h1, stalled);
@@ -6542,10 +6855,12 @@ static void *hang_watch_proc(void *arg)
             GThread *t = &g_threads[j];
             if (!t->used) continue;
             CPU *tc = __atomic_load_n(&t->cpu, __ATOMIC_RELAXED);
-            fprintf(stderr, "[watch] gid=%u run=%d last=%08X pc=%08X eip=%08X "
+            const char *tn = hle_describe(t->last_target);
+            fprintf(stderr, "[watch] gid=%u run=%d last=%08X(%s) pc=%08X eip=%08X "
                             "esp=%08X ebp=%08X n=%u wait=%d ra=%08X "
                             "h0=%08X h1=%08X\n",
-                    t->guest_id, t->running, t->last_target, cpu_live_eip(tc),
+                    t->guest_id, t->running, t->last_target, tn[0] ? tn : "-",
+                    cpu_live_eip(tc),
                     t->last_eip, t->last_esp, t->last_ebp, t->dispatch_count,
                     t->wait_active, t->wait_ra, t->wait_h0, t->wait_h1);
         }
@@ -6586,7 +6901,7 @@ static void *guest_thread_proc(void *p)
     push32(&c, 0x7EFFFFF0u);
     dispatch(&c, t->start);
     t->exit_code = c.eax;
-    t->running = 0;
+    __atomic_store_n(&t->running, 0, __ATOMIC_RELEASE);
 #if WC3_DEBUG && WC3_DEBUG_HLE
     t->cpu = NULL;
 #endif
@@ -6617,7 +6932,7 @@ static uint32_t guest_thread_spawn(uint32_t start, uint32_t arg, uint32_t flags,
             t->start = start;
             t->arg = arg;
             t->exit_code = 0x103u;   /* STILL_ACTIVE */
-            t->running = 1;
+            __atomic_store_n(&t->running, 1, __ATOMIC_RELEASE);
             break;
         }
     }
@@ -6641,6 +6956,7 @@ static uint32_t guest_thread_spawn(uint32_t start, uint32_t arg, uint32_t flags,
     if (thrdaddr && guest_ok(thrdaddr, 4)) wr32g(thrdaddr, t->guest_id);
 
     uint32_t h = gh_new_sync();
+    __atomic_store_n(&t->handle, h, __ATOMIC_RELEASE);
 #ifdef WC3_DEBUG_HLE_SYNC
     sync_trace_mark(h, SYNC_TRACE_THREAD, t->guest_id);
     SYNC_TRACE("CreateThread(%s start=%08X arg=%08X) -> h=%08X gid=%u "
@@ -7624,15 +7940,14 @@ static void u_get_message(CPU *c)
     if (!out) { c->eax = 0xFFFFFFFFu; return; }
 
     service_settings_save(c);
-    /* Windows dispatches WM_TIMER from the message pump.  Service this
-     * thread's due timers here, before waveout_service(), so the 50 ms Miles
-     * mixer timer does not depend on the global completion-service lock or on
-     * whether a waveOut completion happens to be pending. */
-    timer_service(c);
     /* Keep Miles' waveOut completion serviced on the guest thread that pumps
      * messages.  The old stub returned "no message" immediately; do the same
-     * when the queue is empty so startup is not held inside a blocking wait. */
-    waveout_service(c);
+     * when the queue is empty so startup is not held inside a blocking wait.
+     * Deliver completions before WM_TIMER: the 50 ms Miles mixer timer can
+     * block on the mutex that the completion callback releases. */
+    if (g_wave_pending) waveout_deliver(c);
+    timer_service(c);
+    if (g_wave_pending) waveout_deliver(c);
     keyboard_service();
     if (u_msg_take(out, hwnd, lo, hi, 1)) {
         c->eax = rd32g(out + 4) == 0x0012u ? 0 : 1;   /* WM_QUIT */
@@ -7665,8 +7980,9 @@ static void u_peek_message(CPU *c)
     uint32_t hwnd = arg32(c, 1), lo = arg32(c, 2), hi = arg32(c, 3);
     int remove = (arg32(c, 4) & 1) != 0;             /* PM_REMOVE */
     service_settings_save(c);
+    if (g_wave_pending) waveout_deliver(c);
     timer_service(c);
-    waveout_service(c);
+    if (g_wave_pending) waveout_deliver(c);
     keyboard_service();
     c->eax = (uint32_t)u_msg_take(out, hwnd, lo, hi, remove);
 #ifdef WC3_DEBUG

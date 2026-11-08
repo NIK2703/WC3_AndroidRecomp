@@ -300,10 +300,19 @@ static int headless_window_set_title(void *ctx, uintptr_t window,
 
 /* ------------------------------------------------------------------- audio */
 
+/* A-12.4 S1: T1 parity.  The headless DUT has no hardware clock, so it keeps
+ * an explicit virtual device clock: write() only queues bytes, advance() (a
+ * test step) consumes them and fires the same on_consumed() pump as Android.
+ * A difftest can therefore drive WOM_DONE deterministically. */
 typedef struct HeadlessAudio {
     uint32_t rate;
     uint32_t channels;
     uint32_t bits;
+    _Atomic uint64_t written;
+    _Atomic uint64_t consumed;
+    void (*on_consumed)(void *opaque, uint64_t total);
+    void *consumed_opaque;
+    pthread_mutex_t lock;
 } HeadlessAudio;
 
 static int headless_audio_open(void *ctx, uint32_t sample_rate,
@@ -317,6 +326,12 @@ static int headless_audio_open(void *ctx, uint32_t sample_rate,
     stream->rate = sample_rate;
     stream->channels = channels;
     stream->bits = bits;
+    atomic_init(&stream->written, 0);
+    atomic_init(&stream->consumed, 0);
+    if (pthread_mutex_init(&stream->lock, NULL) != 0) {
+        free(stream);
+        return -1;
+    }
     *out = (uintptr_t)stream;
     return 0;
 }
@@ -327,8 +342,60 @@ static int headless_audio_write(void *ctx, uintptr_t handle, const void *frames,
     (void)ctx;
     HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
     if (!stream || (!frames && bytes != 0u)) return -1;
+    atomic_fetch_add_explicit(&stream->written, bytes, memory_order_relaxed);
     if (written) *written = bytes;
     return 0;
+}
+
+static int headless_audio_set_consumed(
+    void *ctx, uintptr_t handle,
+    void (*on_consumed)(void *opaque, uint64_t total), void *opaque)
+{
+    (void)ctx;
+    HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
+    if (!stream) return -1;
+    (void)pthread_mutex_lock(&stream->lock);
+    stream->consumed_opaque = opaque;
+    stream->on_consumed = on_consumed;
+    (void)pthread_mutex_unlock(&stream->lock);
+    return 0;
+}
+
+static uint64_t headless_audio_consumed_bytes(void *ctx, uintptr_t handle)
+{
+    (void)ctx;
+    HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
+    if (!stream) return 0;
+    return atomic_load_explicit(&stream->consumed, memory_order_acquire);
+}
+
+static int headless_audio_advance(void *ctx, uintptr_t handle, uint32_t bytes)
+{
+    (void)ctx;
+    HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
+    if (!stream) return -1;
+    uint64_t queued = atomic_load_explicit(&stream->written,
+                                           memory_order_acquire);
+    uint64_t done = atomic_load_explicit(&stream->consumed,
+                                         memory_order_acquire);
+    uint64_t take = queued > done ? queued - done : 0u;
+    if (take > bytes) take = bytes;
+    if (!take) return 0;
+    atomic_store_explicit(&stream->consumed, done + take,
+                          memory_order_release);
+    (void)pthread_mutex_lock(&stream->lock);
+    void (*cb)(void *, uint64_t) = stream->on_consumed;
+    void *opaque = stream->consumed_opaque;
+    (void)pthread_mutex_unlock(&stream->lock);
+    if (cb) cb(opaque, done + take);
+    return 0;
+}
+
+/* Headless has no hardware queue; the measured depth is always zero. */
+static uint32_t headless_audio_latency_frames(void *ctx, uintptr_t handle)
+{
+    (void)ctx; (void)handle;
+    return 0u;
 }
 
 static int headless_audio_close(void *ctx, uintptr_t handle)
@@ -336,6 +403,7 @@ static int headless_audio_close(void *ctx, uintptr_t handle)
     (void)ctx;
     HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
     if (!stream) return -1;
+    pthread_mutex_destroy(&stream->lock);
     free(stream);
     return 0;
 }
@@ -718,6 +786,10 @@ void headless_services_install(Wc3Platform *platform, HeadlessState *st)
     platform->audio.write = headless_audio_write;
     platform->audio.close = headless_audio_close;
     platform->audio.set_callback = headless_audio_set_callback;
+    platform->audio.set_consumed = headless_audio_set_consumed;
+    platform->audio.consumed_bytes = headless_audio_consumed_bytes;
+    platform->audio.advance = headless_audio_advance;
+    platform->audio.latency_frames = headless_audio_latency_frames;
 
     platform->clipboard.ctx = st;
     platform->clipboard.get_text = headless_clipboard_get;

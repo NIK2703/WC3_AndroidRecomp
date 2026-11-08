@@ -128,6 +128,7 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/user32/user_object"
     "${WC3_ROOT}/runtime/hle/win32/user32/window"
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts"
+    "${WC3_ROOT}/runtime/hle/win32/winmm"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/third_party/softfloat/source/include"
@@ -204,7 +205,8 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/user32/scroll/scroll_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/user_object/user_object_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/window/window_hle.c"
-    "${WC3_ROOT}/runtime/hle/win32/user32/window_facts/window_facts_hle.c")
+    "${WC3_ROOT}/runtime/hle/win32/user32/window_facts/window_facts_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/winmm/waveout_hle.c")
 target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle"
     "${WC3_ROOT}/runtime/diag"
@@ -238,6 +240,7 @@ target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/user32/user_object"
     "${WC3_ROOT}/runtime/hle/win32/user32/window"
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts"
+    "${WC3_ROOT}/runtime/hle/win32/winmm"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/runtime/platform"
