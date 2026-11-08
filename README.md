@@ -9,11 +9,17 @@ code to C and compiles it with the Android NDK/Clang for ARM64.
 At the time of writing, the graphics subsystem is fully debugged. The port can
 launch a melee map or a campaign mission.
 
+<img width="400" height="180" alt="Screenshot_2026-11-07-20-34-58-138_wc3 recomp debug" src="https://github.com/user-attachments/assets/b7035652-e9e1-45c2-9f56-d20b77378dfd" />
+<img width="400" height="180" alt="Screenshot_2026-11-07-20-39-40-093_wc3 recomp debug" src="https://github.com/user-attachments/assets/539d2d96-c366-47a8-8abb-1babd0b6d360" />
+<img width="400" height="180" alt="Screenshot_2026-11-07-20-36-15-019_com miui securitycenter" src="https://github.com/user-attachments/assets/32a04fea-0b6e-4027-9b8a-c1b722f82c8e" />
+
 Known issues:
 
 * Audio is unstable: periodic clicks are audible, and music occasionally drops
   out.
 * The game freezes intermittently.
+
+
 
 ## Target
 
