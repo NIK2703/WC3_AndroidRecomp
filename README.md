@@ -4,11 +4,6 @@ Static recompilation of Warcraft III: The Frozen Throne (1.27.1.7085) into a
 native Android arm64-v8a port. The target pipeline lifts the original x86-32
 code to C and compiles it with the Android NDK/Clang for ARM64.
 
-This repository is the canonical target tree. This README describes the target
-design, project boundaries, and current development status; it does not claim
-that the port is finished. Detailed migration state is tracked in
-`config/migration.json`.
-
 ## Development status
 
 At the time of writing, the graphics subsystem is fully debugged. The port can
@@ -49,7 +44,7 @@ Known issues:
 
 ## Graphics
 
-* D3D9 rendering goes through a thin bridge to DXVK.
+* D3D9 rendering goes through a bridge to DXVK.
 * The dual-backend selector and fallback are provisional until they are
   measured.
 * The Vulkan ICD is selected explicitly through `VulkanDriverApi` (`system` or
