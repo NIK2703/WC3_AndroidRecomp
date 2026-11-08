@@ -50,6 +50,11 @@ option(WC3_BUILD_APP "Build libwc3gameactivity.so" OFF)
 option(WC3_WITH_LEGACY_BOOT "Link the transitional lifted corpus and as-built HLE"
        ${WC3_WITH_LEGACY_BOOT_DEFAULT})
 option(WC3_DEBUG "Build with debug-only diagnostics" OFF)
+# P0-1 stays OFF until G-14/G-15 are green (GUEST_ABI ABI-6).  The pass is
+# implemented and self-tested, but enabling it here is a build decision that
+# must be paired with the golden equivalence report.
+option(WC3_DEVIRTUALIZE_P0_1
+       "Apply the P0-1 direct-call LiftPass to relifted corpus chunks" OFF)
 if(WC3_DEBUG)
     set(WC3_DEBUG_DEFINE 1)
 else()

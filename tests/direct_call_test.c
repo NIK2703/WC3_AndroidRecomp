@@ -16,7 +16,7 @@
 #define WC3_DISP_PENDING_VA 0u
 #define WC3_DISP_PENDING_FN 1u
 
-struct CPU {
+typedef struct CPU {
     uint32_t disp_depth;
     uint32_t disp_pending_valid;
     uint32_t disp_pending_kind;
@@ -25,7 +25,7 @@ struct CPU {
     int log[64];
     int n;
     long hops;
-};
+} CPU;
 
 #include "direct_call.h"
 

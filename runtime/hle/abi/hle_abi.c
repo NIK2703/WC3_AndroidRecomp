@@ -172,27 +172,19 @@ static uint32_t hle_abi_call_entry(HleEntry *e, uint32_t thunk, CPU *c)
 {
     if (!e || !e->impl || !c) abort();
 
-    /* Win32 callee-saved registers are part of the guest ABI: a handler must
-     * leave ebx/esi/edi/ebp unchanged.  The source audit of all target HLE
-     * handlers found exactly one writer, waveout_hle.c's w2_invoke(), and it
-     * saves/restores the four fields itself around its guest callback.  The
-     * bridge restores them here as the frozen ABI requires; a new handler
-     * must still preserve them itself rather than rely on that safety net. */
-    uint32_t saved_ebx = c->ebx;
-    uint32_t saved_esi = c->esi;
-    uint32_t saved_edi = c->edi;
-    uint32_t saved_ebp = c->ebp;
+    /* Win32 callee-saved registers are part of the guest ABI: every target
+     * handler must leave ebx/esi/edi/ebp unchanged.  A source audit of all
+     * target HLE handlers found exactly one writer, waveout_hle.c's
+     * w2_invoke(), and it saves/restores the four fields itself around its
+     * guest callback.  The bridge deliberately does not save or restore them:
+     * that would hide a handler which violates the ABI and add four loads and
+     * stores to every HLE call. */
     uint32_t esp_in = c->esp;
 
     c->eip = thunk;
     e->impl(c);
 
     uint32_t esp_out = c->esp;
-
-    c->ebx = saved_ebx;
-    c->esi = saved_esi;
-    c->edi = saved_edi;
-    c->ebp = saved_ebp;
 
     /* Force the caller frame instead of adding cleanup to a handler that
      * already moved esp; the latter compounds a corrupted guest stack. */

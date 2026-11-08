@@ -551,11 +551,13 @@ static void clear_open_slot_locked(int index)
     pthread_mutex_unlock(&g_open_locks[index]);
 }
 
-/* Caller holds g_open_table_lock.  On success the selected slot is pinned
- * before the table lock is dropped, then the path is copied under the slot
- * lock.  The table lock is released on every return path. */
-static uint32_t open_handle_locked(const char *path)
+/* Lock ownership stays inside this helper: the table lock is taken here, the
+ * selected slot is pinned, the table lock is dropped, then the path is copied
+ * under the slot lock.  Callers never hold g_open_table_lock across a guest
+ * access because they never see it. */
+static uint32_t open_handle_path(const char *path)
 {
+    pthread_mutex_lock(&g_open_table_lock);
     for (unsigned i = 0; i < REG_OPEN_MAX; i++) {
         if (g_open[i].used) continue;
         const uint32_t handle = REG_HANDLE_BASE + i * REG_HANDLE_STRIDE;
@@ -569,6 +571,19 @@ static uint32_t open_handle_locked(const char *path)
     }
     pthread_mutex_unlock(&g_open_table_lock);
     return 0u;
+}
+
+/* Lock ownership is likewise internal: the caller holds only g_lock. */
+static int close_open_handle(uint32_t handle)
+{
+    pthread_mutex_lock(&g_open_table_lock);
+    const int index = find_open_index_locked(handle);
+    if (index < 0) {
+        pthread_mutex_unlock(&g_open_table_lock);
+        return 0;
+    }
+    clear_open_slot_locked(index);
+    return 1;
 }
 
 static int is_predefined_root(uint32_t handle)
@@ -659,21 +674,14 @@ static void h_open_key(CPU *c)
     }
 
     ensure_key_and_parents_locked(path);
-    /* open_handle_locked releases the table lock after pinning the slot. */
-    pthread_mutex_lock(&g_open_table_lock);
-    const uint32_t handle = open_handle_locked(path);
+    const uint32_t handle = open_handle_path(path);
     if (!handle) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_NOT_ENOUGH_MEMORY;
         return;
     }
     if (!out_valid) {
-        pthread_mutex_lock(&g_open_table_lock);
-        const int index = find_open_index_locked(handle);
-        if (index >= 0)
-            clear_open_slot_locked(index);
-        else
-            pthread_mutex_unlock(&g_open_table_lock);
+        (void)close_open_handle(handle);
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_PARAMETER;
         return;
@@ -727,21 +735,14 @@ static void h_create_key(CPU *c)
 
     const int existed = find_key_locked(path) != NULL;
     ensure_key_and_parents_locked(path);
-    /* open_handle_locked releases the table lock after pinning the slot. */
-    pthread_mutex_lock(&g_open_table_lock);
-    const uint32_t handle = open_handle_locked(path);
+    const uint32_t handle = open_handle_path(path);
     if (!handle) {
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_NOT_ENOUGH_MEMORY;
         return;
     }
     if (!out_valid || !disposition_valid) {
-        pthread_mutex_lock(&g_open_table_lock);
-        const int index = find_open_index_locked(handle);
-        if (index >= 0)
-            clear_open_slot_locked(index);
-        else
-            pthread_mutex_unlock(&g_open_table_lock);
+        (void)close_open_handle(handle);
         pthread_mutex_unlock(&g_lock);
         c->eax = REG_INVALID_PARAMETER;
         return;

@@ -112,6 +112,36 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
         if(NOT _chunks)
             message(FATAL_ERROR "splitcorpus produced no chunks for ${_src}")
         endif()
+        if(WC3_DEVIRTUALIZE_P0_1)
+            # P0-1 LiftPass runs after splitcorpus, so every chunk receives the
+            # direct_call.h include and prototypes for cross-TU targets.  This
+            # is gated OFF by default until G-14/G-15 are green (ABI-6).
+            set(_devirt_dir
+                "${CMAKE_CURRENT_BINARY_DIR}/devirtualized/${_name}/${_kind}")
+            file(MAKE_DIRECTORY "${_devirt_dir}")
+            set(_transformed_chunks)
+            foreach(_chunk IN LISTS _chunks)
+                get_filename_component(_chunk_name "${_chunk}" NAME)
+                set(_devirt_out "${_devirt_dir}/${_chunk_name}")
+                execute_process(
+                    COMMAND "${Python3_EXECUTABLE}"
+                            "${WC3_ROOT}/tools/lift/passes/devirtualize.py"
+                            --list "${WC3_BOOT_LIST}"
+                            --lift "${_chunk}"
+                            --out "${_devirt_out}"
+                            --json "${_devirt_out}.json"
+                    RESULT_VARIABLE _devirt_rc
+                    OUTPUT_VARIABLE _devirt_stdout
+                    ERROR_VARIABLE _devirt_stderr)
+                if(NOT _devirt_rc EQUAL 0)
+                    message(FATAL_ERROR
+                        "devirtualize failed for ${_chunk} (rc=${_devirt_rc}):\n"
+                        "${_devirt_stdout}\n${_devirt_stderr}")
+                endif()
+                list(APPEND _transformed_chunks "${_devirt_out}")
+            endforeach()
+            set(_chunks "${_transformed_chunks}")
+        endif()
         list(APPEND WC3_RELIFTED_SOURCES ${_chunks})
     endforeach()
 
@@ -129,6 +159,7 @@ endif()
 add_library(wc3_corpus_relifted STATIC ${WC3_RELIFTED_SOURCES})
 target_include_directories(wc3_corpus_relifted PRIVATE
     "${WC3_ROOT}/runtime/cpu"
+    "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/third_party/softfloat/source/include"
     "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
 target_compile_definitions(wc3_corpus_relifted PRIVATE

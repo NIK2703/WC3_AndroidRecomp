@@ -309,6 +309,7 @@ static uint32_t stream_new(int fd, int std_index, int mode)
     uint32_t record = wc3_legacy_guest_alloc0(0x20u);
     if (!record) return 0;
 
+    unsigned slot = STREAM_LIMIT;
     pthread_mutex_lock(&g_stream_lock);
     for (unsigned i = STREAM_FIRST; i < STREAM_LIMIT; i++) {
         Stream *stream = &g_streams[i];
@@ -329,15 +330,19 @@ static uint32_t stream_new(int fd, int std_index, int mode)
                               memory_order_release);
         stream->closed = 0;
         pthread_mutex_unlock(&stream->lock);
-        pthread_mutex_unlock(&g_stream_lock);
-
-        wc3_legacy_wr32g(record, STREAM_MAGIC);
-        wc3_legacy_wr32g(record + 4u, i);
-        return record;
+        slot = i;
+        break;
     }
     pthread_mutex_unlock(&g_stream_lock);
-    wc3_legacy_guest_free(record);
-    return 0;
+
+    if (slot == STREAM_LIMIT) {
+        wc3_legacy_guest_free(record);
+        return 0;
+    }
+
+    wc3_legacy_wr32g(record, STREAM_MAGIC);
+    wc3_legacy_wr32g(record + 4u, slot);
+    return record;
 }
 
 /* The caller holds stream->lock.  Closing is terminal even when the host

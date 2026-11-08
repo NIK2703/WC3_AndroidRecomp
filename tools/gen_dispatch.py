@@ -81,40 +81,47 @@ void wc3_dispatch_shutdown(void)
     memset(g_lift_hash, 0, sizeof g_lift_hash);
 }
 
-static THREAD_LOCAL int g_disp_depth;
-static THREAD_LOCAL int g_tail_pending;
-static THREAD_LOCAL uint32_t g_tail_target;
-
 static void dispatch_common(CPU *c, uint32_t target, int tail)
 {
-    if (!c) abort();
+    int chained = 0;
+    int have_fn = 0;
+    void (*pending_fn)(CPU *) = NULL;
     (void)tail;
-    g_disp_depth++;
+    if (!c) abort();
+    c->disp_depth++;
     for (;;) {
-        g_tail_pending = 0;
-
-        if (target >= GUEST_HLE_BASE &&
-            target < GUEST_HLE_BASE + (uint32_t)HLE_MAX * HLE_STRIDE) {
+        c->disp_pending_valid = 0;
+        if (have_fn) {
+            void (*fn)(CPU *) = pending_fn;
+            have_fn = 0;
+            pending_fn = NULL;
+            fn(c);
+        } else if (target >= GUEST_HLE_BASE &&
+                   target < GUEST_HLE_BASE + (uint32_t)HLE_MAX * HLE_STRIDE) {
             if (!g_hle_registry) abort();
             hle_abi_call(g_hle_registry, target, c);
-            break;
-        }
-
-        void (*fn)(CPU *) = find_lifted(target);
-        if (fn) {
-            fn(c);
-            if (!g_tail_pending) break;
-            target = g_tail_target;
-            continue;
-        }
-
+        } else {
+            void (*fn)(CPU *) = find_lifted(target);
+            if (!fn) {
 #if WC3_DEBUG
-        fprintf(stderr, "[dispatch] unknown guest target %08X (eip=%08X esp=%08X%s)\\n",
-                target, c->eip, c->esp, (tail || g_disp_depth > 1) ? " [jmp]" : "");
+                fprintf(stderr, "[dispatch] unknown guest target %08X (eip=%08X esp=%08X%s)\\n",
+                        target, c->eip, c->esp, (tail || chained) ? " [jmp]" : "");
 #endif
-        abort();
+                abort();
+            }
+            fn(c);
+        }
+        if (!c->disp_pending_valid) break;
+        chained = 1;
+        if (c->disp_pending_kind == WC3_DISP_PENDING_FN) {
+            pending_fn = (void (*)(CPU *))c->disp_pending_target;
+            have_fn = 1;
+        } else {
+            target = (uint32_t)c->disp_pending_target;
+        }
     }
-    g_disp_depth--;
+    (void)chained;
+    c->disp_depth--;
 }
 
 void dispatch(CPU *c, uint32_t target)
@@ -124,9 +131,10 @@ void dispatch(CPU *c, uint32_t target)
 
 void dispatch_jmp(CPU *c, uint32_t target)
 {
-    if (g_disp_depth > 0) {
-        g_tail_pending = 1;
-        g_tail_target = target;
+    if (c->disp_depth > 0) {
+        c->disp_pending_valid = 1u;
+        c->disp_pending_kind = WC3_DISP_PENDING_VA;
+        c->disp_pending_target = target;
         return;
     }
     dispatch_common(c, target, 1);

@@ -46,6 +46,11 @@ extern "C" {
 
 typedef void (*wc3_lifted_fn)(CPU *);
 
+/* The dispatcher resolves a legacy VA pending target.  cpu.h declares the
+ * same signature; the redeclaration keeps standalone tests and the generated
+ * C include order self-contained. */
+void dispatch(CPU *c, uint32_t target);
+
 /* Host-stack snapshot of CPU.disp_* (ABI-4).  WC3_DIRECT_CALL uses one local
  * per call; the fields are copied back on leave. */
 typedef struct Wc3DispFrame {

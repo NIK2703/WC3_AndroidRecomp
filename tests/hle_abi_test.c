@@ -25,6 +25,17 @@ static void h_cdecl(CPU *c)
     c->eax = 0xC0DEC0DEu;
 }
 
+/* Test-only ABI violator: it proves the bridge does not mask a handler that
+ * clobbers callee-saved registers.  Real handlers must preserve them. */
+static void h_writes_callee_saved(CPU *c)
+{
+    g_hits++;
+    c->ebx = 0xB0000001u;
+    c->esi = 0xB0000002u;
+    c->edi = 0xB0000003u;
+    c->ebp = 0xB0000004u;
+}
+
 static int fail(const char *what)
 {
     fprintf(stderr, "FAIL %s\n", what);
@@ -41,7 +52,11 @@ int main(void)
                                             "TestCdecl", 0, h_cdecl, 2,
                                             HLE_CALL_CDECL | HLE_OPTIONAL,
                                             &g_hits);
-    if (!std_entry || !cdecl_entry) return fail("register returned NULL");
+    HleEntry *bad_saved_entry =
+        hle_register(&g_registry, "KERNEL32.dll", "TestBadSaved", 0,
+                     h_writes_callee_saved, 0, 0);
+    if (!std_entry || !cdecl_entry || !bad_saved_entry)
+        return fail("register returned NULL");
     if (cdecl_entry->user != &g_hits) return fail("per-thunk user payload");
     if (std_entry->stack_cleanup != 16u) return fail("stdcall cleanup");
     if (cdecl_entry->stack_cleanup != 4u) return fail("cdecl cleanup");
@@ -85,6 +100,14 @@ int main(void)
     if (g_hits != 2u) return fail("cdecl handler count");
     if (cpu.esp != 0x31080000u + 16u + 4u) return fail("cdecl exit esp");
     if (cpu.eax != 0xC0DEC0DEu) return fail("cdecl eax");
+
+    /* O-09: the bridge is not a callee-saved safety net.  A handler that
+     * writes these fields makes the violation visible instead of hiding it. */
+    hle_abi_call(&g_registry, GUEST_HLE_BASE + 2u * HLE_STRIDE, &cpu);
+    if (g_hits != 3u) return fail("callee-saved probe count");
+    if (cpu.ebx != 0xB0000001u || cpu.esi != 0xB0000002u ||
+        cpu.edi != 0xB0000003u || cpu.ebp != 0xB0000004u)
+        return fail("bridge restored callee-saved registers");
 
 #if WC3_DEBUG
     if (g_registry.debug[1].calls != 1u) return fail("debug call counter");

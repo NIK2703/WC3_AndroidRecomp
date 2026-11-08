@@ -13,6 +13,7 @@
  * fabricated return value.
  */
 #include "legacy_shim.h"
+#include "direct_call.h"
 #include "convert_hle.h"
 #include "crt_hle.h"
 #include "crt_string_hle.h"
@@ -211,12 +212,14 @@ static void dispatch_common(CPU *c, uint32_t target, int tail)
                 target < GUEST_HLE_BASE + WC3_LEGACY_HLE_MAX *
                                           WC3_LEGACY_HLE_STRIDE) {
                 wc3_legacy_hle_call(target, c);
-                break;
+            } else {
+                void (*fn)(CPU *) = find_lifted(target);
+                if (!fn) {
+                    dispatch_unknown(c, target, tail || chained);
+                } else {
+                    fn(c);
+                }
             }
-            void (*fn)(CPU *) = find_lifted(target);
-            if (!fn)
-                dispatch_unknown(c, target, tail || chained);
-            fn(c);
         }
         if (!c->disp_pending_valid)
             break;

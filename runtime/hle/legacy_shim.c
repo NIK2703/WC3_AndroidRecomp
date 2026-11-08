@@ -419,19 +419,22 @@ static Wc3LegacyGuestLoop g_cb_body;
 static void *g_cb_opaque;
 static sem_t g_cb_sem;
 
-/* O-34: the callback thread is a one-shot startup object.  A mutex here was
- * held across hle_guest_alloc(), the guest stack writes and CreateThread, so
- * the new guest thread could enter wc3_guest_callback_thunk() while the host
- * lock was still held.  The state word is the only owner: STARTING admits one
- * caller, READY publishes body/opaque before CreateThread, and FAILED keeps a
- * failed one-shot from being retried with a half-initialised semaphore. */
+/* O-34: the callback thread is a one-shot startup object.  The old g_cb_lock
+ * was held across hle_guest_alloc(), the guest stack writes and CreateThread,
+ * so the new guest thread could enter wc3_guest_callback_thunk() while the host
+ * lock was still held.  This lock only serialises start callers and is released
+ * before any guest state is written or CreateThread is called.  g_cb_ready is
+ * published before CreateThread so the new thread can enter wait immediately;
+ * g_cb_state becomes READY only after CreateThread returns a handle. */
 enum {
     CB_IDLE = 0,
     CB_STARTING = 1,
-    CB_READY = 2,
-    CB_FAILED = 3
+    CB_READY = 2
 };
-static _Atomic int g_cb_state;
+static pthread_mutex_t g_cb_start_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_cb_start_cond = PTHREAD_COND_INITIALIZER;
+static int g_cb_state;
+static _Atomic int g_cb_ready;
 
 uint32_t wc3_legacy_hle_thunk_of(const char *dll, const char *name)
 {
@@ -452,10 +455,24 @@ uint32_t wc3_legacy_hle_thunk_of(const char *dll, const char *name)
 static void wc3_guest_callback_thunk(CPU *c)
 {
     uint32_t esp = c->esp;
-    if (atomic_load_explicit(&g_cb_state, memory_order_acquire) == CB_READY &&
-        g_cb_body)
+    if (atomic_load_explicit(&g_cb_ready, memory_order_acquire) && g_cb_body)
         g_cb_body(c, g_cb_opaque);
     c->esp = esp;
+}
+
+/* The start owner has set g_cb_state = CB_STARTING and released
+ * g_cb_start_lock.  sem_initialized says whether sem_destroy is safe.  No guest
+ * thread can be waiting here: this path is only reached before CreateThread
+ * returns a handle (or before CreateThread is called at all). */
+static int cb_start_failed(int sem_initialized)
+{
+    atomic_store_explicit(&g_cb_ready, 0, memory_order_release);
+    if (sem_initialized) sem_destroy(&g_cb_sem);
+    pthread_mutex_lock(&g_cb_start_lock);
+    g_cb_state = CB_IDLE;
+    pthread_cond_broadcast(&g_cb_start_cond);
+    pthread_mutex_unlock(&g_cb_start_lock);
+    return -1;
 }
 
 int wc3_legacy_guest_callback_thread_start(Wc3LegacyGuestLoop body,
@@ -463,31 +480,29 @@ int wc3_legacy_guest_callback_thread_start(Wc3LegacyGuestLoop body,
 {
     if (!body) return -1;
 
-    int expected = CB_IDLE;
-    if (!atomic_compare_exchange_strong_explicit(
-            &g_cb_state, &expected, CB_STARTING, memory_order_acq_rel,
-            memory_order_acquire))
-        return expected == CB_READY ? 0 : -1;
+    /* Serialise start callers, but never hold this lock across a guest call or
+     * the actual CreateThread dispatch.  A concurrent caller waits for the
+     * owner to finish, matching the old g_cb_lock ordering without making the
+     * new guest thread run under it. */
+    pthread_mutex_lock(&g_cb_start_lock);
+    while (g_cb_state == CB_STARTING)
+        pthread_cond_wait(&g_cb_start_cond, &g_cb_start_lock);
+    if (g_cb_state == CB_READY) {
+        pthread_mutex_unlock(&g_cb_start_lock);
+        return 0;
+    }
+    g_cb_state = CB_STARTING;
+    pthread_mutex_unlock(&g_cb_start_lock);
 
     g_cb_body = body;
     g_cb_opaque = opaque;
-    if (sem_init(&g_cb_sem, 0, 0) != 0) {
-        atomic_store_explicit(&g_cb_state, CB_FAILED, memory_order_release);
-        return -1;
-    }
+    if (sem_init(&g_cb_sem, 0, 0) != 0) return cb_start_failed(0);
     if (wc3_legacy_hle_add("WINMM.dll", WC3_CB_THREAD_ROW, 1, 0,
-                           wc3_guest_callback_thunk) != 0) {
-        sem_destroy(&g_cb_sem);
-        atomic_store_explicit(&g_cb_state, CB_FAILED, memory_order_release);
-        return -1;
-    }
+                           wc3_guest_callback_thunk) != 0)
+        return cb_start_failed(1);
     uint32_t thunk = wc3_legacy_hle_thunk_of("WINMM.dll", WC3_CB_THREAD_ROW);
     HleFn create = find_hle_fn("KERNEL32.dll", "CreateThread");
-    if (!thunk || !create) {
-        sem_destroy(&g_cb_sem);
-        atomic_store_explicit(&g_cb_state, CB_FAILED, memory_order_release);
-        return -1;
-    }
+    if (!thunk || !create) return cb_start_failed(1);
 
     /* CreateThread(lpThreadAttributes, dwStackSize, lpStartAddress,
      *              lpParameter, dwCreationFlags, lpThreadId) -- argc 6.
@@ -495,11 +510,7 @@ int wc3_legacy_guest_callback_thread_start(Wc3LegacyGuestLoop body,
      * the six arguments start at esp+4.  No host lock is held here: the new
      * guest thread may enter wc3_guest_callback_thunk() immediately. */
     uint32_t esp = hle_guest_alloc(32u);
-    if (!esp) {
-        sem_destroy(&g_cb_sem);
-        atomic_store_explicit(&g_cb_state, CB_FAILED, memory_order_release);
-        return -1;
-    }
+    if (!esp) return cb_start_failed(1);
     wr32g(esp + 0u, 0x7EFFFFF0u);
     wr32g(esp + 4u, 0u);
     wr32g(esp + 8u, 0u);
@@ -507,10 +518,11 @@ int wc3_legacy_guest_callback_thread_start(Wc3LegacyGuestLoop body,
     wr32g(esp + 16u, 0u);
     wr32g(esp + 20u, 0u);
     wr32g(esp + 24u, 0u);
-    /* Publish readiness before CreateThread: the new guest thread enters
-     * wc3_legacy_guest_callback_wait() immediately and must not observe a
-     * false ready flag and exit. */
-    atomic_store_explicit(&g_cb_state, CB_READY, memory_order_release);
+    /* Publish callback readiness before CreateThread: the new guest thread
+     * enters wc3_legacy_guest_callback_wait() immediately and must not observe
+     * a false ready flag and exit.  Start completion stays CB_STARTING until
+     * CreateThread returns a handle. */
+    atomic_store_explicit(&g_cb_ready, 1, memory_order_release);
     CPU c;
     memset(&c, 0, sizeof c);
     c.esp = esp;
@@ -518,24 +530,24 @@ int wc3_legacy_guest_callback_thread_start(Wc3LegacyGuestLoop body,
     uint32_t handle = c.eax;
     hle_guest_free(esp);
 
-    if (!handle) {
-        atomic_store_explicit(&g_cb_state, CB_FAILED, memory_order_release);
-        sem_destroy(&g_cb_sem);
-        return -1;
-    }
+    if (!handle) return cb_start_failed(1);
+
+    pthread_mutex_lock(&g_cb_start_lock);
+    g_cb_state = CB_READY;
+    pthread_cond_broadcast(&g_cb_start_cond);
+    pthread_mutex_unlock(&g_cb_start_lock);
     return 0;
 }
 
 void wc3_legacy_guest_callback_wake(void)
 {
-    if (atomic_load_explicit(&g_cb_state, memory_order_acquire) == CB_READY)
+    if (atomic_load_explicit(&g_cb_ready, memory_order_acquire))
         (void)sem_post(&g_cb_sem);
 }
 
 int wc3_legacy_guest_callback_wait(void)
 {
-    if (atomic_load_explicit(&g_cb_state, memory_order_acquire) != CB_READY)
-        return -1;
+    if (!atomic_load_explicit(&g_cb_ready, memory_order_acquire)) return -1;
     for (;;) {
         if (sem_wait(&g_cb_sem) == 0) return 0;
         if (errno != EINTR) return -1;

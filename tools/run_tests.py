@@ -237,6 +237,12 @@ def test_config_schema() -> int:
     return run([sys.executable, str(ROOT / "tools" / "check_config_schema.py")])
 
 
+def test_profile_corpus() -> int:
+    """O-19/O-30: static profile counters and identity checks are sane."""
+    return run([sys.executable, str(ROOT / "tools" / "profile_corpus.py"),
+                "--self-test"])
+
+
 def test_corpus_identity() -> int:
     """G-05: the sealed manifest digest must match the real input hash.
 
@@ -580,6 +586,51 @@ def test_direct_call() -> int:
     if rc != 0:
         return rc
     return run([str(exe)])
+
+
+def test_direct_call_multi_tu() -> int:
+    """G-14: direct/tail state must span TUs and survive mixed dispatch."""
+    cc = gcc()
+    if not cc:
+        print("direct_call_multi_tu: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    generated = BUILD / "wc3_dispatch_multi_tu.c"
+    rc = run([sys.executable, str(ROOT / "tools" / "gen_dispatch.py"),
+              str(ROOT / "tests" / "fixtures" / "direct_call_list.h"),
+              str(generated)])
+    if rc != 0:
+        return rc
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle" / "abi"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
+        "-I" + str(ROOT / "tests"),
+        "-I" + str(ROOT / "tests" / "fixtures"),
+        "-I" + str(BUILD),
+    ]
+    common = [
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        *include,
+        str(generated),
+        str(ROOT / "runtime" / "hle" / "abi" / "hle_abi.c"),
+        str(ROOT / "tests" / "direct_call_multi_tu_a.c"),
+        str(ROOT / "tests" / "direct_call_multi_tu_b.c"),
+        str(ROOT / "tests" / "direct_call_multi_tu_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("direct_call_multi_tu_debug.exe", 1),
+                        ("direct_call_multi_tu_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
 
 
 def test_file_layout() -> int:
@@ -1989,6 +2040,7 @@ TESTS = {
     "cpu_helpers": test_cpu_helpers,
     "hle_abi": test_hle_abi,
     "direct_call": test_direct_call,
+    "direct_call_multi_tu": test_direct_call_multi_tu,
     "module_registry": test_module_registry,
     "corpus_binding": test_corpus_binding,
     "mailbox_set": test_mailbox_set,
@@ -2031,6 +2083,7 @@ TESTS = {
     "layout": test_layout,
     "config_schema": test_config_schema,
     "corpus_identity": test_corpus_identity,
+    "profile_corpus": test_profile_corpus,
     "atomic_lift": test_atomic_lift,
     "posix_shim": test_posix_shim,
     "dispatch": test_dispatch,

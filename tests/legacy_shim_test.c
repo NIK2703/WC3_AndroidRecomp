@@ -314,6 +314,17 @@ int main(void)
     CHECK(strcmp(wc3_legacy_hle_describe(0), "legacy-test") == 0,
           "hle_describe");
 
+    /* O-08: an overridden slot goes through the clean fast bridge and never
+     * reaches the as-built hle_call ring. */
+    g_last_thunk = 0u;
+    CHECK(wc3_legacy_hle_override("MSVCR80.dll", "TestB", fn_b) == 0,
+          "override binds fast slot");
+    CPU fast_cpu;
+    memset(&fast_cpu, 0, sizeof fast_cpu);
+    wc3_legacy_hle_call(GUEST_HLE_BASE + GUEST_HLE_STRIDE, &fast_cpu);
+    CHECK(fast_cpu.eax == 0xBBBBu, "override fast bridge result");
+    CHECK(g_last_thunk == 0u, "override bypasses as-built hle_call");
+
     wc3_legacy_set_screen_size(1280, 720);
     CHECK(g_screen_w == 1280u && g_screen_h == 720u, "screen size");
     uint32_t w = 0, h = 0;
