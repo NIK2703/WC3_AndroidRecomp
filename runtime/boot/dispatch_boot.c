@@ -71,20 +71,13 @@ typedef struct {
     void (*fn)(CPU *);
 } LiftEnt;
 
-static const LiftEnt g_lift[] = {
-#define X(a) { 0x##a##u, L_##a },
-    LIFTED_FUNCS(X)
-#undef X
-};
-
-/* O-24: the dispatch hash used to be rebuilt from g_lift[] on every startup
- * (one linear probe sequence per entry into a 2 MiB table).
- * tools/gen_boot_dispatch.py now publishes exactly the same table as a
- * constant, so each slot still stores (index into g_lift[]) + 1.
- * LIFT_HASH_BITS/LIFT_HASH_SIZE, the Knuth multiplier, the linear probe order
- * and find_lifted() are unchanged;
- * only the publication point moved from wc3_dispatch_init() to .rodata.  No
- * speed claim is made until G-10/PM-19 measures cold_start. */
+/* O-24/O-53: the dispatch map used to be rebuilt from a separate g_lift[]
+ * table on every startup.  tools/gen_boot_dispatch.py now publishes the same
+ * open-addressing map as a constant, and each slot owns both the guest VA and
+ * the lifted function pointer.  find_lifted() therefore makes one probe read
+ * instead of reading g_lift_hash[e - 1] after g_lift[e - 1].  The Knuth
+ * multiplier and linear probe order are unchanged.  No speed claim is made
+ * until G-10/PM-19 measures cold_start. */
 #include "boot_dispatch_hash.h"
 
 void wc3_dispatch_init(void)
@@ -150,9 +143,9 @@ void wc3_dispatch_init(void)
     wc3_lock_trace_start();
 #endif
 
-    /* O-24: g_lift_hash is a generated constant; there is nothing to build
-     * here.  Hash and probe semantics are unchanged from the loop that used
-     * to run at this point. */
+    /* O-24/O-53: g_lift_hash is a generated constant map; there is nothing to
+     * build here.  Hash and probe semantics are unchanged from the loop that
+     * used to run at this point. */
 }
 
 void wc3_dispatch_shutdown(void)
@@ -163,11 +156,11 @@ static inline void (*find_lifted(uint32_t va))(CPU *)
 {
     uint32_t h = (va * 2654435761u) >> (32 - LIFT_HASH_BITS);
     for (unsigned n = 0; n < LIFT_HASH_SIZE; n++) {
-        uint32_t e = g_lift_hash[h];
-        if (!e)
+        const LiftEnt *e = &g_lift_hash[h];
+        if (!e->va)
             return NULL;
-        if (g_lift[e - 1].va == va)
-            return g_lift[e - 1].fn;
+        if (e->va == va)
+            return e->fn;
         h = (h + 1) & (LIFT_HASH_SIZE - 1);
     }
     return NULL;

@@ -12,6 +12,16 @@ param(
     [switch]$Install,
     [switch]$Launch,
     [switch]$PackDynRelocs,
+    [ValidateSet('android', 'relr', 'android+relr')]
+    [string]$PackDynRelocsMode = 'android',
+    [switch]$Icf,
+    [ValidateSet('safe', 'all')]
+    [string]$IcfMode = 'safe',
+    [switch]$FnoPlt,
+    [switch]$KeepDynsym,
+    # O-52/O-55: forward the unmeasured A/B switches to build_app.ps1.
+    [switch]$NativeTls,
+    [switch]$NoHostHardening,
     [string]$Serial = '',
     [string]$GamesActivityAar = '',
     [string]$DebugTags = '',
@@ -119,7 +129,18 @@ if ($Clean) { $nativeParams['Clean'] = $true }
 if ($GamesActivityAar) { $nativeParams['GamesActivityAar'] = $GamesActivityAar }
 if ($DebugTags) { $nativeParams['DebugTags'] = $DebugTags }
 if ($CorpusRoot) { $nativeParams['CorpusRoot'] = $CorpusRoot }
-if ($PackDynRelocs) { $nativeParams['PackDynRelocs'] = $true }
+if ($PackDynRelocs) {
+    $nativeParams['PackDynRelocs'] = $true
+    $nativeParams['PackDynRelocsMode'] = $PackDynRelocsMode
+}
+if ($Icf) {
+    $nativeParams['Icf'] = $true
+    $nativeParams['IcfMode'] = $IcfMode
+}
+if ($FnoPlt) { $nativeParams['FnoPlt'] = $true }
+if ($KeepDynsym) { $nativeParams['KeepDynsym'] = $true }
+if ($NativeTls) { $nativeParams['NativeTls'] = $true }
+if ($NoHostHardening) { $nativeParams['NoHostHardening'] = $true }
 $ErrorActionPreference = 'Continue'
 & $nativeScript @nativeParams 2>&1 | ForEach-Object { Write-Host $_ }
 $nativeRc = $LASTEXITCODE
@@ -157,8 +178,10 @@ Copy-Item $libcxx (Join-Path $jniDir 'libc++_shared.so') -Force
 
 # O-41: AGP's stripReleaseDebugSymbols is a no-op for this prebuilt library in
 # the useLegacyPackaging=false layout.  Strip only the release copy and only
-# non-PT_LOAD metadata: .symtab/.strtab/.debug_* go away, while .dynsym and
-# .dynstr stay because the crash handler resolves L_<va> through dladdr (O-42).
+# non-PT_LOAD metadata: .symtab/.strtab/.debug_* go away.  O-42 additionally
+# localizes every non-JNI definition at link time; .dynsym still exists for the
+# Java_* entry points, android_main and JNI_OnLoad.  Crash triage uses the module
+# base plus the unstripped .symtab through tools/symbolize_crash.py.
 # The debug copy intentionally keeps symbols for the wc3.recomp.debug package.
 if ($variant -eq 'release') {
     $jniSo = Join-Path $jniDir 'libwc3gameactivity.so'
@@ -176,6 +199,24 @@ if ($variant -eq 'release') {
         $sections -match '\.debug_') {
         Write-Host '[apk] release strip removed .dynsym or kept .symtab/.debug_*'
         exit 1
+    }
+    if (-not $KeepDynsym) {
+        $dynsyms = (& $readelf --dyn-syms $jniSo) -join "`n"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host '[apk] llvm-readelf --dyn-syms failed'
+            exit 1
+        }
+        if ($dynsyms -notmatch 'Java_wc3_recomp_' -or
+            $dynsyms -notmatch '\bandroid_main\b' -or
+            $dynsyms -notmatch '\bJNI_OnLoad\b') {
+            Write-Host '[apk] release JNI/android_main surface missing from .dynsym'
+            exit 1
+        }
+        if ($dynsyms -match 'L_[0-9A-Fa-f]{8}' -or $dynsyms -match '\bwc3_') {
+            Write-Host '[apk] release still exports non-JNI dynamic symbols'
+            exit 1
+        }
+        Write-Host '[apk] release .dynsym contains JNI surface only'
     }
     Write-Host "[apk] stripped release .so: $((Get-Item $jniSo).Length) bytes"
 }

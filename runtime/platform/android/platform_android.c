@@ -9,8 +9,9 @@
  *
  * Ownership and locking:
  *   - thread/TLS state is per host thread;
- *   - every guest-visible sync object is protected by one platform mutex and
- *     a condition variable, and no such lock is held across a guest callback;
+ *   - sync-object state is protected by one platform mutex; single-object
+ *     waits sleep on a per-object condition, multi-object waits on the
+ *     platform condition, and no such lock is held across a guest callback;
  *   - file and memory calls do not take a host lock over guest execution.
  */
 #define _GNU_SOURCE  1
@@ -20,6 +21,7 @@
 #endif
 
 #include "platform_android.h"
+#include "asset_snapshot.h"
 
 #include <aaudio/AAudio.h>
 #include <android/log.h>
@@ -596,6 +598,15 @@ typedef struct AndroidSync {
     pthread_t owner;
     uint32_t recursion;
     uint32_t waiters;
+    /* O-67: a single-object wait sleeps on this object's condition instead of
+     * waking every waiter in the process.  Multi-object waits still use the
+     * global condition because their state is one atomic observation across
+     * several objects; `multi_waiters` lets a signal decide whether the global
+     * condition must be broadcast too. */
+    pthread_cond_t cond;
+    int cond_ready;
+    int cond_monotonic;
+    uint32_t multi_waiters;
 } AndroidSync;
 
 static pthread_once_t g_sync_once = PTHREAD_ONCE_INIT;
@@ -608,14 +619,48 @@ static int g_sync_monotonic;
 /* P0-4, first step: the handle registry is direct-mapped instead of one
  * linear list.  The platform lock is still held for lifecycle changes, so
  * close/free races keep the existing contract; lookup no longer scans every
- * live object.  A later per-object sync pass can remove the lock itself. */
+ * live object.  O-67 adds per-object condition variables for single-object
+ * waits; removing the state lock itself remains an M5 task. */
 #define ANDROID_SYNC_BUCKETS 1024u
+_Static_assert((ANDROID_SYNC_BUCKETS & (ANDROID_SYNC_BUCKETS - 1u)) == 0u,
+               "sync bucket count must be a power of two");
 static AndroidSync *g_sync_buckets[ANDROID_SYNC_BUCKETS];
 
 static uint32_t android_sync_bucket(Wc3SyncHandle handle)
 {
     uintptr_t v = (uintptr_t)handle;
     return (uint32_t)((v >> 4) * 2654435761u) & (ANDROID_SYNC_BUCKETS - 1u);
+}
+
+static int android_sync_cond_init(AndroidSync *p)
+{
+    pthread_condattr_t attr;
+    p->cond_ready = 0;
+    p->cond_monotonic = 0;
+    if (pthread_condattr_init(&attr) == 0) {
+#if defined(__ANDROID__)
+        if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0)
+            p->cond_monotonic = 1;
+#endif
+        if (pthread_cond_init(&p->cond, &attr) == 0) {
+            p->cond_ready = 1;
+        } else if (pthread_cond_init(&p->cond, NULL) == 0) {
+            p->cond_ready = 1;
+            p->cond_monotonic = 0;
+        }
+        pthread_condattr_destroy(&attr);
+    } else if (pthread_cond_init(&p->cond, NULL) == 0) {
+        p->cond_ready = 1;
+    }
+    return p->cond_ready ? 0 : -1;
+}
+
+static void android_sync_wake(AndroidSync *p)
+{
+    if (!p) return;
+    if (p->cond_ready) (void)pthread_cond_broadcast(&p->cond);
+    if (p->multi_waiters != 0u)
+        (void)pthread_cond_broadcast(&g_sync_cond);
 }
 
 static void android_owner_thread_exit(void *value);
@@ -626,7 +671,6 @@ static void android_owner_thread_exit(void *value)
     if (!list) return;
 
     (void)pthread_mutex_lock(&g_sync_lock);
-    int wake = 0;
     while (list) {
         AndroidSync *next = list->owner_next;
         list->owner_next = NULL;
@@ -635,17 +679,17 @@ static void android_owner_thread_exit(void *value)
             list->owner = 0;
             list->recursion = 0u;
             list->abandoned = 1;
-            wake = 1;
+            android_sync_wake(list);
         } else if (list->kind == ANDROID_SYNC_CRITICAL) {
             /* Critical sections are not kernel objects and are not abandoned;
              * a dead owner leaves them permanently locked. */
             list->owner = 0;
             list->recursion = 0u;
             list->owner_dead = 1;
+            android_sync_wake(list);
         }
         list = next;
     }
-    if (wake) (void)pthread_cond_broadcast(&g_sync_cond);
     (void)pthread_mutex_unlock(&g_sync_lock);
 }
 
@@ -729,6 +773,10 @@ static AndroidSync *android_sync_new(uint32_t kind)
 {
     AndroidSync *p = (AndroidSync *)calloc(1, sizeof *p);
     if (!p) return NULL;
+    if (android_sync_cond_init(p) != 0) {
+        free(p);
+        return NULL;
+    }
     p->magic = WC3_SYNC_MAGIC;
     p->kind = kind;
     uint32_t bucket = android_sync_bucket((Wc3SyncHandle)(uintptr_t)p);
@@ -763,7 +811,7 @@ static int android_event_set(void *ctx, Wc3SyncHandle handle)
     int ok = p && p->kind == ANDROID_SYNC_EVENT;
     if (ok) {
         p->signaled = 1;
-        (void)pthread_cond_broadcast(&g_sync_cond);
+        android_sync_wake(p);
     }
     (void)pthread_mutex_unlock(&g_sync_lock);
     return ok ? 0 : -1;
@@ -817,7 +865,7 @@ static int android_mutex_release(void *ctx, Wc3SyncHandle handle)
             p->owner = 0;
             android_owner_remove(p);
         }
-        (void)pthread_cond_broadcast(&g_sync_cond);
+        android_sync_wake(p);
     }
     (void)pthread_mutex_unlock(&g_sync_lock);
     return ok ? 0 : -1;
@@ -853,7 +901,7 @@ static int android_semaphore_release(void *ctx, Wc3SyncHandle handle,
     if (ok) {
         if (previous) *previous = p->count;
         p->count += count;
-        (void)pthread_cond_broadcast(&g_sync_cond);
+        android_sync_wake(p);
     }
     (void)pthread_mutex_unlock(&g_sync_lock);
     return ok ? 0 : -1;
@@ -916,20 +964,6 @@ static int android_wait(void *ctx, const Wc3SyncHandle *objects, uint32_t count,
     }
     (void)pthread_once(&g_sync_once, android_sync_init);
 
-    struct timespec deadline;
-    if (timeout_ms != UINT32_MAX) {
-        clockid_t cid = g_sync_monotonic ? CLOCK_MONOTONIC : CLOCK_REALTIME;
-        if (clock_gettime(cid, &deadline) != 0)
-            return (int)WC3_WAIT_FAILED;
-        uint64_t add = (uint64_t)timeout_ms * 1000000ull;
-        deadline.tv_sec += (time_t)(add / 1000000000ull);
-        deadline.tv_nsec += (long)(add % 1000000000ull);
-        if (deadline.tv_nsec >= 1000000000L) {
-            deadline.tv_sec++;
-            deadline.tv_nsec -= 1000000000L;
-        }
-    }
-
     AndroidSync *p[WC3_PLATFORM_WAIT_MAX];
     (void)pthread_mutex_lock(&g_sync_lock);
     for (uint32_t i = 0; i < count; i++) {
@@ -941,6 +975,32 @@ static int android_wait(void *ctx, const Wc3SyncHandle *objects, uint32_t count,
         }
     }
     for (uint32_t i = 0; i < count; i++) p[i]->waiters++;
+    const int single = count == 1u;
+    if (!single) {
+        for (uint32_t i = 0; i < count; i++) p[i]->multi_waiters++;
+    }
+
+    struct timespec deadline;
+    if (timeout_ms != UINT32_MAX) {
+        int monotonic = single ? p[0]->cond_monotonic : g_sync_monotonic;
+        clockid_t cid = monotonic ? CLOCK_MONOTONIC : CLOCK_REALTIME;
+        if (clock_gettime(cid, &deadline) != 0) {
+            for (uint32_t i = 0; i < count; i++) {
+                p[i]->waiters--;
+                if (!single) p[i]->multi_waiters--;
+            }
+            (void)pthread_mutex_unlock(&g_sync_lock);
+            if (index) *index = 0u;
+            return (int)WC3_WAIT_FAILED;
+        }
+        uint64_t add = (uint64_t)timeout_ms * 1000000ull;
+        deadline.tv_sec += (time_t)(add / 1000000000ull);
+        deadline.tv_nsec += (long)(add % 1000000000ull);
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
+        }
+    }
 
     for (;;) {
         int ready = wait_all ? 1 : 0;
@@ -970,8 +1030,11 @@ static int android_wait(void *ctx, const Wc3SyncHandle *objects, uint32_t count,
                 abandoned = android_sync_abandoned(p[first]);
                 android_sync_consume(p[first]);
             }
-            for (uint32_t i = 0; i < count; i++) p[i]->waiters--;
-            (void)pthread_cond_broadcast(&g_sync_cond);
+            for (uint32_t i = 0; i < count; i++) {
+                p[i]->waiters--;
+                if (!single) p[i]->multi_waiters--;
+            }
+            if (!single) (void)pthread_cond_broadcast(&g_sync_cond);
             (void)pthread_mutex_unlock(&g_sync_lock);
             if (index) *index = wait_all ? 0u : first;
             if (abandoned)
@@ -981,17 +1044,26 @@ static int android_wait(void *ctx, const Wc3SyncHandle *objects, uint32_t count,
         }
 
         if (timeout_ms == 0u) {
-            for (uint32_t i = 0; i < count; i++) p[i]->waiters--;
+            for (uint32_t i = 0; i < count; i++) {
+                p[i]->waiters--;
+                if (!single) p[i]->multi_waiters--;
+            }
             (void)pthread_mutex_unlock(&g_sync_lock);
             if (index) *index = 0u;
             return (int)WC3_WAIT_TIMEOUT;
         }
 
         int rc;
-        if (timeout_ms == UINT32_MAX) {
-            rc = pthread_cond_wait(&g_sync_cond, &g_sync_lock);
+        if (single) {
+            rc = timeout_ms == UINT32_MAX
+                     ? pthread_cond_wait(&p[0]->cond, &g_sync_lock)
+                     : pthread_cond_timedwait(&p[0]->cond, &g_sync_lock,
+                                              &deadline);
         } else {
-            rc = pthread_cond_timedwait(&g_sync_cond, &g_sync_lock, &deadline);
+            rc = timeout_ms == UINT32_MAX
+                     ? pthread_cond_wait(&g_sync_cond, &g_sync_lock)
+                     : pthread_cond_timedwait(&g_sync_cond, &g_sync_lock,
+                                              &deadline);
         }
         if (rc == ETIMEDOUT) {
             /* Re-check once: a signal may have landed at the deadline. */
@@ -1011,7 +1083,10 @@ static int android_wait(void *ctx, const Wc3SyncHandle *objects, uint32_t count,
                 }
             }
             if (!ready_at_deadline) {
-                for (uint32_t i = 0; i < count; i++) p[i]->waiters--;
+                for (uint32_t i = 0; i < count; i++) {
+                    p[i]->waiters--;
+                    if (!single) p[i]->multi_waiters--;
+                }
                 (void)pthread_mutex_unlock(&g_sync_lock);
                 if (index) *index = 0u;
                 return (int)WC3_WAIT_TIMEOUT;
@@ -1028,8 +1103,11 @@ static int android_wait(void *ctx, const Wc3SyncHandle *objects, uint32_t count,
                     android_sync_abandoned(p[first_at_deadline]);
                 android_sync_consume(p[first_at_deadline]);
             }
-            for (uint32_t i = 0; i < count; i++) p[i]->waiters--;
-            (void)pthread_cond_broadcast(&g_sync_cond);
+            for (uint32_t i = 0; i < count; i++) {
+                p[i]->waiters--;
+                if (!single) p[i]->multi_waiters--;
+            }
+            if (!single) (void)pthread_cond_broadcast(&g_sync_cond);
             (void)pthread_mutex_unlock(&g_sync_lock);
             if (index) *index = wait_all ? 0u : first_at_deadline;
             if (abandoned_at_deadline)
@@ -1059,6 +1137,10 @@ static int android_sync_close(void *ctx, Wc3SyncHandle handle)
     if (ok) {
         *pp = p->next;
         p->magic = 0;
+        if (p->cond_ready) {
+            (void)pthread_cond_destroy(&p->cond);
+            p->cond_ready = 0;
+        }
     }
     (void)pthread_mutex_unlock(&g_sync_lock);
     if (ok) free(p);
@@ -1090,7 +1172,7 @@ static int android_cs_enter(void *ctx, Wc3SyncHandle handle)
         } else {
             p->waiters++;
             while (p->owner != 0 || p->owner_dead) {
-                (void)pthread_cond_wait(&g_sync_cond, &g_sync_lock);
+                (void)pthread_cond_wait(&p->cond, &g_sync_lock);
             }
             p->waiters--;
             p->owner = pthread_self();
@@ -1142,105 +1224,18 @@ static char g_save_root[WC3_PLATFORM_PATH_MAX];
  * check and the live stat/access check all keep their old semantics.  A
  * truncated snapshot (very large directory) falls back to the old scan, and
  * asset.init() rebuilds it whenever the root is (re)installed. */
-#define WC3_ASSET_SNAPSHOT_MAX 1024u
-#define WC3_ASSET_NAME_MAX 256u
-
-typedef struct AssetSnapshot {
-    uint32_t count;
-    uint32_t truncated;
-    uint32_t open_failed;
-    uint32_t capacity;
-    char (*names)[WC3_ASSET_NAME_MAX];
-} AssetSnapshot;
-
 static pthread_mutex_t g_asset_lock = PTHREAD_MUTEX_INITIALIZER;
-static AssetSnapshot g_asset_snapshot;
+static Wc3AssetSnapshot g_asset_snapshot;
 static int g_asset_snapshot_valid;
-
-/* Grow the name table to at least `want` entries.  The final table is shrunk
- * to the actual count after the directory scan; this helper only avoids a
- * reallocation per directory entry while the count is still unknown. */
-static int asset_snapshot_reserve_locked(uint32_t want)
-{
-    if (want <= g_asset_snapshot.capacity) return 0;
-    if (want > WC3_ASSET_SNAPSHOT_MAX) return -1;
-
-    uint32_t cap = g_asset_snapshot.capacity ? g_asset_snapshot.capacity : 64u;
-    while (cap < want) {
-        if (cap > WC3_ASSET_SNAPSHOT_MAX / 2u) {
-            cap = WC3_ASSET_SNAPSHOT_MAX;
-            break;
-        }
-        cap *= 2u;
-    }
-    if (cap < want) return -1;
-
-    char (*names)[WC3_ASSET_NAME_MAX] =
-        realloc(g_asset_snapshot.names, (size_t)cap * WC3_ASSET_NAME_MAX);
-    if (!names) return -1;
-    g_asset_snapshot.names = names;
-    g_asset_snapshot.capacity = cap;
-    return 0;
-}
-
-static void asset_snapshot_build_locked(void)
-{
-    free(g_asset_snapshot.names);
-    g_asset_snapshot.names = NULL;
-    g_asset_snapshot.count = 0u;
-    g_asset_snapshot.truncated = 0u;
-    g_asset_snapshot.open_failed = 0u;
-    g_asset_snapshot.capacity = 0u;
-
-    DIR *dir = opendir(g_asset_root);
-    if (!dir) {
-        g_asset_snapshot.open_failed = 1u;
-        return;
-    }
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        const char *name = ent->d_name;
-        size_t len = strlen(name);
-        if (len == 0u) continue;
-        if (len >= WC3_ASSET_NAME_MAX) {
-            g_asset_snapshot.truncated = 1u;
-            continue;
-        }
-        if (g_asset_snapshot.count >= WC3_ASSET_SNAPSHOT_MAX) {
-            g_asset_snapshot.truncated = 1u;
-            break;
-        }
-        if (asset_snapshot_reserve_locked(g_asset_snapshot.count + 1u) != 0) {
-            g_asset_snapshot.truncated = 1u;
-            break;
-        }
-        memcpy(g_asset_snapshot.names[g_asset_snapshot.count], name, len + 1u);
-        g_asset_snapshot.count++;
-    }
-    (void)closedir(dir);
-
-    /* The temporary growth policy keeps at most one spare capacity step; the
-     * steady-state snapshot owns exactly count entries. */
-    if (g_asset_snapshot.count == 0u) {
-        free(g_asset_snapshot.names);
-        g_asset_snapshot.names = NULL;
-        g_asset_snapshot.capacity = 0u;
-    } else if (g_asset_snapshot.count < g_asset_snapshot.capacity) {
-        char (*names)[WC3_ASSET_NAME_MAX] =
-            realloc(g_asset_snapshot.names,
-                    (size_t)g_asset_snapshot.count * WC3_ASSET_NAME_MAX);
-        if (names) {
-            g_asset_snapshot.names = names;
-            g_asset_snapshot.capacity = g_asset_snapshot.count;
-        }
-    }
-}
 
 static void asset_snapshot_ensure_locked(void)
 {
-    if (g_asset_snapshot_valid) return;
-    asset_snapshot_build_locked();
-    g_asset_snapshot_valid = 1;
+    /* A failed opendir must not freeze the empty snapshot for the rest of the
+     * process.  The root can become available after a storage mount or a
+     * permission change; retry on the next lookup instead of caching failure. */
+    if (g_asset_snapshot_valid && !g_asset_snapshot.open_failed) return;
+    wc3_asset_snapshot_build(&g_asset_snapshot, g_asset_root);
+    g_asset_snapshot_valid = g_asset_snapshot.open_failed ? 0 : 1;
 }
 
 static int android_asset_init(void *ctx, const char *asset_root,
@@ -1370,7 +1365,7 @@ static int android_asset_present(void *ctx, const char *logical_name)
             break;
         }
     }
-    if (!present && g_asset_snapshot.truncated)
+    if (!present && (g_asset_snapshot.truncated || g_asset_snapshot.open_failed))
         present = asset_scan_present_locked(logical_name);
     (void)pthread_mutex_unlock(&g_asset_lock);
     return present;
@@ -1384,21 +1379,26 @@ static int android_asset_enumerate(void *ctx, uint32_t index, char *name,
 
     (void)pthread_mutex_lock(&g_asset_lock);
     asset_snapshot_ensure_locked();
-    uint32_t seen = 0u;
     int result = 0;
-    for (uint32_t i = 0; i < g_asset_snapshot.count; i++) {
-        const char *candidate = g_asset_snapshot.names[i];
-        if (!is_mpq_name(candidate)) continue;
-        if (seen++ != index) continue;
-        size_t n = strlen(candidate);
-        if (n >= cap) n = cap - 1u;
-        memcpy(name, candidate, n);
-        name[n] = '\0';
-        result = 1;
-        break;
-    }
-    if (!result && g_asset_snapshot.truncated)
+    if (!g_asset_snapshot.truncated) {
+        uint32_t seen = 0u;
+        for (uint32_t i = 0; i < g_asset_snapshot.count; i++) {
+            const char *candidate = g_asset_snapshot.names[i];
+            if (!is_mpq_name(candidate)) continue;
+            if (seen++ != index) continue;
+            size_t n = strlen(candidate);
+            if (n >= cap) n = cap - 1u;
+            memcpy(name, candidate, n);
+            name[n] = '\0';
+            result = 1;
+            break;
+        }
+    } else {
+        /* Skipped long names make the snapshot's index order differ from a
+         * fresh readdir order, so a truncated snapshot cannot answer an index
+         * lookup correctly.  Keep the old O(N) scan for this rare case. */
         result = asset_scan_enumerate_locked(index, name, cap);
+    }
     if (result == 0 && g_asset_snapshot.open_failed)
         result = -1;
     (void)pthread_mutex_unlock(&g_asset_lock);

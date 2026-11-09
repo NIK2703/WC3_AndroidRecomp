@@ -13,6 +13,7 @@
 #include "pe.h"
 #include "platform_android.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdatomic.h>
@@ -622,6 +623,209 @@ static void test_sync(const Wc3SyncApi *s)
     check(s->close(s->ctx, cs) == 0, "cs close");
 }
 
+typedef struct SyncWaitArg {
+    const Wc3SyncApi *sync;
+    Wc3SyncHandle handle;
+    uint32_t timeout_ms;
+    _Atomic int started;
+    _Atomic int done;
+    int rc;
+    int release_rc;
+    uint32_t index;
+} SyncWaitArg;
+
+static int sync_wait_started(SyncWaitArg *w)
+{
+    for (int i = 0; i < 2000; i++) {
+        if (atomic_load_explicit(&w->started, memory_order_acquire)) return 1;
+        usleep(1000);
+    }
+    return 0;
+}
+
+static int sync_wait_main(void *arg)
+{
+    SyncWaitArg *w = (SyncWaitArg *)arg;
+    atomic_store_explicit(&w->started, 1, memory_order_release);
+    w->rc = w->sync->wait(w->sync->ctx, &w->handle, 1, 0, w->timeout_ms,
+                          &w->index);
+    atomic_store_explicit(&w->done, 1, memory_order_release);
+    return 0;
+}
+
+static int sync_mutex_wait_main(void *arg)
+{
+    SyncWaitArg *w = (SyncWaitArg *)arg;
+    atomic_store_explicit(&w->started, 1, memory_order_release);
+    w->rc = w->sync->wait(w->sync->ctx, &w->handle, 1, 0, w->timeout_ms,
+                          &w->index);
+    if (w->rc == (int)WC3_WAIT_OBJECT_0)
+        w->release_rc = w->sync->mutex_release(w->sync->ctx, w->handle);
+    atomic_store_explicit(&w->done, 1, memory_order_release);
+    return 0;
+}
+
+static int sync_thread_start(const Wc3ThreadApi *t, const char *name,
+                             int (*entry)(void *), SyncWaitArg *arg,
+                             Wc3ThreadHandle *out)
+{
+    Wc3ThreadDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.name = name;
+    desc.stack_size = 128u * 1024u;
+    desc.entry = entry;
+    desc.arg = arg;
+    return t->create(t->ctx, &desc, out);
+}
+
+static void test_sync_wakeups(const Wc3SyncApi *s, const Wc3ThreadApi *t)
+{
+    /* O-67: a single-object wait must sleep on the object's own condition and
+     * wake when that object is signalled, not only when the process-wide
+     * condition is broadcast. */
+    Wc3SyncHandle event = 0;
+    check(s->event_create(s->ctx, 0, 0, &event) == 0,
+          "wake event create");
+    if (event) {
+        SyncWaitArg arg;
+        memset(&arg, 0, sizeof arg);
+        arg.sync = s;
+        arg.handle = event;
+        arg.timeout_ms = 3000u;
+        arg.rc = -1;
+        arg.index = 0xFFFFFFFFu;
+        atomic_init(&arg.started, 0);
+        atomic_init(&arg.done, 0);
+
+        Wc3ThreadHandle thread = 0;
+        check(sync_thread_start(t, "wc3-wake-event", sync_wait_main, &arg,
+                                &thread) == 0,
+              "wake event thread");
+        if (thread) {
+            check(sync_wait_started(&arg), "wake event started");
+            usleep(5000);
+            check(atomic_load_explicit(&arg.done, memory_order_acquire) == 0,
+                  "wake event blocks");
+            check(s->event_set(s->ctx, event) == 0, "wake event set");
+            uint32_t exit_code = 0;
+            check(t->join(t->ctx, thread, &exit_code) == 0,
+                  "wake event join");
+            check(exit_code == 0u, "wake event exit");
+            check(arg.rc == (int)WC3_WAIT_OBJECT_0, "wake event result");
+            check(arg.index == 0u, "wake event index");
+        }
+        check(s->close(s->ctx, event) == 0, "wake event close");
+    }
+
+    Wc3SyncHandle mutex = 0;
+    check(s->mutex_create(s->ctx, 0, &mutex) == 0, "wake mutex create");
+    if (mutex) {
+        uint32_t index = 0xFFFFFFFFu;
+        check(s->wait(s->ctx, &mutex, 1, 0, 0, &index) ==
+                  (int)WC3_WAIT_OBJECT_0,
+              "wake mutex acquire");
+
+        SyncWaitArg arg;
+        memset(&arg, 0, sizeof arg);
+        arg.sync = s;
+        arg.handle = mutex;
+        arg.timeout_ms = 3000u;
+        arg.rc = -1;
+        arg.release_rc = -1;
+        arg.index = 0xFFFFFFFFu;
+        atomic_init(&arg.started, 0);
+        atomic_init(&arg.done, 0);
+
+        Wc3ThreadHandle thread = 0;
+        check(sync_thread_start(t, "wc3-wake-mutex", sync_mutex_wait_main,
+                                &arg, &thread) == 0,
+              "wake mutex thread");
+        if (thread) {
+            check(sync_wait_started(&arg), "wake mutex started");
+            usleep(5000);
+            check(atomic_load_explicit(&arg.done, memory_order_acquire) == 0,
+                  "wake mutex blocks");
+            check(s->mutex_release(s->ctx, mutex) == 0, "wake mutex release");
+            uint32_t exit_code = 0;
+            check(t->join(t->ctx, thread, &exit_code) == 0,
+                  "wake mutex join");
+            check(exit_code == 0u, "wake mutex exit");
+            check(arg.rc == (int)WC3_WAIT_OBJECT_0, "wake mutex result");
+            check(arg.release_rc == 0, "wake mutex child release");
+        }
+        check(s->close(s->ctx, mutex) == 0, "wake mutex close");
+    }
+}
+
+typedef struct CriticalWaitArg {
+    const Wc3SyncApi *sync;
+    Wc3SyncHandle cs;
+    _Atomic int started;
+    _Atomic int entered;
+    int rc;
+} CriticalWaitArg;
+
+static int critical_wait_main(void *arg)
+{
+    CriticalWaitArg *w = (CriticalWaitArg *)arg;
+    atomic_store_explicit(&w->started, 1, memory_order_release);
+    w->rc = w->sync->critical_section_enter(w->sync->ctx, w->cs);
+    if (w->rc == 0) {
+        atomic_store_explicit(&w->entered, 1, memory_order_release);
+        (void)w->sync->critical_section_leave(w->sync->ctx, w->cs);
+    }
+    return 0;
+}
+
+static void test_critical_wakeup(const Wc3SyncApi *s, const Wc3ThreadApi *t)
+{
+    Wc3SyncHandle cs = 0;
+    check(s->critical_section_create(s->ctx, &cs) == 0,
+          "wake cs create");
+    if (!cs) return;
+    check(s->critical_section_enter(s->ctx, cs) == 0, "wake cs enter");
+
+    CriticalWaitArg arg;
+    memset(&arg, 0, sizeof arg);
+    arg.sync = s;
+    arg.cs = cs;
+    arg.rc = -1;
+    atomic_init(&arg.started, 0);
+    atomic_init(&arg.entered, 0);
+
+    Wc3ThreadDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.name = "wc3-wake-cs";
+    desc.stack_size = 128u * 1024u;
+    desc.entry = critical_wait_main;
+    desc.arg = &arg;
+
+    Wc3ThreadHandle thread = 0;
+    check(t->create(t->ctx, &desc, &thread) == 0, "wake cs thread");
+    if (thread) {
+        for (int i = 0; i < 2000 &&
+                        !atomic_load_explicit(&arg.started,
+                                              memory_order_acquire);
+             i++)
+            usleep(1000);
+        check(atomic_load_explicit(&arg.started, memory_order_acquire) == 1,
+              "wake cs started");
+        usleep(5000);
+        check(atomic_load_explicit(&arg.entered, memory_order_acquire) == 0,
+              "wake cs blocks");
+        check(s->critical_section_leave(s->ctx, cs) == 0, "wake cs leave");
+        uint32_t exit_code = 0;
+        check(t->join(t->ctx, thread, &exit_code) == 0, "wake cs join");
+        check(exit_code == 0u, "wake cs exit");
+        check(arg.rc == 0, "wake cs result");
+        check(atomic_load_explicit(&arg.entered, memory_order_acquire) == 1,
+              "wake cs entered");
+    } else {
+        (void)s->critical_section_leave(s->ctx, cs);
+    }
+    check(s->close(s->ctx, cs) == 0, "wake cs close");
+}
+
 typedef struct AbandonArg {
     const Wc3SyncApi *sync;
     Wc3SyncHandle mutex;
@@ -676,31 +880,99 @@ static void test_abandoned_mutex(const Wc3SyncApi *s,
     check(s->close(s->ctx, mutex) == 0, "abandoned mutex close");
 }
 
+static void clear_asset_dir(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (d) {
+        struct dirent *ent;
+        char path[256];
+        while ((ent = readdir(d)) != NULL) {
+            int n;
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+                continue;
+            n = snprintf(path, sizeof path, "%s/%s", dir, ent->d_name);
+            if (n > 0 && (size_t)n < sizeof path) (void)unlink(path);
+        }
+        (void)closedir(d);
+    }
+    (void)rmdir(dir);
+}
+
+static int create_empty_file(const char *path)
+{
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd < 0) return 0;
+    return close(fd) == 0;
+}
+
 static void test_asset(const Wc3AssetApi *a)
 {
     const char *dir = "/data/local/tmp/wc3-platform-assets";
-    (void)mkdir(dir, 0700);
     const char *mpq = "/data/local/tmp/wc3-platform-assets/war3.mpq";
-    int fd = open(mpq, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-    if (fd >= 0) close(fd);
+    const char *patch = "/data/local/tmp/wc3-platform-assets/War3Patch.mpq";
+    const char *late = "/data/local/tmp/wc3-platform-assets/Late.mpq";
+
+    /* The device test is run repeatedly.  Start from a known-empty directory
+     * so a stale patch from the previous run cannot mask snapshot behavior. */
+    clear_asset_dir(dir);
+    check(mkdir(dir, 0700) == 0, "asset mkdir");
+    check(create_empty_file(mpq), "asset war3 create");
+    check(create_empty_file(patch), "asset patch create");
 
     check(a->init(a->ctx, dir, "/data/local/tmp") == 0, "asset init");
     check(a->present(a->ctx, "war3.mpq") == 1, "asset present");
-    char name[64] = {0};
-    check(a->enumerate_mpq(a->ctx, 0, name, sizeof name) == 1,
-          "asset enumerate");
-    check(strcmp(name, "war3.mpq") == 0, "asset enumerate name");
-
-    const char *patch = "/data/local/tmp/wc3-platform-assets/War3Patch.mpq";
-    fd = open(patch, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-    if (fd >= 0) close(fd);
     check(a->present(a->ctx, "war3patch.mpq") == 1,
           "asset present case-insensitive");
+
+    int has_war3 = 0;
+    int has_patch = 0;
+    int has_late = 0;
+    for (uint32_t i = 0; i < 8u; i++) {
+        char name[64] = {0};
+        int rc = a->enumerate_mpq(a->ctx, i, name, sizeof name);
+        if (rc <= 0) break;
+        if (strcmp(name, "war3.mpq") == 0) has_war3 = 1;
+        if (strcmp(name, "War3Patch.mpq") == 0) has_patch = 1;
+        if (strcmp(name, "Late.mpq") == 0) has_late = 1;
+    }
+    check(has_war3 && has_patch, "asset enumerate names");
+
+    /* The snapshot is rebuilt by asset.init(); a file that appears after the
+     * first init is intentionally invisible until the root is re-installed. */
+    check(create_empty_file(late), "asset late create");
+    check(a->present(a->ctx, "late.mpq") == 0,
+          "asset snapshot stable until init");
+    check(a->init(a->ctx, dir, "/data/local/tmp") == 0, "asset reinit");
+    check(a->present(a->ctx, "late.mpq") == 1,
+          "asset snapshot refreshes on init");
+    has_late = 0;
+    for (uint32_t i = 0; i < 8u; i++) {
+        char name[64] = {0};
+        int rc = a->enumerate_mpq(a->ctx, i, name, sizeof name);
+        if (rc <= 0) break;
+        if (strcmp(name, "Late.mpq") == 0) has_late = 1;
+    }
+    check(has_late, "asset enumerate after reinit");
+
     check(a->present(a->ctx, "../war3.mpq") == 0,
           "asset present rejects traversal");
-    (void)unlink(mpq);
-    (void)unlink(patch);
-    (void)rmdir(dir);
+    clear_asset_dir(dir);
+
+    /* A missing root must not permanently freeze an empty snapshot.  Create
+     * the directory after the first init and look up a differently-cased name
+     * so the live scan, not the exact-path fast path, proves the retry. */
+    const char *retry_dir = "/data/local/tmp/wc3-platform-assets-retry";
+    const char *retry_mpq = "/data/local/tmp/wc3-platform-assets-retry/War3.mpq";
+    clear_asset_dir(retry_dir);
+    check(a->init(a->ctx, retry_dir, "/data/local/tmp") == 0,
+          "asset missing-root init");
+    check(a->present(a->ctx, "war3.mpq") == 0,
+          "asset missing-root present");
+    check(mkdir(retry_dir, 0700) == 0, "asset retry mkdir");
+    check(create_empty_file(retry_mpq), "asset retry create");
+    check(a->present(a->ctx, "war3.mpq") == 1,
+          "asset snapshot retries after opendir failure");
+    clear_asset_dir(retry_dir);
 }
 
 static void test_config(const Wc3ConfigApi *c)
@@ -834,6 +1106,8 @@ int main(int argc, char **argv)
     test_thread(&p.thread);
     test_input(&p.input, &p.thread);
     test_sync(&p.sync);
+    test_sync_wakeups(&p.sync, &p.thread);
+    test_critical_wakeup(&p.sync, &p.thread);
     test_abandoned_mutex(&p.sync, &p.thread);
     test_surface(&p.surface);
     test_audio(&p.audio);

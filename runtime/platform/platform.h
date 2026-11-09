@@ -229,10 +229,10 @@ typedef struct Wc3VulkanDriverApi {
 
 typedef uintptr_t Wc3ThreadHandle;
 
-/* P0-9: a zero stack_size asks the platform for its guest-thread default.
- * Android/headless use 8 MiB, matching the guest stack and the triage rule for
- * HOST STACK OVERFLOW; a non-zero value is honoured when it is at least
- * PTHREAD_STACK_MIN. */
+/* P0-9: a zero stack_size asks the platform for its host-thread default.
+ * Android/headless use 8 MiB for guest-created host threads; the guest stack
+ * itself remains the 2 MiB allocation from TA-2.  A non-zero value is honoured
+ * when it is at least PTHREAD_STACK_MIN. */
 #define WC3_HOST_THREAD_STACK_SIZE (8u * 1024u * 1024u)
 
 typedef struct Wc3ThreadDesc {

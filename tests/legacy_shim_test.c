@@ -247,6 +247,20 @@ static void fake_hide(void) {}
 static void fn_a(CPU *c) { c->eax = 0xAAAAu; }
 static void fn_b(CPU *c) { c->eax = 0xBBBBu; }
 
+static uint32_t g_clobber_esp;
+static void fn_clobber(CPU *c)
+{
+    g_clobber_esp = c->esp;
+    c->eax = 0xC1A0B1E5u;
+    c->ebx = 0xB0000001u;
+    c->esi = 0xB0000002u;
+    c->edi = 0xB0000003u;
+    c->ebp = 0xB0000004u;
+    /* A real handler may push a callback frame; hle_call() must force the
+     * caller stack back before applying the import cleanup. */
+    c->esp -= 12u;
+}
+
 static void add_row(const char *dll, const char *name, HleFn fn)
 {
     HleEnt *e = &g_hle[g_hle_count++];
@@ -306,11 +320,62 @@ int main(void)
     CHECK(wc3_legacy_hle_add("KERNEL32.dll", "TestD", 0x10000, 1, fn_a) == -1,
           "add oversized argc");
 
+    /* O-46: a row appended by the quarantine is not fast-bound, so release
+     * must call its as-built handler directly.  That handler deliberately
+     * moves esp and clobbers every callee-saved field; the direct path has to
+     * preserve hle_call()'s forced cleanup and register contract, not just
+     * return the handler's eax. */
+    add_row("KERNEL32.dll", "TestClobber", fn_clobber);
+    g_hle[3].argc = 3;
+    CPU clobber;
+    memset(&clobber, 0, sizeof clobber);
+    clobber.esp = 0x1000u;
+    clobber.ebx = 1u;
+    clobber.esi = 2u;
+    clobber.edi = 3u;
+    clobber.ebp = 4u;
+    wc3_legacy_hle_call(GUEST_HLE_BASE + 3u * GUEST_HLE_STRIDE, &clobber);
+#if !WC3_DEBUG
+    CHECK(g_clobber_esp == 0x1000u, "direct legacy entry esp");
+    CHECK(clobber.eax == 0xC1A0B1E5u, "direct legacy clobber result");
+    CHECK(clobber.esp == 0x1000u + 16u, "direct legacy forced cleanup");
+    CHECK(clobber.ebx == 1u && clobber.esi == 2u &&
+              clobber.edi == 3u && clobber.ebp == 4u,
+          "direct legacy callee-saved registers");
+    CHECK(g_hle[3].calls == 0u, "direct legacy drops diagnostic counter");
+#else
+    /* Debug keeps the as-built hle_call() path; the fake here only records
+     * the forwarding, so the handler itself is not entered. */
+    CHECK(g_clobber_esp == 0u, "debug clobber stays in hle_call");
+    CHECK(g_last_thunk == GUEST_HLE_BASE + 3u * GUEST_HLE_STRIDE,
+          "debug clobber forwards thunk");
+#endif
+
+    add_row("KERNEL32.dll", "TestCdeclClobber", fn_clobber);
+    g_hle[4].argc = 2;
+    g_hle[4].cdecl_abi = 1;
+    CPU cdecl_clobber;
+    memset(&cdecl_clobber, 0, sizeof cdecl_clobber);
+    cdecl_clobber.esp = 0x2000u;
+    wc3_legacy_hle_call(GUEST_HLE_BASE + 4u * GUEST_HLE_STRIDE, &cdecl_clobber);
+#if !WC3_DEBUG
+    CHECK(g_clobber_esp == 0x2000u, "direct legacy cdecl entry esp");
+    CHECK(cdecl_clobber.esp == 0x2004u, "direct legacy cdecl cleanup");
+#endif
+
     CPU c;
     memset(&c, 0, sizeof c);
     wc3_legacy_hle_call(GUEST_HLE_BASE + GUEST_HLE_STRIDE, &c);
+#if WC3_DEBUG
     CHECK(g_last_thunk == GUEST_HLE_BASE + GUEST_HLE_STRIDE, "hle_call thunk");
     CHECK(g_last_cpu == &c, "hle_call cpu");
+#else
+    /* O-46 release path: the as-built handler runs directly after the single
+     * slot conversion, so the diagnostic hle_call() hook is not entered. */
+    CHECK(c.eax == 0xBBBBu, "release direct legacy handler result");
+    CHECK(c.esp == 8u, "release direct legacy stack cleanup");
+    CHECK(g_last_thunk == 0u, "release direct bypasses hle_call");
+#endif
     CHECK(strcmp(wc3_legacy_hle_describe(0), "legacy-test") == 0,
           "hle_describe");
 

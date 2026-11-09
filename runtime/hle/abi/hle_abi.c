@@ -242,14 +242,9 @@ void wc3_hle_fast_bind(uint32_t slot, void (*impl)(CPU *), uint16_t argc,
     }
 }
 
-int wc3_hle_fast_call(uint32_t thunk, CPU *c)
+int wc3_hle_fast_call_slot(uint32_t slot, uint32_t thunk, CPU *c)
 {
-    if (!g_fast_ready) return 0;
-    if (thunk < GUEST_HLE_BASE) return 0;
-    uint32_t off = thunk - GUEST_HLE_BASE;
-    if (off % HLE_STRIDE) return 0;
-    uint32_t slot = off / HLE_STRIDE;
-    if (slot >= HLE_MAX) return 0;
+    if (!g_fast_ready || !c || slot >= HLE_MAX) return 0;
 
     uint16_t index = g_fast_slot_to_index[slot];
     if (index == HLE_FAST_UNBOUND) return 0;
@@ -266,6 +261,15 @@ int wc3_hle_fast_call(uint32_t thunk, CPU *c)
     (void)esp_out;
 #endif
     return 1;
+}
+
+int wc3_hle_fast_call(uint32_t thunk, CPU *c)
+{
+    if (thunk < GUEST_HLE_BASE) return 0;
+    uint32_t off = thunk - GUEST_HLE_BASE;
+    if (off % HLE_STRIDE) return 0;
+    uint32_t slot = off / HLE_STRIDE;
+    return wc3_hle_fast_call_slot(slot, thunk, c);
 }
 
 void hle_fatal_missing(const char *dll, const char *name, uint16_t ordinal)

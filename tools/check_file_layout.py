@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,6 +40,23 @@ def lines(path: Path) -> int:
             return sum(1 for _ in fh)
     except OSError:
         return 0
+
+
+def is_git_ignored(path: Path) -> bool:
+    """Ask git, so R3 follows the same rules as an actual commit."""
+    if not (ROOT / ".git").exists():
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "--quiet", "--", str(path)],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
 
 
 def check_migration_ledger(errors: list[str], warnings: list[str]) -> None:
@@ -161,7 +179,8 @@ def check() -> dict:
     ignored = gi.read_text(encoding="utf-8") if gi.is_file() else ""
     binaries = [p for p in ROOT.rglob("*")
                 if p.is_file() and p.suffix in BINARY_EXT
-                and "build" not in p.parts and "third_party" not in p.parts]
+                and "build" not in p.parts and "third_party" not in p.parts
+                and not is_git_ignored(p)]
     if binaries:
         errors.append(f"R3: {len(binaries)} unignored binary artefact(s): "
                       + ", ".join(rel(p) for p in binaries[:4]))

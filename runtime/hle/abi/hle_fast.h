@@ -3,10 +3,12 @@
  *
  * The legacy registry in runtime/legacy/hle_android.c still owns the thunk
  * slots.  New HLE modules override selected slots through
- * wc3_legacy_hle_override(); those slots can use the clean hle_abi bridge,
- * while every other slot keeps the as-built call path (including its missing
- * import diagnostics).  The clean entry point is hle_abi_call(); the target
- * tree cannot also define hle_call() because the as-built quarantine already
+ * wc3_legacy_hle_override(); those slots use the clean hle_abi bridge.  The
+ * O-46 release path in legacy_shim.c converts the thunk once and calls an
+ * unbound as-built handler directly, preserving its register/stack contract;
+ * debug builds keep hle_call() so its call ring and missing/stack diagnostics
+ * remain available.  The clean entry point is hle_abi_call(); the target tree
+ * cannot also define hle_call() because the as-built quarantine already
  * exports that symbol.
  */
 #ifndef WC3_HLE_FAST_H
@@ -28,6 +30,11 @@ void wc3_hle_fast_bind(uint32_t slot, void (*impl)(CPU *), uint16_t argc,
 /* Returns 1 after the new bridge handled the thunk, 0 when the slot was never
  * bound and the caller must use the legacy hle_call(). */
 int wc3_hle_fast_call(uint32_t thunk, CPU *c);
+
+/* O-46: the caller has already converted the thunk to its slot.  This keeps
+ * the release path to one subtraction/division and one slot lookup instead of
+ * repeating the conversion inside the legacy hle_call(). */
+int wc3_hle_fast_call_slot(uint32_t slot, uint32_t thunk, CPU *c);
 
 #ifdef __cplusplus
 }

@@ -54,18 +54,81 @@ else()
         message(FATAL_ERROR "legacy corpus manifest missing: ${WC3_BOOT_LIST}")
     endif()
 endif()
-if(NOT EXISTS "${WC3_LEGACY_ROOT}/build/android/libsoftfloat.a")
+if(NOT WC3_NATIVE_TLS AND
+   NOT EXISTS "${WC3_LEGACY_ROOT}/build/android/libsoftfloat.a")
     message(FATAL_ERROR
         "legacy softfloat archive missing: ${WC3_LEGACY_ROOT}/build/android/libsoftfloat.a")
+endif()
+
+# O-52: the legacy archive defines __emutls_v.* variables, so compiling the
+# corpus with -fno-emulated-tls while still linking that archive produces
+# undefined native-TLS symbols.  When native TLS is requested, rebuild exactly
+# the archive's 302-source surface from the target-tree vendor input.  The
+# manifest is pinned next to the sources; no file is discovered by globbing.
+if(WC3_NATIVE_TLS)
+    if(NOT ANDROID)
+        message(FATAL_ERROR "WC3_NATIVE_TLS requires the Android toolchain")
+    endif()
+    set(_wc3_softfloat_manifest
+        "${WC3_ROOT}/third_party/softfloat/android_sources.txt")
+    if(NOT EXISTS "${_wc3_softfloat_manifest}")
+        message(FATAL_ERROR
+            "SoftFloat source manifest missing: ${_wc3_softfloat_manifest}")
+    endif()
+    file(STRINGS "${_wc3_softfloat_manifest}" _wc3_softfloat_rel)
+    set(_wc3_softfloat_sources)
+    foreach(_rel IN LISTS _wc3_softfloat_rel)
+        string(STRIP "${_rel}" _rel)
+        if(_rel STREQUAL "" OR _rel MATCHES "^#")
+            continue()
+        endif()
+        string(REPLACE "\\" "/" _rel "${_rel}")
+        list(APPEND _wc3_softfloat_sources
+            "${WC3_ROOT}/third_party/softfloat/${_rel}")
+    endforeach()
+    if(NOT _wc3_softfloat_sources)
+        message(FATAL_ERROR "SoftFloat source manifest is empty")
+    endif()
+    # The legacy archive has exactly 302 members; keep the replacement pinned
+    # to that surface so a manifest edit is a deliberate ABI decision, not a
+    # silent source-set change.
+    list(LENGTH _wc3_softfloat_sources _wc3_softfloat_count)
+    if(NOT _wc3_softfloat_count EQUAL 302)
+        message(FATAL_ERROR
+            "SoftFloat manifest has ${_wc3_softfloat_count} sources, expected 302")
+    endif()
+    add_library(wc3_softfloat STATIC ${_wc3_softfloat_sources})
+    target_include_directories(wc3_softfloat PRIVATE
+        "${WC3_ROOT}/third_party/softfloat"
+        "${WC3_ROOT}/third_party/softfloat/source/include"
+        "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
+    target_compile_definitions(wc3_softfloat PRIVATE
+        SOFTFLOAT_FAST_INT64
+        LITTLEENDIAN
+        THREAD_LOCAL=_Thread_local)
+    target_compile_options(wc3_softfloat PRIVATE
+        -O2
+        -fno-strict-aliasing
+        -fwrapv
+        -ffp-contract=off
+        -Wno-unused-parameter)
+    set_target_properties(wc3_softfloat PROPERTIES
+        POSITION_INDEPENDENT_CODE ON)
+else()
+    add_library(wc3_softfloat STATIC IMPORTED)
+    set_target_properties(wc3_softfloat PROPERTIES
+        IMPORTED_LOCATION
+            "${WC3_LEGACY_ROOT}/build/android/libsoftfloat.a")
 endif()
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 set(WC3_BOOT_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/legacy_boot_generated")
 set(WC3_BOOT_DISPATCH_LIST "${WC3_BOOT_GEN_DIR}/boot_dispatch_list.h")
-# O-24: the dispatcher hash table is published as a generated constant instead
-# of being rebuilt at every startup.  Both headers come from the same tool run
-# so the g_lift indices cannot drift between them.
+# O-24/O-53: the dispatcher map is published as a generated constant instead
+# of being rebuilt at every startup.  Both headers come from the same tool run;
+# the map stores guest VAs and function pointers directly, so there are no
+# g_lift indices that could drift from the generated list.
 set(WC3_BOOT_DISPATCH_HASH "${WC3_BOOT_GEN_DIR}/boot_dispatch_hash.h")
 file(MAKE_DIRECTORY "${WC3_BOOT_GEN_DIR}")
 
@@ -400,7 +463,7 @@ target_link_libraries(wc3gameactivity PRIVATE
     wc3_legacy_boot
     ${WC3_CORPUS_LIBS}
     wc3_dxvk_entry
-    "${WC3_LEGACY_ROOT}/build/android/libsoftfloat.a"
+    wc3_softfloat
     -Wl,--whole-archive
     ${WC3_DXVK_ARCHIVES}
     -Wl,--no-whole-archive

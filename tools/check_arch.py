@@ -78,6 +78,11 @@ GUEST_ZONES = (
 LOCK_FREE_ZONES = ("runtime/ipc/",)
 HLE_PREFIX = "runtime/hle/"
 PLATFORM_PREFIX = "runtime/platform/"
+# The lock-trace probe owns the mutex that protects its diagnostic table.  It
+# is debug-only, never calls dispatch() and never waits on a guest object.
+# Allow that one explicit owner; do not turn the whole diagnostic tree into an
+# implicit lock zone.
+OWNED_DIAG_LOCK_FILES = ("runtime/diag/wc3_lock_trace.c",)
 
 FORBIDDEN_NET = ("NetApi", "Wc3NetApi")
 REQUIRED_APIS = (
@@ -860,6 +865,7 @@ def check_concurrency() -> list[str]:
             "runtime/hle/abi/"
         )
         platform_zone = key.startswith(PLATFORM_PREFIX)
+        owned_diag_lock = key in OWNED_DIAG_LOCK_FILES
 
         for m in HOST_LOCK_RE.finditer(body):
             if guest_zone or lock_free_zone:
@@ -867,7 +873,7 @@ def check_concurrency() -> list[str]:
                 errors.append(
                     f"{key}:{line}: host lock in guest/lock-free zone: {m.group(0)}"
                 )
-            elif not hle_zone and not platform_zone:
+            elif not hle_zone and not platform_zone and not owned_diag_lock:
                 line = body[: m.start()].count("\n") + 1
                 errors.append(f"{key}:{line}: unowned host lock: {m.group(0)}")
 
@@ -908,6 +914,11 @@ def check_platform_contract() -> list[str]:
 def check_release() -> list[str]:
     errors: list[str] = []
     for path in source_files():
+        # runtime/legacy/ is read-only quarantine (R15); its M5 replacement is
+        # checked when the file moves into the target tree.  Failing here would
+        # force edits to the quarantined copy, which H6.3 forbids.
+        if rel(path).startswith("runtime/legacy/"):
+            continue
         body = path.read_text(encoding="utf-8", errors="replace")
         if "#ifdef WC3_DEBUG" in body:
             errors.append(f"{rel(path)}: use #if WC3_DEBUG, not #ifdef")

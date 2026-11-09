@@ -24,11 +24,54 @@ _Static_assert(HLE_MAX == WC3_LEGACY_HLE_MAX,
 _Static_assert(HLE_STRIDE == WC3_LEGACY_HLE_STRIDE,
                "legacy HLE thunk stride changed; update legacy_shim.h");
 
+#if !WC3_DEBUG
+/* O-46: release keeps one thunk -> slot conversion for the whole call.  A slot
+ * that is not overridden by a target HLE module is still an as-built handler,
+ * so preserve hle_call()'s callee-saved register and stack-cleanup contract.
+ * The call ring, the per-import counter and g_last_cpu belong to diagnostics;
+ * they stay on the debug path, where hle_call() remains the source of truth.
+ * Missing-import logging is likewise diagnostic and is intentionally absent
+ * from release. */
+static void legacy_call_direct(uint32_t slot, uint32_t thunk, CPU *c)
+{
+    HleEnt *e = &g_hle[slot];
+    if (!e->fn) return;
+
+    c->eip = thunk;
+    uint32_t sbx = c->ebx, ssi = c->esi, sdi = c->edi, sbp = c->ebp;
+    uint32_t esp_in = c->esp;
+    e->fn(c);
+    c->ebx = sbx;
+    c->esi = ssi;
+    c->edi = sdi;
+    c->ebp = sbp;
+    c->esp = esp_in + (e->cdecl_abi ? 4u : 4u + (uint32_t)e->argc * 4u);
+}
+#endif
+
 void wc3_legacy_hle_call(uint32_t thunk, CPU *c)
 {
-    /* Overridden slots use the clean hle_abi bridge (no release-time call
-     * ring).  Unbound slots keep the as-built path, including its missing
-     * import diagnostics. */
+#if !WC3_DEBUG
+    if (thunk >= GUEST_HLE_BASE) {
+        uint32_t off = thunk - GUEST_HLE_BASE;
+        if ((off % HLE_STRIDE) == 0u) {
+            uint32_t slot = off / HLE_STRIDE;
+            if (slot < g_hle_count && c) {
+                if (wc3_hle_fast_call_slot(slot, thunk, c)) return;
+                if (g_hle[slot].fn) {
+                    legacy_call_direct(slot, thunk, c);
+                    return;
+                }
+            }
+        }
+    }
+#else
+    /* Debug keeps the as-built path, including its per-call ring, trace and
+     * missing-import/stack diagnostics. */
+    if (wc3_hle_fast_call(thunk, c)) return;
+    hle_call(thunk, c);
+    return;
+#endif
     if (wc3_hle_fast_call(thunk, c)) return;
     hle_call(thunk, c);
 }

@@ -245,9 +245,61 @@ def test_profile_corpus() -> int:
 
 
 def test_boot_dispatch_hash() -> int:
-    """O-24: the generated constant table matches the runtime lookup."""
+    """O-24/O-53: the generated merged table matches the runtime lookup."""
     return run([sys.executable, str(ROOT / "tools" / "gen_boot_dispatch.py"),
                 "--self-test"])
+
+
+def test_boot_dispatch_compile() -> int:
+    """O-53: the generated LiftEnt table compiles in the product dispatcher."""
+    cc = gcc()
+    if not cc:
+        print("boot dispatch compile: unavailable (no host C compiler)")
+        return 2
+
+    work = BUILD / "boot_dispatch_compile"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    funcs = work / "funcs.h"
+    funcs.write_text(
+        "#define LIFTED_FUNCS(X) X(00400000) X(00400004) X(35000000)\n",
+        encoding="ascii")
+    gen_list = work / "boot_dispatch_list.h"
+    gen_hash = work / "boot_dispatch_hash.h"
+    rc = run([sys.executable, str(ROOT / "tools" / "gen_boot_dispatch.py"),
+              "--list", str(funcs), "--prefix", "004",
+              "--out", str(gen_list), "--hash-out", str(gen_hash)])
+    if rc != 0:
+        return rc
+
+    # dispatch_boot.c includes the bridge headers on purpose.  Build the
+    # include set from the real tree so a moved HLE header fails this check.
+    include_dirs = [
+        ROOT / "runtime" / "cpu",
+        ROOT / "runtime" / "guest",
+        ROOT / "runtime" / "boot",
+        ROOT / "runtime" / "hle",
+        ROOT / "runtime" / "legacy",
+        ROOT / "runtime" / "platform",
+        ROOT / "runtime" / "platform" / "android",
+        ROOT / "runtime" / "diag",
+        ROOT / "third_party" / "softfloat" / "source" / "include",
+        ROOT / "third_party" / "softfloat" / "source" / "8086-SSE",
+    ]
+    include_dirs.extend(
+        path for path in (ROOT / "runtime" / "hle").rglob("*")
+        if path.is_dir())
+    include = ["-I" + str(path) for path in include_dirs]
+    return run([cc, "-std=c11", "-fsyntax-only", "-DWC3_DEBUG=0",
+                "-I" + str(work), *include,
+                str(ROOT / "runtime" / "boot" / "dispatch_boot.c")])
+
+
+def test_softfloat_manifest() -> int:
+    """O-52: native TLS can replace the emulated-TLS SoftFloat archive."""
+    return run([sys.executable, str(ROOT / "tools" /
+                                    "check_softfloat_manifest.py")])
 
 
 def test_x87_publication_guard() -> int:
@@ -586,6 +638,28 @@ def test_asset_api() -> int:
     return 0
 
 
+def test_asset_snapshot() -> int:
+    """T0: O-45 snapshot growth, truncation and open-failure state."""
+    cc = gcc()
+    if not cc:
+        print("asset snapshot: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "asset_snapshot_test.exe"
+    return run([
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I" + str(ROOT / "runtime" / "platform" / "android"),
+        str(ROOT / "runtime" / "platform" / "android" / "asset_snapshot.c"),
+        str(ROOT / "tests" / "asset_snapshot_test.c"),
+        "-o", str(exe),
+    ]) or run([str(exe)])
+
+
 def test_platform_contract() -> int:
     return run([sys.executable, str(ROOT / "tools" / "check_arch.py"),
                 "--platform-contract", "--concurrency", "--lifecycle", "--release"])
@@ -814,12 +888,82 @@ def test_waveout_runtime() -> int:
     return 0
 
 
+def test_waveout_headless() -> int:
+    """T0: real WINMM handlers on the real headless Wc3AudioApi."""
+    cc = gcc()
+    if not cc:
+        print("waveout headless: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "diag"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "winmm"),
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "runtime" / "platform" / "headless"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
+    ]
+    headless = ROOT / "runtime" / "platform" / "headless"
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "platform" / "platform.c"),
+        str(headless / "headless_mem.c"),
+        str(headless / "headless_file.c"),
+        str(headless / "headless_time.c"),
+        str(headless / "headless_schedule.c"),
+        str(headless / "headless_sched.c"),
+        str(headless / "headless_thread.c"),
+        str(headless / "headless_sync.c"),
+        str(headless / "headless_services.c"),
+        str(headless / "headless_init.c"),
+        str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "waveout_hle.c"),
+        str(ROOT / "tests" / "waveout_headless_test.c"),
+        "-pthread",
+    ]
+    saved_data_dir = os.environ.pop("WC3_DATA_DIR", None)
+    saved_audio_v2 = os.environ.pop("WC3_AUDIO_V2", None)
+    try:
+        for name, debug in (("waveout_headless_test_debug.exe", 1),
+                            ("waveout_headless_test_release.exe", 0)):
+            exe = BUILD / name
+            rc = run([*common, "-DWC3_AUDIO_V2_ENABLED=1",
+                      f"-DWC3_DEBUG={debug}", f"-DWC3_DEBUG_AUDIO={debug}",
+                      "-o", str(exe)])
+            if rc != 0:
+                return rc
+            rc = run([str(exe)])
+            if rc != 0:
+                return rc
+    finally:
+        if saved_data_dir is not None:
+            os.environ["WC3_DATA_DIR"] = saved_data_dir
+        if saved_audio_v2 is not None:
+            os.environ["WC3_AUDIO_V2"] = saved_audio_v2
+    return 0
+
+
 def test_release_hygiene() -> int:
-    """T0: BV-10 checker self-test; artifact scan is a separate command."""
-    return run([
+    """T0: BV-10 marker/source self-test and the live source audit."""
+    rc = run([
         sys.executable,
         str(ROOT / "tools" / "check_release_hygiene.py"),
         "--self-test",
+    ])
+    if rc != 0:
+        return rc
+    return run([
+        sys.executable,
+        str(ROOT / "tools" / "check_release_hygiene.py"),
+        "--source-audit",
     ])
 
 
@@ -935,11 +1079,205 @@ def test_dead_flags_pass() -> int:
                 "--self-test"])
 
 
+def test_return_address_elide_pass() -> int:
+    """P0-6 source check: only proven non-readers lose the return-address store."""
+    return run([sys.executable,
+                str(ROOT / "tools" / "lift" / "passes" /
+                    "return_address_elide.py"),
+                "--self-test"])
+
+
 def test_flag_read_audit() -> int:
     """P0-10 proof step: a live PF/AF read must fail the audit."""
     return run([sys.executable,
                 str(ROOT / "tools" / "flag_read_audit.py"),
                 "--self-test"])
+
+
+def test_corpus_flag_policy() -> int:
+    """O-61: the relifted corpus is built at -O2 with -g0 last."""
+    source = (ROOT / "cmake" / "Wc3ReliftedCorpus.cmake").read_text(
+        encoding="utf-8", errors="replace")
+    block_start = source.find("target_compile_options(wc3_corpus_relifted")
+    block_end = source.find(")", block_start)
+    block = source[block_start:block_end] if block_start >= 0 else ""
+    if "-O2" not in block or "-g0" not in block:
+        print("corpus_flag_policy: -O2/-g0 missing from corpus flags",
+              file=sys.stderr)
+        return 1
+    if block.find("-O2") > block.find("-g0"):
+        print("corpus_flag_policy: -g0 is not after -O2 in the block",
+              file=sys.stderr)
+        return 1
+
+    build_ninja = (ROOT / "build" / "android_app" / "debug" / "cmake" /
+                   "build.ninja")
+    if not build_ninja.is_file():
+        print("corpus_flag_policy: source policy OK (no build.ninja)")
+        return 0
+    text = build_ninja.read_text(encoding="utf-8", errors="replace")
+    marker = "CMakeFiles/wc3_corpus_relifted.dir/"
+    checked = 0
+    for block_text in text.split("\nbuild "):
+        if marker not in block_text:
+            continue
+        for line in block_text.splitlines():
+            if not line.startswith("  FLAGS = "):
+                continue
+            flags = line[len("  FLAGS = "):].split()
+            if "-g0" not in flags:
+                print("corpus_flag_policy: corpus object lacks -g0",
+                      file=sys.stderr)
+                return 1
+            optimizations = [flag for flag in flags
+                             if re.fullmatch(r"-O[0-3sg]", flag)]
+            if not optimizations or optimizations[-1] != "-O2":
+                print(f"corpus_flag_policy: last -O flag is "
+                      f"{optimizations[-1] if optimizations else 'missing'}",
+                      file=sys.stderr)
+                return 1
+            debug_flags = [flag for flag in flags
+                           if re.fullmatch(r"-g[0-3]?", flag)]
+            if not debug_flags or debug_flags[-1] != "-g0":
+                print(f"corpus_flag_policy: last -g flag is "
+                      f"{debug_flags[-1] if debug_flags else 'missing'}",
+                      file=sys.stderr)
+                return 1
+            checked += 1
+            break
+    if checked == 0:
+        print("corpus_flag_policy: build.ninja has no corpus object flags",
+              file=sys.stderr)
+        return 1
+    print(f"corpus_flag_policy: {checked} corpus object(s) use -O2 -g0")
+    return 0
+
+
+def test_pass6_build_guards() -> int:
+    """O-64/O-65: ICF and -fno-plt stay opt-in experiments, OFF by default."""
+    cmake = (ROOT / "CMakeLists.txt").read_text(
+        encoding="utf-8", errors="replace")
+    build_app = (ROOT / "tools" / "android" / "build_app.ps1").read_text(
+        encoding="utf-8", errors="replace")
+    build_apk = (ROOT / "tools" / "android" / "build_apk.ps1").read_text(
+        encoding="utf-8", errors="replace")
+    problems: list[str] = []
+
+    def option_default(name: str, expected: str) -> None:
+        match = re.search(
+            rf"option\({re.escape(name)}\s+\"[^\"]*\"\s+(ON|OFF)\)",
+            cmake, re.S)
+        if not match or match.group(1) != expected:
+            found = match.group(1) if match else "missing"
+            problems.append(f"CMake option {name} default is {found}, "
+                            f"expected {expected}")
+
+    option_default("WC3_ICF", "OFF")
+    option_default("WC3_FNO_PLT", "OFF")
+    option_default("WC3_ICF_PRINT_SECTIONS", "ON")
+    mode = re.search(
+        r'set\(WC3_ICF_MODE\s+"([^"]+)"\s+CACHE STRING', cmake, re.S)
+    if not mode or mode.group(1) != "safe":
+        problems.append("WC3_ICF_MODE default is not safe")
+    if '"-Wl,--icf=${WC3_ICF_MODE}"' not in cmake:
+        problems.append("CMake does not pass -Wl,--icf=... to the link")
+    if "add_compile_options(-fno-plt)" not in cmake:
+        problems.append("CMake does not wire -fno-plt")
+
+    for needle in (
+        "$icfValue = if ($Icf) { 'ON' } else { 'OFF' }",
+        '"-DWC3_ICF=$icfValue"',
+        '"-DWC3_ICF_MODE=$IcfMode"',
+        '"-DWC3_ICF_PRINT_SECTIONS=$icfValue"',
+        "$fnoPltValue = if ($FnoPlt) { 'ON' } else { 'OFF' }",
+        '"-DWC3_FNO_PLT=$fnoPltValue"',
+    ):
+        if needle not in build_app:
+            problems.append(f"build_app.ps1 missing {needle}")
+    for needle in ("$nativeParams['Icf'] = $true",
+                   "$nativeParams['FnoPlt'] = $true"):
+        if needle not in build_apk:
+            problems.append(f"build_apk.ps1 missing {needle}")
+
+    if problems:
+        for problem in problems:
+            print(f"pass6_build_guards: {problem}", file=sys.stderr)
+        return 1
+    print("pass6_build_guards: WC3_ICF/WC3_FNO_PLT are explicit OFF defaults")
+    return 0
+
+
+def test_pass7_build_guards() -> int:
+    """O-70/O-74: RELR and P0-6 stay explicit opt-ins, OFF by default."""
+    cmake = (ROOT / "CMakeLists.txt").read_text(
+        encoding="utf-8", errors="replace")
+    corpus = (ROOT / "cmake" / "Wc3ReliftedCorpus.cmake").read_text(
+        encoding="utf-8", errors="replace")
+    build_app = (ROOT / "tools" / "android" / "build_app.ps1").read_text(
+        encoding="utf-8", errors="replace")
+    build_apk = (ROOT / "tools" / "android" / "build_apk.ps1").read_text(
+        encoding="utf-8", errors="replace")
+    problems: list[str] = []
+
+    def option_default(name: str, expected: str) -> None:
+        match = re.search(
+            rf"option\({re.escape(name)}\s+\"[^\"]*\"\s+(ON|OFF)\)",
+            cmake, re.S)
+        if not match or match.group(1) != expected:
+            found = match.group(1) if match else "missing"
+            problems.append(f"CMake option {name} default is {found}, "
+                            f"expected {expected}")
+
+    option_default("WC3_PACK_DYN_RELOCS", "OFF")
+    option_default("WC3_RETURN_ADDRESS_ELIDE_P0_6", "OFF")
+    mode = re.search(
+        r'set\(WC3_PACK_DYN_RELOCS_MODE\s+"([^"]+)"\s+CACHE STRING',
+        cmake, re.S)
+    if not mode or mode.group(1) != "android":
+        problems.append("WC3_PACK_DYN_RELOCS_MODE default is not android")
+    if '"-Wl,--pack-dyn-relocs=${WC3_PACK_DYN_RELOCS_MODE}"' not in cmake:
+        problems.append("CMake does not pass the selected relocation mode")
+    if "if(WC3_RETURN_ADDRESS_ELIDE_P0_6)" not in corpus:
+        problems.append("relifted corpus does not gate P0-6")
+    if "return_address_elide.py" not in corpus:
+        problems.append("relifted corpus does not invoke return_address_elide")
+    if '"-DWC3_PACK_DYN_RELOCS_MODE=$PackDynRelocsMode"' not in build_app:
+        problems.append("build_app.ps1 does not pass the relocation mode")
+    if "$nativeParams['PackDynRelocsMode'] = $PackDynRelocsMode" not in build_apk:
+        problems.append("build_apk.ps1 does not pass the relocation mode")
+
+    if problems:
+        for problem in problems:
+            print(f"pass7_build_guards: {problem}", file=sys.stderr)
+        return 1
+    print("pass7_build_guards: RELR/P0-6 are explicit OFF opt-ins")
+    return 0
+
+
+def test_icf_audit() -> int:
+    """O-64 source check: duplicate grouping folds aliases by VA."""
+    return run([sys.executable,
+                str(ROOT / "tools" / "icf_audit.py"),
+                "--self-test"])
+
+
+def test_plt_audit() -> int:
+    """O-65 source check: AArch64 BL and PLT-slot mapping."""
+    return run([sys.executable,
+                str(ROOT / "tools" / "plt_audit.py"),
+                "--self-test"])
+
+
+def test_wait_clock_audit() -> int:
+    """O-66 guard: legacy wall-clock waits stay read-only and visible."""
+    rc = run([sys.executable,
+              str(ROOT / "tools" / "wait_clock_audit.py"),
+              "--self-test"])
+    if rc != 0:
+        return rc
+    return run([sys.executable,
+                str(ROOT / "tools" / "wait_clock_audit.py"),
+                "--strict"])
 
 
 def test_gva_fold() -> int:
@@ -1024,6 +1362,105 @@ def test_file_layout() -> int:
 def test_docs() -> int:
     """R11: index/link/policy checks; full path inventory arrives with M6."""
     return run([sys.executable, str(ROOT / "tools" / "check_docs.py")])
+
+
+def test_pass4_build() -> int:
+    """T0: PASS4 build inputs without linking the product.
+
+    The real lld smoke is deliberately outside the default gate: it needs the
+    Android NDK.  This check keeps the O-42 version-script surface and CMake
+    wiring, the O-43 deterministic pack-relocation switches, the O-45 asset
+    snapshot fallbacks, and the O-46 release dispatch path from silently
+    drifting.
+    """
+    failures: list[str] = []
+
+    def check(condition: bool, message: str) -> None:
+        if not condition:
+            failures.append(message)
+
+    map_path = ROOT / "cmake" / "wc3_exports.map"
+    if not map_path.is_file():
+        print(f"FAIL missing {map_path}", file=sys.stderr)
+        return 1
+    version_script = map_path.read_text(encoding="utf-8")
+    global_match = re.search(r"global:(.*?)(?:local:|$)", version_script, re.S)
+    check(global_match is not None, "version script has no global block")
+    if global_match:
+        exported = {item.rstrip(";") for item in global_match.group(1).split()}
+        for symbol in ("JNI_OnLoad", "android_main", "Java_*"):
+            check(symbol in exported, f"version script missing {symbol}")
+    local_match = re.search(r"local:(.*?)(?:};|$)", version_script, re.S)
+    check(local_match is not None, "version script has no local block")
+    if local_match:
+        locals_ = {item.rstrip(";") for item in local_match.group(1).split()}
+        check("*" in locals_, "version script does not localize the rest")
+
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    check("option(WC3_HIDE_DYNSYM" in cmake, "O-42 option missing")
+    check("--version-script=${WC3_ROOT}/cmake/wc3_exports.map" in cmake,
+          "O-42 version script not linked")
+    check("LINK_DEPENDS" in cmake, "O-42 map is not a link dependency")
+    check("--pack-dyn-relocs=${WC3_PACK_DYN_RELOCS_MODE}" in cmake,
+          "O-43 pack mode not wired")
+
+    build_app = (ROOT / "tools" / "android" / "build_app.ps1").read_text(
+        encoding="utf-8")
+    check(re.search(
+        r"\$packDynRelocs\w*\s*=\s*if \(\$PackDynRelocs\)\s*\{\s*'ON'\s*\}\s*"
+        r"else\s*\{\s*'OFF'\s*\}", build_app) is not None,
+          "O-43 OFF is not passed on every configure")
+    check(re.search(r'"-DWC3_PACK_DYN_RELOCS=\$packDynRelocs\w*"',
+                    build_app) is not None,
+          "O-43 pack option is not deterministic")
+    check("WC3_HIDE_DYNSYM=ON" in build_app and "WC3_HIDE_DYNSYM=OFF" in build_app,
+          "O-42 hide option is not explicit per variant")
+    check("$hideDynsym = ($Variant -eq 'release') -and (-not $KeepDynsym)" in build_app,
+          "O-42 hide policy is not release-only with a KeepDynsym escape")
+
+    build_apk = (ROOT / "tools" / "android" / "build_apk.ps1").read_text(
+        encoding="utf-8")
+    check("$KeepDynsym" in build_apk, "O-42 KeepDynsym escape hatch missing")
+    check("L_[0-9A-Fa-f]{8}" in build_apk, "O-42 L_* leak check missing")
+    check(r"\bwc3_" in build_apk, "O-42 wc3_* leak check missing")
+
+    snapshot = (ROOT / "runtime" / "platform" / "android" /
+                "asset_snapshot.c").read_text(encoding="utf-8")
+    snapshot_h = (ROOT / "runtime" / "platform" / "android" /
+                  "asset_snapshot.h").read_text(encoding="utf-8")
+    platform = (ROOT / "runtime" / "platform" / "android" /
+                "platform_android.c").read_text(encoding="utf-8")
+    check("char (*names)[WC3_ASSET_NAME_MAX];" in snapshot_h,
+          "O-45 asset snapshot is not count-allocated")
+    check("realloc(snapshot->names" in snapshot,
+          "O-45 asset snapshot does not grow its name table")
+    check("wc3_asset_snapshot_build(&g_asset_snapshot, g_asset_root);" in platform,
+          "O-45 platform does not use the count-allocated snapshot")
+    check("asset_snapshot.c" in cmake,
+          "O-45 snapshot module is not in the platform target")
+    check("if (!g_asset_snapshot.truncated)" in platform and
+          "asset_scan_enumerate_locked(index, name, cap)" in platform,
+          "O-45 truncated snapshot indexing fallback missing")
+
+    dispatch_boot = (ROOT / "runtime" / "boot" / "dispatch_boot.c").read_text(
+        encoding="utf-8")
+    check("wc3_legacy_hle_call(target, c);" in dispatch_boot,
+          "O-46 product dispatcher bypasses the legacy shim")
+    legacy_shim = (ROOT / "runtime" / "hle" / "legacy_shim.c").read_text(
+        encoding="utf-8")
+    direct_start = legacy_shim.find("static void legacy_call_direct")
+    direct_end = legacy_shim.find("\n}\n", direct_start)
+    direct_body = (legacy_shim[direct_start:direct_end + 3]
+                   if direct_start >= 0 and direct_end >= 0 else "")
+    check(bool(direct_body) and "e->calls++" not in direct_body,
+          "O-46 release direct path still runs the diagnostic counter")
+
+    if failures:
+        for message in failures:
+            print(f"FAIL {message}", file=sys.stderr)
+        return 1
+    print("PASS4 build contract OK")
+    return 0
 
 
 def test_upstream_pin() -> int:
@@ -2425,7 +2862,14 @@ TESTS = {
     "direct_call_multi_tu": test_direct_call_multi_tu,
     "devirtualize_pass": test_devirtualize_pass,
     "dead_flags_pass": test_dead_flags_pass,
+    "return_address_elide_pass": test_return_address_elide_pass,
     "flag_read_audit": test_flag_read_audit,
+    "corpus_flag_policy": test_corpus_flag_policy,
+    "pass6_build_guards": test_pass6_build_guards,
+    "pass7_build_guards": test_pass7_build_guards,
+    "icf_audit": test_icf_audit,
+    "plt_audit": test_plt_audit,
+    "wait_clock_audit": test_wait_clock_audit,
     "gva_fold": test_gva_fold,
     "lift_equivalence_checker": test_lift_equivalence_checker,
     "module_registry": test_module_registry,
@@ -2463,6 +2907,7 @@ TESTS = {
     "msvcr80_string": test_msvcr80_string,
     "msvcr80_rand": test_msvcr80_rand,
     "legacy_shim": test_legacy_shim,
+    "pass4_build": test_pass4_build,
     "overlay": test_overlay,
     "file_layout": test_file_layout,
     "docs": test_docs,
@@ -2472,6 +2917,8 @@ TESTS = {
     "corpus_identity": test_corpus_identity,
     "profile_corpus": test_profile_corpus,
     "boot_dispatch_hash": test_boot_dispatch_hash,
+    "boot_dispatch_compile": test_boot_dispatch_compile,
+    "softfloat_manifest": test_softfloat_manifest,
     "x87_publication_guard": test_x87_publication_guard,
     "splitcorpus_packing": test_splitcorpus_packing,
     "splitcorpus_order": test_splitcorpus_order,
@@ -2485,12 +2932,14 @@ TESTS = {
     "thread_audit": test_thread_audit,
     "guest_runner": test_guest_runner,
     "asset_api": test_asset_api,
+    "asset_snapshot": test_asset_snapshot,
     "platform_contract": test_platform_contract,
     "platform_headless": test_platform_headless,
     "guest_memory": test_guest_memory,
     "window_settle": test_window_settle,
     "waveout_install": test_waveout_install,
     "waveout_runtime": test_waveout_runtime,
+    "waveout_headless": test_waveout_headless,
     "release_hygiene": test_release_hygiene,
     "null_gfx": test_null_gfx,
     "difftest": test_difftest,

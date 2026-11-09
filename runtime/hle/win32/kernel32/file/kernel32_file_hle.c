@@ -11,7 +11,9 @@
  *
  * Exactness rules:
  *   - only the leaf is case-folded, matching ci_resolve();
- *   - a cached spelling is revalidated with access(F_OK);
+ *   - an exact-spelling hit is passed through to the as-built live access;
+ *   - a cached case-variant spelling is revalidated with access(host) and
+ *     access(exact) before it is used;
  *   - a missing file is not positively cached;
  *   - a directory change flushes the cache;
  *   - CreateFileA with a create/truncate/write disposition invalidates the
@@ -320,9 +322,11 @@ static void prefetch_archive(const char *path)
     if (fd < 0) return;
     (void)posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
     close(fd);
+    CACHE_LOG("fadvise sequential \"%s\"\n", path);
+#else
+    (void)path;
 #endif
     prefetch_mark(path);
-    CACHE_LOG("fadvise sequential \"%s\"\n", path);
 }
 
 static void guest_path_from_host(const char *host, char *out, size_t capacity)

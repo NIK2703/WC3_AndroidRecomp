@@ -17,7 +17,21 @@ param(
     [string]$GamesActivityAar = '',
     [string]$CorpusRoot = '',
     [string]$DebugTags = '',
-    [switch]$PackDynRelocs
+    [switch]$PackDynRelocs,
+    [ValidateSet('android', 'relr', 'android+relr')]
+    [string]$PackDynRelocsMode = 'android',
+    [switch]$Icf,
+    [ValidateSet('safe', 'all')]
+    [string]$IcfMode = 'safe',
+    [switch]$FnoPlt,
+    [switch]$KeepDynsym,
+    # O-51/O-52: opt-in native ELF TLS.  It also switches the legacy
+    # emulated-TLS libsoftfloat.a input to a build of the pinned 302-source
+    # surface, so this is an A/B experiment until T2 validates dlopen TLS.
+    [switch]$NativeTls,
+    # O-55: opt-in A/B only.  The default keeps the NDK stack canary and
+    # Fortify on every non-corpus target.
+    [switch]$NoHostHardening
 )
 
 $ErrorActionPreference = 'Stop'
@@ -147,15 +161,48 @@ $configure = @(
 if ($CorpusRoot) {
     $configure += "-DWC3_RELIFTED_CORPUS_ROOT=$CorpusRoot"
 }
-if ($PackDynRelocs) {
-    # O-43 experiment: the product default stays unpacked until T2 proves the
-    # bionic API 26 loader and PM-22/GB-5.2 show a benefit.
-    $configure += '-DWC3_PACK_DYN_RELOCS=ON'
+# O-43/O-70 experiment: the product default stays unpacked until T2 proves
+# the bionic API 26 loader and PM-22/GB-5.2 show a benefit.  Pass both values
+# on every configure, not only when the switch is set: CMake cache entries
+# survive a previous -PackDynRelocs run, and an omitted OFF would silently
+# leave the next "default" build packed.  The mode keeps APS2 (`android`),
+# RELR and the combined table selectable for the A/B run.
+$packDynRelocsValue = if ($PackDynRelocs) { 'ON' } else { 'OFF' }
+$configure += "-DWC3_PACK_DYN_RELOCS=$packDynRelocsValue"
+$configure += "-DWC3_PACK_DYN_RELOCS_MODE=$PackDynRelocsMode"
+# O-52: pass the choice on every configure; an omitted value would inherit a
+# stale cache entry from a previous A/B build.
+$nativeTlsValue = if ($NativeTls) { 'ON' } else { 'OFF' }
+$configure += "-DWC3_NATIVE_TLS=$nativeTlsValue"
+$hostHardeningValue = if ($NoHostHardening) { 'OFF' } else { 'ON' }
+$configure += "-DWC3_HOST_HARDENING=$hostHardeningValue"
+# O-64/O-65: pass ON and OFF on every configure.  CMake cache entries survive
+# an earlier experiment, so omitting OFF here would silently keep ICF or
+# -fno-plt in the next "default" build.
+$icfValue = if ($Icf) { 'ON' } else { 'OFF' }
+$configure += "-DWC3_ICF=$icfValue"
+$configure += "-DWC3_ICF_MODE=$IcfMode"
+$configure += "-DWC3_ICF_PRINT_SECTIONS=$icfValue"
+$fnoPltValue = if ($FnoPlt) { 'ON' } else { 'OFF' }
+$configure += "-DWC3_FNO_PLT=$fnoPltValue"
+# O-42: release ships only the JNI surface.  Debug keeps all dynamic symbols so
+# on-device crash logs retain L_<va> names; -KeepDynsym is the explicit escape
+# hatch for a release triage build.
+$hideDynsym = ($Variant -eq 'release') -and (-not $KeepDynsym)
+if ($hideDynsym) {
+    $configure += '-DWC3_HIDE_DYNSYM=ON'
+} else {
+    $configure += '-DWC3_HIDE_DYNSYM=OFF'
 }
 Write-Host "[app] ndk   $($ndk.Root)"
-Write-Host "[app] pack_dyn_relocs $($PackDynRelocs.IsPresent)"
+Write-Host "[app] pack_dyn_relocs $($PackDynRelocs.IsPresent) ($PackDynRelocsMode)"
+Write-Host "[app] icf $($Icf.IsPresent) ($IcfMode)"
+Write-Host "[app] fno_plt $($FnoPlt.IsPresent)"
+Write-Host "[app] native_tls $($nativeTlsValue -eq 'ON')"
+Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
+Write-Host "[app] hide_dynsym $hideDynsym"
 Write-Host "[app] aar   $GamesActivityAar"
-Write-Host "[app] debug $($NativeDebug.IsPresent)"
+Write-Host "[app] debug $($Variant -eq 'debug')"
 $ErrorActionPreference = 'Continue'
 & $cmake @configure 2>&1 | ForEach-Object { Write-Host $_ }
 $rc = $LASTEXITCODE

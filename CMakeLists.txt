@@ -49,6 +49,21 @@ option(WC3_BUILD_PLATFORM_TEST "Build the arm64 device platform test" ON)
 option(WC3_BUILD_APP "Build libwc3gameactivity.so" OFF)
 option(WC3_WITH_LEGACY_BOOT "Link the transitional lifted corpus and as-built HLE"
        ${WC3_WITH_LEGACY_BOOT_DEFAULT})
+# O-51/O-52: the NDK defaults to compiler-rt emulated TLS for the Android
+# target, so every x87/SoftFloat THREAD_LOCAL access becomes a call to
+# __emutls_get_address.  Native ELF TLS is supported by bionic on this
+# product's minSdk 26, but the legacy libsoftfloat.a is an emulated-TLS input:
+# enabling this option also rebuilds the same 302-object SoftFloat surface from
+# third_party/softfloat/android_sources.txt.  It is opt-in because T2 has not
+# yet proved the dlopen/TLS path; OFF reproduces the product baseline.
+option(WC3_NATIVE_TLS
+       "Use native ELF TLS and rebuild SoftFloat from the pinned source list" OFF)
+# O-55: hardening is the product default; this switch only makes the
+# unmeasured A/B possible without editing the build.  Turning it off removes
+# the stack canary and Fortify from non-corpus targets (the corpus already
+# carries the same flags), so it must be paired with PM-22/T0/T1 evidence.
+option(WC3_HOST_HARDENING
+       "Keep NDK stack-protector and Fortify on non-corpus targets" ON)
 option(WC3_DEBUG "Build with debug-only diagnostics" OFF)
 # P0-1 stays OFF until G-14/G-15 are green (GUEST_ABI ABI-6).  The pass is
 # implemented and self-tested, but enabling it here is a build decision that
@@ -60,6 +75,13 @@ option(WC3_DEVIRTUALIZE_P0_1
 # not applied to the corpus cannot be mistaken for a measured speedup.
 option(WC3_DEAD_FLAGS_P0_2
        "Apply the P0-2 dead-flag LiftPass to relifted corpus chunks" OFF)
+# P0-6 removes only the return-address store before a direct call whose callee
+# proves it never reads the entry [esp] slot.  The pass keeps the esp slot, so
+# the callee's return sequence is unchanged.  OFF until G-15 carries the
+# function-level change set and a whole-corpus run is clean (ABI-6/ABI-11).
+option(WC3_RETURN_ADDRESS_ELIDE_P0_6
+       "Apply the P0-6 return-address-store LiftPass to relifted corpus chunks"
+       OFF)
 # P0-10 stays OFF until a corpus audit proves no live PF/AF read; it is a
 # semantic variant, not a free compiler flag.
 option(WC3_FLAGS_FAST_PF_AF
@@ -75,7 +97,8 @@ if(WC3_FLAGS_FAST_PF_AF)
             "option OFF.")
     endif()
     file(READ "${WC3_FLAGS_FAST_PF_AF_AUDIT}" _wc3_pf_af_audit)
-    if(NOT "${_wc3_pf_af_audit}" MATCHES "\"status\": \"pass\"")
+    if(NOT "${_wc3_pf_af_audit}" MATCHES "\"status\": \"pass\"" OR
+       NOT "${_wc3_pf_af_audit}" MATCHES "\"total\": 0")
         message(FATAL_ERROR
             "P0-10 audit is not a pass: ${WC3_FLAGS_FAST_PF_AF_AUDIT}")
     endif()
@@ -92,6 +115,54 @@ endif()
 # so the product link keeps the unpacked table unless this option is enabled.
 option(WC3_PACK_DYN_RELOCS
        "Experimental: pack dynamic relocations with lld (Android only)" OFF)
+# O-70: lld supports RELR and APS2 either separately or together.  Keep the
+# mode explicit so the A/B run can compare `android`, `relr` and
+# `android+relr` without changing the product default (the option above stays
+# OFF).  DT_RELR loading on the product's minSdk 26 is a T2 check.
+set(WC3_PACK_DYN_RELOCS_MODE "android" CACHE STRING
+    "Dynamic relocation packing: android, relr, or android+relr")
+set_property(CACHE WC3_PACK_DYN_RELOCS_MODE PROPERTY STRINGS
+    android relr android+relr)
+# O-42: release exposes only JNI_OnLoad, android_main and Java_* from the
+# shared object.  Debug keeps the full dynamic symbol table for on-device crash
+# diagnostics.  Release crash triage uses the module base plus the unstripped
+# build .symtab through tools/symbolize_crash.py; the product link is not yet
+# verified.
+option(WC3_HIDE_DYNSYM
+       "Hide every defined dynamic symbol except the JNI surface" OFF)
+# O-64: lld can fold byte-identical function bodies (safe mode refuses bodies
+# whose address is significant).  The option is OFF by default: ICF changes
+# artifact identity, makes dladdr-based crash symbolization ambiguous and can
+# give one address several guest VAs in the generated dispatch map.  Enable
+# it only for an A/B
+# run that also records --print-icf-sections, RELACOUNT and cold-start data,
+# and keep the resulting artifact out of the product until T1/G-15 pass.
+option(WC3_ICF
+       "Experimental: fold identical function bodies with lld (Android only)" OFF)
+set(WC3_ICF_MODE "safe" CACHE STRING
+    "Identical code folding mode: safe or all")
+set_property(CACHE WC3_ICF_MODE PROPERTY STRINGS safe all)
+option(WC3_ICF_PRINT_SECTIONS
+       "Pass --print-icf-sections when ICF is enabled" ON)
+# O-65: replace external PLT calls with GOT loads.  The effect is unmeasured and
+# can be negative, so this is an explicit experiment, not a product default.
+option(WC3_FNO_PLT
+       "Experimental: compile with -fno-plt (Android only)" OFF)
+if(WC3_ICF)
+    if(NOT ANDROID)
+        message(FATAL_ERROR "WC3_ICF requires the Android toolchain")
+    endif()
+    if(NOT WC3_ICF_MODE MATCHES "^(safe|all)$")
+        message(FATAL_ERROR "WC3_ICF_MODE must be safe or all")
+    endif()
+    message(WARNING
+        "O-64 ICF is enabled (${WC3_ICF_MODE}).  It changes artifact identity; "
+        "record --print-icf-sections, RELACOUNT and T1/G-15 evidence, and do "
+        "not treat the result as a measured speedup.")
+endif()
+if(WC3_FNO_PLT AND NOT ANDROID)
+    message(FATAL_ERROR "WC3_FNO_PLT requires the Android toolchain")
+endif()
 if(WC3_DEBUG)
     set(WC3_DEBUG_DEFINE 1)
 else()
@@ -118,6 +189,37 @@ endif()
 
 set(WC3_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 include("${WC3_ROOT}/cmake/Wc3CompilerCache.cmake")
+# O-65: this is a compile-time experiment, so it must be set before the target
+# definitions below.  It is never part of the product default.
+if(WC3_FNO_PLT)
+    message(WARNING
+        "O-65 -fno-plt is enabled.  Record PM-8/PM-19 and cold-start before "
+        "comparing it with the default PLT build.")
+    add_compile_options(-fno-plt)
+endif()
+# O-51/O-52: this must be a directory-level option, before every target that
+# can contain a THREAD_LOCAL object (corpus, boot, shim, HLE, platform and the
+# DXVK bridge).  Prebuilt vendor archives are inputs; they are not recompiled
+# here and keep their own TLS model.
+if(ANDROID AND WC3_NATIVE_TLS)
+    add_compile_options(-fno-emulated-tls)
+    message(STATUS
+        "O-52: native ELF TLS enabled; verify T2 and the removed "
+        "__emutls_get_address calls before claiming a speedup.")
+endif()
+# O-55: this is an opt-in baseline, never the product default.  The corpus
+# already sets these flags; this block extends the same release policy to the
+# remaining host targets (boot, shim, HLE, legacy and the DXVK bridge).
+if(ANDROID AND NOT WC3_HOST_HARDENING AND NOT WC3_DEBUG)
+    message(WARNING
+        "O-55 host hardening is disabled.  Record PM-22 (so_bytes, "
+        "compile_seconds), T0/T1 and the guest-visible delta; do not ship "
+        "this configuration without an ADR/BV-10 decision.")
+    add_compile_options(
+        -fno-stack-protector
+        -U_FORTIFY_SOURCE
+        -D_FORTIFY_SOURCE=0)
+endif()
 set(WC3_INCLUDES
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
@@ -129,6 +231,7 @@ set(WC3_INCLUDES
 
 add_library(wc3_platform STATIC
     "${WC3_ROOT}/runtime/platform/platform.c"
+    "${WC3_ROOT}/runtime/platform/android/asset_snapshot.c"
     "${WC3_ROOT}/runtime/platform/android/platform_android.c")
 target_include_directories(wc3_platform PUBLIC
     "${WC3_ROOT}/runtime/platform"
@@ -232,10 +335,37 @@ if(WC3_BUILD_APP)
         if(NOT ANDROID)
             message(FATAL_ERROR "WC3_PACK_DYN_RELOCS requires the Android toolchain")
         endif()
-        # O-43: keep this opt-in until a T2 run proves bionic API 26 loads the
-        # packed table and PM-22/GB-5.2 show a benefit over the unpacked image.
+        if(NOT WC3_PACK_DYN_RELOCS_MODE MATCHES "^(android|relr|android\\+relr)$")
+            message(FATAL_ERROR
+                "WC3_PACK_DYN_RELOCS_MODE must be android, relr, or android+relr")
+        endif()
+        # O-43/O-70: keep this opt-in until a T2 run proves bionic API 26
+        # loads the selected table and PM-22/GB-5.2 show a benefit over the
+        # unpacked image.
         target_link_options(wc3gameactivity PRIVATE
-            -Wl,--pack-dyn-relocs=android)
+            "-Wl,--pack-dyn-relocs=${WC3_PACK_DYN_RELOCS_MODE}")
+    endif()
+    if(WC3_ICF)
+        # O-64: safe mode is the only supported default for a body that may be
+        # reached through the guest dispatcher; --icf=all is an explicit A/B
+        # experiment, never a silent product choice.
+        target_link_options(wc3gameactivity PRIVATE
+            "-Wl,--icf=${WC3_ICF_MODE}")
+        if(WC3_ICF_PRINT_SECTIONS)
+            target_link_options(wc3gameactivity PRIVATE
+                -Wl,--print-icf-sections)
+        endif()
+    endif()
+    if(WC3_HIDE_DYNSYM)
+        if(NOT ANDROID)
+            message(FATAL_ERROR "WC3_HIDE_DYNSYM requires the Android toolchain")
+        endif()
+        target_link_options(wc3gameactivity PRIVATE
+            "-Wl,--version-script=${WC3_ROOT}/cmake/wc3_exports.map")
+        # A version-script edit changes the output but not the linker command
+        # line, so Ninja would otherwise keep a stale .so after the map changes.
+        set_property(TARGET wc3gameactivity APPEND PROPERTY
+            LINK_DEPENDS "${WC3_ROOT}/cmake/wc3_exports.map")
     endif()
     set_target_properties(wc3gameactivity PROPERTIES
         OUTPUT_NAME wc3gameactivity

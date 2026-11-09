@@ -148,6 +148,38 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             endforeach()
             set(_chunks "${_transformed_chunks}")
         endif()
+        if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
+            # P0-6 runs after P0-1, so it sees both dispatch() and the
+            # WC3_DIRECT_CALL form.  It is OFF until G-15 publishes the
+            # function-level change set; the pass keeps the esp slot and skips
+            # every target that may read the return address.
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                "${WC3_ROOT}/tools/lift/passes/return_address_elide.py")
+            set(_ra_dir
+                "${CMAKE_CURRENT_BINARY_DIR}/return_address_elide/${_name}/${_kind}")
+            file(MAKE_DIRECTORY "${_ra_dir}")
+            set(_ra_chunks)
+            foreach(_chunk IN LISTS _chunks)
+                get_filename_component(_chunk_name "${_chunk}" NAME)
+                set(_ra_out "${_ra_dir}/${_chunk_name}")
+                execute_process(
+                    COMMAND "${Python3_EXECUTABLE}"
+                            "${WC3_ROOT}/tools/lift/passes/return_address_elide.py"
+                            --lift "${_chunk}"
+                            --out "${_ra_out}"
+                            --json "${_ra_out}.json"
+                    RESULT_VARIABLE _ra_rc
+                    OUTPUT_VARIABLE _ra_stdout
+                    ERROR_VARIABLE _ra_stderr)
+                if(NOT _ra_rc EQUAL 0)
+                    message(FATAL_ERROR
+                        "return_address_elide failed for ${_chunk} (rc=${_ra_rc}):\n"
+                        "${_ra_stdout}\n${_ra_stderr}")
+                endif()
+                list(APPEND _ra_chunks "${_ra_out}")
+            endforeach()
+            set(_chunks "${_ra_chunks}")
+        endif()
         if(WC3_DEAD_FLAGS_P0_2)
             # P0-2 runs after P0-1 when both are enabled, so its input is the
             # direct-call form.  It is a straight-line, per-flag kill analysis;

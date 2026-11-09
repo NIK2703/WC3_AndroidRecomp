@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NORMATIVE = (
     ROOT / "AGENTS.md",
     ROOT / "README.md",
-    ROOT / "PLAN_REFACTOR_1.27B.md",
+    ROOT / "docs" / "PLAN_REFACTOR_1.27B.md",
     ROOT / "docs" / "ARCHITECTURE_1.27B.md",
     ROOT / "docs" / "FILE_LAYOUT.md",
     ROOT / "docs" / "ADR.md",
@@ -65,7 +65,7 @@ ID_DEF_RE = {
     "PM": re.compile(r"\*\*PM-(\d+)\s*\("),
     "TA": re.compile(r"\*\*TA-(\d+)\s*\("),
     "R": re.compile(r"^\|\s*R(\d+)\s*\|", re.M),
-    "BV": re.compile(r"\*\*BV-(\d+)\s*\("),
+    "BV": re.compile(r"^(?:\*\*|##\s*)BV-(\d+)\b", re.M),
 }
 ID_REF_RE = {
     "PM": re.compile(r"\bPM-(\d+)\b"),
@@ -138,7 +138,7 @@ def check_index(errors: list[str], warnings: list[str]) -> None:
     for name in sorted(indexed_root):
         if not (ROOT / name).is_file():
             errors.append(f"docs/README.md indexes missing root file {name}")
-    for name in ("AGENTS.md", "README.md", "PLAN_REFACTOR_1.27B.md"):
+    for name in ("AGENTS.md", "README.md"):
         if not (ROOT / name).is_file():
             errors.append(f"root document {name} is missing")
     if "ARCHITECTURE_1.27B.md" not in indexed_docs:
@@ -240,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         check_links(doc, errors, warnings)
         if args.paths:
             check_backtick_paths(doc, warnings)
-    for doc in (ROOT / "README.md", ROOT / "PLAN_REFACTOR_1.27B.md"):
+    for doc in (ROOT / "README.md",):
         if doc.is_file():
             check_links(doc, errors, warnings)
             if args.paths:

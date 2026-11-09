@@ -328,6 +328,7 @@ static int expect_path(const char *expected, const char *label)
 static int cleanup_tree(void)
 {
     remove("build/host/kernel32_file_tmp/Data/war3.mpq");
+    remove("build/host/kernel32_file_tmp/Data/War3.mpq");
     remove("build/host/kernel32_file_tmp/Data/other.txt");
     remove("build/host/kernel32_file_tmp/Other/War3.MPQ");
     RMDIR("build/host/kernel32_file_tmp/Data");

@@ -1,4 +1,5 @@
 #include "hle_abi.h"
+#include "hle_fast.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -34,6 +35,11 @@ static void h_writes_callee_saved(CPU *c)
     c->esi = 0xB0000002u;
     c->edi = 0xB0000003u;
     c->ebp = 0xB0000004u;
+}
+
+static void h_fast(CPU *c)
+{
+    c->eax = 0xF00Du;
 }
 
 static int fail(const char *what)
@@ -108,6 +114,68 @@ int main(void)
     if (cpu.ebx != 0xB0000001u || cpu.esi != 0xB0000002u ||
         cpu.edi != 0xB0000003u || cpu.ebp != 0xB0000004u)
         return fail("bridge restored callee-saved registers");
+
+    /* O-47: the cutover registry is bounded separately from the frozen ABI
+     * window.  Bind the last ABI slot, prove that an unbound hole is still
+     * rejected, and prove that the one-conversion entry point preserves the
+     * guest stack cleanup contract. */
+    uint32_t fast_thunk = GUEST_HLE_BASE + (HLE_MAX - 1u) * HLE_STRIDE;
+    CPU fast_cpu;
+    memset(&fast_cpu, 0, sizeof fast_cpu);
+    fast_cpu.esp = 0x31080000u;
+    wc3_hle_fast_bind(HLE_MAX - 1u, h_fast, 2u, 0u);
+    if (wc3_hle_fast_call_slot(HLE_MAX, fast_thunk, &fast_cpu))
+        return fail("fast slot above ABI window accepted");
+    if (wc3_hle_fast_call_slot(HLE_MAX - 2u, fast_thunk, &fast_cpu))
+        return fail("unbound fast slot accepted");
+    if (!wc3_hle_fast_call_slot(HLE_MAX - 1u, fast_thunk, &fast_cpu))
+        return fail("bound fast slot not called");
+    if (fast_cpu.eax != 0xF00Du) return fail("fast slot result");
+    if (fast_cpu.esp != 0x31080000u + 12u) return fail("fast slot cleanup");
+
+    /* The one-conversion entry point must reject an unbound hole and non-ABI
+     * thunks before it reaches the dense slot map. */
+    CPU unbound_cpu;
+    memset(&unbound_cpu, 0, sizeof unbound_cpu);
+    unbound_cpu.esp = 0x31080000u;
+    if (wc3_hle_fast_call(GUEST_HLE_BASE + 1u * HLE_STRIDE, &unbound_cpu))
+        return fail("fast thunk bound through empty slot");
+    if (wc3_hle_fast_call(GUEST_HLE_BASE + 1u * HLE_STRIDE + 1u,
+                          &unbound_cpu))
+        return fail("unaligned fast thunk accepted");
+    if (wc3_hle_fast_call(GUEST_HLE_BASE + HLE_MAX * HLE_STRIDE,
+                          &unbound_cpu))
+        return fail("fast thunk outside ABI window accepted");
+
+    /* Rebinding an existing slot updates the entry in place and must not
+     * consume a second registry index. */
+    CPU rebind_cpu;
+    memset(&rebind_cpu, 0, sizeof rebind_cpu);
+    rebind_cpu.esp = 0x31080000u;
+    wc3_hle_fast_bind(HLE_MAX - 1u, h_stdcall, 1u, 0u);
+    if (!wc3_hle_fast_call_slot(HLE_MAX - 1u, fast_thunk, &rebind_cpu))
+        return fail("rebound fast slot not called");
+    if (g_hits != 4u) return fail("rebind handler count");
+    if (rebind_cpu.eax != 0x5A5A5A5Au) return fail("rebind result");
+    if (rebind_cpu.esp != 0x31080000u + 8u)
+        return fail("rebind cleanup");
+
+    /* Fill the remaining cutover entries (slot 4095 is already bound) and
+     * prove that the 4097th bind is rejected without displacing slot 0. */
+    for (uint32_t slot = 0; slot < 4095u; slot++)
+        wc3_hle_fast_bind(slot, h_fast, 0u, 0u);
+    wc3_hle_fast_bind(4096u, h_fast, 0u, 0u);
+    CPU overflow_cpu;
+    memset(&overflow_cpu, 0, sizeof overflow_cpu);
+    overflow_cpu.esp = 0x31080000u;
+    if (wc3_hle_fast_call_slot(4096u, GUEST_HLE_BASE + 4096u * HLE_STRIDE,
+                               &overflow_cpu))
+        return fail("fast registry overflow accepted");
+    if (!wc3_hle_fast_call_slot(0u, GUEST_HLE_BASE, &overflow_cpu))
+        return fail("fast registry overflow displaced slot 0");
+    if (overflow_cpu.eax != 0xF00Du) return fail("overflow survivor result");
+    if (overflow_cpu.esp != 0x31080000u + 4u)
+        return fail("overflow survivor cleanup");
 
 #if WC3_DEBUG
     if (g_registry.debug[1].calls != 1u) return fail("debug call counter");
