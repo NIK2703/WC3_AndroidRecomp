@@ -232,6 +232,7 @@ set(WC3_INCLUDES
 add_library(wc3_platform STATIC
     "${WC3_ROOT}/runtime/platform/platform.c"
     "${WC3_ROOT}/runtime/platform/android/asset_snapshot.c"
+    "${WC3_ROOT}/runtime/platform/android/net_android.c"
     "${WC3_ROOT}/runtime/platform/android/platform_android.c")
 target_include_directories(wc3_platform PUBLIC
     "${WC3_ROOT}/runtime/platform"

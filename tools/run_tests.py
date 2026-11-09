@@ -250,6 +250,61 @@ def test_boot_dispatch_hash() -> int:
                 "--self-test"])
 
 
+def test_pass5_build_guards() -> int:
+    """O-52/O-55: the A/B switches stay explicit and the defaults stay safe."""
+    cmake = (ROOT / "CMakeLists.txt").read_text(
+        encoding="utf-8", errors="replace")
+    legacy = (ROOT / "cmake" / "Wc3LegacyBoot.cmake").read_text(
+        encoding="utf-8", errors="replace")
+    build_app = (ROOT / "tools" / "android" / "build_app.ps1").read_text(
+        encoding="utf-8", errors="replace")
+    build_apk = (ROOT / "tools" / "android" / "build_apk.ps1").read_text(
+        encoding="utf-8", errors="replace")
+    problems: list[str] = []
+
+    def option_default(name: str, expected: str) -> None:
+        match = re.search(
+            rf"option\({re.escape(name)}\s+\"[^\"]*\"\s+(ON|OFF)\)",
+            cmake, re.S)
+        found = match.group(1) if match else "missing"
+        if found != expected:
+            problems.append(
+                f"CMake option {name} default is {found}, expected {expected}")
+
+    option_default("WC3_NATIVE_TLS", "OFF")
+    option_default("WC3_HOST_HARDENING", "ON")
+    if "add_compile_options(-fno-emulated-tls)" not in cmake:
+        problems.append("CMake does not wire native ELF TLS")
+    if "add_library(wc3_softfloat STATIC" not in legacy:
+        problems.append("Wc3LegacyBoot.cmake does not build wc3_softfloat")
+    if not re.search(r"target_link_libraries\(wc3gameactivity PRIVATE"
+                     r"[\s\S]*?\bwc3_softfloat\b", legacy):
+        problems.append("wc3gameactivity does not link wc3_softfloat")
+    if "        -fno-stack-protector\n" not in cmake:
+        problems.append("CMake does not wire the O-55 opt-out")
+
+    for needle in (
+        "$nativeTlsValue = if ($NativeTls) { 'ON' } else { 'OFF' }",
+        '"-DWC3_NATIVE_TLS=$nativeTlsValue"',
+        "$hostHardeningValue = if ($NoHostHardening) { 'OFF' } else { 'ON' }",
+        '"-DWC3_HOST_HARDENING=$hostHardeningValue"',
+        'Write-Host "[app] debug $($Variant -eq \'debug\')"',
+    ):
+        if needle not in build_app:
+            problems.append(f"build_app.ps1 missing {needle}")
+    for needle in ("$nativeParams['NativeTls'] = $true",
+                   "$nativeParams['NoHostHardening'] = $true"):
+        if needle not in build_apk:
+            problems.append(f"build_apk.ps1 missing {needle}")
+
+    if problems:
+        for problem in problems:
+            print(f"pass5_build_guards: {problem}", file=sys.stderr)
+        return 1
+    print("pass5_build_guards: O-52/O-55 switches and defaults are wired")
+    return 0
+
+
 def test_boot_dispatch_compile() -> int:
     """O-53: the generated LiftEnt table compiles in the product dispatcher."""
     cc = gcc()
@@ -294,6 +349,84 @@ def test_boot_dispatch_compile() -> int:
     return run([cc, "-std=c11", "-fsyntax-only", "-DWC3_DEBUG=0",
                 "-I" + str(work), *include,
                 str(ROOT / "runtime" / "boot" / "dispatch_boot.c")])
+
+
+def test_pass9_release_preprocess() -> int:
+    """O-91: release dispatch preprocesses without v2; debug keeps it."""
+    cc = gcc()
+    if not cc:
+        print("pass9 release preprocess: unavailable (no host C compiler)")
+        return 2
+
+    work = BUILD / "pass9_release_preprocess"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    funcs = work / "funcs.h"
+    funcs.write_text(
+        "#define LIFTED_FUNCS(X) X(00400000) X(00400004) X(35000000)\n",
+        encoding="ascii")
+    gen_list = work / "boot_dispatch_list.h"
+    gen_hash = work / "boot_dispatch_hash.h"
+    rc = run([sys.executable, str(ROOT / "tools" / "gen_boot_dispatch.py"),
+              "--list", str(funcs), "--prefix", "004",
+              "--out", str(gen_list), "--hash-out", str(gen_hash)])
+    if rc != 0:
+        return rc
+
+    include_dirs = [
+        ROOT / "runtime" / "cpu",
+        ROOT / "runtime" / "guest",
+        ROOT / "runtime" / "boot",
+        ROOT / "runtime" / "hle",
+        ROOT / "runtime" / "legacy",
+        ROOT / "runtime" / "platform",
+        ROOT / "runtime" / "platform" / "android",
+        ROOT / "runtime" / "diag",
+        ROOT / "third_party" / "softfloat" / "source" / "include",
+        ROOT / "third_party" / "softfloat" / "source" / "8086-SSE",
+    ]
+    include_dirs.extend(
+        path for path in (ROOT / "runtime" / "hle").rglob("*")
+        if path.is_dir())
+    include = ["-I" + str(path) for path in include_dirs]
+    dispatch = ROOT / "runtime" / "boot" / "dispatch_boot.c"
+
+    def preprocess(debug: int) -> str:
+        cmd = _with_ccache([
+            cc, "-std=c11", "-E", "-P", f"-DWC3_DEBUG={debug}",
+            "-I" + str(work), *include, str(dispatch)])
+        print("+ " + " ".join(str(x) for x in cmd))
+        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                              errors="replace")
+        if proc.returncode != 0:
+            print(proc.stderr, file=sys.stderr)
+            raise RuntimeError("dispatch preprocessing failed")
+        return proc.stdout
+
+    try:
+        release = preprocess(0)
+        debug = preprocess(1)
+    except RuntimeError:
+        return 1
+
+    fast = "wc3_hle_winmm_fast_bind_rows"
+    v2 = "wc3_hle_winmm_waveout_install"
+    problems = []
+    if fast not in release:
+        problems.append("release dispatch lost the product fast-bind")
+    if v2 in release:
+        problems.append("release dispatch still installs v2")
+    if fast not in debug:
+        problems.append("debug dispatch lost the product fast-bind")
+    if v2 not in debug:
+        problems.append("debug dispatch lost the v2 install")
+    if problems:
+        for problem in problems:
+            print(f"pass9_release_preprocess: {problem}", file=sys.stderr)
+        return 1
+    print("pass9_release_preprocess: release has no v2; debug keeps it")
+    return 0
 
 
 def test_softfloat_manifest() -> int:
@@ -797,6 +930,7 @@ def test_waveout_install() -> int:
         "-Wextra",
         "-Werror",
         *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "winmm_fast_bind.c"),
         str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "waveout_hle.c"),
         str(ROOT / "tests" / "waveout_install_test.c"),
     ]
@@ -1254,6 +1388,192 @@ def test_pass7_build_guards() -> int:
     return 0
 
 
+def test_audio_ring_layout() -> int:
+    """O-107/O-108: the platform ring stays 64 KiB with split SPSC counters."""
+    cc = gcc()
+    if not cc:
+        print("audio_ring_layout: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "audio_ring_layout_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "platform" / "android"),
+        str(ROOT / "tests" / "audio_ring_layout_test.c"),
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_audio_runtime_profile() -> int:
+    """O-105: recreate the PASS11 counters from the historical device log."""
+    script = ROOT / "tools" / "audio_runtime_profile.py"
+    rc = run([sys.executable, str(script), "--self-test"])
+    if rc != 0:
+        return rc
+    log = ROOT / "build" / "device_run.txt"
+    if not log.is_file():
+        print("audio_runtime_profile: historical log absent; self-test only")
+        return 0
+    return run([sys.executable, str(script), "--check"])
+
+
+def test_pass11_tree_snapshot() -> int:
+    """O-114: the PASS11 snapshot tool is reproducible and self-checks."""
+    script = ROOT / "tools" / "pass11_tree_snapshot.py"
+    return run([sys.executable, str(script), "--self-test"])
+
+
+def test_pass11_audio_guards() -> int:
+    """O-106/O-107/O-108: platform and bounded legacy ring stay wired."""
+    platform_path = (ROOT / "runtime" / "platform" / "android" /
+                     "platform_android.c")
+    header_path = (ROOT / "runtime" / "platform" / "android" /
+                   "audio_ring_layout.h")
+    legacy_path = ROOT / "runtime" / "legacy" / "hle_android.c"
+    platform = platform_path.read_text(encoding="utf-8", errors="replace")
+    header = header_path.read_text(encoding="utf-8", errors="replace")
+    legacy = legacy_path.read_text(encoding="utf-8", errors="replace")
+    problems: list[str] = []
+
+    if '#include "audio_ring_layout.h"' not in platform:
+        problems.append("platform_android.c does not include the ring layout")
+    if "#define WC3_AUDIO_RING_BYTES" in platform:
+        problems.append("platform_android.c defines the ring size locally")
+    if "Wc3AudioRingPositions positions;" not in platform:
+        problems.append("AndroidAudioStream does not own split positions")
+    if "st->read_pos" in platform or "st->write_pos" in platform:
+        problems.append("platform_android.c still uses adjacent counter fields")
+
+    if "#define WC3_AUDIO_RING_BYTES" not in header or \
+            "1u << 16" not in header:
+        problems.append("audio_ring_layout.h does not pin the 64 KiB ring")
+    if "offsetof(Wc3AudioRingPositions, write_pos)" not in header:
+        problems.append("audio_ring_layout.h lacks the cache-line assertion")
+
+    if "memset(audio_data, 0, need);" in platform:
+        problems.append("O-106 full-buffer memset is back on the RT path")
+    if "memset((uint8_t *)audio_data + got, 0, need - got);" not in platform:
+        problems.append("O-106 underrun-tail clear is missing")
+    read_at = platform.find("audio_ring_read(st, audio_data, need)")
+    clear_at = platform.find("memset((uint8_t *)audio_data + got, 0, need - got);")
+    if read_at < 0 or clear_at < 0 or read_at > clear_at:
+        problems.append("O-106 clears before the ring read")
+
+    # O-107 landed in the as-built winmm path as a bounded, overridable ring.
+    # The invariant is the bound, not the literal 128 KiB: a later M5 move may
+    # choose 64 KiB (the platform value) without rewriting this guard.
+    ring = re.search(
+        r"#define\s+WC3_WAVE_RING_BYTES\s+\((\d+)u\s*\*\s*(\d+)u\)", legacy)
+    if not ring:
+        problems.append("legacy ring has no WC3_WAVE_RING_BYTES bound")
+    else:
+        ring_bytes = int(ring.group(1)) * int(ring.group(2))
+        if ring_bytes >= 8 * 1024 * 1024:
+            problems.append("legacy ring was not reduced from 8 MiB")
+        if ring_bytes < 5 * 8832 + 2 * 3536 * 4:
+            problems.append("legacy ring is smaller than the A-12.4 prefill")
+    if not re.search(r"#define\s+WAVE_RING_BYTES\s+WC3_WAVE_RING_BYTES",
+                     legacy):
+        problems.append("legacy WAVE_RING_BYTES is not the A/B alias")
+    if "_Static_assert(WAVE_RING_BYTES >=" not in legacy:
+        problems.append("legacy ring lost its compile-time lower bound")
+
+    # O-110/O-111 remain pending: the guard fails if they change without the
+    # corresponding T1/difftest update.
+    if "pthread_cond_broadcast(&e->cv);" not in legacy:
+        problems.append("legacy broadcast site changed without O-110 update")
+    if "WaveBlock blk[WAVE_HDR_MAX];" not in legacy:
+        problems.append("legacy WaveBlock queue changed without O-111 update")
+
+    if problems:
+        for problem in problems:
+            print(f"pass11_audio_guards: {problem}", file=sys.stderr)
+        return 1
+    print("pass11_audio_guards: O-106/O-107/O-108 wired; "
+          "legacy ring bounded; O-110/O-111 pending")
+    return 0
+
+
+def test_pass9_build_guards() -> int:
+    """O-91: v2 is debug-only; product WINMM fast-bind stays in release."""
+    boot = (ROOT / "cmake" / "Wc3LegacyBoot.cmake").read_text(
+        encoding="utf-8", errors="replace")
+    dispatch = (ROOT / "runtime" / "boot" / "dispatch_boot.c").read_text(
+        encoding="utf-8", errors="replace")
+    v2 = (ROOT / "runtime" / "hle" / "win32" / "winmm" /
+          "waveout_hle.c").read_text(encoding="utf-8", errors="replace")
+    fast = (ROOT / "runtime" / "hle" / "win32" / "winmm" /
+            "winmm_fast_bind.c").read_text(encoding="utf-8",
+                                           errors="replace")
+    hygiene = (ROOT / "tools" / "check_release_hygiene.py").read_text(
+        encoding="utf-8", errors="replace")
+    problems: list[str] = []
+
+    base = re.search(
+        r"add_library\(wc3_hle_modules STATIC(.*?)\)", boot, re.S)
+    base_block = base.group(1) if base else ""
+    if "winmm_fast_bind.c" not in base_block:
+        problems.append("release HLE list is missing winmm_fast_bind.c")
+    if "waveout_hle.c" in base_block:
+        problems.append("release HLE list still compiles waveout_hle.c")
+    if not re.search(
+        r"if\(WC3_DEBUG\)\s*target_sources\(wc3_hle_modules PRIVATE"
+        r".*?waveout_hle\.c.*?\)", boot, re.S):
+        problems.append("v2 is not added under if(WC3_DEBUG)")
+
+    if '#include "winmm_fast_bind.h"' not in dispatch:
+        problems.append("dispatch does not include the product fast-bind")
+    if not re.search(
+            r'#if WC3_DEBUG\s*\n\s*#include "waveout_hle\.h"\s*\n\s*#endif',
+            dispatch):
+        problems.append("dispatch includes the v2 header outside WC3_DEBUG")
+    if not re.search(
+            r"WC3_INSTALL_STEP\(wc3_hle_winmm_fast_bind_rows\(\)\);",
+            dispatch):
+        problems.append("dispatch does not bind the product WINMM rows")
+    if not re.search(
+            r"#if WC3_DEBUG\s*\n(?:\s*/\*.*?\*/\s*)?"
+            r"WC3_INSTALL_STEP\(wc3_hle_winmm_waveout_install\(\)\);\s*\n"
+            r"\s*#endif", dispatch, re.S):
+        problems.append("dispatch installs v2 outside WC3_DEBUG")
+    if dispatch.find("wc3_hle_winmm_fast_bind_rows()") > \
+            dispatch.find("wc3_hle_winmm_waveout_install()"):
+        problems.append("v2 install runs before the product fast-bind")
+
+    if "#define WC3_AUDIO_V2_ENABLED 0" not in v2:
+        problems.append("v2 default is not 0")
+    if "g_as_built_fast_rows" in v2 or \
+            "wc3_legacy_hle_fast_bind" in v2:
+        problems.append("v2 still owns the product fast-bind list")
+    if "wc3_legacy_hle_fast_bind" not in fast:
+        problems.append("winmm_fast_bind.c does not use the shim")
+
+    debug_markers = re.search(
+        r"DEBUG_ONLY_MARKERS = \((.*?)\)", hygiene, re.S)
+    product_markers = re.search(
+        r"PRODUCT_MARKERS = \((.*?)\)", hygiene, re.S)
+    if not debug_markers or \
+            '"[wave2] missing WINMM row"' not in debug_markers.group(1):
+        problems.append("v2 install errors are not debug-only markers")
+    if not product_markers or "[wave2]" in product_markers.group(1):
+        problems.append("v2 install errors are still product markers")
+    if '"runtime/hle/win32/winmm/waveout_hle.c"' not in hygiene:
+        problems.append("release source audit does not know the v2 file")
+    if '"[wave2] USER32 rows missing",\n        "product install failure"' \
+            in hygiene:
+        problems.append("release source audit still excepts v2")
+
+    if problems:
+        for problem in problems:
+            print(f"pass9_build_guards: {problem}", file=sys.stderr)
+        return 1
+    print("pass9_build_guards: v2 is debug-only; product fast-bind is in release")
+    return 0
+
+
 def test_icf_audit() -> int:
     """O-64 source check: duplicate grouping folds aliases by VA."""
     return run([sys.executable,
@@ -1265,6 +1585,13 @@ def test_plt_audit() -> int:
     """O-65 source check: AArch64 BL and PLT-slot mapping."""
     return run([sys.executable,
                 str(ROOT / "tools" / "plt_audit.py"),
+                "--self-test"])
+
+
+def test_pass8_static_audit() -> int:
+    """O-78/O-79/O-80 source check: owner buckets and addend repeats."""
+    return run([sys.executable,
+                str(ROOT / "tools" / "pass8_static_audit.py"),
                 "--self-test"])
 
 
@@ -1369,9 +1696,9 @@ def test_pass4_build() -> int:
 
     The real lld smoke is deliberately outside the default gate: it needs the
     Android NDK.  This check keeps the O-42 version-script surface and CMake
-    wiring, the O-43 deterministic pack-relocation switches, the O-45 asset
-    snapshot fallbacks, and the O-46 release dispatch path from silently
-    drifting.
+    wiring, the O-43 deterministic pack-relocation switches, the O-44
+    constructor counter, the O-45 asset snapshot fallbacks, and the O-46
+    release dispatch path from silently drifting.
     """
     failures: list[str] = []
 
@@ -1441,6 +1768,23 @@ def test_pass4_build() -> int:
     check("if (!g_asset_snapshot.truncated)" in platform and
           "asset_scan_enumerate_locked(index, name, cap)" in platform,
           "O-45 truncated snapshot indexing fallback missing")
+
+    legacy_cmake = (ROOT / "cmake" / "Wc3LegacyBoot.cmake").read_text(
+        encoding="utf-8")
+    app_boot = (ROOT / "runtime" / "boot" / "app_boot.c").read_text(
+        encoding="utf-8")
+    init_probe = (ROOT / "runtime" / "boot" / "init_array_probe.c").read_text(
+        encoding="utf-8")
+    check("init_array_probe.c" in legacy_cmake,
+          "O-44 constructor counter is not in the boot target")
+    check("#if WC3_DEBUG && WC3_DEBUG_BOOT" in app_boot and
+          "wc3_init_array_count()" in app_boot,
+          "O-44 constructor counter is not wired into the boot log")
+    check("__attribute__((constructor(101)))" in init_probe and
+          "dl_iterate_phdr" in init_probe and
+          "DT_INIT_ARRAYSZ" in init_probe and
+          "WC3_DEBUG && WC3_DEBUG_BOOT" in init_probe,
+          "O-44 counter does not read the loaded .init_array")
 
     dispatch_boot = (ROOT / "runtime" / "boot" / "dispatch_boot.c").read_text(
         encoding="utf-8")
@@ -2865,10 +3209,18 @@ TESTS = {
     "return_address_elide_pass": test_return_address_elide_pass,
     "flag_read_audit": test_flag_read_audit,
     "corpus_flag_policy": test_corpus_flag_policy,
+    "pass5_build_guards": test_pass5_build_guards,
     "pass6_build_guards": test_pass6_build_guards,
     "pass7_build_guards": test_pass7_build_guards,
+    "audio_ring_layout": test_audio_ring_layout,
+    "audio_runtime_profile": test_audio_runtime_profile,
+    "pass11_tree_snapshot": test_pass11_tree_snapshot,
+    "pass11_audio_guards": test_pass11_audio_guards,
+    "pass9_build_guards": test_pass9_build_guards,
+    "pass9_release_preprocess": test_pass9_release_preprocess,
     "icf_audit": test_icf_audit,
     "plt_audit": test_plt_audit,
+    "pass8_static_audit": test_pass8_static_audit,
     "wait_clock_audit": test_wait_clock_audit,
     "gva_fold": test_gva_fold,
     "lift_equivalence_checker": test_lift_equivalence_checker,

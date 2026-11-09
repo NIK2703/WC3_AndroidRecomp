@@ -22,6 +22,7 @@
 
 #include "platform_android.h"
 #include "asset_snapshot.h"
+#include "audio_ring_layout.h"
 
 #include <aaudio/AAudio.h>
 #include <android/log.h>
@@ -1755,8 +1756,8 @@ int wc3_android_config_load(const char *path)
  * ring.  64 KiB is the smallest power of two that still holds all five 50 ms
  * headers (5 * 8832 = 44160 B) and is ~4.6 AAudio bursts on the reference
  * device (3536 frames).  The old 1 MiB ring was 5.7 s of audio and let the
- * guest run arbitrarily far ahead of the speaker. */
-#define WC3_AUDIO_RING_BYTES   (1u << 16)
+ * guest run arbitrarily far ahead of the speaker.  O-107 keeps this capacity
+ * in audio_ring_layout.h so the mask and the T0 assertion cannot drift. */
 #define WC3_AUDIO_REOPEN_MAX   5
 
 #if WC3_DEBUG
@@ -1773,8 +1774,8 @@ typedef void (*AndroidAudioCallback)(void *opaque, void *frames,
 typedef void (*AndroidAudioConsumed)(void *opaque, uint64_t total);
 
 typedef struct AndroidAudioStream {
-    _Atomic uint32_t read_pos;
-    _Atomic uint32_t write_pos;
+    /* O-108: producer and consumer counters are one cache line apart. */
+    Wc3AudioRingPositions positions;
     _Atomic int callback_users;
     _Atomic int writers;
     _Atomic int closing;
@@ -1811,8 +1812,10 @@ typedef struct AndroidAudioStream {
 static uint32_t audio_ring_read(AndroidAudioStream *st, void *dst,
                                 uint32_t bytes)
 {
-    uint32_t r = atomic_load_explicit(&st->read_pos, memory_order_relaxed);
-    uint32_t w = atomic_load_explicit(&st->write_pos, memory_order_acquire);
+    uint32_t r = atomic_load_explicit(&st->positions.read_pos,
+                                      memory_order_relaxed);
+    uint32_t w = atomic_load_explicit(&st->positions.write_pos,
+                                      memory_order_acquire);
     uint32_t available = w - r;
     if (bytes > available) bytes = available;
 
@@ -1823,15 +1826,18 @@ static uint32_t audio_ring_read(AndroidAudioStream *st, void *dst,
     if (bytes > first)
         memcpy((uint8_t *)dst + first, st->ring, bytes - first);
 
-    atomic_store_explicit(&st->read_pos, r + bytes, memory_order_release);
+    atomic_store_explicit(&st->positions.read_pos, r + bytes,
+                          memory_order_release);
     return bytes;
 }
 
 static uint32_t audio_ring_write(AndroidAudioStream *st, const void *src,
                                  uint32_t bytes)
 {
-    uint32_t w = atomic_load_explicit(&st->write_pos, memory_order_relaxed);
-    uint32_t r = atomic_load_explicit(&st->read_pos, memory_order_acquire);
+    uint32_t w = atomic_load_explicit(&st->positions.write_pos,
+                                      memory_order_relaxed);
+    uint32_t r = atomic_load_explicit(&st->positions.read_pos,
+                                      memory_order_acquire);
     uint32_t used = w - r;
     if (used >= WC3_AUDIO_RING_BYTES) return 0;
     uint32_t free_bytes = WC3_AUDIO_RING_BYTES - used;
@@ -1844,7 +1850,8 @@ static uint32_t audio_ring_write(AndroidAudioStream *st, const void *src,
     if (bytes > first)
         memcpy(st->ring, (const uint8_t *)src + first, bytes - first);
 
-    atomic_store_explicit(&st->write_pos, w + bytes, memory_order_release);
+    atomic_store_explicit(&st->positions.write_pos, w + bytes,
+                          memory_order_release);
     return bytes;
 }
 
@@ -1864,9 +1871,10 @@ static aaudio_data_callback_result_t audio_data_callback(
     }
 
     uint32_t need = (uint32_t)num_frames * st->bytes_per_frame;
-    memset(audio_data, 0, need);
-    if (!atomic_load_explicit(&st->silent, memory_order_acquire)) {
-        uint32_t got = audio_ring_read(st, audio_data, need);
+    int silent = atomic_load_explicit(&st->silent, memory_order_acquire);
+    uint32_t got = 0;
+    if (!silent) {
+        got = audio_ring_read(st, audio_data, need);
         if (got) {
             /* Publish device time.  No locks, no allocation, no guest memory
              * and no callback invocation on the RT thread. */
@@ -1876,7 +1884,14 @@ static aaudio_data_callback_result_t audio_data_callback(
                                   memory_order_release);
             (void)sem_post(&st->wake);
         }
-        if (got < need) {
+    }
+    if (got < need) {
+        /* O-106: clear only the underrun tail.  The old unconditional
+         * memset() zeroed the whole callback buffer before copying the same
+         * bytes from the ring, so every one of the ~105 callbacks/s paid for
+         * a full-buffer store that was immediately overwritten. */
+        memset((uint8_t *)audio_data + got, 0, need - got);
+        if (!silent) {
             AndroidAudioCallback cb = atomic_load_explicit(
                 &st->callback, memory_order_acquire);
             if (cb) {
@@ -2128,8 +2143,8 @@ static int android_audio_open(void *ctx, uint32_t sample_rate,
         return -1;
     }
 
-    atomic_init(&st->read_pos, 0);
-    atomic_init(&st->write_pos, 0);
+    atomic_init(&st->positions.read_pos, 0);
+    atomic_init(&st->positions.write_pos, 0);
     atomic_init(&st->callback_users, 0);
     atomic_init(&st->writers, 0);
     atomic_init(&st->closing, 0);
@@ -2400,6 +2415,8 @@ int wc3_android_platform_init(Wc3Platform *platform)
     platform->asset.save_root = android_save_root;
     platform->asset.enumerate_mpq = android_asset_enumerate;
     platform->asset.present = android_asset_present;
+
+    wc3_android_net_install(&platform->net);
 
     (void)pthread_once(&g_thread_once, android_thread_key_init);
     memset(&g_main_thread, 0, sizeof g_main_thread);

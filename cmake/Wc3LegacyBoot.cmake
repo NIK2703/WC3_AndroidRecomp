@@ -167,6 +167,7 @@ add_custom_target(wc3_boot_dispatch_gen
 add_library(wc3_boot STATIC
     "${WC3_ROOT}/runtime/boot/app_boot.c"
     "${WC3_ROOT}/runtime/boot/dispatch_boot.c"
+    "${WC3_ROOT}/runtime/boot/init_array_probe.c"
     "${WC3_ROOT}/runtime/diag/wc3_lock_trace.c")
 add_dependencies(wc3_boot wc3_boot_dispatch_gen)
 target_include_directories(wc3_boot PRIVATE
@@ -205,6 +206,7 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/user32/window"
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts"
     "${WC3_ROOT}/runtime/hle/win32/winmm"
+    "${WC3_ROOT}/runtime/hle/win32/ws2_32"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/third_party/softfloat/source/include"
@@ -289,7 +291,18 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/user32/user_object/user_object_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/window/window_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts/window_facts_hle.c"
-    "${WC3_ROOT}/runtime/hle/win32/winmm/waveout_hle.c")
+    "${WC3_ROOT}/runtime/hle/win32/winmm/winmm_fast_bind.c"
+    "${WC3_ROOT}/runtime/hle/win32/ws2_32/ws2_32_hle.c")
+
+# O-91/BV-3: the rejected v2 sink is debug/headless evidence only.  Release
+# still gets winmm_fast_bind.c, so the product fast registry does not depend on
+# v2.  WC3_DEBUG is the variant value supplied by build_app.ps1; a direct CMake
+# invocation must keep that value consistent.
+if(WC3_DEBUG)
+    target_sources(wc3_hle_modules PRIVATE
+        "${WC3_ROOT}/runtime/hle/win32/winmm/waveout_hle.c")
+endif()
+
 target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle"
     "${WC3_ROOT}/runtime/diag"
@@ -325,6 +338,7 @@ target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/user32/window"
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts"
     "${WC3_ROOT}/runtime/hle/win32/winmm"
+    "${WC3_ROOT}/runtime/hle/win32/ws2_32"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/runtime/platform"

@@ -46,7 +46,12 @@
 #include "user_object_hle.h"
 #include "window_facts_hle.h"
 #include "window_hle.h"
+#include "winmm_fast_bind.h"
+#include "ws2_32_hle.h"
+
+#if WC3_DEBUG
 #include "waveout_hle.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -132,9 +137,15 @@ void wc3_dispatch_init(void)
     WC3_INSTALL_STEP(wc3_hle_msvcr80_string_install());
     WC3_INSTALL_STEP(msvcr80_convert_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_time_install());
-    /* WINMM on a dedicated audio thread (A-6.2/A-6.3).  Installed last so
+    WC3_INSTALL_STEP(wc3_hle_ws2_32_install());
+    /* O-91: the product fast registry is independent of the rejected v2 sink.
+     * This call stays in release; v2 install is debug/headless evidence. */
+    WC3_INSTALL_STEP(wc3_hle_winmm_fast_bind_rows());
+#if WC3_DEBUG
+    /* WINMM v2 on a dedicated audio thread (A-6.2/A-6.3).  Installed last so
      * the pump chains sit above the already-installed USER32 handlers. */
     WC3_INSTALL_STEP(wc3_hle_winmm_waveout_install());
+#endif
 #undef WC3_INSTALL_STEP
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
@@ -188,11 +199,12 @@ static void dispatch_unknown(CPU *c, uint32_t target, int tail)
     abort();
 }
 
-static void dispatch_common(CPU *c, uint32_t target, int tail)
+static void dispatch_common(CPU *c, uint32_t target, int tail,
+                            wc3_lifted_fn resolved)
 {
     int chained = 0;
-    int have_fn = 0;
-    void (*pending_fn)(CPU *) = NULL;
+    int have_fn = resolved != NULL;
+    void (*pending_fn)(CPU *) = resolved;
 #if WC3_DEBUG && WC3_DEBUG_HLE
     uint32_t lt_op = 0, lt_lock = 0, lt_arg = 0;
     uint32_t lt_ra = 0, lt_caller = 0, lt_gid = 0;
@@ -245,7 +257,7 @@ static void dispatch_common(CPU *c, uint32_t target, int tail)
 
 void dispatch(CPU *c, uint32_t target)
 {
-    dispatch_common(c, target, 0);
+    dispatch_common(c, target, 0, NULL);
 }
 
 void dispatch_jmp(CPU *c, uint32_t target)
@@ -256,5 +268,21 @@ void dispatch_jmp(CPU *c, uint32_t target)
         c->disp_pending_target = target;
         return;
     }
-    dispatch_common(c, target, 1);
+    dispatch_common(c, target, 1, NULL);
+}
+
+wc3_lifted_fn wc3_dispatch_resolve(uint32_t target)
+{
+    /* HLE thunks live outside the generated lift table, so find_lifted()
+     * already returns NULL for them; this is the same fail-closed result as
+     * the normal dispatcher path. */
+    return target ? find_lifted(target) : NULL;
+}
+
+void wc3_dispatch_resolved(CPU *c, wc3_lifted_fn fn)
+{
+    /* A NULL target must be handled by the caller with dispatch(); silently
+     * skipping a callback would change guest-visible completion semantics. */
+    if (!c || !fn) abort();
+    dispatch_common(c, 0u, 0, fn);
 }

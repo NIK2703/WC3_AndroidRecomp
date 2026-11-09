@@ -29,36 +29,29 @@ DEFAULT_RELEASE = ROOT / "build" / "android_app" / "release" / "cmake" / \
 DEFAULT_DEBUG = ROOT / "build" / "android_app" / "debug" / "cmake" / \
     "libwc3gameactivity.so"
 
-# Diagnostics that must not survive into a release APK.
+# Diagnostics that must not survive into a release APK.  O-91 makes the whole
+# v2 sink debug/headless-only, so its install errors are debug markers now.
 DEBUG_ONLY_MARKERS = (
     "unknown guest target",
     "[wave2] disabled: as-built WINMM path",
+    "[wave2] USER32 rows missing",
+    "[wave2] missing WINMM row",
     "[dispatch]",
 )
 
 # Target errors that are part of the product, not diagnostics.  They must stay
-# in both variants so a release failure remains diagnosable.
-PRODUCT_MARKERS = (
-    "[wave2] USER32 rows missing",
-    "[wave2] missing WINMM row",
-)
+# in both variants so a release failure remains diagnosable.  There are none
+# for the audio path after O-91: the product fast-bind module has no
+# unconditional error string, and v2 is absent from release.
+PRODUCT_MARKERS = ()
 
 # O-72 site-level companion to the marker scan.  These are the only ungated
 # stderr sites in the product tree that are product errors rather than
 # diagnostics.  Everything else must be inside a WC3_DEBUG guard; legacy and
 # vendor sources are counted separately because they are read-only (R15).
-SOURCE_EXCEPTIONS = (
-    (
-        "runtime/hle/win32/winmm/waveout_hle.c",
-        "[wave2] USER32 rows missing",
-        "product install failure",
-    ),
-    (
-        "runtime/hle/win32/winmm/waveout_hle.c",
-        "[wave2] missing WINMM row",
-        "product install failure",
-    ),
-)
+# O-91 excludes waveout_hle.c from release as a whole, so it needs no
+# site-level exceptions.
+SOURCE_EXCEPTIONS = ()
 SOURCE_SUFFIXES = (".c", ".h", ".cc", ".cpp", ".hpp")
 SOURCE_ROOTS = (ROOT / "runtime", ROOT / "apps")
 SOURCE_EXCLUDED_PARTS = ("third_party", "vendor", "build", ".git")
@@ -67,6 +60,8 @@ SOURCE_NON_PRODUCT_PREFIXES = (
 )
 SOURCE_DEBUG_ONLY_PREFIXES = (
     "runtime/diag/",
+    # O-91/BV-3: v2 is compiled only when WC3_DEBUG is on.
+    "runtime/hle/win32/winmm/waveout_hle.c",
 )
 SOURCE_READ_ONLY_PREFIXES = (
     "runtime/legacy/",
@@ -263,7 +258,10 @@ def source_audit(
                 reason = "runtime/legacy is read-only (R15/M5)"
             elif relpath.startswith(SOURCE_NON_PRODUCT_PREFIXES):
                 continue
-            elif guards[index] or relpath.startswith(SOURCE_DEBUG_ONLY_PREFIXES):
+            elif relpath.startswith(SOURCE_DEBUG_ONLY_PREFIXES):
+                kind = "debug-only-file"
+                reason = "file is compiled only in debug/headless"
+            elif guards[index]:
                 kind = "debug-gated"
                 reason = "inside WC3_DEBUG guard"
             else:
@@ -440,6 +438,10 @@ def run_self_test() -> int:
         legacy = root / "runtime" / "legacy" / "old.c"
         legacy.parent.mkdir(parents=True)
         legacy.write_text("fprintf(stderr, \"legacy\");\n", encoding="utf-8")
+        debug_only = root / "runtime" / "hle" / "win32" / "winmm" / \
+            "waveout_hle.c"
+        debug_only.parent.mkdir(parents=True)
+        debug_only.write_text("fprintf(stderr, \"v2\");\n", encoding="utf-8")
         exceptions = (("runtime/app/good.c", "PRODUCT", "test product error"),)
         source_report = source_audit(root, exceptions)
         counts = source_report["counts"]
@@ -448,6 +450,7 @@ def run_self_test() -> int:
             or counts["debug-gated"] != 1
             or counts["product-error"] != 1
             or counts["read-only-legacy"] != 1
+            or counts["debug-only-file"] != 1
         ):
             print("release source self-test: false failure")
             return 1

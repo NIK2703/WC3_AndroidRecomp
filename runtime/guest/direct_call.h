@@ -51,6 +51,15 @@ typedef void (*wc3_lifted_fn)(CPU *);
  * C include order self-contained. */
 void dispatch(CPU *c, uint32_t target);
 
+/* O-98: resolve a fixed guest target once, then enter it without repeating
+ * the HLE-window check or the lift hash probe.  The helper still owns the
+ * CPU.disp_depth/tail-chaining contract: a dispatch_jmp() inside the callback
+ * is drained before wc3_dispatch_resolved() returns.  A NULL result means the
+ * target is not a lifted guest function (an HLE thunk, an unknown VA, or 0);
+ * the caller must keep using dispatch() for that target. */
+wc3_lifted_fn wc3_dispatch_resolve(uint32_t target);
+void wc3_dispatch_resolved(CPU *c, wc3_lifted_fn fn);
+
 /* Host-stack snapshot of CPU.disp_* (ABI-4).  WC3_DIRECT_CALL uses one local
  * per call; the fields are copied back on leave. */
 typedef struct Wc3DispFrame {

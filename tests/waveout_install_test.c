@@ -1,20 +1,22 @@
 /*
  * waveout_install_test.c - T0 contract for the WINMM install decision.
  *
- * O-91/O-125: the product default is the as-built WINMM path.  The target
- * slice must fast-bind the existing rows and must not chain or override them
- * while v2 is disabled.  The test links the real waveout_hle.c and supplies
- * only the quarantine/platform boundary; it does not fake the module under
- * test.
+ * O-91/O-125: the product default is the as-built WINMM path.  The product
+ * fast-bind module must bind the existing rows and v2 must not chain or
+ * override them while disabled.  The test links the real winmm_fast_bind.c and
+ * waveout_hle.c and supplies only the quarantine/platform boundary; it does
+ * not fake the modules under test.
  */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "cpu.h"
+#include "direct_call.h"
 #include "legacy_shim.h"
 #include "platform.h"
 #include "waveout_hle.h"
+#include "winmm_fast_bind.h"
 
 #define MAX_CALLS 32u
 
@@ -35,6 +37,21 @@ const Wc3Platform *wc3_platform(void)
 {
     static Wc3Platform platform;
     return &platform;
+}
+
+/* The install contract does not execute a guest callback.  Supply the two
+ * dispatcher symbols used by waveout_hle.c so the real module can link
+ * without pulling the boot dispatcher and its corpus into this T0 test. */
+wc3_lifted_fn wc3_dispatch_resolve(uint32_t target)
+{
+    (void)target;
+    return NULL;
+}
+
+void wc3_dispatch_resolved(CPU *c, wc3_lifted_fn fn)
+{
+    (void)c;
+    (void)fn;
 }
 
 int wc3_legacy_hle_fast_bind(const char *dll, const char *name)
@@ -145,6 +162,11 @@ int main(int argc, char **argv)
     const unsigned expected_override_count =
         (unsigned)(sizeof expected_overrides / sizeof expected_overrides[0]);
     const int want_enabled = argc > 1 && strcmp(argv[1], "enabled") == 0;
+    if (!want_enabled) {
+        int bound = wc3_hle_winmm_fast_bind_rows();
+        if (bound != (int)expected_count)
+            return fail("product fast-bind did not bind every WINMM row");
+    }
     const int rc = wc3_hle_winmm_waveout_install();
 
     if (!wc3_platform()) return fail("platform table missing");

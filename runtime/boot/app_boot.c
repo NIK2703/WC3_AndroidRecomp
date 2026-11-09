@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "init_array_probe.h"
 #include "legacy_shim.h"
 
 #ifndef WC3_DEBUG
@@ -165,6 +166,9 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
     if (!data_dir || !*data_dir || !state_dir || !*state_dir || !window ||
         !width || !height)
         return -EINVAL;
+#if WC3_DEBUG && WC3_DEBUG_BOOT
+    LOGI("init_array: %u entries (probe included)", wc3_init_array_count());
+#endif
     const int roc = game_mode && !strcmp(game_mode, "roc");
     /* The shared game directory is also the guest's working directory.  Let
      * the game create saves, replays and logs without inheriting a restrictive

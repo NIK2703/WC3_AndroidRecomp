@@ -283,6 +283,40 @@ int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
     return 0;
 }
 
+int wc3_legacy_hle_bind_ordinal(const char *dll, uint16_t ordinal, int argc,
+                                int cdecl_abi, void (*impl)(CPU *c))
+{
+    if (!dll || !dll[0] || !impl || argc < 0 || argc > 0xFFFF) return -1;
+
+    HleEnt *e = NULL;
+    for (unsigned i = 0; i < g_hle_count; i++) {
+        HleEnt *candidate = &g_hle[i];
+        if (candidate->ord != ordinal || candidate->name[0]) continue;
+        if (ascii_equal_ci(candidate->dll, dll)) {
+            e = candidate;
+            break;
+        }
+    }
+
+    if (!e) {
+        if (g_hle_count >= HLE_MAX) return -1;
+        e = &g_hle[g_hle_count++];
+        memset(e, 0, sizeof *e);
+        copy_bounded(e->dll, sizeof e->dll, dll);
+        e->used = 1;
+        /* The name index deliberately does not cover ordinal rows.  Leave its
+         * count untouched so the next name lookup sees the mismatch and
+         * rebuilds once. */
+    }
+
+    e->ord = ordinal;
+    e->fn = impl;
+    e->argc = (uint16_t)argc;
+    e->cdecl_abi = cdecl_abi ? 1u : 0u;
+    bind_fast_slot(e);
+    return 0;
+}
+
 int wc3_legacy_guest_ok(uint32_t addr, uint32_t size)
 {
     /* O-07: the new validator owns the static-arena page map.  Its dynamic

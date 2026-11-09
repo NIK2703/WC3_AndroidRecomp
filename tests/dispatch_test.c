@@ -1,4 +1,5 @@
 #include "hle_abi.h"
+#include "direct_call.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -49,6 +50,17 @@ int main(void)
     cpu.eax = 0;
     dispatch_jmp(&cpu, 0x00401010u);
     if (cpu.eax != 0x22222222u) return fail("top-level jump");
+
+    wc3_lifted_fn resolved = wc3_dispatch_resolve(0x00401000u);
+    if (!resolved) return fail("resolved target not found");
+    cpu.eax = 0;
+    wc3_dispatch_resolved(&cpu, resolved);
+    if (cpu.eax != 0x22222222u) return fail("resolved tail jump chain");
+    if (cpu.disp_depth != 0u || cpu.disp_pending_valid != 0u)
+        return fail("resolved path left dispatch state");
+    if (wc3_dispatch_resolve(0u) != NULL ||
+        wc3_dispatch_resolve(GUEST_HLE_BASE) != NULL)
+        return fail("non-lifted target resolved");
 
     cpu.eax = 0;
     dispatch(&cpu, GUEST_HLE_BASE);

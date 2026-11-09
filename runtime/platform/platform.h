@@ -5,8 +5,9 @@
  * Windows headers.  The real implementation lives under
  * runtime/platform/android, the fake implementation under runtime/platform/fake.
  *
- * There is deliberately no NetApi: LAN/Battle.net are outside the 1.27 Android
- * target.
+ * NetApi is the POSIX-shaped socket surface used by the winsock HLE.  It is
+ * deliberately socket-level, not Winsock-level: the guest-visible structures,
+ * handles, error codes and event semantics stay in runtime/hle/win32/ws2_32.
  */
 #ifndef WC3_PLATFORM_H
 #define WC3_PLATFORM_H
@@ -65,6 +66,200 @@ typedef struct Wc3FileApi {
     int (*stat)(void *ctx, const char *path, Wc3FileStat *out);
     int (*close)(void *ctx, uintptr_t file);
 } Wc3FileApi;
+
+/* ------------------------------------------------------------------ net */
+
+/* Socket values are host-opaque.  The winsock HLE keeps its own guest handle
+ * table and never exposes these values to the guest. */
+typedef uintptr_t Wc3NetSocket;
+
+#define WC3_NET_FD_SETSIZE 64u
+#define WC3_NET_ADDR_MAX 128u
+#define WC3_NET_CANON_MAX 256u
+
+enum {
+    WC3_NET_AF_UNSPEC = 0,
+    WC3_NET_AF_INET = 2,
+    WC3_NET_AF_INET6 = 10
+};
+
+enum {
+    WC3_NET_SOCK_STREAM = 1,
+    WC3_NET_SOCK_DGRAM = 2
+};
+
+enum {
+    WC3_NET_IPPROTO_IP = 0,
+    WC3_NET_IPPROTO_TCP = 6,
+    WC3_NET_IPPROTO_UDP = 17
+};
+
+enum {
+    WC3_NET_AI_PASSIVE = 1u << 0,
+    WC3_NET_AI_CANONNAME = 1u << 1,
+    WC3_NET_AI_NUMERICHOST = 1u << 2,
+    WC3_NET_AI_NUMERICSERV = 1u << 3,
+    WC3_NET_AI_V4MAPPED = 1u << 4,
+    WC3_NET_AI_ALL = 1u << 5
+};
+
+enum {
+    WC3_NET_SHUT_RD = 0,
+    WC3_NET_SHUT_WR = 1,
+    WC3_NET_SHUT_RDWR = 2
+};
+
+/* Platform-neutral message flags.  The winsock HLE maps the guest MSG_*
+ * values to this set; a backend must not interpret the guest constants. */
+enum {
+    WC3_NET_MSG_OOB = 1u << 0,
+    WC3_NET_MSG_PEEK = 1u << 1,
+    WC3_NET_MSG_DONTROUTE = 1u << 2
+};
+
+/* Platform-neutral socket options.  The winsock HLE translates SO_* values,
+ * including the DWORD-millisecond timeout form, before calling this table. */
+enum {
+    WC3_NET_OPT_REUSEADDR = 1,
+    WC3_NET_OPT_EXCLUSIVEADDRUSE,
+    WC3_NET_OPT_BROADCAST,
+    WC3_NET_OPT_KEEPALIVE,
+    WC3_NET_OPT_DONTROUTE,
+    WC3_NET_OPT_OOBINLINE,
+    WC3_NET_OPT_RCVBUF,
+    WC3_NET_OPT_SNDBUF,
+    WC3_NET_OPT_RCVTIMEO_MS,
+    WC3_NET_OPT_SNDTIMEO_MS,
+    WC3_NET_OPT_LINGER,
+    WC3_NET_OPT_TCP_NODELAY,
+    WC3_NET_OPT_ERROR,
+    WC3_NET_OPT_TYPE
+};
+
+/* NetApi failures are returned as -WC3_NET_ERR_*.  WC3_NET_ERR_NONE is not a
+ * failure and is never returned.  Keeping the mapping here means both the
+ * Android and verification backends translate host errno exactly once. */
+enum {
+    WC3_NET_ERR_NONE = 0,
+    WC3_NET_ERR_AGAIN = 1,
+    WC3_NET_ERR_INTR,
+    WC3_NET_ERR_BADF,
+    WC3_NET_ERR_ACCES,
+    WC3_NET_ERR_FAULT,
+    WC3_NET_ERR_INVAL,
+    WC3_NET_ERR_MFILE,
+    WC3_NET_ERR_NOMEM,
+    WC3_NET_ERR_NOTSOCK,
+    WC3_NET_ERR_CONNREFUSED,
+    WC3_NET_ERR_CONNRESET,
+    WC3_NET_ERR_CONNABORTED,
+    WC3_NET_ERR_HOSTUNREACH,
+    WC3_NET_ERR_NETUNREACH,
+    WC3_NET_ERR_TIMEDOUT,
+    WC3_NET_ERR_WOULDBLOCK,
+    WC3_NET_ERR_INPROGRESS,
+    WC3_NET_ERR_ALREADY,
+    WC3_NET_ERR_MSGSIZE,
+    WC3_NET_ERR_ADDRINUSE,
+    WC3_NET_ERR_ADDRNOTAVAIL,
+    WC3_NET_ERR_NETDOWN,
+    WC3_NET_ERR_NOTCONN,
+    WC3_NET_ERR_DESTADDRREQ,
+    WC3_NET_ERR_AFNOSUPPORT,
+    WC3_NET_ERR_PROTONOSUPPORT,
+    WC3_NET_ERR_OPNOTSUPP,
+    WC3_NET_ERR_ISCONN,
+    WC3_NET_ERR_NODATA,
+    WC3_NET_ERR_NONAME,
+    WC3_NET_ERR_NOBUFS,
+    WC3_NET_ERR_PIPE,
+    WC3_NET_ERR_IO,
+    WC3_NET_ERR_UNKNOWN
+};
+
+typedef struct Wc3NetFdSet {
+    uint32_t count;
+    Wc3NetSocket fd[WC3_NET_FD_SETSIZE];
+} Wc3NetFdSet;
+
+typedef struct Wc3NetAddrInfo {
+    int32_t family;
+    int32_t socktype;
+    int32_t protocol;
+    int32_t flags;
+    uint32_t addr_length;
+    uint8_t addr[WC3_NET_ADDR_MAX];
+    char canonname[WC3_NET_CANON_MAX];
+} Wc3NetAddrInfo;
+
+typedef struct Wc3NetResolveHints {
+    int32_t family;
+    int32_t socktype;
+    int32_t protocol;
+    int32_t flags;
+} Wc3NetResolveHints;
+
+enum {
+    WC3_NET_IF_UP = 1u << 0,
+    WC3_NET_IF_LOOPBACK = 1u << 1
+};
+
+typedef struct Wc3NetInterface {
+    uint32_t address;   /* IPv4 in network byte order */
+    uint32_t netmask;   /* IPv4 in network byte order */
+    uint32_t broadcast; /* IPv4 in network byte order */
+    uint32_t flags;     /* WC3_NET_IF_* */
+} Wc3NetInterface;
+
+typedef struct Wc3NetApi {
+    void *ctx;
+    /* Process-wide socket runtime.  Both calls are idempotent. */
+    int (*startup)(void *ctx);
+    void (*cleanup)(void *ctx);
+
+    int (*socket)(void *ctx, int family, int type, int protocol,
+                  Wc3NetSocket *out);
+    int (*close)(void *ctx, Wc3NetSocket socket);
+    int (*bind)(void *ctx, Wc3NetSocket socket, const void *addr,
+                uint32_t addr_length);
+    int (*connect)(void *ctx, Wc3NetSocket socket, const void *addr,
+                   uint32_t addr_length);
+    int (*listen)(void *ctx, Wc3NetSocket socket, int backlog);
+    int (*accept)(void *ctx, Wc3NetSocket socket, Wc3NetSocket *out,
+                  void *addr, uint32_t *addr_length);
+    int (*send)(void *ctx, Wc3NetSocket socket, const void *buf,
+                uint32_t length, int flags, uint32_t *sent);
+    int (*recv)(void *ctx, Wc3NetSocket socket, void *buf, uint32_t length,
+                int flags, uint32_t *received);
+    int (*sendto)(void *ctx, Wc3NetSocket socket, const void *buf,
+                  uint32_t length, int flags, const void *addr,
+                  uint32_t addr_length, uint32_t *sent);
+    int (*recvfrom)(void *ctx, Wc3NetSocket socket, void *buf,
+                    uint32_t length, int flags, void *addr,
+                    uint32_t *addr_length, uint32_t *received);
+    int (*shutdown)(void *ctx, Wc3NetSocket socket, int how);
+    int (*getpeername)(void *ctx, Wc3NetSocket socket, void *addr,
+                       uint32_t *addr_length);
+    int (*getsockname)(void *ctx, Wc3NetSocket socket, void *addr,
+                       uint32_t *addr_length);
+    int (*setsockopt)(void *ctx, Wc3NetSocket socket, int option,
+                      const void *value, uint32_t length);
+    int (*getsockopt)(void *ctx, Wc3NetSocket socket, int option,
+                      void *value, uint32_t *length);
+    int (*set_nonblocking)(void *ctx, Wc3NetSocket socket, int enable);
+    int (*bytes_available)(void *ctx, Wc3NetSocket socket, uint32_t *out);
+    int (*at_mark)(void *ctx, Wc3NetSocket socket, int *out);
+    /* timeout_us < 0 waits forever.  The sets are both in/out. */
+    int (*select)(void *ctx, Wc3NetFdSet *read, Wc3NetFdSet *write,
+                  Wc3NetFdSet *except, int64_t timeout_us);
+
+    int (*hostname)(void *ctx, char *buf, uint32_t cap);
+    int (*resolve)(void *ctx, const char *node, const char *service,
+                   const Wc3NetResolveHints *hints, Wc3NetAddrInfo *out,
+                   uint32_t cap, uint32_t *count);
+    int (*interfaces)(void *ctx, Wc3NetInterface *out, uint32_t cap,
+                      uint32_t *count);
+} Wc3NetApi;
 
 typedef struct Wc3TimeApi {
     void *ctx;
@@ -304,6 +499,7 @@ typedef struct Wc3Platform {
     Wc3LogApi log;
     Wc3ConfigApi config;
     Wc3AssetApi asset;
+    Wc3NetApi net;
     Wc3ThreadApi thread;
     Wc3SyncApi sync;
     Wc3VulkanDriverApi vulkan_driver;

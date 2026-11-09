@@ -24,6 +24,7 @@
 #endif
 
 #include "cpu.h"
+#include "direct_call.h"
 #include "legacy_shim.h"
 #include "platform.h"
 #include "waveout_hle.h"
@@ -72,6 +73,9 @@ static int g_callback_wait_calls;
 static int g_callback_wake_calls;
 
 static uint32_t g_dispatch_calls;
+static uint32_t g_resolved_calls;
+static uint32_t g_resolve_calls;
+static uint32_t g_resolved_target;
 static uint32_t g_last_target;
 static uint32_t g_last_args[MAX_ARGS];
 
@@ -220,6 +224,29 @@ void dispatch_jmp(CPU *c, uint32_t target)
 {
     (void)c;
     (void)target;
+}
+
+static void fake_resolved_target(CPU *c)
+{
+    (void)c;
+    g_resolved_calls++;
+}
+
+wc3_lifted_fn wc3_dispatch_resolve(uint32_t target)
+{
+    g_resolve_calls++;
+    g_resolved_target = target;
+    return target ? fake_resolved_target : NULL;
+}
+
+void wc3_dispatch_resolved(CPU *c, wc3_lifted_fn fn)
+{
+    if (!fn) return;
+    g_dispatch_calls++;
+    g_last_target = g_resolved_target;
+    for (unsigned i = 0; i < MAX_ARGS; i++)
+        g_last_args[i] = wc3_legacy_rd32g(c->esp + 4u + i * 4u);
+    fn(c);
 }
 
 int wc3_legacy_guest_callback_thread_start(Wc3LegacyGuestLoop body,
@@ -403,6 +430,8 @@ static int test_open(void)
         return fail("platform completion pump not installed");
     if (!g_callback_body) return fail("guest callback thread not started");
     if (wc3_legacy_rd32g(PHWO) == 0u) return fail("waveOutOpen wrote no handle");
+    if (g_resolve_calls != 1u)
+        return fail("waveOutOpen did not resolve the callback once");
     return 0;
 }
 
@@ -441,8 +470,11 @@ static int test_completion(uint32_t hwo)
         return fail("played-frame count mismatch");
 
     g_dispatch_calls = 0u;
+    g_resolved_calls = 0u;
     run_callback_thread();
     if (g_dispatch_calls != 1u) return fail("no WOM_DONE dispatch");
+    if (g_resolved_calls != 1u)
+        return fail("WOM_DONE did not use the resolved target");
     if (g_last_target != 0x00401000u) return fail("WOM_DONE target mismatch");
     if (g_last_args[0] != hwo || g_last_args[1] != WOM_DONE ||
         g_last_args[2] != 0x00005000u || g_last_args[3] != hdr ||
@@ -480,8 +512,11 @@ static int test_spill(uint32_t hwo)
         return fail("spill tail did not complete");
 
     g_dispatch_calls = 0u;
+    g_resolved_calls = 0u;
     run_callback_thread();
     if (g_dispatch_calls != 1u) return fail("spill produced no WOM_DONE");
+    if (g_resolved_calls != 1u)
+        return fail("spill WOM_DONE did not use the resolved target");
     if (g_last_args[3] != hdr) return fail("spill WOM_DONE header mismatch");
     return 0;
 }
@@ -520,9 +555,12 @@ static int test_nomem(uint32_t hwo)
         MMSYSERR_NOERROR)
         return fail("waveOutReset failed");
     g_dispatch_calls = 0u;
+    g_resolved_calls = 0u;
     run_callback_thread();
     if (g_dispatch_calls != HDR_MAX)
         return fail("reset did not flush every pending WOM_DONE");
+    if (g_resolved_calls != HDR_MAX)
+        return fail("reset WOM_DONE did not use the resolved target");
     return 0;
 }
 
@@ -538,10 +576,15 @@ static int test_timer(uint32_t hwo)
 
     g_now_ns = 50u * 1000000u;
     g_dispatch_calls = 0u;
+    g_resolved_calls = 0u;
     CPU c;
     set_args(&c, NULL, 0u);
     pump_get(&c);
     if (g_dispatch_calls != 1u) return fail("WM_TIMER did not fire");
+    if (g_resolved_calls != 1u)
+        return fail("WM_TIMER did not use the resolved target");
+    if (g_resolve_calls != 2u)
+        return fail("SetTimer did not resolve its callback once");
     if (g_last_target != 0x00402000u) return fail("WM_TIMER target mismatch");
     if (g_last_args[0] != 0x00001000u || g_last_args[1] != TEST_WM_TIMER ||
         g_last_args[2] != id || g_last_args[3] != 50u)

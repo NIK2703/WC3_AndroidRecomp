@@ -767,10 +767,199 @@ static int headless_vulkan_caps(void *ctx, uint32_t device_index,
     return -1;
 }
 
+/* ------------------------------------------------------------------ net */
+
+/* The verification DUT is asset-free and has no network identity.  Keeping
+ * every NetApi entry present but explicitly unsupported lets the winsock HLE
+ * install without fabricating an external connection. */
+static int headless_net_startup(void *ctx) { (void)ctx; return 0; }
+static void headless_net_cleanup(void *ctx) { (void)ctx; }
+static int headless_net_unsupported(void) { return -WC3_NET_ERR_OPNOTSUPP; }
+static int headless_net_socket(void *ctx, int family, int type, int protocol,
+                               Wc3NetSocket *out)
+{
+    (void)ctx; (void)family; (void)type; (void)protocol;
+    if (out) *out = 0;
+    return headless_net_unsupported();
+}
+static int headless_net_close(void *ctx, Wc3NetSocket socket)
+{
+    (void)ctx; (void)socket;
+    return headless_net_unsupported();
+}
+static int headless_net_bind(void *ctx, Wc3NetSocket socket, const void *addr,
+                             uint32_t length)
+{
+    (void)ctx; (void)socket; (void)addr; (void)length;
+    return headless_net_unsupported();
+}
+static int headless_net_connect(void *ctx, Wc3NetSocket socket,
+                                const void *addr, uint32_t length)
+{
+    (void)ctx; (void)socket; (void)addr; (void)length;
+    return headless_net_unsupported();
+}
+static int headless_net_listen(void *ctx, Wc3NetSocket socket, int backlog)
+{
+    (void)ctx; (void)socket; (void)backlog;
+    return headless_net_unsupported();
+}
+static int headless_net_accept(void *ctx, Wc3NetSocket socket,
+                               Wc3NetSocket *out, void *addr,
+                               uint32_t *length)
+{
+    (void)ctx; (void)socket; (void)addr; (void)length;
+    if (out) *out = 0;
+    return headless_net_unsupported();
+}
+static int headless_net_send(void *ctx, Wc3NetSocket socket, const void *buf,
+                             uint32_t length, int flags, uint32_t *sent)
+{
+    (void)ctx; (void)socket; (void)buf; (void)length; (void)flags;
+    if (sent) *sent = 0;
+    return headless_net_unsupported();
+}
+static int headless_net_recv(void *ctx, Wc3NetSocket socket, void *buf,
+                             uint32_t length, int flags, uint32_t *received)
+{
+    (void)ctx; (void)socket; (void)buf; (void)length; (void)flags;
+    if (received) *received = 0;
+    return headless_net_unsupported();
+}
+static int headless_net_sendto(void *ctx, Wc3NetSocket socket, const void *buf,
+                               uint32_t length, int flags, const void *addr,
+                               uint32_t addr_length, uint32_t *sent)
+{
+    (void)ctx; (void)socket; (void)buf; (void)length; (void)flags;
+    (void)addr; (void)addr_length;
+    if (sent) *sent = 0;
+    return headless_net_unsupported();
+}
+static int headless_net_recvfrom(void *ctx, Wc3NetSocket socket, void *buf,
+                                 uint32_t length, int flags, void *addr,
+                                 uint32_t *addr_length, uint32_t *received)
+{
+    (void)ctx; (void)socket; (void)buf; (void)length; (void)flags;
+    (void)addr; (void)addr_length;
+    if (received) *received = 0;
+    return headless_net_unsupported();
+}
+static int headless_net_shutdown(void *ctx, Wc3NetSocket socket, int how)
+{
+    (void)ctx; (void)socket; (void)how;
+    return headless_net_unsupported();
+}
+static int headless_net_getpeername(void *ctx, Wc3NetSocket socket, void *addr,
+                                    uint32_t *length)
+{
+    (void)ctx; (void)socket; (void)addr; (void)length;
+    return headless_net_unsupported();
+}
+static int headless_net_getsockname(void *ctx, Wc3NetSocket socket, void *addr,
+                                    uint32_t *length)
+{
+    (void)ctx; (void)socket; (void)addr; (void)length;
+    return headless_net_unsupported();
+}
+static int headless_net_setsockopt(void *ctx, Wc3NetSocket socket, int option,
+                                   const void *value, uint32_t length)
+{
+    (void)ctx; (void)socket; (void)option; (void)value; (void)length;
+    return headless_net_unsupported();
+}
+static int headless_net_getsockopt(void *ctx, Wc3NetSocket socket, int option,
+                                   void *value, uint32_t *length)
+{
+    (void)ctx; (void)socket; (void)option; (void)value; (void)length;
+    return headless_net_unsupported();
+}
+static int headless_net_set_nonblocking(void *ctx, Wc3NetSocket socket,
+                                        int enable)
+{
+    (void)ctx; (void)socket; (void)enable;
+    return headless_net_unsupported();
+}
+static int headless_net_bytes_available(void *ctx, Wc3NetSocket socket,
+                                        uint32_t *out)
+{
+    (void)ctx; (void)socket;
+    if (out) *out = 0;
+    return headless_net_unsupported();
+}
+static int headless_net_at_mark(void *ctx, Wc3NetSocket socket, int *out)
+{
+    (void)ctx; (void)socket;
+    if (out) *out = 0;
+    return headless_net_unsupported();
+}
+static int headless_net_select(void *ctx, Wc3NetFdSet *read,
+                               Wc3NetFdSet *write, Wc3NetFdSet *except,
+                               int64_t timeout_us)
+{
+    (void)ctx; (void)read; (void)write; (void)except; (void)timeout_us;
+    return headless_net_unsupported();
+}
+static int headless_net_hostname(void *ctx, char *buf, uint32_t cap)
+{
+    (void)ctx;
+    if (!buf || cap == 0u) return -WC3_NET_ERR_INVAL;
+    static const char name[] = "headless";
+    if (sizeof name > cap) return -WC3_NET_ERR_INVAL;
+    memcpy(buf, name, sizeof name);
+    return 0;
+}
+static int headless_net_resolve(void *ctx, const char *node,
+                                const char *service,
+                                const Wc3NetResolveHints *hints,
+                                Wc3NetAddrInfo *out, uint32_t cap,
+                                uint32_t *count)
+{
+    (void)ctx; (void)node; (void)service; (void)hints; (void)out; (void)cap;
+    if (count) *count = 0;
+    return -WC3_NET_ERR_NONAME;
+}
+static int headless_net_interfaces(void *ctx, Wc3NetInterface *out,
+                                   uint32_t cap, uint32_t *count)
+{
+    (void)ctx; (void)out; (void)cap;
+    if (count) *count = 0;
+    return 0;
+}
+
+static void headless_net_install(Wc3NetApi *net)
+{
+    memset(net, 0, sizeof *net);
+    net->startup = headless_net_startup;
+    net->cleanup = headless_net_cleanup;
+    net->socket = headless_net_socket;
+    net->close = headless_net_close;
+    net->bind = headless_net_bind;
+    net->connect = headless_net_connect;
+    net->listen = headless_net_listen;
+    net->accept = headless_net_accept;
+    net->send = headless_net_send;
+    net->recv = headless_net_recv;
+    net->sendto = headless_net_sendto;
+    net->recvfrom = headless_net_recvfrom;
+    net->shutdown = headless_net_shutdown;
+    net->getpeername = headless_net_getpeername;
+    net->getsockname = headless_net_getsockname;
+    net->setsockopt = headless_net_setsockopt;
+    net->getsockopt = headless_net_getsockopt;
+    net->set_nonblocking = headless_net_set_nonblocking;
+    net->bytes_available = headless_net_bytes_available;
+    net->at_mark = headless_net_at_mark;
+    net->select = headless_net_select;
+    net->hostname = headless_net_hostname;
+    net->resolve = headless_net_resolve;
+    net->interfaces = headless_net_interfaces;
+}
+
 /* ------------------------------------------------------------------ install */
 
 void headless_services_install(Wc3Platform *platform, HeadlessState *st)
 {
+    headless_net_install(&platform->net);
     platform->window.ctx = st;
     platform->window.create = headless_window_create;
     platform->window.destroy = headless_window_destroy;

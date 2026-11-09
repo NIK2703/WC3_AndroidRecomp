@@ -18,6 +18,10 @@ extern "C" {
  */
 int wc3_android_platform_init(Wc3Platform *platform);
 
+/* Install the socket half of the platform table.  Kept separate from the core
+ * init so the net translation unit has no dependency on activity state. */
+void wc3_android_net_install(Wc3NetApi *net);
+
 /*
  * Read the optional app-private config file once.  The format is documented
  * at the implementation.  A missing file is an empty configuration and

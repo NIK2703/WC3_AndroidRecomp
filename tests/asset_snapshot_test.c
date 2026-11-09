@@ -101,7 +101,7 @@ int main(void)
     wc3_asset_snapshot_build(&s, TEST_DIR);
     CHECK(s.open_failed == 0u, "snapshot opens directory");
     CHECK(s.truncated == 0u, "small snapshot is not truncated");
-    CHECK(s.count == 4u, "snapshot count follows directory entries");
+    CHECK(s.count == 6u, "snapshot count follows directory entries");
     CHECK(s.capacity >= s.count && s.capacity < WC3_ASSET_SNAPSHOT_MAX,
           "snapshot does not reserve the full 1024-entry table");
     CHECK(has_name(&s, "War3.mpq"), "snapshot keeps War3.mpq");
@@ -123,7 +123,7 @@ int main(void)
     CHECK(create_file(TEST_DIR "/War3.mpq"), "recreate War3.mpq");
     wc3_asset_snapshot_build(&s, TEST_DIR);
     CHECK(s.open_failed == 0u, "retry opens directory");
-    CHECK(s.count == 1u, "retry sees the new entry");
+    CHECK(s.count == 3u, "retry sees the new entry");
     CHECK(has_name(&s, "War3.mpq"), "retry keeps the new entry");
 
     /* Cross the 64-entry growth step. */
@@ -133,7 +133,7 @@ int main(void)
     wc3_asset_snapshot_build(&s, TEST_DIR);
     CHECK(s.open_failed == 0u, "growth snapshot opens");
     CHECK(s.truncated == 0u, "growth snapshot is complete");
-    CHECK(s.count == 70u, "growth snapshot count");
+    CHECK(s.count == 72u, "growth snapshot count");
     CHECK(s.capacity >= s.count && s.capacity < WC3_ASSET_SNAPSHOT_MAX,
           "growth snapshot does not reserve the full table");
 

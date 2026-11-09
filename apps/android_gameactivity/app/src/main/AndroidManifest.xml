@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- LAN play needs AF_INET UDP/TCP sockets in the app UID. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- The native host reads the licensed game files with POSIX calls from
          /storage/emulated/0/Warcraft 3, so it needs All files access on API 30+. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />

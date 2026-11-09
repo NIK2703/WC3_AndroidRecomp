@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """Static PLT call-site audit for an already-built ELF (O-65).
 
-``-fno-plt`` replaces external ``bl <plt>`` calls with a GOT load and ``blr``.
-Whether that is faster is a runtime question (PM-8/PM-19), so this tool only
-publishes the static side of the comparison: the PLT slot count, the number of
-``bl`` instructions that target those slots, the contiguous ``adrp/ldr/blr``
-GOT call sites, and the per-symbol call counts.  It never enables
-``WC3_FNO_PLT`` and never writes to the artifact.
+``-fno-plt`` replaces external ``bl <plt>`` calls with a GOT load and an
+indirect branch.  Whether that is faster is a runtime question (PM-8/PM-19),
+so this tool only publishes the static side of the comparison: the PLT slot
+count, the number of ``bl``/``b`` instructions that target those slots, the
+``adrp/ldr/br|blr`` GOT call sites, and the per-symbol call counts.  It never
+enables ``WC3_FNO_PLT`` and never writes to the artifact.
 
 The parser is self-contained (ELF64 little-endian, AArch64): no NDK or
 ``objdump`` is required.  ``.rela.plt`` supplies the slot-to-symbol mapping;
 the first 32 bytes of ``.plt`` are the resolver header and each following
 16-byte slot belongs to one relocation in order.  ``.rela.dyn`` supplies the
 GOT slot-to-symbol mapping for the indirect form.  The GOT scan accepts the
-contiguous compiler sequence ``adrp xN, page; ldr xN, [xN, #off]; blr xN`` and
+compiler sequence ``adrp xN, page; ldr xN, [xN, #off]; br|blr xN`` (an
+alignment ``nop`` or unrelated ``adr`` may sit between the loads) and
 deliberately does not treat arbitrary register copies as a GOT call.
 
 Usage:
@@ -47,18 +48,35 @@ from icf_audit import (
     sha256_bytes,
 )
 
+AARCH64_B_MASK = 0xFC000000
+AARCH64_B = 0x14000000
 AARCH64_BL_MASK = 0xFC000000
 AARCH64_BL = 0x94000000
+AARCH64_ADR_MASK = 0x9F000000
+AARCH64_ADR = 0x10000000
 AARCH64_ADRP_MASK = 0x9F000000
 AARCH64_ADRP = 0x90000000
 AARCH64_LDR_UNSIGNED_MASK = 0xFFC00000
 AARCH64_LDR_UNSIGNED = 0xF9400000
+AARCH64_BR_MASK = 0xFFFFFC1F
+AARCH64_BR = 0xD61F0000
 AARCH64_BLR_MASK = 0xFFFFFC1F
 AARCH64_BLR = 0xD63F0000
+AARCH64_NOP = 0xD503201F
 R_AARCH64_GLOB_DAT = 1025
 R_AARCH64_JUMP_SLOT = 1026
 PLT_HEADER_BYTES = 0x20
 PLT_ENTRY_BYTES = 16
+
+
+def decode_b(insn: int, pc: int) -> int | None:
+    """Return the target of an unconditional tail-call ``B`` instruction."""
+    if (insn & AARCH64_B_MASK) != AARCH64_B:
+        return None
+    imm = insn & 0x03FFFFFF
+    if imm & 0x02000000:
+        imm -= 0x04000000
+    return pc + (imm << 2)
 
 
 def decode_bl(insn: int, pc: int) -> int | None:
@@ -69,6 +87,13 @@ def decode_bl(insn: int, pc: int) -> int | None:
     if imm & 0x02000000:
         imm -= 0x04000000
     return pc + (imm << 2)
+
+
+def decode_adr(insn: int) -> int | None:
+    """Return the destination register for ``ADR``, or ``None``."""
+    if (insn & AARCH64_ADR_MASK) != AARCH64_ADR:
+        return None
+    return insn & 0x1F
 
 
 def decode_adrp(insn: int, pc: int) -> tuple[int, int] | None:
@@ -92,6 +117,13 @@ def decode_ldr_unsigned(insn: int) -> tuple[int, int, int] | None:
     base = (insn >> 5) & 0x1F
     offset = ((insn >> 10) & 0xFFF) * 8
     return target, base, offset
+
+
+def decode_br(insn: int) -> int | None:
+    """Return the register used by a tail-call ``BR``, or ``None``."""
+    if (insn & AARCH64_BR_MASK) != AARCH64_BR:
+        return None
+    return (insn >> 5) & 0x1F
 
 
 def decode_blr(insn: int) -> int | None:
@@ -248,9 +280,11 @@ def scan_got_calls(body: bytes, base: int, got: dict[int, str],
                    ) -> tuple[Counter[str], Counter[str], int, Counter[str]]:
     """Count contiguous ``adrp/ldr/blr`` calls through a mapped GOT slot.
 
-    The compiler normally emits that exact three-instruction sequence for
-    ``-fno-plt``.  Any other instruction clears the tracked registers, so a
-    stale page/address cannot turn an unrelated indirect call into a match.
+    The compiler normally emits an ``adrp`` page load, an ``ldr`` from the
+    GOT, and an indirect branch (``blr`` or a tail-call ``br``).  Alignment
+    ``nop`` and unrelated ``adr`` instructions between them are harmless; any
+    other instruction clears the tracked registers, so a stale page/address
+    cannot turn an unrelated indirect call into a match.
     """
     counts: Counter[str] = Counter()
     in_l: Counter[str] = Counter()
@@ -268,6 +302,13 @@ def scan_got_calls(body: bytes, base: int, got: dict[int, str],
             adrp_regs[register] = page
             got_regs.pop(register, None)
             continue
+        if insn == AARCH64_NOP:
+            continue
+        adr = decode_adr(insn)
+        if adr is not None:
+            adrp_regs.pop(adr, None)
+            got_regs.pop(adr, None)
+            continue
         ldr = decode_ldr_unsigned(insn)
         if ldr is not None:
             target, source, offset = ldr
@@ -279,6 +320,8 @@ def scan_got_calls(body: bytes, base: int, got: dict[int, str],
                 got_regs.pop(target, None)
             continue
         called = decode_blr(insn)
+        if called is None:
+            called = decode_br(insn)
         if called is not None:
             address = got_regs.get(called)
             if address is not None:
@@ -306,11 +349,14 @@ def collect_calls(data: bytes, sections: Sequence[Section],
                   top: int) -> dict[str, object]:
     counts: Counter[str] = Counter()
     in_l: Counter[str] = Counter()
+    tail_counts: Counter[str] = Counter()
+    tail_in_l: Counter[str] = Counter()
     got_counts: Counter[str] = Counter()
     got_in_l: Counter[str] = Counter()
     got_owners: Counter[str] = Counter()
     emutls_owners: Counter[str] = Counter()
     total = 0
+    tail_total = 0
     got_total = 0
     emutls_calls = 0
     emutls_in_l = 0
@@ -323,6 +369,9 @@ def collect_calls(data: bytes, sections: Sequence[Section],
         pc = section.addr
         for (insn,) in struct.iter_unpack("<I", body[:usable]):
             target = decode_bl(insn, pc)
+            is_bl = target is not None
+            if target is None:
+                target = decode_b(insn, pc)
             caller = pc
             pc += 4
             if target is None:
@@ -330,13 +379,19 @@ def collect_calls(data: bytes, sections: Sequence[Section],
             slot = plt_slot(target, plt_addr, plt_size, len(names))
             if slot is not None:
                 name = names[slot]
-                total += 1
-                counts[name] += 1
                 owner = owner_name(caller, ranges, starts)
-                if owner is not None and owner.startswith("L_"):
-                    in_l[name] += 1
+                if is_bl:
+                    total += 1
+                    counts[name] += 1
+                    if owner is not None and owner.startswith("L_"):
+                        in_l[name] += 1
+                else:
+                    tail_total += 1
+                    tail_counts[name] += 1
+                    if owner is not None and owner.startswith("L_"):
+                        tail_in_l[name] += 1
                 continue
-            if emutls_addr is not None and target == emutls_addr:
+            if is_bl and emutls_addr is not None and target == emutls_addr:
                 emutls_calls += 1
                 owner = owner_name(caller, ranges, starts)
                 if owner is not None and owner.startswith("L_"):
@@ -351,8 +406,10 @@ def collect_calls(data: bytes, sections: Sequence[Section],
         got_owners.update(section_owners)
 
     all_counts = Counter(counts)
+    all_counts.update(tail_counts)
     all_counts.update(got_counts)
     all_in_l = Counter(in_l)
+    all_in_l.update(tail_in_l)
     all_in_l.update(got_in_l)
     return {
         "plt_entries": len(names),
@@ -361,6 +418,13 @@ def collect_calls(data: bytes, sections: Sequence[Section],
         "calls_by_symbol": [{"sym": name, "calls": calls}
                             for name, calls in sorted(counts.items())],
         "top_calls": top_calls(counts, in_l, top),
+        "plt_tail_symbols_called": len(tail_counts),
+        "total_plt_tail_calls": tail_total,
+        "plt_tail_calls_by_symbol": [
+            {"sym": name, "calls": calls}
+            for name, calls in sorted(tail_counts.items())
+        ],
+        "top_plt_tail_calls": top_calls(tail_counts, tail_in_l, top),
         "got_entries": len(got),
         "got_symbols_called": len(got_counts),
         "total_got_calls": got_total,
@@ -368,7 +432,7 @@ def collect_calls(data: bytes, sections: Sequence[Section],
                                 for name, calls in sorted(got_counts.items())],
         "top_got_calls": top_calls(got_counts, got_in_l, top),
         "top_got_owners": top_owners(got_owners, 12),
-        "total_external_calls": total + got_total,
+        "total_external_calls": total + tail_total + got_total,
         "all_calls_by_symbol": [{"sym": name, "calls": calls}
                                 for name, calls in sorted(all_counts.items())],
         "top_external_calls": top_calls(all_counts, all_in_l, top),
@@ -404,11 +468,11 @@ def audit(path: Path, top: int = 12) -> dict[str, object]:
         "emutls_defined_addr": hex(emutls_addr)
         if emutls_addr is not None else None,
         "limits": [
-            "counts AArch64 BL instructions whose target is a .plt slot",
-            "counts contiguous adrp/ldr/blr sequences whose GOT address is a "
-            "GLOB_DAT/JUMP_SLOT relocation",
-            "GOT-indirect calls through register copies or non-contiguous "
-            "sequences are not counted",
+            "counts AArch64 BL and B instructions whose target is a .plt slot",
+            "counts adrp/ldr/br|blr sequences whose GOT address is a "
+            "GLOB_DAT/JUMP_SLOT relocation; alignment nop/adr are tolerated",
+            "GOT-indirect calls through register copies or other "
+            "non-contiguous sequences are not counted",
             "static call-site counts are not runtime weights (PM-17)",
         ],
         **calls,
@@ -465,6 +529,12 @@ def compare_reports(baseline: dict[str, object],
                 candidate.get("plt_symbols_called", 0)),
             "total_plt_calls": _delta(baseline.get("total_plt_calls", 0),
                                       candidate.get("total_plt_calls", 0)),
+            "plt_tail_symbols_called": _delta(
+                baseline.get("plt_tail_symbols_called", 0),
+                candidate.get("plt_tail_symbols_called", 0)),
+            "total_plt_tail_calls": _delta(
+                baseline.get("total_plt_tail_calls", 0),
+                candidate.get("total_plt_tail_calls", 0)),
             "got_symbols_called": _delta(
                 baseline.get("got_symbols_called", 0),
                 candidate.get("got_symbols_called", 0)),
@@ -509,10 +579,12 @@ def print_report(report: dict[str, object]) -> None:
           f"{report['plt_bytes']} B")
     print(f"  {report['plt_symbols_called']} symbols called, "
           f"{report['total_plt_calls']} BL sites")
+    print(f"  {report['plt_tail_symbols_called']} symbols tail-called, "
+          f"{report['total_plt_tail_calls']} B sites")
     print(f"  GOT: {report['got_symbols_called']} symbols called, "
-          f"{report['total_got_calls']} indirect blr sites")
+          f"{report['total_got_calls']} indirect branch sites")
     print(f"  external: {report['total_external_calls']} call sites "
-          f"(BL + GOT)")
+          f"(BL + B + GOT)")
     if report["emutls_defined_addr"] is not None:
         print(f"  __emutls_get_address: {report['emutls_defined_addr']}, "
               f"{report['emutls_bl']} direct BL sites "
@@ -536,6 +608,12 @@ def run_self_test() -> int:
         return 1
     if decode_bl(0x14000000, 0x1000) is not None:
         print("plt audit self-test: non-BL decoded as call")
+        return 1
+    if decode_b(0x14000000, 0x1000) != 0x1000:
+        print("plt audit self-test: B +0 failed")
+        return 1
+    if decode_b(0x94000000, 0x1000) is not None:
+        print("plt audit self-test: BL decoded as tail call")
         return 1
     if plt_slot(0x1010, 0x1000, 0x40, 2) is not None:
         print("plt audit self-test: PLT header mapped as slot")
@@ -568,6 +646,14 @@ def run_self_test() -> int:
     if decode_blr(blr) != 16 or decode_blr(0xD503201F) is not None:
         print("plt audit self-test: BLR decode failed")
         return 1
+    br = 0xD61F0000 | (16 << 5)
+    if decode_br(br) != 16 or decode_br(blr) is not None:
+        print("plt audit self-test: BR decode failed")
+        return 1
+    adr = 0x10000000 | 16
+    if decode_adr(adr) != 16 or decode_adr(adrp) is not None:
+        print("plt audit self-test: ADR decode failed")
+        return 1
 
     got = {0x2010: "memcpy"}
     got_ranges = [(0x1000, 0x100C, "L_00001000")]
@@ -579,10 +665,15 @@ def run_self_test() -> int:
             got_in_l.get("memcpy") != 1 or got_owners.get("L_00001000") != 1):
         print("plt audit self-test: contiguous GOT call not counted")
         return 1
-    body = struct.pack("<IIII", adrp, 0xD503201F, ldr, blr)
+    body = struct.pack("<IIII", adrp, AARCH64_NOP, ldr, br)
+    _, _, got_total, _ = scan_got_calls(body, 0x1000, got, [], [])
+    if got_total != 1:
+        print("plt audit self-test: NOP/BR GOT call not counted")
+        return 1
+    body = struct.pack("<IIII", adrp, adr, ldr, blr)
     _, _, got_total, _ = scan_got_calls(body, 0x1000, got, [], [])
     if got_total != 0:
-        print("plt audit self-test: stale GOT register survived NOP")
+        print("plt audit self-test: ADR did not invalidate the page register")
         return 1
     if _call_map({"all_calls_by_symbol": [{"sym": "x", "calls": 3}],
                   "calls_by_symbol": [{"sym": "x", "calls": 1}]}) != {"x": 3}:
@@ -614,9 +705,11 @@ def run_self_test() -> int:
         "plt_entries": 2,
         "plt_symbols_called": 2,
         "total_plt_calls": 10,
+        "plt_tail_symbols_called": 2,
+        "total_plt_tail_calls": 2,
         "got_symbols_called": 1,
         "total_got_calls": 4,
-        "total_external_calls": 14,
+        "total_external_calls": 16,
         "emutls_bl": 4,
         "calls_by_symbol": [{"sym": "memset", "calls": 3},
                             {"sym": "memcpy", "calls": 7}],
@@ -628,9 +721,11 @@ def run_self_test() -> int:
         "plt_entries": 1,
         "plt_symbols_called": 1,
         "total_plt_calls": 5,
+        "plt_tail_symbols_called": 1,
+        "total_plt_tail_calls": 1,
         "got_symbols_called": 2,
         "total_got_calls": 8,
-        "total_external_calls": 13,
+        "total_external_calls": 14,
         "emutls_bl": 8,
         "calls_by_symbol": [{"sym": "memset", "calls": 5}],
     }
@@ -639,7 +734,8 @@ def run_self_test() -> int:
     changes = comparison["top_changed_symbols"]  # type: ignore[index]
     if (delta["total_plt_calls"] != -5 or delta["emutls_bl"] != 4 or
             delta["total_got_calls"] != 4 or
-            delta["total_external_calls"] != -1 or
+            delta["total_plt_tail_calls"] != -1 or
+            delta["total_external_calls"] != -2 or
             delta["got_symbols_called"] != 1 or
             delta["plt_entries"] != -1 or not changes or
             changes[0]["sym"] != "memcpy" or changes[0]["delta"] != -7 or

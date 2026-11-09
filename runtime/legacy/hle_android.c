@@ -3073,14 +3073,10 @@ static void h_wait_many(CPU *c)
             return;
         }
 
-        /* While this guest thread is blocked, it is still the thread that
-         * must deliver Miles' 50 ms mixer timer and waveOut WOM_DONE
-         * callbacks.  Completions first, then timers, then any completion
-         * raised by the timer; the timer callback may need the mixer mutex
-         * that the completion callback releases. */
-        if (g_wave_pending) waveout_deliver(c);
-        timer_service(c);
-        if (g_wave_pending) waveout_deliver(c);
+        /* The service triple runs at the top of the next iteration, before
+         * the wait is rechecked.  Running it here as well is redundant: it
+         * adds up to three extra passes per 1 ms sleep without changing the
+         * completion -> timer -> completion order. */
         usleep(1000);
     }
 }
@@ -3196,8 +3192,18 @@ static void h_sleep(CPU *c)
  * the device has played, and each WOM_DONE is addressed to the submitting
  * guest thread.  The ring only absorbs jitter; it no longer defines the
  * timing relationship between guest and sink. */
-#define WAVE_RING_BYTES    (8u * 1024u * 1024u)
+/* O-90: the ring only absorbs jitter; device frames pace the producer.
+ * The measured peak on the reference device was 43,800 bytes
+ * (PERFORMANCE_AUDIT_PASS11 O-107), so 128 KiB keeps 3x headroom over the
+ * observed workload while replacing 32 MiB of worst-case BSS with 512 KiB.
+ * WC3_WAVE_RING_BYTES remains an A/B input for the boundary test. */
+#ifndef WC3_WAVE_RING_BYTES
+#define WC3_WAVE_RING_BYTES (128u * 1024u)
+#endif
+#define WAVE_RING_BYTES    WC3_WAVE_RING_BYTES
 #define WAVE_RING_TARGET   WAVE_RING_BYTES
+_Static_assert(WAVE_RING_BYTES >= 5u * 8832u + 2u * 3536u * 4u,
+               "wave ring must hold five guest headers plus prefill");
 #define WOM_DONE_MSG       0x3BDu
 /* Each WOM_DONE is addressed to the guest thread that submitted its header;
  * that thread is paced by the device clock and pumps on every write, so the
@@ -3208,9 +3214,9 @@ static void h_sleep(CPU *c)
 /* A completion is addressed to the guest thread that submitted its WAVEHDR.
  * Because that same thread is now paced by back-pressure in waveOutWrite(),
  * it pumps on every buffer and collects its own completion immediately.
- * 250 ms is only an emergency escape for a submitter that died; it is not a
- * normal scheduling path and is counted/diagnosed as `foreign`. */
-#define WAVE_DONE_HANDOFF_MS 250u
+ * Default 0 = no artificial wait.  A positive handoff_ms is a debug-only
+ * emergency escape for a submitter that died and is counted as `foreign`. */
+#define WAVE_DONE_HANDOFF_MS 0u
 #define WAVE_DONE_ROUTE_OWNER     0
 #define WAVE_DONE_ROUTE_SUBMITTER 1
 /* waveOutOpen leaves the AAudio stream paused until the ring holds at least
@@ -3385,6 +3391,7 @@ static uint32_t wave_now_ms(void)
  * runs on the AAudio real-time thread and must not call getenv(). */
 static void wave_done_tuning_from_env(WaveDev *d)
 {
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
     const char *route = getenv("WC3_WAVEOUT_DONE_ROUTE");
     const char *wait = getenv("WC3_WAVEOUT_DONE_HANDOFF_MS");
     const char *early = getenv("WC3_WAVEOUT_DONE_EARLY_FLAG");
@@ -3402,6 +3409,13 @@ static void wave_done_tuning_from_env(WaveDev *d)
      * follows within 0-1 ms, so Miles never sees a "free" header while the
      * PCM is still being copied.  =1 restores the old early flag for A/B. */
     d->done_early_flag = (early && early[0] == '1');
+#else
+    /* O-91: rejected A/B switches are debug-only.  Release keeps the
+     * measured defaults and does not expose an audio tuning surface. */
+    d->done_route = WAVE_DONE_ROUTE_SUBMITTER;
+    d->done_handoff_ms = WAVE_DONE_HANDOFF_MS;
+    d->done_early_flag = 0;
+#endif
 }
 
 /* ---- USER32 timers ---------------------------------------------------
@@ -3732,7 +3746,10 @@ static void wave_queue_done_locked(WaveDev *d, uint32_t hdr,
     d->done[i].hdr = hdr;
     d->done[i].owner = (d->done_route == WAVE_DONE_ROUTE_SUBMITTER)
                            ? submitter : d->owner;
-    d->done[i].queued_ms = wave_now_ms();
+    /* O-88: the default handoff is 0, so no completion age is needed and
+     * the AAudio RT thread must not take CLOCK_MONOTONIC under g_wave_lock.
+     * A positive debug-only handoff still timestamps its queue entry. */
+    d->done[i].queued_ms = d->done_handoff_ms ? wave_now_ms() : 0;
     d->done_count++;
     g_wave_pending = 1;
     (void)why;
@@ -3766,6 +3783,7 @@ static volatile uint64_t g_aa_lock_max_us;
 static volatile uint32_t g_aa_short_want, g_aa_short_avail;
 static volatile uint32_t g_aa_want, g_aa_take, g_aa_ring, g_aa_blocks;
 static volatile uint32_t g_aa_fake, g_aa_peak, g_aa_nonzero, g_aa_samples;
+static volatile int g_aa_energy_dev = -1;
 static volatile uint64_t g_aa_energy_us, g_aa_energy_cb;
 static unsigned g_aa_energy_reported, g_aa_short_reported, g_aa_error_reported;
 static uint64_t g_aa_report_us;
@@ -3870,27 +3888,16 @@ static aaudio_data_callback_result_t wave_aaudio_cb(AAudioStream *stream,
         }
     }
 #if WC3_DEBUG && WC3_DEBUG_AUDIO
-    if (now_us - g_aa_energy_us >= 2000000u) {
-        uint32_t peak = 0, nonzero = 0;
-        const int16_t *s = (const int16_t *)(const void *)out;
-        uint32_t ns = take / 2u;
-        for (uint32_t i = 0; i < ns; i++) {
-            int v = s[i];
-            if (v < 0) v = -v;
-            if (v > peak) peak = (uint32_t)v;
-            if (v) nonzero++;
-        }
-        g_aa_want = want;
-        g_aa_take = take;
-        g_aa_ring = d->head - d->tail;
-        g_aa_blocks = (uint32_t)d->blk_count;
-        g_aa_fake = (uint32_t)d->fake;
-        g_aa_peak = peak;
-        g_aa_nonzero = nonzero;
-        g_aa_samples = ns;
-        g_aa_energy_us = now_us;
-        g_aa_energy_cb = g_aa_cb;
-    }
+    /* O-89: publish the callback shape only.  The energy scan of `take/2`
+     * samples used to run here, inside the blocking g_wave_lock section;
+     * wave_audio_stats_report() now scans the last copied ring window from
+     * the guest thread, outside the real-time path. */
+    g_aa_want = want;
+    g_aa_take = take;
+    g_aa_ring = d->head - d->tail;
+    g_aa_blocks = (uint32_t)d->blk_count;
+    g_aa_fake = (uint32_t)d->fake;
+    g_aa_energy_dev = (int)(d - g_wave_dev);
 #endif
     pthread_mutex_unlock(&g_wave_lock);
 
@@ -3980,6 +3987,47 @@ static void wave_audio_stats_report(void)
     const unsigned silent = g_aa_silent;
     const unsigned errs = g_aa_error_count;
     const unsigned gap5 = g_aa_gap5, gap20 = g_aa_gap20;
+    /* O-89: the energy scan is a diagnostic, so it runs here on the guest
+     * thread over the ring window that the last callback copied.  The RT
+     * callback only publishes want/take/ring/blocks.  A concurrent producer
+     * may overwrite the window, which is acceptable for this sample. */
+    {
+        const int dev = g_aa_energy_dev;
+        const uint32_t take = g_aa_take;
+        if (dev >= 0 && dev < WAVE_DEV_MAX && take > 0u) {
+            WaveDev *d = &g_wave_dev[dev];
+            pthread_mutex_lock(&g_wave_lock);
+            if (d->used && d->ring && d->tail >= take) {
+                const uint32_t start = d->tail - take;
+                const uint32_t idx = start % WAVE_RING_BYTES;
+                const uint32_t first = WAVE_RING_BYTES - idx < take
+                                           ? WAVE_RING_BYTES - idx : take;
+                uint32_t peak = 0, nonzero = 0;
+                const int16_t *a = (const int16_t *)(const void *)(d->ring + idx);
+                const int16_t *b = (const int16_t *)(const void *)d->ring;
+                const uint32_t na = first / 2u;
+                const uint32_t nb = (take - first) / 2u;
+                for (uint32_t i = 0; i < na; i++) {
+                    int v = a[i];
+                    if (v < 0) v = -v;
+                    if (v > peak) peak = (uint32_t)v;
+                    if (v) nonzero++;
+                }
+                for (uint32_t i = 0; i < nb; i++) {
+                    int v = b[i];
+                    if (v < 0) v = -v;
+                    if (v > peak) peak = (uint32_t)v;
+                    if (v) nonzero++;
+                }
+                g_aa_peak = peak;
+                g_aa_nonzero = nonzero;
+                g_aa_samples = take / 2u;
+                g_aa_energy_us = now;
+                g_aa_energy_cb = cb;
+            }
+            pthread_mutex_unlock(&g_wave_lock);
+        }
+    }
     int32_t xruns = -1;
     for (unsigned i = 0; i < WAVE_DEV_MAX; i++) {
         if (g_wave_dev[i].used && g_wave_dev[i].stream) {
@@ -4035,8 +4083,12 @@ static int wave_open_aaudio(WaveDev *d)
     /* A hard memset(0) at an underrun is a step discontinuity, and that step
      * is the audible click.  Default to a ~2 ms fade; set
      * WC3_WAVEOUT_UNDERRUN_FADE=0 to restore the old behaviour for A/B. */
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
     const char *fade_env = getenv("WC3_WAVEOUT_UNDERRUN_FADE");
     d->underrun_fade = !fade_env || fade_env[0] != '0';
+#else
+    d->underrun_fade = 1;
+#endif
     /* Low latency is the right choice for a game mixer, but not every device
      * accepts it; a plain stream is still better than the silent fallback. */
     const aaudio_performance_mode_t modes[2] = {
@@ -4083,6 +4135,7 @@ static int wave_open_aaudio(WaveDev *d)
                     granted = set > 0 ? set :
                               AAudioStream_getBufferSizeInFrames(d->stream);
                 }
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
                 fprintf(stderr,
                         "[wave] AAudio latency requested=%d ms granted=%d "
                         "frames (%.1f ms) burst=%d cap=%d rate=%d\n",
@@ -4090,6 +4143,11 @@ static int wave_open_aaudio(WaveDev *d)
                         d->rate > 0
                             ? (double)granted * 1000.0 / (double)d->rate : 0.0,
                         (int)burst, (int)cap, (int)d->rate);
+#else
+                (void)granted;
+                (void)burst;
+                (void)cap;
+#endif
             }
 #ifdef WC3_DEBUG
             int32_t actual = AAudioStream_getSampleRate(d->stream);
@@ -4186,7 +4244,7 @@ static void waveout_deliver(CPU *c)
              * re-submit the header first.  Default handoff is therefore 0 --
              * the first pumping guest thread delivers immediately.  A/B:
              * WC3_WAVEOUT_DONE_HANDOFF_MS=100 restores the wait. */
-            done_age = now - q->queued_ms;
+            done_age = q->queued_ms ? now - q->queued_ms : 0;
             done_foreign = !pthread_equal(q->owner, pthread_self());
             if (done_foreign) {
                 if ((int32_t)done_age < (int32_t)d->done_handoff_ms) {
@@ -4389,7 +4447,9 @@ static void h_wave_out_open(CPU *c)
 
     if (!d->fake && !wave_open_aaudio(d)) {
         d->fake = 1;
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
         fprintf(stderr, "[wave] AAudio unavailable; using timed silent sink\n");
+#endif
     }
     uint32_t gh = d->gh;
     wr32g(phwo, gh);
@@ -4715,7 +4775,11 @@ static void h_wave_out_write(CPU *c)
     if (start_now) {
         aaudio_result_t sr = AAudioStream_requestStart(start_stream);
         if (sr != AAUDIO_OK) {
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
             fprintf(stderr, "[wave] AAudio deferred start failed %d\n", (int)sr);
+#else
+            (void)sr;
+#endif
         } else {
             /* From here on the device clock, not wall-clock pump points,
              * paces the guest mixer. */

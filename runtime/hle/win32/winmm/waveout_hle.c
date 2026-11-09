@@ -47,6 +47,8 @@
  * The product default is STILL the as-built WINMM path.  WC3_AUDIO_V2_ENABLED
  * stays 0 until S5 (gate + sync-log + miles-state + blind A/B) passes on the
  * device; enabling an unmeasured architecture was the rev-4 regression.
+ * O-91: this file is compiled only in WC3_DEBUG.  The product fast binding of
+ * as-built rows lives in winmm_fast_bind.c and stays in release.
  *
  * runtime/legacy is never edited.  All guest memory access, HLE overrides and
  * the callback thread go through legacy_shim.h.  Diagnostics are gated by
@@ -59,6 +61,7 @@
 #include <string.h>
 
 #include "cpu.h"
+#include "direct_call.h"
 #include "legacy_shim.h"
 #include "platform.h"
 #include "wc3_debug.h"
@@ -107,6 +110,7 @@ typedef struct {
     uint32_t hdr;
     uint32_t ghwo, cb, inst, ev;
     uint64_t end_byte;      /* cumulative device byte that finishes this header */
+    wc3_lifted_fn cb_fn;    /* O-98: resolved once in waveOutOpen */
 } W2Pending;
 
 /* Only a partial platform write creates a spill.  The pump feeds the rest
@@ -119,12 +123,14 @@ typedef struct {
 
 typedef struct {
     uint32_t hdr, ghwo, cb, inst, ev;
+    wc3_lifted_fn cb_fn;    /* O-98: survives the pump -> callback mailbox */
 } W2Done;
 
 typedef struct {
     _Atomic int used;
     _Atomic int closing;
     uint32_t ghwo, cb, inst, ev;
+    wc3_lifted_fn cb_fn;    /* O-98: fixed callback target, resolved at open */
     int tag, channels, bits, rate;
     uint32_t src_align, out_align;
     uintptr_t stream;
@@ -330,8 +336,8 @@ unsigned long long wc3_hle_winmm_played_frames(void)
 /* stdcall arguments are pushed right-to-left; the lifted `ret` needs a
  * harmless return slot, so W2_DISPATCH_RETURN goes last.  Never called while
  * g_lock is held: dispatch() must not be reachable from a locked region. */
-static void w2_invoke(CPU *c, uint32_t target, const uint32_t *args,
-                      unsigned n)
+static void w2_invoke(CPU *c, uint32_t target, wc3_lifted_fn resolved,
+                      const uint32_t *args, unsigned n)
 {
     if (!c || !target || !args || !n) return;
     uint32_t esp = c->esp;
@@ -348,7 +354,12 @@ static void w2_invoke(CPU *c, uint32_t target, const uint32_t *args,
     if (ok && c->esp >= 4u && wc3_legacy_guest_ok(c->esp - 4u, 4u)) {
         c->esp -= 4u;
         wc3_legacy_wr32g(c->esp, W2_DISPATCH_RETURN);
-        dispatch(c, target);
+        /* O-98: the fixed target is normally resolved at open/set-time.  An
+         * HLE thunk or an unrecognised VA keeps the old dispatcher path. */
+        if (resolved)
+            wc3_dispatch_resolved(c, resolved);
+        else
+            dispatch(c, target);
     }
     c->esp = esp;
     c->ebx = ebx; c->esi = esi; c->edi = edi; c->ebp = ebp;
@@ -358,7 +369,7 @@ static void w2_invoke_proc(CPU *c, const W2Done *q)
 {
     if (!q->cb) return;                 /* CALLBACK_NULL / event-only */
     const uint32_t args[5] = { q->ghwo, W2_WOM_DONE, q->inst, q->hdr, 0u };
-    w2_invoke(c, q->cb, args, 5u);
+    w2_invoke(c, q->cb, q->cb_fn, args, 5u);
 }
 
 /* ---- S2: the winmm callback thread ----------------------------------- */
@@ -403,6 +414,7 @@ typedef struct {
     int used;
     uint32_t hwnd, id, elapse, callback;
     uint32_t owner_gid, due_ms;
+    wc3_lifted_fn callback_fn; /* O-98: resolved once in SetTimer */
 } W2Timer;
 static W2Timer g_timers[W2_TIMER_MAX];
 static uint32_t g_timer_next_id = 0xA000u;
@@ -436,7 +448,7 @@ static void w2_fire_timer(CPU *c, const W2Timer *t, uint32_t tick_ms)
     }
 #endif
     const uint32_t args[4] = { t->hwnd, W2_WM_TIMER, t->id, tick_ms };
-    w2_invoke(c, t->callback, args, 4u);
+    w2_invoke(c, t->callback, t->callback_fn, args, 4u);
 }
 
 static void w2_wall_tick(CPU *c)
@@ -478,7 +490,7 @@ static void w2_finish_locked(const W2Pending *p)
         f = (f & ~W2_WHDR_INQUEUE) | W2_WHDR_DONE | W2_WHDR_PREPARED;
         wc3_legacy_wr32g(p->hdr + 16u, f);
     }
-    W2Done q = { p->hdr, p->ghwo, p->cb, p->inst, p->ev };
+    W2Done q = { p->hdr, p->ghwo, p->cb, p->inst, p->ev, p->cb_fn };
     if (!w2_mail_push(&q)) atomic_fetch_add(&g_stat_overflow, 1u);
 }
 
@@ -621,6 +633,12 @@ static void h_w2_open(CPU *c)
         return;
     }
 
+    /* O-98: waveOutOpen fixes the callback address for the life of the
+     * device.  Resolve it once here; a NULL result keeps the normal
+     * dispatcher as the fallback for an HLE thunk or an unknown VA. */
+    wc3_lifted_fn cb_fn = (type == W2_CALLBACK_FUNCTION && cb)
+        ? wc3_dispatch_resolve(cb) : NULL;
+
     /* S2: the serialised winmm callback thread must exist before the first
      * completion can be published.  Created exactly once. */
     if (wc3_legacy_guest_callback_thread_start(w2_callback_body, NULL) != 0) {
@@ -644,6 +662,7 @@ static void h_w2_open(CPU *c)
     memset(d, 0, sizeof *d);
     d->ghwo = 0x000A0000u + (uint32_t)slot * 4u;
     d->cb = (type == W2_CALLBACK_FUNCTION) ? cb : 0u;
+    d->cb_fn = cb_fn;
     d->inst = inst;
     d->ev = (type == W2_CALLBACK_EVENT) ? (cb ? cb : inst) : 0u;
     d->tag = tag; d->channels = ch; d->bits = bits; d->rate = rate;
@@ -834,6 +853,7 @@ static void h_w2_write(CPU *c)
     meta.hdr = hdr;
     meta.ghwo = d->ghwo;
     meta.cb = d->cb;
+    meta.cb_fn = d->cb_fn;
     meta.inst = d->inst;
     meta.ev = d->ev;
     meta.end_byte = 0u;
@@ -980,6 +1000,11 @@ static void h_w2_set_timer(CPU *c)
     uint32_t gid = w2_gid(c);
     uint32_t now = w2_now_ms();
 
+    /* O-98: SetTimer fixes the callback for this timer slot.  Resolve it
+     * once, outside the bookkeeping lock; SetTimer with a new callback
+     * refreshes it. */
+    wc3_lifted_fn callback_fn = cb ? wc3_dispatch_resolve(cb) : NULL;
+
     w2_lock();
     W2Timer *t = NULL;
     if (id) {
@@ -1011,6 +1036,7 @@ static void h_w2_set_timer(CPU *c)
     }
     t->elapse = elapse;
     t->callback = cb;
+    t->callback_fn = callback_fn;
     t->due_ms = now + elapse;
     w2_unlock();
     c->eax = id;
@@ -1058,24 +1084,6 @@ static const W2Override g_overrides[] = {
     { "waveOutSetVolume",        h_w2_set_volume },
 };
 
-/* O-125: as-built WINMM rows that already have a real handler.  Fast-binding
- * keeps those handlers and their registered argc/cdecl_abi; it only fills
- * the dense fast registry.  timeGetTime is already bound by the M5 time
- * module. */
-static const char *const g_as_built_fast_rows[] = {
-    "waveOutGetNumDevs",
-    "waveOutGetDevCapsA",
-    "waveOutOpen",
-    "waveOutClose",
-    "waveOutPrepareHeader",
-    "waveOutUnprepareHeader",
-    "waveOutWrite",
-    "waveOutReset",
-    "waveOutGetID",
-    "waveOutGetVolume",
-    "waveOutSetVolume",
-};
-
 int wc3_hle_winmm_waveout_install(void)
 {
     static int installed = 0;
@@ -1096,17 +1104,8 @@ int wc3_hle_winmm_waveout_install(void)
 #endif
     if (!enable) {
         atomic_store(&g_enabled, 0);
-        for (unsigned i = 0;
-             i < sizeof g_as_built_fast_rows / sizeof g_as_built_fast_rows[0];
-             i++) {
-            if (wc3_legacy_hle_fast_bind("WINMM.dll",
-                                         g_as_built_fast_rows[i]) != 0) {
-#if WC3_DEBUG && WC3_DEBUG_HLE
-                fprintf(stderr, "[wave2] fast-bind missing WINMM row %s\n",
-                        g_as_built_fast_rows[i]);
-#endif
-            }
-        }
+        /* O-91: fast binding is product code in winmm_fast_bind.c and runs in
+         * every variant.  v2 does not duplicate it here. */
 #if WC3_DEBUG && WC3_DEBUG_AUDIO
         fprintf(stderr, "[wave2] disabled: as-built WINMM path; "
                         "rev 6 needs S5 device acceptance\n");

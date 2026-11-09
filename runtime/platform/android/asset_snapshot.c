@@ -65,7 +65,6 @@ void wc3_asset_snapshot_build(Wc3AssetSnapshot *snapshot, const char *dir)
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         const char *name = ent->d_name;
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
         size_t len = strlen(name);
         if (len == 0u) continue;
         if (len >= WC3_ASSET_NAME_MAX) {

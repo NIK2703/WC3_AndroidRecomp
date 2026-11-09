@@ -66,6 +66,16 @@ uint32_t wc3_legacy_get_last_error(void);
 int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
                        int cdecl_abi, void (*impl)(CPU *c));
 
+/* Bind an ordinal-only import row.  The as-built loader creates such a row
+ * with an empty name when the PE import has no name, then binds it by ordinal.
+ * A target module cannot address that row through wc3_legacy_hle_add(), whose
+ * key is the name; this call finds the existing empty-name row (or appends one
+ * before the import walk) and pins the handler and arity in place.  It is the
+ * ordinal counterpart of wc3_legacy_hle_override and must run before the first
+ * guest thread.  Returns 0 on success, -1 on a bad argument or a full registry. */
+int wc3_legacy_hle_bind_ordinal(const char *dll, uint16_t ordinal, int argc,
+                                int cdecl_abi, void (*impl)(CPU *c));
+
 /* Guest VA of a registry row, or 0 when the row is absent.  A row can be used
  * as a guest thread start address: dispatch() recognises the HLE window and
  * calls the registered handler with that thread's own CPU. */
