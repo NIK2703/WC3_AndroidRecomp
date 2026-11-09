@@ -285,6 +285,19 @@ static inline void wc3_voice_copy_locked(Wc3Voice *v, uint64_t frame_base,
     }
 }
 
+/* nfsu2 PcmVoice::published(): clear the stale window and count the publish
+ * only while playing.  Pre-filling a paused buffer must not make it look like
+ * a live streaming ring.  The caller holds `publishing`.  Clear stale BEFORE
+ * publishing the count so a render that observes the new count also observes
+ * the stale reset. */
+static inline void wc3_voice_published_locked(Wc3Voice *v)
+{
+    atomic_fetch_add_explicit(&v->stale_reset, 1u, memory_order_release);
+    atomic_store_explicit(&v->stale_frames, 0u, memory_order_release);
+    if (atomic_load_explicit(&v->playing, memory_order_acquire))
+        atomic_fetch_add_explicit(&v->publishes, 1u, memory_order_release);
+}
+
 /* Commit the copied regions.  One guest Unlock() is one publish even when the
  * locked range wraps the end of the buffer and physically touches two spans:
  * nfsu2's PcmVoice::published() is called once per Unlock. */
@@ -297,13 +310,7 @@ static inline void wc3_voice_commit_locked(Wc3Voice *v, uint64_t end_frame)
                                                   end_frame,
                                                   memory_order_release,
                                                   memory_order_relaxed)) {}
-    /* nfsu2 PcmVoice::published(): only a publish while playing counts toward
-     * streaming().  Pre-filling a paused buffer must not make it look like a
-     * live streaming ring. */
-    if (atomic_load_explicit(&v->playing, memory_order_acquire))
-        atomic_fetch_add_explicit(&v->publishes, 1u, memory_order_relaxed);
-    atomic_fetch_add_explicit(&v->stale_reset, 1u, memory_order_release);
-    atomic_store_explicit(&v->stale_frames, 0u, memory_order_release);
+    wc3_voice_published_locked(v);
     atomic_store_explicit(&v->publishing, 0, memory_order_release);
 }
 
@@ -368,6 +375,31 @@ static inline uint32_t wc3_voice_publish2(Wc3Voice *v,
     return bytes1 + bytes2;
 }
 
+/* nfsu2 PcmVoice::published() for a zero-byte Unlock: no PCM moves, but the
+ * stale window is cleared and, while playing, the publish count advances.
+ * Exactness matters because streaming() is `loop && publishes >= 4`. */
+static inline int wc3_voice_published(Wc3Voice *v)
+{
+    if (!v || atomic_load_explicit(&v->used, memory_order_acquire) != 1)
+        return -1;
+    /* published() is called under the nfsu2 mixer mutex.  Claim the same
+     * per-voice producer gate so it cannot interleave with a real publish or
+     * a reset; a concurrent Unlock on one buffer is not valid guest use. */
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &v->publishing, &expected, 1, memory_order_acq_rel,
+            memory_order_relaxed))
+        return -1;
+    if (atomic_load_explicit(&v->used, memory_order_acquire) != 1 ||
+        atomic_load_explicit(&v->resetting, memory_order_acquire)) {
+        atomic_store_explicit(&v->publishing, 0, memory_order_release);
+        return -1;
+    }
+    wc3_voice_published_locked(v);
+    atomic_store_explicit(&v->publishing, 0, memory_order_release);
+    return 0;
+}
+
 /* waveOutReset(): discard every queued/old sample without freeing or
  * reallocating the voice.  The caller must first set `resetting` (render skips
  * the voice), wait render_users()==0 and publishing==0, and keep the producer
@@ -376,6 +408,8 @@ static inline uint32_t wc3_voice_publish2(Wc3Voice *v,
 static inline int wc3_voice_reset(Wc3Voice *v)
 {
     if (!v || !v->pcm || !v->seq || v->frames == 0u) return -1;
+    /* voice_remove() may have marked the slot dying after our platform lookup. */
+    if (atomic_load_explicit(&v->used, memory_order_acquire) != 1) return -1;
     atomic_store_explicit(&v->playing, 0, memory_order_release);
     atomic_store_explicit(&v->published_frame, 0u, memory_order_release);
     atomic_store_explicit(&v->play_frame, 0u, memory_order_release);
@@ -433,15 +467,19 @@ static inline void wc3_voice_control(Wc3Voice *v, int playing, int loop,
                                      uint32_t frequency, int volume, int pan)
 {
     if (!v) return;
-    if (playing >= 0)
-        atomic_store_explicit(&v->playing, playing, memory_order_release);
-    if (loop >= 0)
-        atomic_store_explicit(&v->loop, loop, memory_order_release);
     if (playing == 1) {
-        /* nfsu2 Play(): a fresh start clears the stale counter. */
+        /* nfsu2 Play(): a fresh start clears the stale counter.  Publish the
+         * reset BEFORE playing=1 so a render that observes the new playing
+         * state also observes stale_source=0 (release/acquire pairing). */
         atomic_fetch_add_explicit(&v->stale_reset, 1u, memory_order_release);
         atomic_store_explicit(&v->stale_frames, 0u, memory_order_release);
     }
+    /* loop is visible before playing: a render that acquires playing==1 also
+     * sees the loop flag that belongs to this Play/Stop transition. */
+    if (loop >= 0)
+        atomic_store_explicit(&v->loop, loop, memory_order_release);
+    if (playing >= 0)
+        atomic_store_explicit(&v->playing, playing, memory_order_release);
     uint32_t freq = frequency ? frequency : v->rate;
     if (freq) atomic_store_explicit(&v->frequency, freq, memory_order_relaxed);
     if (volume > 0) volume = 0;
@@ -572,7 +610,8 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
 
         for (unsigned k = 0; k < nactive; k++) {
             Wc3Voice *v = &m->voices[active[k]];
-            if (atomic_load_explicit(&v->playing, memory_order_relaxed) == 0)
+            /* Acquire: Play publishes stale_reset and loop before playing. */
+            if (atomic_load_explicit(&v->playing, memory_order_acquire) == 0)
                 continue;
 
             uint32_t seek = atomic_load_explicit(&v->seek_serial,
@@ -583,6 +622,8 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
                     &v->seek_to, memory_order_relaxed);
                 v->stale_source = 0.0;
             }
+            uint32_t publishes = atomic_load_explicit(
+                &v->publishes, memory_order_acquire);
             uint32_t reset = atomic_load_explicit(&v->stale_reset,
                                                   memory_order_relaxed);
             if (reset != v->reset_seen) {
@@ -595,9 +636,7 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
                 &v->frequency, memory_order_relaxed);
             if (!frequency) frequency = v->rate;
             double step = (double)frequency / (double)m->rate;
-            int streaming = loop &&
-                atomic_load_explicit(&v->publishes,
-                                     memory_order_relaxed) >= 4u;
+            int streaming = loop && publishes >= 4u;
             int muted = streaming && v->stale_source >= (double)v->frames;
             float gl = wc3_bits_float(atomic_load_explicit(
                 &v->left_bits, memory_order_relaxed));
@@ -610,8 +649,6 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
                                           memory_order_release);
                     v->position = 0.0;
                     v->stale_source = 0.0;
-                    atomic_store_explicit(&v->play_frame, 0u,
-                                          memory_order_release);
                     break;
                 }
                 if (!muted) {
@@ -664,13 +701,29 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
                 if (!muted) v->stale_source += step;
             }
 
-            atomic_store_explicit(&v->play_frame, (uint64_t)v->position,
-                                  memory_order_release);
-            atomic_store_explicit(&v->stale_frames,
-                                  v->stale_source > 4294967295.0
-                                      ? 4294967295u
-                                      : (uint32_t)v->stale_source,
-                                  memory_order_relaxed);
+            uint32_t seek_after = atomic_load_explicit(&v->seek_serial,
+                                                       memory_order_acquire);
+            if (seek_after == v->seek_seen) {
+                atomic_store_explicit(&v->play_frame, (uint64_t)v->position,
+                                      memory_order_release);
+                /* A seek that landed between the check and the store must not
+                 * be lost: put its target (the latest one) back.  The next
+                 * chunk applies it to the mixer position. */
+                if (atomic_load_explicit(&v->seek_serial,
+                                         memory_order_acquire) != v->seek_seen)
+                    atomic_store_explicit(
+                        &v->play_frame,
+                        atomic_load_explicit(&v->seek_to,
+                                             memory_order_relaxed),
+                        memory_order_release);
+            }
+            if (atomic_load_explicit(&v->stale_reset,
+                                     memory_order_relaxed) == v->reset_seen)
+                atomic_store_explicit(&v->stale_frames,
+                                      v->stale_source > 4294967295.0
+                                          ? 4294967295u
+                                          : (uint32_t)v->stale_source,
+                                      memory_order_relaxed);
         }
 
         for (uint32_t f = 0; f < n; f++) {

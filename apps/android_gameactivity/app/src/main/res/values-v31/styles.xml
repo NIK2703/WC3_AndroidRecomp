@@ -17,7 +17,6 @@
     <!-- API 31+ draws a splash window.  Keep it in the same warm-black palette
          instead of the default application icon flash. -->
     <style name="Wc3LaunchTheme" parent="Wc3LaunchTheme.Base">
-        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
         <item name="android:windowSplashScreenBackground">@color/launch_bg</item>
         <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launch_mark</item>
         <item name="android:windowSplashScreenIconBackgroundColor">@color/launch_panel</item>

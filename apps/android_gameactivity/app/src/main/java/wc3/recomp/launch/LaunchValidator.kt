@@ -188,7 +188,11 @@ object LaunchValidator {
     }
 
     private fun hasCommonFiles(dir: File): Boolean =
-        COMMON_FILES.all { findFile(dir, it) != null }
+        dir.isDirectory &&
+            dir.canRead() &&
+            dir.canExecute() &&
+            dir.canWrite() &&
+            COMMON_FILES.all { findFile(dir, it) != null }
 
     private fun findFile(dir: File, name: String): File? =
         File(dir, name).takeIf { it.isFile }

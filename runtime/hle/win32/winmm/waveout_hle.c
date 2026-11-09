@@ -979,6 +979,19 @@ static void h_w2_write(CPU *c)
         } else {
             frame_base = d->written_bytes / d->out_align;
         }
+        /* waveOutReset() left the voice paused.  Seek and mark it playing
+         * BEFORE publishing: PcmVoice::published() counts a publish only
+         * while playing, and the stale-mute threshold must include this first
+         * post-reset Unlock.  Seeking first also prevents a callback that
+         * starts during publish from being dragged back to frame 0 later. */
+        if (first_after_reset && d->voice) {
+            if (d->audio->voice_seek)
+                (void)d->audio->voice_seek(d->audio->ctx, d->voice,
+                                           frame_base);
+            if (d->audio->voice_control)
+                (void)d->audio->voice_control(d->audio->ctx, d->voice, 1, 1,
+                                              (uint32_t)d->rate, 0, 0);
+        }
         uint32_t accepted = 0;
         int rc;
         if (d->voice && d->audio->voice_publish)
@@ -993,18 +1006,7 @@ static void h_w2_write(CPU *c)
             c->eax = W2_MMSYSERR_NOMEM;
             return;
         }
-        if (first_after_reset) {
-            if (d->voice) {
-                if (d->audio->voice_seek)
-                    (void)d->audio->voice_seek(d->audio->ctx, d->voice,
-                                               frame_base);
-                if (d->audio->voice_control)
-                    (void)d->audio->voice_control(d->audio->ctx, d->voice,
-                                                  1, 1, (uint32_t)d->rate,
-                                                  0, 0);
-            }
-            d->reset_pending = 0;
-        }
+        if (first_after_reset) d->reset_pending = 0;
         d->written_bytes += need;
         d->next_frame = frame_base + nframes;
         meta.end_byte = d->written_bytes;

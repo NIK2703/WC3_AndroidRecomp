@@ -1,6 +1,7 @@
 package wc3.recomp
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -8,19 +9,23 @@ import android.os.Bundle
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.DisplayMetrics
 import android.view.View
-import android.view.WindowManager
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
-import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import wc3.recomp.launch.GameFolderPicker
 import wc3.recomp.launch.GameMode
 import wc3.recomp.launch.LaunchContract
 import wc3.recomp.launch.LaunchCoordinator
@@ -37,18 +42,9 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var mode: GameMode
     private lateinit var store: LaunchSettingsStore
 
-    private lateinit var modeIcon: ImageView
-    private lateinit var modeTitle: TextView
-    private lateinit var modeState: TextView
-
     private lateinit var folderInput: EditText
     private lateinit var folderStatus: TextView
-    private lateinit var widthInput: EditText
-    private lateinit var heightInput: EditText
-    private lateinit var nativeChip: TextView
-    private lateinit var chip720: TextView
-    private lateinit var chip900: TextView
-    private lateinit var chip1080: TextView
+    private lateinit var resolutionSpinner: Spinner
     private lateinit var soundSwitch: SwitchCompat
     private lateinit var argsInput: EditText
     private lateinit var latencyInput: EditText
@@ -56,23 +52,29 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var errorBanner: LinearLayout
     private lateinit var errorText: TextView
     private lateinit var grantButton: Button
-    private lateinit var resetButton: Button
-    private lateinit var doneButton: Button
     private lateinit var playButton: Button
 
+    private var resolutionOptions: List<ResolutionOption> = emptyList()
     private var binding = false
+    private var storageRequested = false
+
+    private val folderPicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) usePickedFolder(uri)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         mode = GameMode.fromId(intent?.getStringExtra(LaunchContract.EXTRA_MODE))
             ?: GameMode.TFT
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_launch_settings)
-        applyDisplayCutoutMode()
 
         store = LaunchSettingsStore(this)
+        val settings = store.load(mode)
+        resolutionOptions = buildResolutionOptions(settings)
         bindViews()
-        bindMode()
-        bindSettings(store.load(mode))
+        bindSettings(settings)
         wireListeners()
         refreshValidation()
     }
@@ -84,7 +86,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
             ?: return
         if (nextMode != mode) {
             mode = nextMode
-            bindMode()
             refreshValidation()
         }
     }
@@ -105,22 +106,16 @@ class LaunchSettingsActivity : AppCompatActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_STORAGE) refreshValidation()
+        if (requestCode == REQUEST_STORAGE) {
+            storageRequested = true
+            refreshValidation()
+        }
     }
 
     private fun bindViews() {
-        modeIcon = findViewById(R.id.mode_icon)
-        modeTitle = findViewById(R.id.mode_title)
-        modeState = findViewById(R.id.mode_state)
-
         folderInput = findViewById(R.id.folder_input)
         folderStatus = findViewById(R.id.folder_status)
-        widthInput = findViewById(R.id.width_input)
-        heightInput = findViewById(R.id.height_input)
-        nativeChip = findViewById(R.id.preset_native)
-        chip720 = findViewById(R.id.preset_720)
-        chip900 = findViewById(R.id.preset_900)
-        chip1080 = findViewById(R.id.preset_1080)
+        resolutionSpinner = findViewById(R.id.resolution_spinner)
         soundSwitch = findViewById(R.id.sound_switch)
         argsInput = findViewById(R.id.args_input)
         latencyInput = findViewById(R.id.latency_input)
@@ -128,25 +123,29 @@ class LaunchSettingsActivity : AppCompatActivity() {
         errorBanner = findViewById(R.id.error_banner)
         errorText = findViewById(R.id.error_text)
         grantButton = findViewById(R.id.grant_button)
-        resetButton = findViewById(R.id.reset_button)
-        doneButton = findViewById(R.id.done_button)
         playButton = findViewById(R.id.play_button)
-    }
 
-    private fun bindMode() {
-        modeIcon.setImageResource(mode.iconRes)
-        modeIcon.contentDescription = getString(
-            R.string.cd_mode_icon,
-            getString(mode.titleRes)
-        )
-        modeTitle.setText(mode.titleRes)
+        resolutionSpinner.adapter = ArrayAdapter(
+            this,
+            R.layout.item_resolution,
+            resolutionOptions.map { it.label }
+        ).apply {
+            setDropDownViewResource(R.layout.item_resolution_dropdown)
+        }
     }
 
     private fun bindSettings(settings: LaunchSettings) {
         binding = true
         folderInput.setText(settings.gameDir)
-        widthInput.setText(if (settings.width > 0) settings.width.toString() else "")
-        heightInput.setText(if (settings.height > 0) settings.height.toString() else "")
+
+        val resolutionIndex = resolutionOptions.indexOfFirst {
+            it.width == settings.width && it.height == settings.height
+        }
+        resolutionSpinner.setSelection(
+            if (resolutionIndex >= 0) resolutionIndex else resolutionOptions.lastIndex,
+            false
+        )
+
         soundSwitch.isChecked = settings.sound
         argsInput.setText(settings.extraArgs)
         latencyInput.setText(
@@ -157,14 +156,10 @@ class LaunchSettingsActivity : AppCompatActivity() {
 
     private fun wireListeners() {
         folderInput.afterTextChanged { if (!binding) refreshValidation() }
-        widthInput.afterTextChanged { if (!binding) refreshValidation() }
-        heightInput.afterTextChanged { if (!binding) refreshValidation() }
         argsInput.afterTextChanged { if (!binding) refreshValidation() }
         latencyInput.afterTextChanged { if (!binding) refreshValidation() }
 
         folderInput.setOnFocusChangeListener { _, focused -> if (!focused) saveIfValid() }
-        widthInput.setOnFocusChangeListener { _, focused -> if (!focused) saveIfValid() }
-        heightInput.setOnFocusChangeListener { _, focused -> if (!focused) saveIfValid() }
         argsInput.setOnFocusChangeListener { _, focused -> if (!focused) saveIfValid() }
         latencyInput.setOnFocusChangeListener { _, focused -> if (!focused) saveIfValid() }
 
@@ -175,21 +170,121 @@ class LaunchSettingsActivity : AppCompatActivity() {
             }
         }
 
-        nativeChip.setOnClickListener { setResolution(0, 0) }
-        chip720.setOnClickListener { setResolution(1280, 720) }
-        chip900.setOnClickListener { setResolution(1600, 900) }
-        chip1080.setOnClickListener { setResolution(1920, 1080) }
+        resolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) {
+                if (!binding) {
+                    refreshValidation()
+                    saveIfValid()
+                }
+            }
 
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        findViewById<Button>(R.id.choose_folder_button).setOnClickListener { pickFolder() }
         findViewById<Button>(R.id.find_folder_button).setOnClickListener { findFolder() }
+        findViewById<Button>(R.id.reset_button).setOnClickListener { confirmReset() }
+        findViewById<Button>(R.id.done_button).setOnClickListener { finishWithSave(false) }
         grantButton.setOnClickListener { requestStoragePermission() }
-        resetButton.setOnClickListener { confirmReset() }
-        doneButton.setOnClickListener { finishWithSave(false) }
         playButton.setOnClickListener { finishWithSave(true) }
     }
 
-    private fun setResolution(width: Int, height: Int) {
-        widthInput.setText(if (width > 0) width.toString() else "")
-        heightInput.setText(if (height > 0) height.toString() else "")
+    private fun buildResolutionOptions(settings: LaunchSettings): List<ResolutionOption> {
+        val (screenWidth, screenHeight) = nativeScreenSize()
+        val options = mutableListOf<ResolutionOption>()
+
+        var height = MIN_RESOLUTION_HEIGHT
+        while (height < screenHeight) {
+            val width = widthForHeight(height, screenWidth, screenHeight)
+            if (width in LaunchValidator.MIN_WIDTH..LaunchValidator.MAX_WIDTH &&
+                height in LaunchValidator.MIN_HEIGHT..LaunchValidator.MAX_HEIGHT
+            ) {
+                options += ResolutionOption(
+                    width = width,
+                    height = height,
+                    label = getString(R.string.launch_resolution_option, width, height)
+                )
+            }
+            height += RESOLUTION_HEIGHT_STEP
+        }
+
+        // Preserve a resolution saved by an older build that is not on the
+        // current grid.  The native entry below already covers a saved value
+        // that happens to equal the screen size.
+        val savedExplicit = settings.width > 0 && settings.height > 0 &&
+            (settings.width != screenWidth || settings.height != screenHeight)
+        if (savedExplicit &&
+            options.none { it.width == settings.width && it.height == settings.height }
+        ) {
+            options += ResolutionOption(
+                width = settings.width,
+                height = settings.height,
+                label = getString(
+                    R.string.launch_resolution_option,
+                    settings.width,
+                    settings.height
+                )
+            )
+        }
+
+        options += ResolutionOption(
+            width = 0,
+            height = 0,
+            label = getString(
+                R.string.launch_resolution_native,
+                screenWidth,
+                screenHeight
+            )
+        )
+        return options
+    }
+
+    @Suppress("DEPRECATION")
+    private fun nativeScreenSize(): Pair<Int, Int> {
+        val metrics = DisplayMetrics()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.getRealMetrics(metrics)
+        } else {
+            windowManager.defaultDisplay.getRealMetrics(metrics)
+        }
+
+        var width = metrics.widthPixels
+        var height = metrics.heightPixels
+        if (width <= 0 || height <= 0) {
+            val fallback = resources.displayMetrics
+            width = fallback.widthPixels
+            height = fallback.heightPixels
+        }
+        if (width <= 0 || height <= 0) return DEFAULT_SCREEN_WIDTH to DEFAULT_SCREEN_HEIGHT
+        return maxOf(width, height) to minOf(width, height)
+    }
+
+    private fun widthForHeight(height: Int, screenWidth: Int, screenHeight: Int): Int {
+        if (screenHeight <= 0) return height
+        return ((height.toLong() * screenWidth + screenHeight / 2) / screenHeight).toInt()
+    }
+
+    private fun pickFolder() {
+        try {
+            folderPicker.launch(null)
+        } catch (ignored: ActivityNotFoundException) {
+            Toast.makeText(this, R.string.launch_folder_picker_missing, Toast.LENGTH_LONG)
+                .show()
+        }
+    }
+
+    private fun usePickedFolder(uri: Uri) {
+        val folder = GameFolderPicker.resolveTree(this, uri)
+        if (folder == null) {
+            Toast.makeText(this, R.string.launch_folder_unsupported, Toast.LENGTH_LONG).show()
+            return
+        }
+        folderInput.setText(folder.absolutePath)
         refreshValidation()
         saveIfValid()
     }
@@ -228,7 +323,9 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private fun resetForm() {
         val defaults = LaunchSettings(mode)
         bindSettings(defaults)
-        store.save(defaults)
+        if (!store.save(defaults)) {
+            Toast.makeText(this, R.string.launch_error_save, Toast.LENGTH_LONG).show()
+        }
         refreshValidation()
     }
 
@@ -267,7 +364,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
 
     private fun refreshValidation() {
         val settings = readForm()
-        updateChipSelection(settings.width, settings.height)
         updateFolderStatus(settings)
 
         when (val result = LaunchValidator.validate(this, settings)) {
@@ -287,13 +383,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateChipSelection(width: Int, height: Int) {
-        nativeChip.isSelected = width == 0 && height == 0
-        chip720.isSelected = width == 1280 && height == 720
-        chip900.isSelected = width == 1600 && height == 900
-        chip1080.isSelected = width == 1920 && height == 1080
-    }
-
     private fun updateFolderStatus(settings: LaunchSettings) {
         val folderSettings = settings.copy(
             width = 0,
@@ -304,46 +393,41 @@ class LaunchSettingsActivity : AppCompatActivity() {
         when (val folderResult = LaunchValidator.validate(this, folderSettings)) {
             is LaunchValidator.Result.Ok -> {
                 val folder = LaunchValidator.resolveGameDir(this, settings)
-                setStatus(
-                    getString(R.string.launch_status_ok, folder.absolutePath),
-                    getString(R.string.launch_status_ready),
-                    R.color.launch_ok
-                )
+                folderStatus.text = getString(R.string.launch_status_ok, folder.absolutePath)
+                folderStatus.setTextColor(ContextCompat.getColor(this, R.color.launch_ok))
             }
             is LaunchValidator.Result.Error -> {
-                val statusRes = if (folderResult.kind == LaunchValidator.Kind.PERMISSION) {
-                    R.string.launch_status_permission
-                } else {
-                    R.string.launch_status_missing
+                val statusRes = when (folderResult.kind) {
+                    LaunchValidator.Kind.PERMISSION -> R.string.launch_status_permission
+                    LaunchValidator.Kind.WRITABLE -> R.string.launch_status_unavailable
+                    else -> R.string.launch_status_missing
                 }
-                val text = getString(statusRes)
                 val color = if (folderResult.kind == LaunchValidator.Kind.PERMISSION) {
                     R.color.launch_warning
                 } else {
                     R.color.launch_error
                 }
-                setStatus(text, text, color)
+                folderStatus.setText(statusRes)
+                folderStatus.setTextColor(ContextCompat.getColor(this, color))
             }
         }
     }
 
-    private fun setStatus(folderText: String, modeText: String, colorRes: Int) {
-        val color = ContextCompat.getColor(this, colorRes)
-        folderStatus.text = folderText
-        folderStatus.setTextColor(color)
-        modeState.text = modeText
-        modeState.setTextColor(color)
-    }
+    private fun readForm(): LaunchSettings {
+        val resolution = resolutionOptions.getOrNull(resolutionSpinner.selectedItemPosition)
+            ?: resolutionOptions.lastOrNull()
+            ?: ResolutionOption(0, 0, "")
 
-    private fun readForm(): LaunchSettings = LaunchSettings(
-        mode = mode,
-        gameDir = folderInput.text.toString().trim(),
-        width = readNumber(widthInput),
-        height = readNumber(heightInput),
-        sound = soundSwitch.isChecked,
-        extraArgs = argsInput.text.toString().trim(),
-        audioLatencyMs = readNumber(latencyInput)
-    )
+        return LaunchSettings(
+            mode = mode,
+            gameDir = folderInput.text.toString().trim(),
+            width = resolution.width,
+            height = resolution.height,
+            sound = soundSwitch.isChecked,
+            extraArgs = argsInput.text.toString().trim(),
+            audioLatencyMs = readNumber(latencyInput)
+        )
+    }
 
     private fun readNumber(input: EditText): Int {
         val text = input.text.toString().trim()
@@ -362,24 +446,39 @@ class LaunchSettingsActivity : AppCompatActivity() {
             } catch (ignored: Exception) {
                 startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             }
-        } else {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(
-                    Manifest.permission.READ_EXTERNAL_STORAGE,
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE
-                ),
-                REQUEST_STORAGE
-            )
+            return
         }
-    }
 
-    private fun applyDisplayCutoutMode() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
-        val attributes = window.attributes
-        attributes.layoutInDisplayCutoutMode =
-            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        window.attributes = attributes
+        if (storageRequested &&
+            !ActivityCompat.shouldShowRequestPermissionRationale(
+                this,
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            )
+        ) {
+            // The second denial can be permanent; the system dialog will no
+            // longer appear, so send the user to the app's permission page.
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            } catch (ignored: Exception) {
+                // No settings activity on this device; the status stays visible.
+            }
+            return
+        }
+
+        storageRequested = true
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ),
+            REQUEST_STORAGE
+        )
     }
 
     private fun EditText.afterTextChanged(block: () -> Unit) {
@@ -402,7 +501,17 @@ class LaunchSettingsActivity : AppCompatActivity() {
         })
     }
 
+    private data class ResolutionOption(
+        val width: Int,
+        val height: Int,
+        val label: String
+    )
+
     private companion object {
         const val REQUEST_STORAGE = 4101
+        const val MIN_RESOLUTION_HEIGHT = 360
+        const val RESOLUTION_HEIGHT_STEP = 180
+        const val DEFAULT_SCREEN_WIDTH = 1280
+        const val DEFAULT_SCREEN_HEIGHT = 720
     }
 }

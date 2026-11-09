@@ -241,6 +241,11 @@ $gradleCache = Join-Path $outDir 'gradle-cache'
 $aapt2 = Join-Path $buildTools 'aapt2.exe'
 $gradleTask = 'assemble' + $variant.Substring(0, 1).ToUpper() +
     $variant.Substring(1)
+# Always repackage from a clean Gradle build directory.  AGP/zipflinger
+# incremental packaging keeps old entry offsets when the 153 MiB native
+# library changes; repeated builds then leave unreferenced holes inside the
+# APK (observed: 774 MiB file for 171 MiB of live entries).  Cleaning only the
+# Gradle output keeps the native CMake build and ccache intact.
 $gradleArgs = @(
     '--offline',
     '--no-daemon',
@@ -251,6 +256,7 @@ $gradleArgs = @(
     "-Pwc3JniLibs=$jniRoot",
     "-Pwc3LocalMaven=$localMaven",
     "-Pandroid.aapt2FromMavenOverride=$aapt2",
+    ':app:clean',
     $gradleTask
 )
 Write-Host "[apk] gradle  $gradle"
@@ -296,7 +302,19 @@ try {
         }
         Write-Host "[apk] lib     $($entry.FullName) ($($entry.Length) bytes, stored)"
     }
-    Write-Host "[apk] apk     $final ($((Get-Item $final).Length) bytes)"
+    # A clean package has only local/central-directory headers and the APK
+    # signing block outside the entry payload.  Reject the 600+ MiB holes that
+    # incremental zipflinger packaging used to leave behind.
+    $liveBytes = [int64](($zip.Entries |
+        Measure-Object -Property CompressedLength -Sum).Sum)
+    $containerBytes = (Get-Item $final).Length
+    $overhead = $containerBytes - $liveBytes
+    Write-Host "[apk] zip     live=$liveBytes container=$containerBytes overhead=$overhead"
+    if ($overhead -gt 8MB) {
+        Write-Host "[apk] APK contains $overhead bytes of unreferenced padding; stale incremental package rejected"
+        exit 1
+    }
+    Write-Host "[apk] apk     $final ($containerBytes bytes)"
 } finally {
     $zip.Dispose()
 }

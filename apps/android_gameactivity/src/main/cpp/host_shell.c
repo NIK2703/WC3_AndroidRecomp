@@ -253,7 +253,7 @@ static void set_activity_text(struct android_app *app, const char *text)
 
 static char g_data_dir[1024];
 static char g_state_dir[1024];
-/* Set by Wc3RocActivity/Wc3TftActivity before GameActivity starts android_main. */
+/* Wc3RocActivity overrides the default before GameActivity starts android_main. */
 static char g_game_mode[8] = "tft";
 
 #define SHARED_DATA_DIR_NAME "Warcraft 3"
@@ -968,13 +968,15 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     if (user_args && user_args[0])
         snprintf(args, sizeof args, "%s", user_args);
     if (!sound && !has_arg_token(args, "-nosound")) {
+        static const char token[] = "-nosound";
         size_t len = strlen(args);
-        if (len > 0 && len + 1 < sizeof args) {
+        const size_t token_len = sizeof token - 1u;
+        if (len > 0 && len + 1u + token_len < sizeof args) {
             args[len++] = ' ';
             args[len] = '\0';
         }
-        if (len + 1 < sizeof args)
-            snprintf(args + len, sizeof args - len, "%s", "-nosound");
+        if (len + token_len < sizeof args)
+            snprintf(args + len, sizeof args - len, "%s", token);
     }
     if (args[0])
         setenv("WC3_ARGS", args, 1);

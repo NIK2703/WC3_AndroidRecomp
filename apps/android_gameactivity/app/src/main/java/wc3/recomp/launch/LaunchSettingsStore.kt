@@ -13,11 +13,11 @@ class LaunchSettingsStore(context: Context) {
 
     fun load(mode: GameMode): LaunchSettings = LaunchSettings(
         mode = mode,
-        gameDir = prefs.getString(KEY_GAME_DIR, "").orEmpty(),
+        gameDir = prefs.getString(KEY_GAME_DIR, "").orEmpty().trim(),
         width = prefs.getInt(KEY_WIDTH, 0),
         height = prefs.getInt(KEY_HEIGHT, 0),
         sound = prefs.getBoolean(KEY_SOUND, true),
-        extraArgs = prefs.getString(KEY_EXTRA_ARGS, "").orEmpty(),
+        extraArgs = prefs.getString(KEY_EXTRA_ARGS, "").orEmpty().trim(),
         audioLatencyMs = prefs.getInt(KEY_AUDIO_LATENCY_MS, 0)
     )
 

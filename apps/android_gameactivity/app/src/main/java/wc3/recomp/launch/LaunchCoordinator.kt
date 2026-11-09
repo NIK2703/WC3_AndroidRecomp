@@ -11,9 +11,15 @@ object LaunchCoordinator {
      * of being recreated with the new settings.
      */
     fun startGame(context: Context, settings: LaunchSettings) {
+        // Resolve an empty "auto" folder here so the host gets the exact
+        // directory that was validated.  This also lets the host recognize an
+        // app-private folder and skip the All files access prompt.
+        val launchSettings = settings.copy(
+            gameDir = LaunchValidator.resolveGameDir(context, settings).absolutePath
+        )
         val intent = Intent(context, settings.mode.hostClass).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            putExtra(LaunchContract.EXTRA_LAUNCH, settings.toBundle())
+            putExtra(LaunchContract.EXTRA_LAUNCH, launchSettings.toBundle())
         }
         context.startActivity(intent)
     }

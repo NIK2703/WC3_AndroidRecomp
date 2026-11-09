@@ -2150,7 +2150,8 @@ static int32_t audio_frames_for_ms(AAudioStream *stream, int32_t rate,
     return want;
 }
 
-static AAudioStream *audio_create_stream(AndroidAudioStream *st)
+static AAudioStream *audio_create_stream(AndroidAudioStream *st,
+                                         int allow_float)
 {
     static const aaudio_performance_mode_t modes[] = {
         AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
@@ -2164,7 +2165,8 @@ static AAudioStream *audio_create_stream(AndroidAudioStream *st)
     };
     const int32_t rate = (int32_t)st->sample_rate;
 
-    for (size_t f = 0; f < sizeof formats / sizeof formats[0]; f++) {
+    for (size_t f = allow_float ? 0u : 1u;
+         f < sizeof formats / sizeof formats[0]; f++) {
       for (size_t m = 0; m < sizeof modes / sizeof modes[0]; m++) {
         AAudioStreamBuilder *builder = NULL;
         aaudio_result_t result = AAudio_createStreamBuilder(&builder);
@@ -2199,6 +2201,13 @@ static AAudioStream *audio_create_stream(AndroidAudioStream *st)
 
         int32_t actual = AAudioStream_getSampleRate(stream);
         if (actual <= 0) actual = rate;
+        int32_t actual_ch = AAudioStream_getChannelCount(stream);
+        if (actual_ch > 0 && actual_ch != (int32_t)st->channels) {
+            AUDIO_LOG("AAudio changed channels %d -> %d",
+                      (int)st->channels, (int)actual_ch);
+            AAudioStream_close(stream);
+            continue;
+        }
         /* LOW_LATENCY streams on MediaTek/Unisoc cap capacity at two bursts,
          * which is too small for the measured 50 ms guest buffers.  Fall back
          * to a normal-latency stream instead of shipping a starving sink. */
@@ -2308,7 +2317,7 @@ static void *audio_supervisor(void *arg)
         unsigned shift = failures < 4u ? failures : 4u;
         if (audio_sleep_interruptible(st, 50u << shift) != 0) break;
 
-        AAudioStream *fresh = audio_create_stream(st);
+        AAudioStream *fresh = audio_create_stream(st, st->primary_voice != 0u);
         if (fresh) {
             pthread_mutex_lock(&st->lifecycle);
             if (atomic_load_explicit(&st->closing, memory_order_acquire)) {
@@ -2429,7 +2438,7 @@ static int android_audio_open(void *ctx, uint32_t sample_rate,
         return -1;
     }
 
-    AAudioStream *stream = audio_create_stream(st);
+    AAudioStream *stream = audio_create_stream(st, 1);
     if (!stream) {
         sem_destroy(&st->wake);
         pthread_mutex_destroy(&st->lifecycle);
@@ -2452,6 +2461,30 @@ static int android_audio_open(void *ctx, uint32_t sample_rate,
                                 WC3_PULL_RING_BYTES,
                                 &st->primary_voice) != 0) {
         st->primary_voice = 0;
+    }
+
+    /* The byte-exact pull fallback writes PCM_I16.  If the voice mixer could
+     * not be created (allocation failure), do not hand that fallback a float
+     * AAudio buffer: reopen the still-unstarted stream in I16.  The mixer path
+     * keeps PCM_FLOAT whenever a primary voice exists. */
+    if (!st->primary_voice && st->float_output) {
+        (void)AAudioStream_requestStop(stream);
+        (void)AAudioStream_close(stream);
+        st->stream = NULL;
+        stream = audio_create_stream(st, 0);
+        if (!stream) {
+            sem_destroy(&st->wake);
+            pthread_mutex_destroy(&st->lifecycle);
+            android_audio_unregister_stream(st);
+            for (unsigned i = 0; i < WC3_MIXER_VOICES; i++)
+                free(st->voice_pcm[i]);
+            wc3_mixer_deinit(&st->mixer);
+            free(st->pull_pcm);
+            free(st->ring);
+            free(st);
+            return -1;
+        }
+        st->stream = stream;
     }
 
     if (pthread_create(&st->supervisor, NULL, audio_supervisor, st) != 0) {
@@ -2631,6 +2664,8 @@ static int android_audio_voice_remove(void *ctx, uintptr_t voice)
     android_audio_wait_render_idle(&st->mixer);
     while (atomic_load_explicit(&v->publishing, memory_order_acquire) != 0)
         android_poll_pause();
+    while (atomic_load_explicit(&v->resetting, memory_order_acquire) != 0)
+        android_poll_pause();
     wc3_mixer_voice_release(v);
     free(st->voice_pcm[(size_t)local - 1u]);
     st->voice_pcm[(size_t)local - 1u] = NULL;
@@ -2695,6 +2730,28 @@ static int android_audio_voice_publish2(void *ctx, uintptr_t voice,
     if (written) *written = got;
     atomic_store_explicit(&st->pull_mode, 1, memory_order_release);
     android_audio_ensure_started(st);
+    return 0;
+}
+
+static int android_audio_voice_published(void *ctx, uintptr_t voice)
+{
+    (void)ctx;
+    AndroidAudioStream *st = NULL;
+    uintptr_t local = 0;
+    Wc3Voice *v = android_audio_voice(voice, &st, &local);
+    if (!v) return -1;
+    int rc = wc3_voice_published(v);
+    if (rc != 0) return rc;
+    uint64_t now = android_monotonic_ns(NULL);
+    uint64_t last = st->voice_last_publish_ns[(size_t)local - 1u];
+    if (last && now > last) {
+        uint64_t gap = now - last;
+        if (gap > st->voice_max_gap_ns[(size_t)local - 1u])
+            st->voice_max_gap_ns[(size_t)local - 1u] = gap;
+    }
+    st->voice_last_publish_ns[(size_t)local - 1u] = now;
+    /* A zero-byte Unlock carries no PCM, so it must not start the device on
+     * its own; the first real publish does that. */
     return 0;
 }
 
@@ -2831,6 +2888,9 @@ static uintptr_t android_audio_primary_voice(void *ctx, uintptr_t handle)
 {
     (void)ctx;
     AndroidAudioStream *st = (AndroidAudioStream *)handle;
+    /* DirectSoundCreate has no WINMM stream handle; use the same first
+     * registered stream fallback as voice_add(). */
+    if (!st) st = g_audio_streams[0];
     return st ? st->primary_voice : 0u;
 }
 
@@ -3042,6 +3102,7 @@ int wc3_android_platform_init(Wc3Platform *platform)
     platform->audio.voice_device_rate = android_audio_voice_device_rate;
     platform->audio.voice_publish2 = android_audio_voice_publish2;
     platform->audio.voice_reset = android_audio_voice_reset;
+    platform->audio.voice_published = android_audio_voice_published;
 
     platform->log.ctx = NULL;
     platform->log.write = android_log_write;

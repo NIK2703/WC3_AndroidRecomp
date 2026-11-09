@@ -1,29 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Russian settings UI.  The project brand and the two game titles are
-         product names and stay in values/strings.xml; version, package and
-         protocol values are non-translatable there as well. -->
+         product names and stay in values/strings.xml. -->
     <string name="launch_title">Настройки запуска</string>
     <string name="launch_subtitle">Изменения применяются при следующем запуске игры.</string>
-    <string name="launch_shortcut_hint">Экран открывается только по долгому нажатию на иконку.</string>
-    <string name="launch_section_status">СОСТОЯНИЕ</string>
-    <string name="launch_section_advanced">ДОПОЛНИТЕЛЬНО</string>
 
     <string name="launch_folder_label">Каталог игры</string>
-    <string name="launch_folder_help">Папка с war3.exe, game.dll и war3.mpq.</string>
+    <string name="launch_folder_help">Папка с war3.exe, game.dll и war3.mpq. Выберите её системным проводником или введите путь.</string>
+    <string name="launch_folder_choose">Выбрать</string>
     <string name="launch_folder_find">Найти</string>
 
     <string name="launch_resolution_label">Разрешение</string>
-    <string name="launch_resolution_help">Внутреннее разрешение игры. 0 × 0 — как на экране.</string>
-    <string name="launch_width_hint">Ширина</string>
-    <string name="launch_height_hint">Высота</string>
-    <string name="launch_preset_native">Нативно</string>
+    <string name="launch_resolution_help">Высота — от 360 с шагом 180 до высоты экрана; ширина подбирается по соотношению сторон экрана.</string>
+    <string name="launch_resolution_native">Нативное — %1$d × %2$d</string>
 
     <string name="launch_sound_label">Звук</string>
-    <string name="launch_sound_help">Выключение добавляет -nosound в командную строку игры.</string>
 
-    <string name="launch_args_label">Аргументы</string>
-    <string name="launch_args_help">Дополнительные ключи war3.exe. Только для диагностики.</string>
+    <string name="launch_args_label">Дополнительные аргументы</string>
 
     <string name="launch_latency_label">Задержка звука</string>
     <string name="launch_latency_help">0 — авто. Экспериментальное переопределение буфера AAudio, 0–500 мс.</string>
@@ -35,31 +28,31 @@
     <string name="launch_reset_title">Сбросить настройки запуска?</string>
     <string name="launch_reset_message">Все параметры запуска вернутся к значениям по умолчанию.</string>
     <string name="launch_reset_confirm">Сбросить</string>
-    <string name="launch_grant">Разрешить доступ</string>
+    <string name="launch_grant">Разрешить</string>
 
     <string name="launch_status_ok">Готово: %1$s</string>
-    <string name="launch_status_ready">Готово</string>
     <string name="launch_status_missing">Не найдено</string>
     <string name="launch_status_permission">Нет доступа к файлам</string>
-    <string name="launch_status_unset">Не настроено</string>
-    <string name="launch_folder_found">Найден: %1$s</string>
+    <string name="launch_status_unavailable">Недоступно</string>
+    <string name="launch_folder_found">Найден каталог: %1$s</string>
     <string name="launch_folder_not_found">Каталог с war3.exe, game.dll и war3.mpq не найден.</string>
+    <string name="launch_folder_picker_missing">Системный выбор папки недоступен.</string>
+    <string name="launch_folder_unsupported">Этот источник не имеет пути в файловой системе. Выберите папку во встроенной памяти или на SD-карте.</string>
 
-    <string name="launch_error_permission">Нужен доступ ко всем файлам. Иначе игра не увидит лицензионные файлы.</string>
+    <string name="launch_error_permission">Нужен доступ к файлам. Иначе игра не увидит лицензионные файлы.</string>
     <string name="launch_error_folder">Каталог игры не найден: %1$s</string>
     <string name="launch_error_not_directory">Путь не является каталогом: %1$s</string>
     <string name="launch_error_not_writable">Каталог игры недоступен для записи: %1$s</string>
     <string name="launch_error_missing_files">Не хватает обязательных файлов: %1$s</string>
     <string name="launch_error_resolution">Разрешение должно быть 0 × 0 или оба значения в диапазоне 320–7680 × 240–4320.</string>
-    <string name="launch_error_args">Аргументы: до 200 печатных ASCII-символов, без переводов строк.</string>
+    <string name="launch_error_args">Аргументы: до 200 печатных ASCII-символов, без переносов строк.</string>
     <string name="launch_error_latency">Задержка звука должна быть в диапазоне 0–500 мс.</string>
     <string name="launch_error_save">Не удалось сохранить настройки.</string>
 
-    <string name="launch_toast_permission">Нет доступа ко всем файлам. Долгое нажатие на иконку → «Настройки запуска».</string>
+    <string name="launch_toast_permission">Нет доступа к файлам. Долгое нажатие на иконку → «Настройки запуска».</string>
     <string name="launch_toast_missing">Каталог игры не найден. Долгое нажатие на иконку → «Настройки запуска».</string>
     <string name="launch_toast_invalid">Проверьте настройки запуска. Долгое нажатие на иконку → «Настройки запуска».</string>
 
     <string name="shortcut_settings_short">Настройки</string>
     <string name="shortcut_settings_long">Настройки запуска</string>
-    <string name="cd_mode_icon">Иконка %1$s</string>
 </resources>

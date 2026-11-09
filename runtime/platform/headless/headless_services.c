@@ -509,6 +509,8 @@ static int headless_audio_voice_remove(void *ctx, uintptr_t voice)
     headless_audio_wait_render_idle(&stream->mixer);
     while (atomic_load_explicit(&v->publishing, memory_order_acquire) != 0)
         sched_yield();
+    while (atomic_load_explicit(&v->resetting, memory_order_acquire) != 0)
+        sched_yield();
     wc3_mixer_voice_release(v);
     free(stream->voice_pcm[(size_t)local - 1u]);
     stream->voice_pcm[(size_t)local - 1u] = NULL;
@@ -575,6 +577,26 @@ static int headless_audio_voice_publish2(void *ctx, uintptr_t voice,
     }
     if (written) *written = got;
     if (stream) stream->mixer_mode = 1;
+    return 0;
+}
+
+static int headless_audio_voice_published(void *ctx, uintptr_t voice)
+{
+    (void)ctx;
+    uintptr_t local = 0;
+    Wc3Voice *v = headless_voice(voice, &local);
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (!v || !stream) return -1;
+    int rc = wc3_voice_published(v);
+    if (rc != 0) return rc;
+    uint64_t now = stream->virtual_ns;
+    uint64_t last = stream->voice_last_publish_ns[(size_t)local - 1u];
+    if (last && now > last) {
+        uint64_t gap = now - last;
+        if (gap > stream->voice_max_gap_ns[(size_t)local - 1u])
+            stream->voice_max_gap_ns[(size_t)local - 1u] = gap;
+    }
+    stream->voice_last_publish_ns[(size_t)local - 1u] = now;
     return 0;
 }
 
@@ -712,6 +734,7 @@ static uintptr_t headless_audio_primary_voice(void *ctx, uintptr_t handle)
 {
     (void)ctx;
     HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
+    if (!stream) stream = g_headless_audio_last;
     return (stream && stream->mixer_mode) ? stream->primary_voice : 0u;
 }
 
@@ -1482,6 +1505,7 @@ void headless_services_install(Wc3Platform *platform, HeadlessState *st)
     platform->audio.voice_device_rate = headless_audio_voice_device_rate;
     platform->audio.voice_publish2 = headless_audio_voice_publish2;
     platform->audio.voice_reset = headless_audio_voice_reset;
+    platform->audio.voice_published = headless_audio_voice_published;
     platform->audio.play_frame = headless_audio_play_frame;
     platform->audio.device_rate = headless_audio_device_rate;
     platform->audio.primary_voice = headless_audio_primary_voice;

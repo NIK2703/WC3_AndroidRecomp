@@ -67,9 +67,9 @@ static void dsound_dispatch(CPU *c, unsigned kind, unsigned method);
 
 DS_ROW(1, 0, 3) DS_ROW(1, 1, 1) DS_ROW(1, 2, 1) DS_ROW(1, 3, 4)
 DS_ROW(1, 4, 2) DS_ROW(1, 5, 3) DS_ROW(1, 6, 3) DS_ROW(1, 7, 1)
-DS_ROW(1, 8, 2) DS_ROW(1, 9, 2) DS_ROW(1, 10, 3)
+DS_ROW(1, 8, 2) DS_ROW(1, 9, 2) DS_ROW(1, 10, 2)
 DS_ROW(2, 0, 3) DS_ROW(2, 1, 1) DS_ROW(2, 2, 1) DS_ROW(2, 3, 2)
-DS_ROW(2, 4, 3) DS_ROW(2, 5, 3) DS_ROW(2, 6, 2) DS_ROW(2, 7, 2)
+DS_ROW(2, 4, 3) DS_ROW(2, 5, 4) DS_ROW(2, 6, 2) DS_ROW(2, 7, 2)
 DS_ROW(2, 8, 2) DS_ROW(2, 9, 2) DS_ROW(2, 10, 3) DS_ROW(2, 11, 8)
 DS_ROW(2, 12, 4) DS_ROW(2, 13, 2) DS_ROW(2, 14, 2) DS_ROW(2, 15, 2)
 DS_ROW(2, 16, 2) DS_ROW(2, 17, 2) DS_ROW(2, 18, 1) DS_ROW(2, 19, 5)
@@ -86,10 +86,10 @@ static const DsRow g_rows[] = {
     { 1, 4, 2, ds_row_1_4 }, { 1, 5, 3, ds_row_1_5 },
     { 1, 6, 3, ds_row_1_6 }, { 1, 7, 1, ds_row_1_7 },
     { 1, 8, 2, ds_row_1_8 }, { 1, 9, 2, ds_row_1_9 },
-    { 1, 10, 3, ds_row_1_10 },
+    { 1, 10, 2, ds_row_1_10 },
     { 2, 0, 3, ds_row_2_0 }, { 2, 1, 1, ds_row_2_1 },
     { 2, 2, 1, ds_row_2_2 }, { 2, 3, 2, ds_row_2_3 },
-    { 2, 4, 3, ds_row_2_4 }, { 2, 5, 3, ds_row_2_5 },
+    { 2, 4, 3, ds_row_2_4 }, { 2, 5, 4, ds_row_2_5 },
     { 2, 6, 2, ds_row_2_6 }, { 2, 7, 2, ds_row_2_7 },
     { 2, 8, 2, ds_row_2_8 }, { 2, 9, 2, ds_row_2_9 },
     { 2, 10, 3, ds_row_2_10 }, { 2, 11, 8, ds_row_2_11 },
@@ -177,7 +177,7 @@ static int ds_guid_is(uint32_t va, unsigned kind)
         0x279AFA85u, 0x11CE4981u, 0x200021A5u, 0x60E50BAFu
     };
     static const uint32_t unknown[4] = {
-        0u, 0xC0000000u, 0u, 0x46000000u
+        0u, 0u, 0x000000C0u, 0x46000000u
     };
     const uint32_t *want = kind == 1u ? dev : buf;
     if (!va || !wc3_legacy_guest_ok(va, 16u)) return 0;
@@ -221,7 +221,9 @@ static void ds_query_interface(CPU *c, DsObject *o)
 {
     uint32_t riid = wc3_legacy_arg32(c, 1);
     uint32_t out = wc3_legacy_arg32(c, 2);
-    if (!out) { c->eax = E_POINTER; return; }
+    if (!out || !wc3_legacy_guest_ok(out, 4u)) {
+        c->eax = E_POINTER; return;
+    }
     wc3_legacy_wr32g(out, 0u);
     if (!ds_guid_is(riid, o->kind)) { c->eax = E_NOINTERFACE; return; }
     wc3_legacy_wr32g(out, o->self);
@@ -261,7 +263,9 @@ static void ds_create_sound_buffer(CPU *c, DsObject *o)
     (void)o;
     uint32_t desc = wc3_legacy_arg32(c, 1);
     uint32_t out = wc3_legacy_arg32(c, 2);
-    if (!out) { c->eax = E_POINTER; return; }
+    if (!out || !wc3_legacy_guest_ok(out, 4u)) {
+        c->eax = E_POINTER; return;
+    }
     wc3_legacy_wr32g(out, 0u);
     if (!desc || !wc3_legacy_guest_ok(desc, 4u)) {
         c->eax = DSERR_INVALIDPARAM;
@@ -285,7 +289,6 @@ static void ds_create_sound_buffer(CPU *c, DsObject *o)
         return;
     }
     uint32_t flags = wc3_legacy_rd32g(desc + 4u);
-    if (flags & DSBCAPS_CTRL3D) { c->eax = DSERR_UNSUPPORTED; return; }
 
     DsObject *b = ds_alloc(2u);
     if (!b) { c->eax = DSERR_OUTOFMEMORY; return; }
@@ -296,6 +299,11 @@ static void ds_create_sound_buffer(CPU *c, DsObject *o)
      * coordinates.  nfsu2 never creates one, but DirectSound applications
      * probe for it and some iterate it through the same vtable. */
     if (flags & DSBCAPS_PRIMARYBUFFER) {
+        if (flags & DSBCAPS_CTRL3D) {
+            ds_free(b);
+            c->eax = DSERR_UNSUPPORTED;
+            return;
+        }
         b->bytes = 0u;
         b->rate = 44100u;
         b->channels = 2u;
@@ -314,6 +322,12 @@ static void ds_create_sound_buffer(CPU *c, DsObject *o)
         !ds_parse_format(fmt, b) || (bytes % b->bpf) != 0u) {
         ds_free(b);
         c->eax = DSERR_BADFORMAT;
+        return;
+    }
+    /* The reference checks the format first, then rejects 3D buffers. */
+    if (flags & DSBCAPS_CTRL3D) {
+        ds_free(b);
+        c->eax = DSERR_UNSUPPORTED;
         return;
     }
 
@@ -353,10 +367,13 @@ static void ds_get_current_position(CPU *c, DsObject *o)
     }
     uint32_t pout = wc3_legacy_arg32(c, 1);
     uint32_t wout = wc3_legacy_arg32(c, 2);
-    if (pout && wc3_legacy_guest_ok(pout, 4u))
-        wc3_legacy_wr32g(pout, play);
-    if (wout && wc3_legacy_guest_ok(wout, 4u))
-        wc3_legacy_wr32g(wout, write);
+    if ((pout && !wc3_legacy_guest_ok(pout, 4u)) ||
+        (wout && !wc3_legacy_guest_ok(wout, 4u))) {
+        c->eax = E_POINTER;
+        return;
+    }
+    if (pout) wc3_legacy_wr32g(pout, play);
+    if (wout) wc3_legacy_wr32g(wout, write);
     c->eax = DS_OK;
 }
 
@@ -365,7 +382,8 @@ static void ds_get_format(CPU *c, DsObject *o)
     uint32_t out = wc3_legacy_arg32(c, 1);
     uint32_t allocated = wc3_legacy_arg32(c, 2);
     uint32_t written = wc3_legacy_arg32(c, 3);
-    if (!out || !wc3_legacy_guest_ok(out, 18u) || allocated < 18u) {
+    if (!out || !wc3_legacy_guest_ok(out, 18u) || allocated < 18u ||
+        (written && !wc3_legacy_guest_ok(written, 4u))) {
         c->eax = DSERR_INVALIDPARAM;
         return;
     }
@@ -376,8 +394,7 @@ static void ds_get_format(CPU *c, DsObject *o)
     wc3_legacy_wr16g(out + 12u, (uint16_t)o->bpf);
     wc3_legacy_wr16g(out + 14u, (uint16_t)o->bits);
     wc3_legacy_wr16g(out + 16u, 0u);
-    if (written && wc3_legacy_guest_ok(written, 4u))
-        wc3_legacy_wr32g(written, 18u);
+    if (written) wc3_legacy_wr32g(written, 18u);
     c->eax = DS_OK;
 }
 
@@ -479,8 +496,15 @@ static void ds_lock(CPU *c, DsObject *o)
 {
     uint32_t offset = wc3_legacy_arg32(c, 1);
     uint32_t length = wc3_legacy_arg32(c, 2);
+    uint32_t p1 = wc3_legacy_arg32(c, 3);
+    uint32_t p2 = wc3_legacy_arg32(c, 4);
+    uint32_t p3 = wc3_legacy_arg32(c, 5);
+    uint32_t p4 = wc3_legacy_arg32(c, 6);
     uint32_t flags = wc3_legacy_arg32(c, 7);
-    if (!wc3_legacy_arg32(c, 3) || !wc3_legacy_arg32(c, 4) ||
+    if (!p1 || !p2 || !wc3_legacy_guest_ok(p1, 4u) ||
+        !wc3_legacy_guest_ok(p2, 4u) ||
+        (p3 && !wc3_legacy_guest_ok(p3, 4u)) ||
+        (p4 && !wc3_legacy_guest_ok(p4, 4u)) ||
         (flags & ~3u) || o->locked || !o->bytes) {
         c->eax = DSERR_INVALIDPARAM;
         return;
@@ -505,20 +529,17 @@ static void ds_lock(CPU *c, DsObject *o)
     uint32_t first = o->bytes - offset;
     if (length < first) first = length;
     uint32_t second = length - first;
-    if (second && (!wc3_legacy_arg32(c, 5) || !wc3_legacy_arg32(c, 6))) {
+    if (second && (!p3 || !p4)) {
         c->eax = DSERR_INVALIDPARAM;
         return;
     }
     o->locked = 1;
     o->lock_offset = offset;
     o->lock_bytes = length;
-    wc3_legacy_wr32g(wc3_legacy_arg32(c, 3), o->guest_samples + offset);
-    wc3_legacy_wr32g(wc3_legacy_arg32(c, 4), first);
-    if (wc3_legacy_arg32(c, 5))
-        wc3_legacy_wr32g(wc3_legacy_arg32(c, 5),
-                         second ? o->guest_samples : 0u);
-    if (wc3_legacy_arg32(c, 6))
-        wc3_legacy_wr32g(wc3_legacy_arg32(c, 6), second);
+    wc3_legacy_wr32g(p1, o->guest_samples + offset);
+    wc3_legacy_wr32g(p2, first);
+    if (p3) wc3_legacy_wr32g(p3, second ? o->guest_samples : 0u);
+    if (p4) wc3_legacy_wr32g(p4, second);
     c->eax = DS_OK;
 }
 
@@ -527,10 +548,6 @@ static void ds_unlock(CPU *c, DsObject *o)
     const Wc3AudioApi *a = ds_audio();
     if (!o->locked || !o->guest_samples || !o->bytes || !o->bpf) {
         c->eax = DSERR_INVALIDPARAM;
-        return;
-    }
-    if (!a || !a->voice_publish2) {
-        c->eax = DSERR_GENERIC;
         return;
     }
     uint32_t first = o->bytes - o->lock_offset;
@@ -551,11 +568,18 @@ static void ds_unlock(CPU *c, DsObject *o)
         return;
     }
 
-    /* A zero-length Lock/Unlock pair is a legal Windows no-op.  It has no PCM
-     * to publish, so do not turn it into DSERR_GENERIC at the platform seam. */
+    /* A zero-length Lock/Unlock pair is a legal Windows no-op.  nfsu2 still
+     * calls PcmVoice::published(), which clears the stale window and counts
+     * one publish while playing; mirror that instead of inventing a failure. */
     if (o->lock_bytes == 0u) {
+        if (a && a->voice_published)
+            (void)a->voice_published(a->ctx, o->voice);
         o->locked = 0;
         c->eax = DS_OK;
+        return;
+    }
+    if (!a || !a->voice_publish2) {
+        c->eax = DSERR_GENERIC;
         return;
     }
 
@@ -655,20 +679,26 @@ static void dsound_dispatch(CPU *c, unsigned kind, unsigned method)
     case 5u: ds_get_format(c, o); return;
     case 6u: {
         uint32_t out = wc3_legacy_arg32(c, 1);
-        if (out && wc3_legacy_guest_ok(out, 4u))
-            wc3_legacy_wr32g(out, (uint32_t)(int32_t)o->volume);
+        if (!out || !wc3_legacy_guest_ok(out, 4u)) {
+            c->eax = E_POINTER; return;
+        }
+        wc3_legacy_wr32g(out, (uint32_t)(int32_t)o->volume);
         c->eax = DS_OK; return;
     }
     case 7u: {
         uint32_t out = wc3_legacy_arg32(c, 1);
-        if (out && wc3_legacy_guest_ok(out, 4u))
-            wc3_legacy_wr32g(out, (uint32_t)(int32_t)o->pan);
+        if (!out || !wc3_legacy_guest_ok(out, 4u)) {
+            c->eax = E_POINTER; return;
+        }
+        wc3_legacy_wr32g(out, (uint32_t)(int32_t)o->pan);
         c->eax = DS_OK; return;
     }
     case 8u: {
         uint32_t out = wc3_legacy_arg32(c, 1);
-        if (out && wc3_legacy_guest_ok(out, 4u))
-            wc3_legacy_wr32g(out, o->frequency);
+        if (!out || !wc3_legacy_guest_ok(out, 4u)) {
+            c->eax = E_POINTER; return;
+        }
+        wc3_legacy_wr32g(out, o->frequency);
         c->eax = DS_OK; return;
     }
     case 9u: ds_get_status(c, o); return;
@@ -731,7 +761,9 @@ static void h_dsound_create(CPU *c)
 
     /* Windows checks the out pointer first, then aggregation, then the
      * device GUID; the reference preserves that exact precedence. */
-    if (!out) { c->eax = E_POINTER; return; }
+    if (!out || !wc3_legacy_guest_ok(out, 4u)) {
+        c->eax = E_POINTER; return;
+    }
     wc3_legacy_wr32g(out, 0u);
     if (outer) { c->eax = CLASS_E_NOAGGREGATION; return; }
     /* NULL selects the default playback device; an explicit GUID we do not
@@ -739,7 +771,11 @@ static void h_dsound_create(CPU *c)
     if (guid) { c->eax = DSERR_NODRIVER; return; }
 
     const Wc3AudioApi *a = ds_audio();
-    if (!a || !a->voice_add) { c->eax = DSERR_NODRIVER; return; }
+    if (!a || !a->voice_add || !a->primary_voice ||
+        !a->primary_voice(a->ctx, 0u)) {
+        c->eax = DSERR_NODRIVER;
+        return;
+    }
     /* The WINMM path already opened the AAudio stream and registered its
      * primary voice; DirectSoundCreate only builds the COM object. */
     DsObject *o = ds_alloc(1u);

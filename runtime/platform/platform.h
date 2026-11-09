@@ -427,6 +427,9 @@ typedef struct Wc3AudioApi {
      * generation.  Optional; NULL keeps the old "flush headers only" behaviour.
      * Appended LAST. */
     int (*voice_reset)(void *ctx, uintptr_t voice);
+    /* Zero-byte Unlock: clear the stale window and, while playing, advance the
+     * publish count exactly like PcmVoice::published().  Appended LAST. */
+    int (*voice_published)(void *ctx, uintptr_t voice);
 } Wc3AudioApi;
 
 typedef struct Wc3ClipboardApi {

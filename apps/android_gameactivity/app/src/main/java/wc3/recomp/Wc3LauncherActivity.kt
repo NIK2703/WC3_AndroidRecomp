@@ -1,5 +1,6 @@
 package wc3.recomp
 
+import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -19,6 +20,19 @@ abstract class Wc3LauncherActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleIntent()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent()
+    }
+
+    private fun handleIntent() {
+        // A singleTop gate can receive a second intent while it is finishing;
+        // do not start a second host from a stale activity.
+        if (isFinishing) return
 
         if (intent?.action == LaunchContract.ACTION_OPEN_SETTINGS) {
             startActivity(LaunchCoordinator.settingsIntent(this, mode))

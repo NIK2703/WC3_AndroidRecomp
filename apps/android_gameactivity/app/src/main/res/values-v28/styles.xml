@@ -12,7 +12,4 @@
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
 
-    <style name="Wc3LaunchTheme" parent="Wc3LaunchTheme.Base">
-        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
-    </style>
 </resources>
