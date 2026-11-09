@@ -206,6 +206,7 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/user32/window"
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts"
     "${WC3_ROOT}/runtime/hle/win32/winmm"
+    "${WC3_ROOT}/runtime/hle/win32/dsound"
     "${WC3_ROOT}/runtime/hle/win32/ws2_32"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
@@ -292,16 +293,15 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/user32/window/window_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts/window_facts_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/winmm/winmm_fast_bind.c"
+    "${WC3_ROOT}/runtime/hle/win32/winmm/waveout_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/dsound/dsound_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/ws2_32/ws2_32_hle.c")
 
-# O-91/BV-3: the rejected v2 sink is debug/headless evidence only.  Release
-# still gets winmm_fast_bind.c, so the product fast registry does not depend on
-# v2.  WC3_DEBUG is the variant value supplied by build_app.ps1; a direct CMake
-# invocation must keep that value consistent.
-if(WC3_DEBUG)
-    target_sources(wc3_hle_modules PRIVATE
-        "${WC3_ROOT}/runtime/hle/win32/winmm/waveout_hle.c")
-endif()
+# S-2/S-3 (owner decision 2026-11-09): the new WINMM pull slice is PRODUCT
+# code and is compiled in every variant, including release.  O-91's debug-only
+# isolation is intentionally lifted; wave2_v2_off remains the instant runtime
+# rollback to the as-built legacy WINMM path.  All diagnostics in the slice
+# are WC3_DEBUG-gated so release hygiene stays clean.
 
 target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle"
@@ -338,6 +338,7 @@ target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/user32/window"
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts"
     "${WC3_ROOT}/runtime/hle/win32/winmm"
+    "${WC3_ROOT}/runtime/hle/win32/dsound"
     "${WC3_ROOT}/runtime/hle/win32/ws2_32"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"

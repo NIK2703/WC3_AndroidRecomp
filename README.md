@@ -22,15 +22,32 @@ Known issues:
 
 ## Launchers
 
-The APK exposes two launcher entries that share the same game data:
+The APK exposes two launcher entries that share the same game data. A normal
+tap starts the selected game immediately; there is no intro screen.
 
-| Entry | Label | Process | State directory | Guest command |
-| --- | --- | --- | --- | --- |
-| `.Wc3RocActivity` | Reign of Chaos | `:roc` | `files/roc` | `war3.exe -classic` |
-| `.Wc3GameActivity` | Frozen Throne | default | `files` | `war3.exe` |
+| Launcher entry | Game host | Label | Host process | State directory | Guest command |
+| --- | --- | --- | --- | --- | --- |
+| `.Wc3RocLauncherActivity` | `.Wc3RocActivity` | Reign of Chaos | `:roc` | `files/roc` | `war3.exe -classic` |
+| `.Wc3TftLauncherActivity` | `.Wc3GameActivity` | Frozen Throne | default | `files` | `war3.exe` |
 
-The debug build adds `(debug)` to both labels. Both entries read the licensed
-1.27 directory from `/storage/emulated/0/Warcraft 3`; the APK does not ship
+The launcher activities are invisible gates: they validate the saved settings,
+start the native host, and show no window. The settings screen is not a
+launcher entry. Long-press the game icon and choose **Launch settings** (or
+**Настройки запуска**) to open it; the static shortcut carries
+`wc3.recomp.action.OPEN_SETTINGS` to the gate. The screen is localized in
+English and Russian.
+
+Launch settings can override the game directory, guest resolution, sound,
+extra `war3.exe` arguments, and the experimental AAudio latency. The default
+game directory is `/storage/emulated/0/Warcraft 3`; a selected path reaches the
+native picker through `WC3_GAME_DATA_DIR`. Resolution maps to
+`WC3_DXVK_WIDTH`/`WC3_DXVK_HEIGHT`, sound-off to `-nosound` in `WC3_ARGS`, and
+latency to `WC3_AUDIO_LATENCY_MS`. Values are stored in the default process and
+passed to both hosts through the launch intent, so the `:roc` process never
+reads another process's preferences.
+
+The debug build adds `(debug)` to both labels, targets `wc3.recomp.debug` from
+its shortcuts, and installs next to the release build. The APK does not ship
 game assets. The game fills the display cutout and republishes its surface
 after a resume. In-game options are persisted in the guest registry under
 `Software\Blizzard Entertainment\Warcraft III` and written to
@@ -76,9 +93,9 @@ after a resume. In-game options are persisted in the guest registry under
 * Guest threads are real host threads. `CreateThread` and `_beginthreadex`
   create a host thread with its own CPU state, guest stack, TEB, TLS state, and
   dispatcher state, within the fixed guest-thread limit.
-* `ThreadApi`, `SyncApi`, `AssetApi`, and `VulkanDriverApi` are required
-  platform interfaces. `NetApi` is not included; LAN and Battle.net are out of
-  scope.
+* `ThreadApi`, `SyncApi`, `AssetApi`, `VulkanDriverApi`, and `NetApi` are
+  required platform interfaces. `NetApi` is the LAN boundary (ADR-031).
+  Battle.net and Internet services are the next phases after LAN.
 * Guest-visible events, mutexes, semaphores, and critical sections are HLE
   objects; their behavior must follow Win32 semantics. No-op waits and stub
   synchronization are not allowed.

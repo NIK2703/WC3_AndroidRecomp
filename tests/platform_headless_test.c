@@ -426,6 +426,73 @@ static void test_audio_surface(const Wc3Platform *p)
     p->surface.release(p->surface.ctx, surface);
 }
 
+/* S-1: the headless pull twin renders the same PCM the Android callback will
+ * render, with a steppable clock and a deterministic PCM hash. */
+static void test_audio_pull(const Wc3Platform *p)
+{
+    uint8_t src[1024];
+    for (size_t i = 0; i < sizeof src; i++)
+        src[i] = (uint8_t)(i * 7u + 3u);
+
+    uintptr_t first = 0, second = 0;
+    uint32_t written = 0;
+    check(p->audio.publish != NULL, "headless publish is installed");
+    check(p->audio.open(p->audio.ctx, 44100, 2, 16, &first) == 0,
+          "pull open");
+    wc3_headless_audio_enable_pull(1);
+    wc3_headless_audio_set_burst(64);
+    check(p->audio.publish(p->audio.ctx, first, 0, src, sizeof src,
+                           &written) == 0, "pull publish");
+    check(written == sizeof src, "pull publish accepted whole region");
+
+    g_audio_consumed_seen = 0;
+    g_audio_consumed_calls = 0;
+    check(p->audio.set_consumed(p->audio.ctx, first, audio_consumed_probe,
+                                NULL) == 0, "pull consumed callback");
+    check(p->audio.advance(p->audio.ctx, first, sizeof src) == 0,
+          "pull advance");
+    check(g_audio_consumed_calls == 4, "burst cadence is deterministic");
+    check(g_audio_consumed_seen == sizeof src,
+          "consumed pump reached published bytes");
+
+    Wc3HeadlessPullStats a;
+    memset(&a, 0, sizeof a);
+    check(wc3_headless_audio_pull_stats(first, &a) == 0, "pull stats");
+    check(a.pull_mode == 1, "pull mode active");
+    check(a.published_frame == 256u, "published frame cursor");
+    check(a.play_frame == 256u, "play frame cursor");
+    check(a.consumed == sizeof src, "pull device clock");
+    check(a.stale_frames == 0u, "no stale frames when fully published");
+    check(a.render_calls == 4u, "render calls match bursts");
+
+    check(p->audio.open(p->audio.ctx, 44100, 2, 16, &second) == 0,
+          "pull open replay");
+    wc3_headless_audio_set_burst(64);
+    check(p->audio.publish(p->audio.ctx, second, 0, src, sizeof src,
+                           &written) == 0, "pull publish replay");
+    check(p->audio.advance(p->audio.ctx, second, sizeof src) == 0,
+          "pull advance replay");
+    Wc3HeadlessPullStats b;
+    memset(&b, 0, sizeof b);
+    check(wc3_headless_audio_pull_stats(second, &b) == 0,
+          "pull stats replay");
+    check(a.pcm_hash == b.pcm_hash,
+          "PCM hash is identical across deterministic replays");
+
+    check(p->audio.advance(p->audio.ctx, first, 256u) == 0,
+          "pull underrun advance");
+    Wc3HeadlessPullStats c;
+    memset(&c, 0, sizeof c);
+    check(wc3_headless_audio_pull_stats(first, &c) == 0,
+          "pull stats underrun");
+    check(c.stale_frames > 0u, "underrun frames counted as stale");
+    check(c.consumed == sizeof src + 256u,
+          "device clock advances through underrun");
+
+    check(p->audio.close(p->audio.ctx, first) == 0, "pull close");
+    check(p->audio.close(p->audio.ctx, second) == 0, "pull close replay");
+}
+
 static void test_config(const Wc3ConfigApi *c)
 {
     const char *value = c->get(c->ctx, "WC3_HEADLESS_TEST");
@@ -974,7 +1041,7 @@ int main(void)
               p.input.set_text_focus && p.surface.acquire && p.audio.open &&
               p.audio.set_callback && p.audio.set_consumed &&
               p.audio.consumed_bytes && p.audio.advance &&
-              p.audio.latency_frames &&
+              p.audio.latency_frames && p.audio.publish &&
               p.config.get && p.asset.init &&
               p.window.create && p.clipboard.get_text && p.locale.to_wide,
           "platform table");
@@ -992,6 +1059,7 @@ int main(void)
     test_config(&p.config);
     test_asset(&p.asset);
     test_audio_surface(&p);
+    test_audio_pull(&p);
     p.log.write(p.log.ctx, 4, "wc3-headless", "platform test complete");
 
     check(p.vulkan_driver.select(p.vulkan_driver.ctx, 0) == -1,

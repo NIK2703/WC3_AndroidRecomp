@@ -29,11 +29,12 @@ DEFAULT_RELEASE = ROOT / "build" / "android_app" / "release" / "cmake" / \
 DEFAULT_DEBUG = ROOT / "build" / "android_app" / "debug" / "cmake" / \
     "libwc3gameactivity.so"
 
-# Diagnostics that must not survive into a release APK.  O-91 makes the whole
-# v2 sink debug/headless-only, so its install errors are debug markers now.
+# Diagnostics that must not survive into a release APK.  Since S-2/S-3 the
+# WINMM pull slice ships in release, but every stderr site in it is
+# WC3_DEBUG-gated, so these strings remain debug-only binary markers.
 DEBUG_ONLY_MARKERS = (
     "unknown guest target",
-    "[wave2] disabled: as-built WINMM path",
+    "[wave2] disabled: as-built WINMM rollback",
     "[wave2] USER32 rows missing",
     "[wave2] missing WINMM row",
     "[dispatch]",
@@ -49,8 +50,8 @@ PRODUCT_MARKERS = ()
 # stderr sites in the product tree that are product errors rather than
 # diagnostics.  Everything else must be inside a WC3_DEBUG guard; legacy and
 # vendor sources are counted separately because they are read-only (R15).
-# O-91 excludes waveout_hle.c from release as a whole, so it needs no
-# site-level exceptions.
+# S-2/S-3: waveout_hle.c now ships in release and has no ungated stderr,
+# so it still needs no site-level exception.
 SOURCE_EXCEPTIONS = ()
 SOURCE_SUFFIXES = (".c", ".h", ".cc", ".cpp", ".hpp")
 SOURCE_ROOTS = (ROOT / "runtime", ROOT / "apps")
@@ -60,8 +61,8 @@ SOURCE_NON_PRODUCT_PREFIXES = (
 )
 SOURCE_DEBUG_ONLY_PREFIXES = (
     "runtime/diag/",
-    # O-91/BV-3: v2 is compiled only when WC3_DEBUG is on.
-    "runtime/hle/win32/winmm/waveout_hle.c",
+    # S-2/S-3: waveout_hle.c is now product code in every variant and is
+    # audited like any other HLE source.  Its stderr sites are WC3_DEBUG-gated.
 )
 SOURCE_READ_ONLY_PREFIXES = (
     "runtime/legacy/",
@@ -438,16 +439,27 @@ def run_self_test() -> int:
         legacy = root / "runtime" / "legacy" / "old.c"
         legacy.parent.mkdir(parents=True)
         legacy.write_text("fprintf(stderr, \"legacy\");\n", encoding="utf-8")
-        debug_only = root / "runtime" / "hle" / "win32" / "winmm" / \
-            "waveout_hle.c"
+        debug_only = root / "runtime" / "diag" / "probe.c"
         debug_only.parent.mkdir(parents=True)
-        debug_only.write_text("fprintf(stderr, \"v2\");\n", encoding="utf-8")
+        debug_only.write_text("fprintf(stderr, \"diag\");\n",
+                              encoding="utf-8")
+        # S-2/S-3: the WINMM pull slice ships in release, so its stderr must
+        # be debug-gated rather than excused as a debug-only file.
+        pull_slice = root / "runtime" / "hle" / "win32" / "winmm" / \
+            "waveout_hle.c"
+        pull_slice.parent.mkdir(parents=True)
+        pull_slice.write_text(
+            "#if WC3_DEBUG && WC3_DEBUG_AUDIO\n"
+            "fprintf(stderr, \"[wave2] diagnostic\");\n"
+            "#endif\n",
+            encoding="utf-8",
+        )
         exceptions = (("runtime/app/good.c", "PRODUCT", "test product error"),)
         source_report = source_audit(root, exceptions)
         counts = source_report["counts"]
         if (
             source_report["errors"]
-            or counts["debug-gated"] != 1
+            or counts["debug-gated"] != 2
             or counts["product-error"] != 1
             or counts["read-only-legacy"] != 1
             or counts["debug-only-file"] != 1

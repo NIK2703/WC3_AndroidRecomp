@@ -1022,6 +1022,48 @@ def test_waveout_runtime() -> int:
     return 0
 
 
+def test_ws2_32_hle() -> int:
+    """T0: winsock ordinal split, guest layouts, AcceptEx/IOCP bridge."""
+    cc = gcc()
+    if not cc:
+        print("ws2_32 hle: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "ws2_32"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "runtime" / "diag"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
+    ]
+    common = [
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "ws2_32" / "ws2_32_hle.c"),
+        str(ROOT / "tests" / "ws2_32_hle_test.c"),
+        "-pthread",
+    ]
+    for name, debug in (("ws2_32_hle_test_debug.exe", 1),
+                        ("ws2_32_hle_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}",
+                  f"-DWC3_DEBUG_NET={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
+
+
 def test_waveout_headless() -> int:
     """T0: real WINMM handlers on the real headless Wc3AudioApi."""
     cc = gcc()
@@ -1407,6 +1449,43 @@ def test_audio_ring_layout() -> int:
     return run([str(exe)])
 
 
+def test_audio_pull_ring() -> int:
+    """S-1: host-owned pull ring, seqlock and deterministic device clock."""
+    cc = gcc()
+    if not cc:
+        print("audio_pull_ring: unavailable (no host C compiler)")
+        return 2
+    header = ROOT / "runtime" / "platform" / "audio_pull_ring.h"
+    text = header.read_text(encoding="utf-8", errors="replace")
+    problems = []
+    for token in ("malloc(", "calloc(", "free(", "pthread_mutex",
+                  "#include <pthread"):
+        if token in text:
+            problems.append("header must not use " + token)
+    if problems:
+        for problem in problems:
+            print("audio_pull_ring:", problem)
+        return 1
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "audio_pull_ring_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "platform"),
+        str(ROOT / "tests" / "audio_pull_ring_test.c"),
+        "-pthread", "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_audio_pull_difftest() -> int:
+    """S-5: V5.9/E11 semantic difftest harness must self-check."""
+    return run([sys.executable,
+                str(ROOT / "tools" / "audio_pull_difftest.py"),
+                "--self-test"])
+
+
 def test_audio_runtime_profile() -> int:
     """O-105: recreate the PASS11 counters from the historical device log."""
     script = ROOT / "tools" / "audio_runtime_profile.py"
@@ -1498,7 +1577,7 @@ def test_pass11_audio_guards() -> int:
 
 
 def test_pass9_build_guards() -> int:
-    """O-91: v2 is debug-only; product WINMM fast-bind stays in release."""
+    """S-2/S-3: the WINMM pull slice is product code; fast-bind stays first."""
     boot = (ROOT / "cmake" / "Wc3LegacyBoot.cmake").read_text(
         encoding="utf-8", errors="replace")
     dispatch = (ROOT / "runtime" / "boot" / "dispatch_boot.c").read_text(
@@ -1517,37 +1596,39 @@ def test_pass9_build_guards() -> int:
     base_block = base.group(1) if base else ""
     if "winmm_fast_bind.c" not in base_block:
         problems.append("release HLE list is missing winmm_fast_bind.c")
-    if "waveout_hle.c" in base_block:
-        problems.append("release HLE list still compiles waveout_hle.c")
-    if not re.search(
+    if "waveout_hle.c" not in base_block:
+        problems.append("release HLE list does not compile the pull slice")
+    if re.search(
         r"if\(WC3_DEBUG\)\s*target_sources\(wc3_hle_modules PRIVATE"
         r".*?waveout_hle\.c.*?\)", boot, re.S):
-        problems.append("v2 is not added under if(WC3_DEBUG)")
+        problems.append("pull slice is still debug-only")
 
     if '#include "winmm_fast_bind.h"' not in dispatch:
         problems.append("dispatch does not include the product fast-bind")
-    if not re.search(
-            r'#if WC3_DEBUG\s*\n\s*#include "waveout_hle\.h"\s*\n\s*#endif',
-            dispatch):
-        problems.append("dispatch includes the v2 header outside WC3_DEBUG")
+    if '#include "waveout_hle.h"' not in dispatch:
+        problems.append("dispatch does not include the pull slice")
+    if re.search(r'#if WC3_DEBUG\s*\n\s*#include "waveout_hle\.h"',
+                 dispatch):
+        problems.append("pull slice header is still debug-only")
     if not re.search(
             r"WC3_INSTALL_STEP\(wc3_hle_winmm_fast_bind_rows\(\)\);",
             dispatch):
         problems.append("dispatch does not bind the product WINMM rows")
     if not re.search(
-            r"#if WC3_DEBUG\s*\n(?:\s*/\*.*?\*/\s*)?"
-            r"WC3_INSTALL_STEP\(wc3_hle_winmm_waveout_install\(\)\);\s*\n"
-            r"\s*#endif", dispatch, re.S):
-        problems.append("dispatch installs v2 outside WC3_DEBUG")
+            r"WC3_INSTALL_STEP\(wc3_hle_winmm_waveout_install\(\)\);",
+            dispatch):
+        problems.append("dispatch does not install the pull slice")
     if dispatch.find("wc3_hle_winmm_fast_bind_rows()") > \
             dispatch.find("wc3_hle_winmm_waveout_install()"):
-        problems.append("v2 install runs before the product fast-bind")
+        problems.append("pull install runs before the product fast-bind")
 
-    if "#define WC3_AUDIO_V2_ENABLED 0" not in v2:
-        problems.append("v2 default is not 0")
+    if "#define WC3_AUDIO_V2_ENABLED 1" not in v2:
+        problems.append("pull slice is not the product default")
+    if 'w2_trigger("wave2_v2_off")' not in v2:
+        problems.append("hard rollback trigger is missing")
     if "g_as_built_fast_rows" in v2 or \
             "wc3_legacy_hle_fast_bind" in v2:
-        problems.append("v2 still owns the product fast-bind list")
+        problems.append("pull slice still owns the product fast-bind list")
     if "wc3_legacy_hle_fast_bind" not in fast:
         problems.append("winmm_fast_bind.c does not use the shim")
 
@@ -1557,20 +1638,22 @@ def test_pass9_build_guards() -> int:
         r"PRODUCT_MARKERS = \((.*?)\)", hygiene, re.S)
     if not debug_markers or \
             '"[wave2] missing WINMM row"' not in debug_markers.group(1):
-        problems.append("v2 install errors are not debug-only markers")
+        problems.append("pull slice diagnostics are not debug-only markers")
     if not product_markers or "[wave2]" in product_markers.group(1):
-        problems.append("v2 install errors are still product markers")
-    if '"runtime/hle/win32/winmm/waveout_hle.c"' not in hygiene:
-        problems.append("release source audit does not know the v2 file")
-    if '"[wave2] USER32 rows missing",\n        "product install failure"' \
-            in hygiene:
-        problems.append("release source audit still excepts v2")
+        problems.append("pull slice diagnostics are still product markers")
+    debug_only_prefixes = re.search(
+        r"SOURCE_DEBUG_ONLY_PREFIXES = \((.*?)\)", hygiene, re.S)
+    if debug_only_prefixes and \
+            '"runtime/hle/win32/winmm/waveout_hle.c"' in \
+            debug_only_prefixes.group(1):
+        problems.append("release source audit still skips the pull slice")
 
     if problems:
         for problem in problems:
             print(f"pass9_build_guards: {problem}", file=sys.stderr)
         return 1
-    print("pass9_build_guards: v2 is debug-only; product fast-bind is in release")
+    print("pass9_build_guards: WINMM pull slice ships in release; "
+          "fast-bind stays first; rollback trigger present")
     return 0
 
 
@@ -3213,6 +3296,8 @@ TESTS = {
     "pass6_build_guards": test_pass6_build_guards,
     "pass7_build_guards": test_pass7_build_guards,
     "audio_ring_layout": test_audio_ring_layout,
+    "audio_pull_ring": test_audio_pull_ring,
+    "audio_pull_difftest": test_audio_pull_difftest,
     "audio_runtime_profile": test_audio_runtime_profile,
     "pass11_tree_snapshot": test_pass11_tree_snapshot,
     "pass11_audio_guards": test_pass11_audio_guards,
@@ -3292,6 +3377,7 @@ TESTS = {
     "waveout_install": test_waveout_install,
     "waveout_runtime": test_waveout_runtime,
     "waveout_headless": test_waveout_headless,
+    "ws2_32_hle": test_ws2_32_hle,
     "release_hygiene": test_release_hygiene,
     "null_gfx": test_null_gfx,
     "difftest": test_difftest,

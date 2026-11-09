@@ -3,4 +3,24 @@
     <!-- Both game portraits are framed against a black background; black also
          fills the transparent corners of the original .ico artwork. -->
     <color name="ic_launcher_background">#FF000000</color>
+
+    <!-- Launch settings: a warm war-room ledger, not a system settings page. -->
+    <color name="launch_bg">#0C0B09</color>
+    <color name="launch_panel">#15130F</color>
+    <color name="launch_panel_inner">#1B1812</color>
+    <color name="launch_parchment">#E8DCC0</color>
+    <color name="launch_muted">#A79B82</color>
+    <color name="launch_gold">#C9A227</color>
+    <color name="launch_gold_light">#F0D98C</color>
+    <color name="launch_ember">#D06B3C</color>
+    <color name="launch_ok">#9BC17A</color>
+    <color name="launch_warning">#D9A441</color>
+    <color name="launch_error">#C96A5B</color>
+    <color name="launch_line">#3A3428</color>
+    <color name="launch_field">#0E0D0A</color>
+    <color name="launch_field_stroke">#5A4D33</color>
+    <color name="launch_button_text">#1A1307</color>
+    <color name="launch_chip_text">#B8AB90</color>
+    <color name="launch_error_bg">#2A1713</color>
+    <color name="launch_error_stroke">#6E342B</color>
 </resources>

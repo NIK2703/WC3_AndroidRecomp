@@ -10,4 +10,160 @@
         <item name="android:colorBackground">@android:color/black</item>
         <item name="android:windowBackground">@android:color/black</item>
     </style>
+
+    <!-- Invisible launcher gates: a normal tap starts the host immediately.
+         A static shortcut delivers ACTION_OPEN_SETTINGS; no intro window. -->
+    <style name="Wc3GateTheme.Base" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowNoDisplay">true</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+
+    <style name="Wc3GateTheme" parent="Wc3GateTheme.Base" />
+
+    <style name="Wc3LaunchTheme.Base" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowFullscreen">false</item>
+        <item name="android:colorBackground">@color/launch_bg</item>
+        <item name="android:windowBackground">@color/launch_bg</item>
+        <item name="android:statusBarColor">@color/launch_bg</item>
+        <item name="android:navigationBarColor">@color/launch_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="colorAccent">@color/launch_gold</item>
+        <item name="colorPrimary">@color/launch_gold</item>
+        <item name="colorPrimaryDark">@color/launch_bg</item>
+        <item name="android:textColorPrimary">@color/launch_parchment</item>
+        <item name="android:textColorSecondary">@color/launch_muted</item>
+    </style>
+
+    <style name="Wc3LaunchTheme" parent="Wc3LaunchTheme.Base" />
+
+    <style name="Wc3Eyebrow">
+        <item name="android:fontFamily">sans-serif-condensed</item>
+        <item name="android:textSize">10sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/launch_gold</item>
+        <item name="android:letterSpacing">0.22</item>
+        <item name="android:textAllCaps">true</item>
+    </style>
+
+    <style name="Wc3Version">
+        <item name="android:fontFamily">sans-serif-condensed</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:textColor">@color/launch_muted</item>
+        <item name="android:letterSpacing">0.08</item>
+    </style>
+
+    <style name="Wc3ModeTitle">
+        <item name="android:fontFamily">serif</item>
+        <item name="android:textSize">20sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/launch_parchment</item>
+        <item name="android:letterSpacing">0.04</item>
+    </style>
+
+    <style name="Wc3Title">
+        <item name="android:fontFamily">serif</item>
+        <item name="android:textSize">28sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/launch_parchment</item>
+    </style>
+
+    <style name="Wc3Helper">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textColor">@color/launch_muted</item>
+        <item name="android:lineSpacingExtra">2dp</item>
+    </style>
+
+    <style name="Wc3ErrorText">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textColor">@color/launch_parchment</item>
+        <item name="android:lineSpacingExtra">2dp</item>
+    </style>
+
+    <style name="Wc3RowNumber">
+        <item name="android:fontFamily">serif</item>
+        <item name="android:textSize">20sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/launch_gold</item>
+        <item name="android:gravity">top</item>
+        <item name="android:paddingTop">2dp</item>
+    </style>
+
+    <style name="Wc3RowLabel">
+        <item name="android:fontFamily">serif</item>
+        <item name="android:textSize">18sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/launch_parchment</item>
+    </style>
+
+    <style name="Wc3Field">
+        <item name="android:background">@drawable/bg_field</item>
+        <item name="android:backgroundTint">@null</item>
+        <item name="android:textColor">@color/launch_parchment</item>
+        <item name="android:textColorHint">@color/launch_muted</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:paddingTop">10dp</item>
+        <item name="android:paddingBottom">10dp</item>
+        <item name="android:singleLine">true</item>
+        <item name="android:imeOptions">actionDone</item>
+    </style>
+
+    <style name="Wc3Chip">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">36dp</item>
+        <item name="android:layout_marginEnd">8dp</item>
+        <item name="android:background">@drawable/bg_chip</item>
+        <item name="android:textColor">@color/chip_text</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:fontFamily">sans-serif-condensed</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+
+    <style name="Wc3ButtonPrimary" parent="Widget.AppCompat.Button">
+        <item name="android:background">@drawable/bg_button_primary</item>
+        <item name="android:backgroundTint">@null</item>
+        <item name="android:textColor">@color/button_primary_text</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:fontFamily">sans-serif-condensed</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.08</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:minWidth">104dp</item>
+        <item name="android:stateListAnimator">@null</item>
+        <item name="android:elevation">0dp</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+    </style>
+
+    <style name="Wc3ButtonGhost" parent="Widget.AppCompat.Button">
+        <item name="android:background">@drawable/bg_button_ghost</item>
+        <item name="android:backgroundTint">@null</item>
+        <item name="android:textColor">@color/launch_gold_light</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:fontFamily">sans-serif-condensed</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.08</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:minWidth">104dp</item>
+        <item name="android:stateListAnimator">@null</item>
+        <item name="android:elevation">0dp</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+    </style>
 </resources>

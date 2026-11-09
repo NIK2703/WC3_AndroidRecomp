@@ -18,9 +18,11 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #include <ifaddrs.h>
 
@@ -87,6 +89,138 @@ static int net_msg_flags(int flags, int sending)
     (void)sending;
 #endif
     return out;
+}
+
+/* Android gives every app a default network (usually mobile data).  A
+ * hotspot/AP or a Wi-Fi client is a separate local network, so a limited
+ * broadcast (255.255.255.255) sent on the default network never reaches the
+ * LAN.  Select the LAN interface natively and steer only broadcast datagrams
+ * there with IP_PKTINFO; ordinary Internet traffic keeps the default network.
+ * The interface name is the stable native selector and needs no Java
+ * ConnectivityManager call. */
+static int is_lan_ifname(const char *name)
+{
+    if (!name || !name[0]) return 0;
+    if (strncmp(name, "rmnet", 5) == 0 ||
+        strncmp(name, "ccmni", 5) == 0 ||
+        strncmp(name, "pdp", 3) == 0 ||
+        strncmp(name, "tun", 3) == 0 ||
+        strncmp(name, "ppp", 3) == 0 ||
+        strncmp(name, "dummy", 5) == 0 ||
+        strncmp(name, "lo", 2) == 0)
+        return 0;
+    return strncmp(name, "wlan", 4) == 0 ||
+           strncmp(name, "swlan", 5) == 0 ||
+           strncmp(name, "softap", 6) == 0 ||
+           strncmp(name, "ap", 2) == 0 ||
+           strncmp(name, "eth", 3) == 0 ||
+           strncmp(name, "rndis", 5) == 0 ||
+           strncmp(name, "usb", 3) == 0 ||
+           strncmp(name, "br", 2) == 0;
+}
+
+static int preferred_lan_info(char *out, size_t cap, unsigned *ifindex,
+                              uint32_t *address)
+{
+    if (!out || cap == 0) return 0;
+    struct ifaddrs *list = NULL;
+    if (getifaddrs(&list) != 0) return 0;
+    int found = 0;
+    for (int pass = 0; pass < 2 && !found; pass++) {
+        for (struct ifaddrs *ifa = list; ifa; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+                continue;
+            if (!(ifa->ifa_flags & IFF_UP) ||
+                (ifa->ifa_flags & IFF_LOOPBACK))
+                continue;
+            if (!is_lan_ifname(ifa->ifa_name)) continue;
+            /* Prefer an interface that can carry subnet broadcast. */
+            if (pass == 0 && !(ifa->ifa_flags & IFF_BROADCAST)) continue;
+            const struct sockaddr_in *sin =
+                (const struct sockaddr_in *)ifa->ifa_addr;
+            snprintf(out, cap, "%s", ifa->ifa_name);
+            if (ifindex) *ifindex = if_nametoindex(ifa->ifa_name);
+            if (address) *address = sin->sin_addr.s_addr;
+            found = 1;
+            break;
+        }
+    }
+    freeifaddrs(list);
+    return found;
+}
+
+/* Send the limited broadcast (255.255.255.255) on the LAN interface instead
+ * of the default network.  IP_PKTINFO selects the outgoing interface and
+ * source address per datagram, so a socket that also talks to Internet hosts
+ * keeps its normal route.  A subnet broadcast (for example 10.0.0.255) is
+ * already routed on-link by the kernel and does not need this path. */
+static int send_lan_broadcast(int fd, const void *buf, uint32_t length,
+                              int flags, const void *addr,
+                              uint32_t addr_length, uint32_t *sent)
+{
+    if (!addr || addr_length < sizeof(struct sockaddr_in)) return 0;
+    const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
+    if (sin->sin_family != AF_INET ||
+        sin->sin_addr.s_addr != INADDR_BROADCAST)
+        return 0;
+
+    char name[IFNAMSIZ];
+    unsigned ifindex = 0;
+    uint32_t address = 0;
+    if (!preferred_lan_info(name, sizeof name, &ifindex, &address) ||
+        ifindex == 0)
+        return 0;
+
+    int type = 0;
+    socklen_t type_length = sizeof type;
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &type_length) != 0 ||
+        type != SOCK_DGRAM)
+        return 0;
+
+    struct iovec iov;
+    iov.iov_base = (void *)(uintptr_t)buf;
+    iov.iov_len = length;
+    struct msghdr message;
+    memset(&message, 0, sizeof message);
+    message.msg_name = (void *)(uintptr_t)addr;
+    message.msg_namelen = (socklen_t)addr_length;
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+
+    char control[CMSG_SPACE(sizeof(struct in_pktinfo))];
+    memset(control, 0, sizeof control);
+    message.msg_control = control;
+    message.msg_controllen = sizeof control;
+    struct cmsghdr *header = CMSG_FIRSTHDR(&message);
+    header->cmsg_level = IPPROTO_IP;
+    header->cmsg_type = IP_PKTINFO;
+    header->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+    struct in_pktinfo info;
+    memset(&info, 0, sizeof info);
+    info.ipi_ifindex = (int)ifindex;
+    info.ipi_spec_dst.s_addr = address;
+    memcpy(CMSG_DATA(header), &info, sizeof info);
+
+    ssize_t n = sendmsg(fd, &message, net_msg_flags(flags, 1));
+    if (n < 0) {
+#if WC3_DEBUG && WC3_DEBUG_NET
+        fprintf(stderr, "[net] broadcast if=%s idx=%u failed: %s\n", name,
+                ifindex, strerror(errno));
+#endif
+        return 0;
+    }
+#if WC3_DEBUG && WC3_DEBUG_NET
+    char destination_text[INET_ADDRSTRLEN] = "?";
+    char source_text[INET_ADDRSTRLEN] = "?";
+    inet_ntop(AF_INET, &sin->sin_addr, destination_text,
+              sizeof destination_text);
+    inet_ntop(AF_INET, &address, source_text, sizeof source_text);
+    fprintf(stderr, "[net] broadcast %s:%u via %s idx=%u src=%s\n",
+            destination_text, (unsigned)ntohs(sin->sin_port), name, ifindex,
+            source_text);
+#endif
+    *sent = (uint32_t)n;
+    return 1;
 }
 
 static int android_net_startup(void *ctx)
@@ -213,6 +347,8 @@ static int android_net_sendto(void *ctx, Wc3NetSocket s, const void *buf,
     int fd = net_fd(s);
     if (fd < 0 || (!buf && length) || !addr || !sent)
         return -WC3_NET_ERR_INVAL;
+    if (send_lan_broadcast(fd, buf, length, flags, addr, addr_length, sent))
+        return 0;
     ssize_t n = sendto(fd, buf, length, net_msg_flags(flags, 1),
                        (const struct sockaddr *)addr,
                        (socklen_t)addr_length);
@@ -372,7 +508,19 @@ static int android_net_getsockopt(void *ctx, Wc3NetSocket s, int option,
     int name = 0;
 
     switch (option) {
-    case WC3_NET_OPT_ERROR: name = SO_ERROR; break;
+    case WC3_NET_OPT_ERROR: {
+        int host_error = 0;
+        socklen_t elen = sizeof host_error;
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &host_error, &elen) != 0)
+            return net_err(errno);
+        if (cap < 4u) return -WC3_NET_ERR_INVAL;
+        uint32_t code = host_error
+                            ? (uint32_t)(-net_err(host_error))
+                            : (uint32_t)WC3_NET_ERR_NONE;
+        memcpy(value, &code, sizeof code);
+        *length = 4u;
+        return 0;
+    }
     case WC3_NET_OPT_TYPE: name = SO_TYPE; break;
     case WC3_NET_OPT_RCVBUF: name = SO_RCVBUF; break;
     case WC3_NET_OPT_SNDBUF: name = SO_SNDBUF; break;
@@ -615,8 +763,11 @@ static int android_net_interfaces(void *ctx, Wc3NetInterface *out,
     struct ifaddrs *list = NULL;
     if (getifaddrs(&list) != 0) return net_err(errno);
 
-    uint32_t non_loop = 0;
+    Wc3NetInterface lan[WC3_NET_FD_SETSIZE];
+    Wc3NetInterface other[WC3_NET_FD_SETSIZE];
     Wc3NetInterface loop[WC3_NET_FD_SETSIZE];
+    uint32_t lan_count = 0;
+    uint32_t other_count = 0;
     uint32_t loop_count = 0;
 
     for (struct ifaddrs *ifa = list; ifa; ifa = ifa->ifa_next) {
@@ -646,14 +797,26 @@ static int android_net_interfaces(void *ctx, Wc3NetInterface *out,
             item.broadcast = item.address | ~item.netmask;
         }
 
-        if ((item.flags & WC3_NET_IF_LOOPBACK) && loop_count < WC3_NET_FD_SETSIZE)
-            loop[loop_count++] = item;
-        else if (non_loop < cap)
-            out[non_loop++] = item;
+        if (item.flags & WC3_NET_IF_LOOPBACK) {
+            if (loop_count < WC3_NET_FD_SETSIZE)
+                loop[loop_count++] = item;
+        } else if (is_lan_ifname(ifa->ifa_name)) {
+            if (lan_count < WC3_NET_FD_SETSIZE)
+                lan[lan_count++] = item;
+        } else if (other_count < WC3_NET_FD_SETSIZE) {
+            other[other_count++] = item;
+        }
     }
     freeifaddrs(list);
 
-    uint32_t n = non_loop;
+    /* gethostbyname(), SIO_GET_BROADCAST_ADDRESS and address-list callers take
+     * the first usable entry.  Keep the real LAN interface ahead of mobile
+     * data and VPN addresses so discovery does not advertise 10.x cellular. */
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < lan_count && n < cap; i++)
+        out[n++] = lan[i];
+    for (uint32_t i = 0; i < other_count && n < cap; i++)
+        out[n++] = other[i];
     for (uint32_t i = 0; i < loop_count && n < cap; i++)
         out[n++] = loop[i];
     *count = n;

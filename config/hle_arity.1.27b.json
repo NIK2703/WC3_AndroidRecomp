@@ -2984,6 +2984,797 @@
       "ordinal": null,
       "argc": 3,
       "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 1,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 2,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 3,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 4,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 5,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 6,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 7,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 9,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 10,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 11,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 12,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 13,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 14,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 15,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 16,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 17,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 18,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 19,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 20,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 21,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 22,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 23,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 52,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 57,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 111,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 112,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 115,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 116,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": null,
+      "ordinal": 151,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "__WSAFDIsSet",
+      "ordinal": 151,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "accept",
+      "ordinal": 1,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "bind",
+      "ordinal": 2,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "closesocket",
+      "ordinal": 3,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "connect",
+      "ordinal": 4,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "freeaddrinfo",
+      "ordinal": null,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "getaddrinfo",
+      "ordinal": null,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "gethostbyname",
+      "ordinal": 52,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "gethostname",
+      "ordinal": 57,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "getpeername",
+      "ordinal": 5,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "getsockname",
+      "ordinal": 6,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "getsockopt",
+      "ordinal": 7,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "htons",
+      "ordinal": 9,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "inet_addr",
+      "ordinal": 11,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "inet_ntoa",
+      "ordinal": 12,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "ioctlsocket",
+      "ordinal": 10,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "listen",
+      "ordinal": 13,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "ntohl",
+      "ordinal": 14,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "ntohs",
+      "ordinal": 15,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "recv",
+      "ordinal": 16,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "recvfrom",
+      "ordinal": 17,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "select",
+      "ordinal": 18,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "send",
+      "ordinal": 19,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "sendto",
+      "ordinal": 20,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "setsockopt",
+      "ordinal": 21,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "shutdown",
+      "ordinal": 22,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "socket",
+      "ordinal": 23,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "WSACleanup",
+      "ordinal": 116,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "WSAGetLastError",
+      "ordinal": 111,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "WSAIoctl",
+      "ordinal": null,
+      "argc": 9,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "WSASetLastError",
+      "ordinal": 112,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WS2_32.dll",
+      "name": "WSAStartup",
+      "ordinal": 115,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 1,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 2,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 3,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 4,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 5,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 6,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 9,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 10,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 11,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 12,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 13,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 14,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 15,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 16,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 17,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 18,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 19,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 20,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 21,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 23,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 52,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 57,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 111,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 112,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 115,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": null,
+      "ordinal": 116,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "accept",
+      "ordinal": 1,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "bind",
+      "ordinal": 2,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "closesocket",
+      "ordinal": 3,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "connect",
+      "ordinal": 4,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "gethostbyname",
+      "ordinal": 52,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "gethostname",
+      "ordinal": 57,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "getpeername",
+      "ordinal": 5,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "getsockname",
+      "ordinal": 6,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "htons",
+      "ordinal": 9,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "inet_addr",
+      "ordinal": 10,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "inet_ntoa",
+      "ordinal": 11,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "ioctlsocket",
+      "ordinal": 12,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "listen",
+      "ordinal": 13,
+      "argc": 2,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "ntohl",
+      "ordinal": 14,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "ntohs",
+      "ordinal": 15,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "recv",
+      "ordinal": 16,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "recvfrom",
+      "ordinal": 17,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "select",
+      "ordinal": 18,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "send",
+      "ordinal": 19,
+      "argc": 4,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "sendto",
+      "ordinal": 20,
+      "argc": 6,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "setsockopt",
+      "ordinal": 21,
+      "argc": 5,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "socket",
+      "ordinal": 23,
+      "argc": 3,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "WSACleanup",
+      "ordinal": 116,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "WSAGetLastError",
+      "ordinal": 111,
+      "argc": 0,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "WSASetLastError",
+      "ordinal": 112,
+      "argc": 1,
+      "callconv": "stdcall"
+    },
+    {
+      "module": "WSOCK32.dll",
+      "name": "WSAStartup",
+      "ordinal": 115,
+      "argc": 2,
+      "callconv": "stdcall"
     }
   ]
 }

@@ -1,8 +1,91 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- BV-2.3: the debug source set overrides only this label, so both
-         applicationId variants stay distinguishable in the launcher. -->
-    <string name="app_name">WC3 recomp</string>
-    <string name="app_name_roc">Reign of Chaos</string>
-    <string name="app_name_tft">Frozen Throne</string>
+    <!-- BV-2.3: the debug source set overrides only these labels, so both
+         applicationId variants stay distinguishable in the launcher.  The
+         project brand and the two game titles are product names and stay in
+         English in every locale; the settings UI itself is translated. -->
+    <string name="app_name" translatable="false">WC3 recomp</string>
+    <string name="app_name_roc" translatable="false">Reign of Chaos</string>
+    <string name="app_name_tft" translatable="false">Frozen Throne</string>
+
+    <!-- Launch settings.  English is the default locale; values-ru carries the
+         Russian translation.  Protocol/package/brand values stay
+         non-translatable. -->
+    <string name="launch_eyebrow" translatable="false">WC3 RECOMP</string>
+    <string name="launch_version" translatable="false">1.27.1.7085 · arm64-v8a</string>
+    <string name="launch_mode_tft" translatable="false">THE FROZEN THRONE</string>
+    <string name="launch_mode_roc" translatable="false">REIGN OF CHAOS</string>
+
+    <string name="launch_title">Launch settings</string>
+    <string name="launch_subtitle">Changes apply the next time the game starts.</string>
+    <string name="launch_shortcut_hint">This screen opens only from the long-press shortcut.</string>
+    <string name="launch_section_status">STATUS</string>
+    <string name="launch_section_advanced">ADVANCED</string>
+
+    <string name="launch_row_01" translatable="false">01</string>
+    <string name="launch_row_02" translatable="false">02</string>
+    <string name="launch_row_03" translatable="false">03</string>
+    <string name="launch_row_04" translatable="false">04</string>
+    <string name="launch_row_05" translatable="false">05</string>
+
+    <string name="launch_folder_label">Game folder</string>
+    <string name="launch_folder_help">Folder with war3.exe, game.dll and war3.mpq.</string>
+    <string name="launch_folder_hint" translatable="false">/storage/emulated/0/Warcraft 3</string>
+    <string name="launch_folder_find">Find</string>
+
+    <string name="launch_resolution_label">Resolution</string>
+    <string name="launch_resolution_help">Guest backbuffer. 0 × 0 keeps the native surface size.</string>
+    <string name="launch_width_hint">Width</string>
+    <string name="launch_height_hint">Height</string>
+    <string name="launch_resolution_separator" translatable="false">×</string>
+    <string name="launch_preset_native">Native</string>
+    <string name="launch_preset_720" translatable="false">720p</string>
+    <string name="launch_preset_900" translatable="false">900p</string>
+    <string name="launch_preset_1080" translatable="false">1080p</string>
+
+    <string name="launch_sound_label">Sound</string>
+    <string name="launch_sound_help">Turning sound off adds -nosound to the guest command line.</string>
+
+    <string name="launch_args_label">Extra arguments</string>
+    <string name="launch_args_help">Additional war3.exe switches. Diagnostic use only.</string>
+    <string name="launch_args_hint" translatable="false">-window</string>
+
+    <string name="launch_latency_label">Audio latency</string>
+    <string name="launch_latency_help">0 = auto. Experimental AAudio buffer override, 0–500 ms.</string>
+    <string name="launch_latency_hint" translatable="false">0</string>
+
+    <string name="launch_done">Done</string>
+    <string name="launch_play">Play</string>
+    <string name="launch_reset">Reset</string>
+    <string name="launch_cancel">Cancel</string>
+    <string name="launch_reset_title">Reset launch settings?</string>
+    <string name="launch_reset_message">All launch parameters will return to their defaults.</string>
+    <string name="launch_reset_confirm">Reset</string>
+    <string name="launch_grant">Grant access</string>
+
+    <string name="launch_status_ok">Ready: %1$s</string>
+    <string name="launch_status_ready">Ready</string>
+    <string name="launch_status_missing">Not found</string>
+    <string name="launch_status_permission">No storage access</string>
+    <string name="launch_status_unset">Not configured</string>
+    <string name="launch_folder_found">Found: %1$s</string>
+    <string name="launch_folder_not_found">No folder with war3.exe, game.dll and war3.mpq found.</string>
+
+    <string name="launch_error_permission">All files access is required. Without it the game cannot read the licensed files.</string>
+    <string name="launch_error_folder">Game folder not found: %1$s</string>
+    <string name="launch_error_not_directory">Path is not a folder: %1$s</string>
+    <string name="launch_error_not_writable">Game folder is not writable: %1$s</string>
+    <string name="launch_error_missing_files">Missing required files: %1$s</string>
+    <string name="launch_error_resolution">Resolution must be 0 × 0 or both values within 320–7680 × 240–4320.</string>
+    <string name="launch_error_args">Arguments: up to 200 printable ASCII characters, no line breaks.</string>
+    <string name="launch_error_latency">Audio latency must be between 0 and 500 ms.</string>
+    <string name="launch_error_save">Could not save settings.</string>
+
+    <string name="launch_toast_permission">No all-files access. Long-press the game icon → Launch settings.</string>
+    <string name="launch_toast_missing">Game folder not found. Long-press the game icon → Launch settings.</string>
+    <string name="launch_toast_invalid">Check launch settings. Long-press the game icon → Launch settings.</string>
+
+    <string name="shortcut_settings_short">Settings</string>
+    <string name="shortcut_settings_long">Launch settings</string>
+    <string name="cd_mode_icon">%1$s icon</string>
 </resources>

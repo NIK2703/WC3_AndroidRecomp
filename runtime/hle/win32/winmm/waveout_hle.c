@@ -41,14 +41,21 @@
  *       a header still marked WHDR_INQUEUE.  The five WAVEHDRs are the only
  *       back-pressure - there is no wait inside waveOutWrite.
  *   S4  All A/B crutches are gone (DMA, devclock, delays, done_route,
- *       handoff, tick_order, ring size, EXCLUSIVE, resampler).  Exactly one
- *       rollback remains: <WC3_DATA_DIR>/wave2_v2_off (and wave2_v2_on).
+ *       handoff, tick_order, ring size, EXCLUSIVE, resampler).  A-16 removes
+ *       the v2 opt-out: legacy WINMM is opt-in via wave2_legacy_on only.
  *
- * The product default is STILL the as-built WINMM path.  WC3_AUDIO_V2_ENABLED
- * stays 0 until S5 (gate + sync-log + miles-state + blind A/B) passes on the
- * device; enabling an unmeasured architecture was the rev-4 regression.
- * O-91: this file is compiled only in WC3_DEBUG.  The product fast binding of
- * as-built rows lives in winmm_fast_bind.c and stays in release.
+ * PRODUCT PATH (owner decision 2026-11-09, A-15/A-16, ADR-032/033/034): this
+ * slice is the active WINMM implementation in every variant, including
+ * release, and now runs the FULL nfsu2 architecture through the platform
+ * voice mixer: cursor-based region publication, positional completions,
+ * sinc resampling to the device rate, PCM_FLOAT output and stale mute.
+ * WC3_AUDIO_V2_ENABLED defaults to 1 and there is NO opt-out trigger: the
+ * stale wave2_v2_off file from the rev-6 rollback is ignored.  The only
+ * rollback is an explicit opt-IN file <WC3_DATA_DIR>/wave2_legacy_on.
+ * Device A/B, --gate/--sync-log/--miles-state and blind listening are still
+ * REQUIRED before this can be called a fix (A-7, E11, kill criterion A-12.4).
+ * The product fast binding of as-built rows lives in winmm_fast_bind.c and
+ * runs first in every variant; this install chains on top of it.
  *
  * runtime/legacy is never edited.  All guest memory access, HLE overrides and
  * the callback thread go through legacy_shim.h.  Diagnostics are gated by
@@ -96,13 +103,20 @@
 #define W2_DISPATCH_RETURN     0x7EFFFFF1u
 
 #ifndef WC3_AUDIO_V2_ENABLED
-#define WC3_AUDIO_V2_ENABLED 0
+/* Product default after the owner's explicit 2026-11-09 decision: the new
+ * WINMM -> Wc3AudioApi.publish -> AAudio pull path is active in release.
+ * Legacy WINMM is reachable only through <WC3_DATA_DIR>/wave2_legacy_on. */
+#define WC3_AUDIO_V2_ENABLED 1
 #endif
 
 /* Miles prepares five 50 ms headers.  16 leaves room for a second device and
  * for waveOutReset without ever allocating on the RT path. */
 #define W2_HDR_MAX             16u
 #define W2_MAILBOX_MAX         64u
+/* S-2: one preallocated staging buffer per in-flight header.  The pull path
+ * must never malloc/free inside waveOutWrite (nfsu2 publishes only the region
+ * it wrote; the platform owns the PCM copy). */
+#define W2_STAGE_BYTES         (16u * 1024u)
 #define W2_LOG_BUDGET          4000u
 #define W2_DUMP_LIMIT          (8u << 20)
 
@@ -110,6 +124,7 @@ typedef struct {
     uint32_t hdr;
     uint32_t ghwo, cb, inst, ev;
     uint64_t end_byte;      /* cumulative device byte that finishes this header */
+    uint64_t end_frame;     /* absolute SOURCE frame that finishes this header */
     wc3_lifted_fn cb_fn;    /* O-98: resolved once in waveOutOpen */
 } W2Pending;
 
@@ -141,6 +156,10 @@ typedef struct {
     W2Spill spill[W2_HDR_MAX];
     unsigned spill_head, spill_count;
     uint64_t written_bytes;    /* cumulative bytes accepted by the platform ring */
+    uint64_t next_frame;       /* producer cursor, anchored to the play cursor */
+    int reset_pending;         /* waveOutReset(): restart at frame 0 on next write */
+    uintptr_t voice;           /* primary host-owned looping voice (nfsu2 port) */
+    uint8_t *stage;            /* W2_HDR_MAX * W2_STAGE_BYTES, open() only */
 } W2Dev;
 
 static W2Dev g_dev[2];
@@ -154,9 +173,14 @@ static _Atomic int g_enabled;
 static atomic_flag g_lock = ATOMIC_FLAG_INIT;
 static void w2_lock(void)
 {
+    /* AGENTS.md forbids a bare spinlock.  This bookkeeping flag is held only
+     * for a few non-blocking stores, but a contended waiter must yield through
+     * the platform instead of burning a core. */
     for (;;) {
         if (!atomic_flag_test_and_set_explicit(&g_lock, memory_order_acquire))
             return;
+        if (g_platform && g_platform->thread.yield)
+            g_platform->thread.yield(g_platform->thread.ctx);
     }
 }
 static void w2_unlock(void)
@@ -503,7 +527,8 @@ static void w2_on_pump(void *opaque, uint64_t consumed_total)
     w2_lock();
     /* A partially accepted header is fed here, from a normal host thread.
      * audio.write() is the only producer of the platform SPSC ring. */
-    while (d->spill_count && d->audio && d->audio->write) {
+    while (d->spill_count && d->audio && !d->audio->publish &&
+           d->audio->write) {
         W2Spill *s = &d->spill[d->spill_head];
         uint32_t left = s->len - s->off;
         uint32_t accepted = 0;
@@ -527,11 +552,21 @@ static void w2_on_pump(void *opaque, uint64_t consumed_total)
         d->spill_count--;
     }
 
-    /* Strict FIFO.  A header completes only when the device has consumed its
-     * last byte; the five-WAVEHDR pool then becomes the feedback loop. */
-    while (d->pend_count &&
-           d->pend[d->pend_head].end_byte <= consumed_total) {
-        w2_finish_locked(&d->pend[d->pend_head]);
+    /* Positional completion (full nfsu2 port): a header finishes only when
+     * the mixer's PLAY cursor has passed its published region.  The old rule
+     * compared a producer byte counter with a wall-clock device counter; when
+     * the guest stalled those diverged and completions fired instantly, which
+     * is the "step 5" resubmission avalanche.  In the nfsu2 topology the
+     * device clock never drives the producer. */
+    uint64_t play = 0u;
+    int positional = (d->voice && d->audio->play_frame) ? 1 : 0;
+    if (positional) play = d->audio->play_frame(d->audio->ctx, d->stream);
+    while (d->pend_count) {
+        W2Pending *p = &d->pend[d->pend_head];
+        int done = positional ? (p->end_frame <= play)
+                              : (p->end_byte <= consumed_total);
+        if (!done) break;
+        w2_finish_locked(p);
         d->pend_head = (d->pend_head + 1u) % W2_HDR_MAX;
         d->pend_count--;
         pushed++;
@@ -669,6 +704,15 @@ static void h_w2_open(CPU *c)
     d->src_align = (uint32_t)ch * (uint32_t)(bits / 8);
     d->out_align = (uint32_t)ch * 2u;
     d->audio = &g_platform->audio;
+    /* S-2: no per-write malloc.  Allocate the staging pool once, at open. */
+    if (d->audio->publish) {
+        d->stage = (uint8_t *)calloc(W2_HDR_MAX, W2_STAGE_BYTES);
+        if (!d->stage) {
+            w2_unlock();
+            c->eax = W2_MMSYSERR_NOMEM;
+            return;
+        }
+    }
     atomic_store_explicit(&d->used, 1, memory_order_release);
     uint32_t ghwo = d->ghwo;
     w2_unlock();
@@ -677,14 +721,31 @@ static void h_w2_open(CPU *c)
     if (d->audio->open(d->audio->ctx, (uint32_t)rate, (uint32_t)ch,
                        (uint32_t)bits, &stream) != 0) {
         W2LOG("platform audio open failed");
+        free(d->stage);
+        d->stage = NULL;
         atomic_store_explicit(&d->used, 0, memory_order_release);
         c->eax = W2_MMSYSERR_NOMEM;
         return;
     }
     d->stream = stream;
+    /* Full nfsu2 port: bind WINMM to the platform's primary LOOPING voice.
+     * waveOutWrite becomes a Lock/Unlock of one region anchored at
+     * play_cursor + 10 ms instead of a push onto a producer counter.  This
+     * is the guest-visible half that makes the "step 5" repeat impossible. */
+    if (d->audio->primary_voice) {
+        d->voice = d->audio->primary_voice(d->audio->ctx, stream);
+        if (d->voice && d->audio->voice_control)
+            (void)d->audio->voice_control(d->audio->ctx, d->voice, 1, 1,
+                                          (uint32_t)rate, 0, 0);
+    }
+    if (!d->voice)
+        W2LOG("voice mixer unavailable: falling back to producer-counter "
+              "publication (host test stubs only)");
     if (d->audio->set_consumed(d->audio->ctx, stream, w2_on_pump, d) != 0) {
         W2LOG("platform consumed pump unavailable");
         (void)d->audio->close(d->audio->ctx, stream);
+        free(d->stage);
+        d->stage = NULL;
         atomic_store_explicit(&d->used, 0, memory_order_release);
         c->eax = W2_MMSYSERR_NOMEM;
         return;
@@ -745,6 +806,8 @@ static void h_w2_close(CPU *c)
      * freeing the ring, so w2_on_pump cannot touch a freed device. */
     if (audio && audio->close) (void)audio->close(audio->ctx, stream);
     w2_lock();
+    free(d->stage);
+    d->stage = NULL;
     memset(d, 0, sizeof *d);
     atomic_store_explicit(&d->used, 0, memory_order_release);
     w2_unlock();
@@ -857,6 +920,7 @@ static void h_w2_write(CPU *c)
     meta.inst = d->inst;
     meta.ev = d->ev;
     meta.end_byte = 0u;
+    int first_after_reset = d->reset_pending;
 
     wc3_legacy_wr32g(hdr + 16,
                      (f & ~W2_WHDR_DONE) | W2_WHDR_INQUEUE | W2_WHDR_PREPARED);
@@ -872,10 +936,94 @@ static void h_w2_write(CPU *c)
         return;
     }
 
-    /* Copy at submit.  A-9.7.2's DMA hypothesis was disproved on the device:
-     * the five WAVEHDRs have distinct lpData (the first four are adjacent
-     * segments of one PCM buffer with 16-byte gaps), so a submit-time
-     * snapshot is correct.  The platform ring is the only queue. */
+    /* S-2 pull path: publish ONLY the submitted region into the host-owned
+     * ring.  No malloc/free in waveOutWrite, no spill queue, no partial
+     * accept: five headers (44160 B) always fit the 64 KiB platform ring. */
+    if (d->audio->publish) {
+        if (!d->stage || need > W2_STAGE_BYTES) {
+            wc3_legacy_wr32g(hdr + 16, f);
+            w2_unlock();
+            c->eax = W2_MMSYSERR_NOMEM;
+            return;
+        }
+        unsigned si = (d->pend_head + d->pend_count) % W2_HDR_MAX;
+        uint8_t *buf = d->stage + (size_t)si * W2_STAGE_BYTES;
+        if (data && wc3_legacy_guest_ok(data, need))
+            memcpy(buf, (const void *)(uintptr_t)data, need);
+        else
+            memset(buf, 0, need);
+        w2_dump_pcm(buf, need);
+
+        /* nfsu2 contract: the producer writes at the PLAY cursor plus one
+         * 10 ms lookahead, exactly like DirectSound GetCurrentPosition.  A
+         * late guest is re-anchored forward (a silence gap), never allowed to
+         * publish into the past and never allowed to replay stale PCM. */
+        uint32_t nframes = need / d->out_align;
+        uint64_t frame_base;
+        if (d->voice && d->audio->play_frame) {
+            if (first_after_reset) {
+                /* waveOutReset(): the ring is silent and its cursor was
+                 * zeroed, so the first new header starts at frame 0 rather
+                 * than one lookahead into the discarded buffer. */
+                frame_base = 0u;
+            } else {
+                uint64_t play = d->audio->play_frame(d->audio->ctx, d->stream);
+                uint32_t dev_rate = d->audio->device_rate
+                    ? d->audio->device_rate(d->audio->ctx, d->stream)
+                    : (uint32_t)d->rate;
+                uint64_t lookahead = (uint64_t)(dev_rate / 100u);
+                uint64_t anchor = play + (lookahead ? lookahead : 1u);
+                if (d->next_frame < anchor) d->next_frame = anchor;
+                frame_base = d->next_frame;
+            }
+        } else {
+            frame_base = d->written_bytes / d->out_align;
+        }
+        uint32_t accepted = 0;
+        int rc;
+        if (d->voice && d->audio->voice_publish)
+            rc = d->audio->voice_publish(d->audio->ctx, d->voice,
+                                         frame_base, buf, need, &accepted);
+        else
+            rc = d->audio->publish(d->audio->ctx, d->stream, frame_base,
+                                   buf, need, &accepted);
+        if (rc != 0 || accepted != need) {
+            wc3_legacy_wr32g(hdr + 16, f);
+            w2_unlock();
+            c->eax = W2_MMSYSERR_NOMEM;
+            return;
+        }
+        if (first_after_reset) {
+            if (d->voice) {
+                if (d->audio->voice_seek)
+                    (void)d->audio->voice_seek(d->audio->ctx, d->voice,
+                                               frame_base);
+                if (d->audio->voice_control)
+                    (void)d->audio->voice_control(d->audio->ctx, d->voice,
+                                                  1, 1, (uint32_t)d->rate,
+                                                  0, 0);
+            }
+            d->reset_pending = 0;
+        }
+        d->written_bytes += need;
+        d->next_frame = frame_base + nframes;
+        meta.end_byte = d->written_bytes;
+        meta.end_frame = frame_base + nframes;
+        d->pend[si] = meta;
+        d->pend_count++;
+        w2_unlock();
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+        atomic_fetch_add(&g_stat_writes, 1u);
+        W2LOG("pull write hdr=%08X frame=%llu bytes=%u",
+              hdr, (unsigned long long)frame_base, need);
+#endif
+        c->eax = W2_MMSYSERR_NOERROR;
+        return;
+    }
+
+    /* Legacy linear write() A/B path.  Copy at submit.  A-9.7.2's DMA
+     * hypothesis was disproved on the device: the five WAVEHDRs have distinct
+     * lpData, so a submit-time snapshot is correct. */
     uint8_t *buf = (uint8_t *)malloc(need);
     if (!buf) {
         wc3_legacy_wr32g(hdr + 16, f);
@@ -899,6 +1047,7 @@ static void h_w2_write(CPU *c)
         return;
     }
     d->written_bytes += accepted;
+    d->reset_pending = 0;
     if (accepted == need) {
         free(buf);
         meta.end_byte = d->written_bytes;
@@ -937,6 +1086,23 @@ static void h_w2_reset(CPU *c)
     if (!d) { c->eax = W2_MMSYSERR_INVALHANDLE; return; }
     w2_lock();
     w2_flush_locked(d);
+    /* Windows: waveOutReset stops playback, marks queued headers done, and
+     * resets the current position.  The persistent voice ring would otherwise
+     * replay the old buffer on the next write, so discard it as well. */
+    d->next_frame = 0u;
+    d->written_bytes = 0u;
+    d->reset_pending = 1;
+    if (d->voice && d->audio) {
+        if (d->audio->voice_reset) {
+            (void)d->audio->voice_reset(d->audio->ctx, d->voice);
+        } else {
+            if (d->audio->voice_seek)
+                (void)d->audio->voice_seek(d->audio->ctx, d->voice, 0u);
+            if (d->audio->voice_control)
+                (void)d->audio->voice_control(d->audio->ctx, d->voice, 0, 1,
+                                               (uint32_t)d->rate, 0, 0);
+        }
+    }
     w2_unlock();
     wc3_legacy_guest_callback_wake();
     c->eax = W2_MMSYSERR_NOERROR;
@@ -1092,12 +1258,15 @@ int wc3_hle_winmm_waveout_install(void)
     g_platform = wc3_platform();
     if (g_platform) g_time = &g_platform->time;
 
-    /* One decision, visible in every variant.  Default is still the measured
-     * as-built WINMM path: rev 4 shipped an unmeasured architecture and made
-     * the stutter worse.  S4 leaves exactly one rollback. */
+    /* A-16 / ADR-034: the full nfsu2 port is the PRODUCT path in every
+     * variant.  There is deliberately NO opt-out trigger.  The old
+     * wave2_v2_off file that can still sit in <WC3_DATA_DIR> from the rev-6
+     * rollback is intentionally IGNORED; legacy WINMM is now opt-IN via
+     * wave2_legacy_on.  wc3_legacy_hle_add() appends rows at the end of the
+     * registry, so the dsound rows installed in dispatch_boot.c never shift
+     * the frozen fast-bind slots of the 11 as-built WINMM rows. */
     int enable = WC3_AUDIO_V2_ENABLED ? 1 : 0;
-    if (w2_trigger("wave2_v2_on"))  enable = 1;
-    if (w2_trigger("wave2_v2_off")) enable = 0;
+    if (w2_trigger("wave2_legacy_on")) enable = 0;
 #if WC3_DEBUG
     const char *env = getenv("WC3_AUDIO_V2");
     if (env) enable = env[0] != '0';
@@ -1107,8 +1276,8 @@ int wc3_hle_winmm_waveout_install(void)
         /* O-91: fast binding is product code in winmm_fast_bind.c and runs in
          * every variant.  v2 does not duplicate it here. */
 #if WC3_DEBUG && WC3_DEBUG_AUDIO
-        fprintf(stderr, "[wave2] disabled: as-built WINMM path; "
-                        "rev 6 needs S5 device acceptance\n");
+        fprintf(stderr, "[wave2] disabled: as-built WINMM opt-in "
+                        "(wave2_legacy_on)\n");
 #endif
         installed = 1;
         return 0;
@@ -1122,15 +1291,14 @@ int wc3_hle_winmm_waveout_install(void)
                                 h_w2_set_timer) != 0 ||
         wc3_legacy_hle_override("USER32.dll", "KillTimer",
                                 h_w2_kill_timer) != 0) {
-        fprintf(stderr, "[wave2] USER32 rows missing\n");
+        W2LOG("USER32 rows missing");
         return -1;
     }
     int n = 0;
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
         if (wc3_legacy_hle_override("WINMM.dll", g_overrides[i].name,
                                     g_overrides[i].impl) != 0) {
-            fprintf(stderr, "[wave2] missing WINMM row %s\n",
-                    g_overrides[i].name);
+            W2LOG("missing WINMM row %s", g_overrides[i].name);
             return -1;
         }
         n++;

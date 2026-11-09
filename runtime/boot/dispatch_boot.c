@@ -27,6 +27,7 @@
 #include "crt_time_hle.h"
 #include "display_hle.h"
 #include "dragdrop_hle.h"
+#include "dsound_hle.h"
 #include "heap_hle.h"
 #include "imagelist_hle.h"
 #include "kernel32_file_hle.h"
@@ -49,9 +50,8 @@
 #include "winmm_fast_bind.h"
 #include "ws2_32_hle.h"
 
-#if WC3_DEBUG
+/* S-2/S-3: the WINMM pull slice is product code in every variant. */
 #include "waveout_hle.h"
-#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -138,15 +138,22 @@ void wc3_dispatch_init(void)
     WC3_INSTALL_STEP(msvcr80_convert_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_time_install());
     WC3_INSTALL_STEP(wc3_hle_ws2_32_install());
-    /* O-91: the product fast registry is independent of the rejected v2 sink.
-     * This call stays in release; v2 install is debug/headless evidence. */
+    /* Product fast registry binds the 11 as-built WINMM rows first. */
     WC3_INSTALL_STEP(wc3_hle_winmm_fast_bind_rows());
-#if WC3_DEBUG
-    /* WINMM v2 on a dedicated audio thread (A-6.2/A-6.3).  Installed last so
-     * the pump chains sit above the already-installed USER32 handlers. */
+    /* S-2/S-3: the new WINMM pull slice chains on top in EVERY variant.
+     * Installed last so the pump chains sit above the already-installed
+     * USER32 handlers.  wave2_v2_off disables the overrides at runtime. */
     WC3_INSTALL_STEP(wc3_hle_winmm_waveout_install());
-#endif
 #undef WC3_INSTALL_STEP
+
+    /* ADR-034: the full DirectSound COM guest contract is installed in EVERY
+     * build, not behind a trigger.  wc3_legacy_hle_add() only APPENDS rows at
+     * g_hle_count, so the 11 frozen as-built WINMM fast-bind slots and the
+     * generated import slot indices keep their positions; the appended dsound
+     * rows are simply unused until the corpus is re-lifted (G-14/G-15).  A
+     * registration failure must not abort boot of the current corpus, hence
+     * the plain call instead of WC3_INSTALL_STEP. */
+    (void)wc3_hle_dsound_install();
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
     /* Ownership tracing for the registry lock: a frozen guest can show its

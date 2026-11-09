@@ -44,9 +44,11 @@ MODULE_BY_MACRO = {
 }
 CDECL_BY_MACRO = {"KC", "CR", "UC"}
 
-# LAN/Battle.net is out of scope for the 1.27 Android target.  The Windows-era
-# HLE table contained no-op WS2_32 rows; they must not become "present".
-EXCLUDED_MODULES = {"ws2_32.dll", "wsock32.dll", "wininet.dll", "wldap32.dll"}
+# Local LAN is in scope (ADR-031): ws2_32/wsock32 are implemented by
+# runtime/hle/win32/ws2_32, so their PE imports classify against HLE rows.
+# Battle.net and Internet services (wininet/wldap32) are the next phase after
+# LAN; they stay unresolved debt rather than being excluded or forbidden.
+EXCLUDED_MODULES: set[str] = set()
 # The old Android HLE table named the CRT by its 1.26 module.  1.27's PE imports
 # msvcr120.dll; the same function surface is bound through the MSVCR80 entries.
 MODULE_ALIASES = {"msvcr120.dll": "msvcr80.dll"}
@@ -182,11 +184,12 @@ def dedupe(entries: list[Entry]) -> tuple[list[Entry], list[str]]:
 
 
 def filter_excluded(entries: list[Entry]) -> tuple[list[Entry], list[dict]]:
-    """LAN/Internet networking is outside the 1.27 Android target.
+    """Report modules that are outside the current phase.
 
-    The legacy table carried WS2_32 no-op rows from the Windows port.  Keeping
-    them would silently make a mandatory network import look implemented, so
-    they are removed from the baseline and reported explicitly.
+    Local LAN is implemented by runtime/hle/win32/ws2_32 (ADR-031).  Battle.net
+    and Internet services (wininet/wldap32) are the next phase after LAN, so
+    they stay in the table as unresolved debt instead of being excluded or
+    silently treated as present.
     """
     kept: list[Entry] = []
     excluded: list[dict] = []
@@ -198,7 +201,7 @@ def filter_excluded(entries: list[Entry]) -> tuple[list[Entry], list[dict]]:
                     "name": e.name,
                     "ordinal": e.ordinal,
                     "source": e.source,
-                    "reason": "LAN/Battle.net out of scope",
+                    "reason": "not implemented yet (next phase after LAN)",
                 }
             )
         else:
@@ -236,7 +239,7 @@ def write_tsv(path: Path, entries: list[Entry]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# module\tname\tordinal\targc\tcallconv\tsource",
-        "# Bootstrap export from the historical Android HLE table; not a PE fixture.",
+        "# Bootstrap export from the Android HLE tables; not a PE fixture.",
     ]
     for e in sorted(entries, key=lambda x: (x.module.lower(), (x.name or "").lower(), x.ordinal or 0)):
         lines.append(
@@ -341,7 +344,7 @@ def merge_pe(pe: dict, hle_entries: list[Entry]) -> tuple[list[dict], dict, list
             hle_source = hle.source
         elif module.lower() in EXCLUDED_MODULES:
             status = "excluded"
-            reason = "LAN/Battle.net out of scope"
+            reason = "not implemented yet (next phase after LAN)"
             argc = None
             callconv = None
             hle_source = None

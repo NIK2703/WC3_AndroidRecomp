@@ -284,8 +284,15 @@ static const char *pick_data_dir(struct android_app *app)
         return NULL;
 
     char shared[1024];
-    const char *candidates[3];
+    const char *candidates[4];
     int count = 0;
+
+    /* The launch settings screen owns this override.  Check it before the
+     * historical auto-detection so a user-selected licensed game directory
+     * wins even when the default shared path also contains a partial copy. */
+    const char *override = getenv("WC3_GAME_DATA_DIR");
+    if (override && override[0])
+        candidates[count++] = override;
 
     if (derive_shared_data_dir(app->activity->externalDataPath, shared,
                                sizeof shared) == 0)
@@ -902,6 +909,92 @@ Java_wc3_recomp_Wc3GameActivity_nativeSetGameMode(
     else
         LOGE("unknown game mode: %s", value);
     (*env)->ReleaseStringUTFChars(env, mode, value);
+}
+
+/* Whole-token match for a space-separated guest command line. */
+static int has_arg_token(const char *args, const char *token)
+{
+    if (!args || !args[0] || !token || !token[0]) return 0;
+    const size_t token_len = strlen(token);
+    const char *p = args;
+    while ((p = strstr(p, token)) != NULL) {
+        const int left = (p == args) || p[-1] == ' ' || p[-1] == '\t';
+        const int right = p[token_len] == '\0' || p[token_len] == ' ' ||
+                          p[token_len] == '\t';
+        if (left && right) return 1;
+        p += token_len;
+    }
+    return 0;
+}
+
+/*
+ * Called before GameActivity.onCreate starts android_main.  Only the variables
+ * owned by the settings screen are written; a host launch without the launch
+ * bundle never reaches this function, so ADB/diagnostic launches keep their
+ * environment untouched.
+ */
+JNIEXPORT void JNICALL
+Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
+    JNIEnv *env, jclass clazz, jstring game_dir, jint width, jint height,
+    jboolean sound, jstring extra_args, jint audio_latency_ms)
+{
+    (void)clazz;
+    const char *dir = NULL;
+    const char *user_args = NULL;
+
+    if (game_dir)
+        dir = (*env)->GetStringUTFChars(env, game_dir, NULL);
+    if (extra_args)
+        user_args = (*env)->GetStringUTFChars(env, extra_args, NULL);
+
+    if (dir && dir[0])
+        setenv("WC3_GAME_DATA_DIR", dir, 1);
+    else
+        unsetenv("WC3_GAME_DATA_DIR");
+
+    if (width > 0 && height > 0) {
+        char value[16];
+        snprintf(value, sizeof value, "%d", (int)width);
+        setenv("WC3_DXVK_WIDTH", value, 1);
+        snprintf(value, sizeof value, "%d", (int)height);
+        setenv("WC3_DXVK_HEIGHT", value, 1);
+    } else {
+        unsetenv("WC3_DXVK_WIDTH");
+        unsetenv("WC3_DXVK_HEIGHT");
+    }
+
+    char args[512];
+    args[0] = '\0';
+    if (user_args && user_args[0])
+        snprintf(args, sizeof args, "%s", user_args);
+    if (!sound && !has_arg_token(args, "-nosound")) {
+        size_t len = strlen(args);
+        if (len > 0 && len + 1 < sizeof args) {
+            args[len++] = ' ';
+            args[len] = '\0';
+        }
+        if (len + 1 < sizeof args)
+            snprintf(args + len, sizeof args - len, "%s", "-nosound");
+    }
+    if (args[0])
+        setenv("WC3_ARGS", args, 1);
+    else
+        unsetenv("WC3_ARGS");
+
+    if (audio_latency_ms > 0 && audio_latency_ms <= 500) {
+        char value[16];
+        snprintf(value, sizeof value, "%d", (int)audio_latency_ms);
+        setenv("WC3_AUDIO_LATENCY_MS", value, 1);
+    } else {
+        /* The settings bundle owns this key.  Explicit 0 also masks a
+         * diagnostic wc3.cfg value, so "auto" really means auto. */
+        setenv("WC3_AUDIO_LATENCY_MS", "0", 1);
+    }
+
+    if (dir)
+        (*env)->ReleaseStringUTFChars(env, game_dir, dir);
+    if (user_args)
+        (*env)->ReleaseStringUTFChars(env, extra_args, user_args);
 }
 
 static void canvas_attach_provider(struct android_app *app)

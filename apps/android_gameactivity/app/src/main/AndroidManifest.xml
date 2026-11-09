@@ -5,8 +5,15 @@
     <!-- LAN play needs AF_INET UDP/TCP sockets in the app UID. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- API 26-29 shared-storage access.  API 30+ uses All files access below. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
     <!-- The native host reads the licensed game files with POSIX calls from
-         /storage/emulated/0/Warcraft 3, so it needs All files access on API 30+. -->
+         the configured game directory, so it needs All files access on API 30+. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <uses-feature android:name="android.hardware.vulkan.version"
@@ -21,6 +28,69 @@
         android:roundIcon="@mipmap/ic_launcher_tft"
         android:theme="@style/Wc3Theme">
 
+        <!-- Launcher gates.  A normal tap validates the saved launch settings
+             and starts the native host immediately.  The long-press shortcut
+             sends ACTION_OPEN_SETTINGS to the same gate.  No intro screen and
+             no visible gate window. -->
+        <activity
+            android:name=".Wc3TftLauncherActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode|density"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_tft"
+            android:label="@string/app_name_tft"
+            android:launchMode="singleTop"
+            android:noHistory="true"
+            android:roundIcon="@mipmap/ic_launcher_tft"
+            android:taskAffinity="${applicationId}.launcher.tft"
+            android:theme="@style/Wc3GateTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts_tft" />
+        </activity>
+
+        <activity
+            android:name=".Wc3RocLauncherActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode|density"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_roc"
+            android:label="@string/app_name_roc"
+            android:launchMode="singleTop"
+            android:noHistory="true"
+            android:roundIcon="@mipmap/ic_launcher_roc"
+            android:taskAffinity="${applicationId}.launcher.roc"
+            android:theme="@style/Wc3GateTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts_roc" />
+        </activity>
+
+        <!-- The settings screen is not a launcher entry.  It is started only by
+             the gates and owns the SharedPreferences in the default process.
+             The hosts receive the same values through the launch intent, so the
+             :roc process never has to read another process's preferences. -->
+        <activity
+            android:name=".LaunchSettingsActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode|density"
+            android:exported="false"
+            android:label="@string/launch_title"
+            android:launchMode="singleTask"
+            android:screenOrientation="userLandscape"
+            android:taskAffinity="${applicationId}.settings"
+            android:theme="@style/Wc3LaunchTheme"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- Native RoC host.  The component and :roc process are unchanged so
+             direct ADB launches and pidof-based tooling keep working. -->
         <activity
             android:name=".Wc3RocActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode|density"
@@ -32,18 +102,13 @@
             android:roundIcon="@mipmap/ic_launcher_roc"
             android:screenOrientation="userLandscape"
             android:taskAffinity="${applicationId}.roc">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="wc3gameactivity" />
         </activity>
 
-        <!-- The original activity stays the TFT entry and the default process.
-             This keeps the existing .Wc3GameActivity component and pidof-based
-             tooling working; only the RoC entry gets an isolated process. -->
+        <!-- Native TFT host and default process.  The component stays
+             .Wc3GameActivity so JNI names and pidof-based tooling are stable. -->
         <activity
             android:name=".Wc3GameActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode|density"
@@ -53,10 +118,6 @@
             android:launchMode="singleTask"
             android:roundIcon="@mipmap/ic_launcher_tft"
             android:screenOrientation="userLandscape">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="wc3gameactivity" />

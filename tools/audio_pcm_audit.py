@@ -15,8 +15,41 @@ import sys
 import array
 import struct
 import collections
+import re
 
 BLK = 8832          # 2208 frames * 2 ch * 2 bytes
+
+# S-4: report-only parser for the non-RT pull diagnostics emitted by
+# platform_android.c.  It deliberately introduces NO new gate threshold
+# (PM-2): existing --gate/--sync-log/--miles-state remain the only criteria.
+PULL_RE = re.compile(
+    r"\[wave2\] pull xruns=(-?\d+) buffer=(\d+) burst=(\d+) "
+    r"consumed=(\d+) play=(\d+) published=(\d+) stale=(\d+) regions=(\d+)")
+
+
+def pull_report(path):
+    rows = []
+    with open(path, encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            m = PULL_RE.search(line)
+            if m:
+                rows.append(tuple(int(v) for v in m.groups()))
+    if not rows:
+        return ["pull report: no [wave2] pull rows in %s" % path]
+    out = ["pull report: %d sample(s) from %s" % (len(rows), path)]
+    labels = ("xruns", "buffer_frames", "burst", "consumed_bytes",
+              "play_frame", "published_frame", "stale_frames",
+              "publish_regions")
+    for i, label in enumerate(labels):
+        vals = sorted(r[i] for r in rows)
+        out.append("  %-17s min=%d p50=%d max=%d" %
+                   (label, vals[0], vals[len(vals) // 2], vals[-1]))
+    lags = [r[5] - r[4] for r in rows]
+    out.append("  %-17s min=%d p50=%d max=%d" %
+               ("publish_lag_frames", min(lags),
+                sorted(lags)[len(lags) // 2], max(lags)))
+    out.append("  verdict: diagnostics only; no pass/fail is asserted here")
+    return out
 
 
 def load_blocks(path):
@@ -412,8 +445,18 @@ if __name__ == '__main__':
                          'fails when the SPSC contract w-r<=N, a stable '
                          'TimerProc gid or the no-waveOutWrite-in-callback '
                          'rule is broken (A-12.4 S0)')
+    ap.add_argument('--pull-log', metavar='RUN_TXT',
+                    help='device log with [wave2] pull rows; report-only '
+                         'distribution of xruns, buffer depth, device clock '
+                         'and publish lag (S-4). Adds no gate threshold.')
     args = ap.parse_args()
     failed = []
+    if args.pull_log:
+        try:
+            for line in pull_report(args.pull_log):
+                print(line)
+        except Exception as e:
+            failed.append('%s: pull report FAILED %s' % (args.pull_log, e))
     if args.miles_state:
         try:
             for v in miles_state_check(args.miles_state):

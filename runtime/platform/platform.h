@@ -118,7 +118,9 @@ enum {
 };
 
 /* Platform-neutral socket options.  The winsock HLE translates SO_* values,
- * including the DWORD-millisecond timeout form, before calling this table. */
+ * including the DWORD-millisecond timeout form, before calling this table.
+ * WC3_NET_OPT_ERROR returns a positive WC3_NET_ERR_* value (0 when no error is
+ * pending), never a host errno. */
 enum {
     WC3_NET_OPT_REUSEADDR = 1,
     WC3_NET_OPT_EXCLUSIVEADDRUSE,
@@ -357,6 +359,74 @@ typedef struct Wc3AudioApi {
      * and this reports what AAudio actually granted.  It is an A/B input,
      * never a claim that a larger buffer fixes clicks. */
     uint32_t (*latency_frames)(void *ctx, uintptr_t stream);
+    /* S-1 (docs/AUDIO_PULL_IMPLEMENTATION_SPEC.md): host-owned pull ring.
+     * Publish ONLY the region just written, at an absolute frame index since
+     * open().  Optional: NULL means the platform has no pull sink and the HLE
+     * stays on the linear write() path.  Added LAST so existing field offsets
+     * and the frozen guest ABI do not move. */
+    int (*publish)(void *ctx, uintptr_t stream, uint64_t frame_base,
+                   const void *frames, uint32_t bytes, uint32_t *written);
+
+    /* Full nfsu2 port (A-14 / ADR-033): host-owned LOOPING voices mixed in
+     * the AAudio real-time callback.  Every field is appended LAST so the
+     * frozen guest ABI and all existing table offsets stay put.  All methods
+     * are optional: NULL keeps the linear write() / pull ring path.
+     *
+     * Frames in this block are SOURCE frames of the voice, never device
+     * frames; rate conversion belongs to the mixer, not to the HLE. */
+    int (*voice_add)(void *ctx, uintptr_t stream, uint32_t rate,
+                     uint32_t channels, uint32_t bits, uint32_t bytes,
+                     uintptr_t *out_voice);
+    int (*voice_remove)(void *ctx, uintptr_t voice);
+    int (*voice_publish)(void *ctx, uintptr_t voice, uint64_t frame_base,
+                         const void *frames, uint32_t bytes,
+                         uint32_t *written);
+    /* DirectSound GetCurrentPosition: play/write cursors in BYTES, modulo the
+     * looping buffer, plus the absolute source-frame play cursor.  write is
+     * play + one 10 ms lookahead, exactly as the nfsu2 guest contract. */
+    int (*voice_position)(void *ctx, uintptr_t voice, uint32_t *play_bytes,
+                          uint32_t *write_bytes, uint64_t *play_frame);
+    int (*voice_control)(void *ctx, uintptr_t voice, int playing, int loop,
+                         uint32_t frequency, int volume, int pan);
+    /* Absolute SOURCE-frame play cursor of the stream's primary voice. */
+    uint64_t (*play_frame)(void *ctx, uintptr_t stream);
+    /* Actual AAudio sample rate (the nfsu2 mixer rate), 0 on headless. */
+    uint32_t (*device_rate)(void *ctx, uintptr_t stream);
+    /* The platform's primary looping voice, created at open().  The WINMM
+     * slice treats it as its persistent DirectSound-style buffer. */
+    uintptr_t (*primary_voice)(void *ctx, uintptr_t stream);
+    /* DirectSound SetCurrentPosition / SetFormat equivalents.  Both are
+     * appended LAST: the frozen guest ABI and every earlier method offset
+     * stay put.  NULL keeps the previous "validate only" behaviour. */
+    int (*voice_seek)(void *ctx, uintptr_t voice, uint64_t abs_frame);
+    int (*voice_format)(void *ctx, uintptr_t voice, uint32_t rate,
+                        uint32_t channels, uint32_t bits);
+    /* nfsu2 serviceGuestSound(): non-RT health snapshot, off the callback.
+     * `active` is the stream-wide count of playing voices; clipped/peak/
+     * callback_peak are exchanged by this call.  Gap and ring are per voice. */
+    int (*voice_stats)(void *ctx, uintptr_t voice, uint32_t *active,
+                       uint32_t *clipped, float *peak,
+                       uint64_t *publish_gap_us, uint32_t *ring_ms,
+                       uint32_t *callback_peak_us);
+    /* DirectSound GetStatus: current per-voice playing/loop flags and the
+     * absolute SOURCE play cursor.  Appended LAST for the same reason. */
+    int (*voice_state)(void *ctx, uintptr_t voice, uint32_t *playing,
+                       uint32_t *loop, uint64_t *position);
+    /* Device rate of the stream that owns this voice.  DirectSound's write
+     * cursor lookahead is measured in device time, not guest time. */
+    uint32_t (*voice_device_rate)(void *ctx, uintptr_t voice);
+    /* One guest Unlock() that wraps the physical end of the ring.  Copies both
+     * locked spans under one publish claim, so nfsu2's publishes>=4 streaming
+     * threshold still counts Unlock calls, not ring spans.  Appended LAST. */
+    int (*voice_publish2)(void *ctx, uintptr_t voice,
+                          uint64_t frame_base1, const void *frames1,
+                          uint32_t bytes1,
+                          uint64_t frame_base2, const void *frames2,
+                          uint32_t bytes2, uint32_t *written);
+    /* waveOutReset(): silence the persistent ring and reset its cursor/publish
+     * generation.  Optional; NULL keeps the old "flush headers only" behaviour.
+     * Appended LAST. */
+    int (*voice_reset)(void *ctx, uintptr_t voice);
 } Wc3AudioApi;
 
 typedef struct Wc3ClipboardApi {

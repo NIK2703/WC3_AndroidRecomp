@@ -7,10 +7,13 @@
  * discarded, and the surface hands out a stable fake native handle.  Input is
  * a lock-free SPSC mailbox so a replay schedule can feed the guest thread.
  */
+#include "audio_pull_ring.h"
+#include "audio_mixer.h"
 #include "headless_internal.h"
 
 #include <dirent.h>
 #include <errno.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -313,7 +316,51 @@ typedef struct HeadlessAudio {
     void (*on_consumed)(void *opaque, uint64_t total);
     void *consumed_opaque;
     pthread_mutex_t lock;
+
+    /* S-1: deterministic pull twin.  pull_mode == 0 keeps the exact legacy
+     * linear advance() contract so existing T0/T1 tests stay byte-identical. */
+    Wc3PullRing pull;
+    uint8_t *pull_pcm;
+    int pull_mode;
+    uint32_t burst_frames;
+    uint64_t pcm_hash;
+
+    /* Deterministic device clock for health snapshots.  Android uses real
+     * monotonic time; the headless DUT must not make T1 replays wall-clock
+     * dependent, so advance() moves this clock by the burst duration. */
+    uint64_t virtual_ns;
+
+    /* Full nfsu2 port: deterministic twin of the Android voice mixer.  Off by
+     * default so the existing T0/T1 replays stay byte-identical; a T1 difftest
+     * turns it on through wc3_headless_audio_enable_mixer(). */
+    Wc3PcmMixer mixer;
+    uint8_t *voice_pcm[WC3_MIXER_VOICES];
+    uint64_t voice_last_publish_ns[WC3_MIXER_VOICES];
+    uint64_t voice_max_gap_ns[WC3_MIXER_VOICES];
+    uintptr_t primary_voice;
+    int mixer_mode;
 } HeadlessAudio;
+
+/* Last opened stream, used only by the T1 verification setters below.  The
+ * headless DUT owns one audio device per process; no production code reads
+ * this pointer. */
+static HeadlessAudio *g_headless_audio_last;
+
+/* Set by wc3_headless_audio_enable_mixer() BEFORE waveOutOpen().  The stream
+ * is created by open(), so a per-stream switch alone would be lost: the T1
+ * replay sets this global, and the next open() applies it to the new stream. */
+static int g_headless_mixer_default;
+
+static void headless_audio_wait_render_idle(Wc3PcmMixer *mixer)
+{
+    const Wc3Platform *p = wc3_platform();
+    while (wc3_mixer_render_users(mixer) != 0u) {
+        if (p && p->thread.yield)
+            p->thread.yield(p->thread.ctx);
+        else
+            sched_yield();
+    }
+}
 
 static int headless_audio_open(void *ctx, uint32_t sample_rate,
                                uint32_t channels, uint32_t bits,
@@ -328,11 +375,47 @@ static int headless_audio_open(void *ctx, uint32_t sample_rate,
     stream->bits = bits;
     atomic_init(&stream->written, 0);
     atomic_init(&stream->consumed, 0);
+    stream->pcm_hash = WC3_PULL_HASH_INIT;
+    stream->burst_frames = 1u;
     if (pthread_mutex_init(&stream->lock, NULL) != 0) {
         free(stream);
         return -1;
     }
+    /* The pull ring only accepts a format that tiles a 1 KiB slot.  Other
+     * bit depths keep the legacy linear path; publish() then returns -1. */
+    uint32_t bpf = channels * (bits / 8u);
+    if (bpf != 0u && (WC3_PULL_SLOT_BYTES % bpf) == 0u) {
+        stream->pull_pcm = (uint8_t *)calloc(1, WC3_PULL_RING_BYTES);
+        if (stream->pull_pcm &&
+            wc3_pull_ring_init(&stream->pull, stream->pull_pcm, bpf) == 0)
+            stream->burst_frames = WC3_PULL_SLOT_BYTES / bpf;
+        else {
+            free(stream->pull_pcm);
+            stream->pull_pcm = NULL;
+        }
+    }
+    /* Full nfsu2 port: deterministic twin of the Android voice mixer.  It is
+     * inert until a T1 replay calls wc3_headless_audio_enable_mixer(), so the
+     * legacy linear and S-1 pull replays stay byte-identical. */
+    uint32_t vbpf = channels * (bits / 8u);
+    if (vbpf && (WC3_VOICE_SLOT_BYTES % vbpf) == 0u &&
+        wc3_mixer_init(&stream->mixer, sample_rate, channels, 0) == 0) {
+        uint8_t *pcm = (uint8_t *)calloc(1, WC3_PULL_RING_BYTES);
+        uintptr_t local = 0;
+        if (pcm && wc3_mixer_voice_add(&stream->mixer, pcm,
+                                       WC3_PULL_RING_BYTES, sample_rate,
+                                       channels, bits, &local) == 0) {
+            stream->voice_pcm[(size_t)local - 1u] = pcm;
+            stream->primary_voice = (1u << 16) | local;
+        } else {
+            free(pcm);
+        }
+    }
+    /* Apply the replay-level switch before WINMM asks for primary_voice(). */
+    stream->mixer_mode = (g_headless_mixer_default && stream->primary_voice)
+        ? 1 : 0;
     *out = (uintptr_t)stream;
+    g_headless_audio_last = stream;
     return 0;
 }
 
@@ -345,6 +428,298 @@ static int headless_audio_write(void *ctx, uintptr_t handle, const void *frames,
     atomic_fetch_add_explicit(&stream->written, bytes, memory_order_relaxed);
     if (written) *written = bytes;
     return 0;
+}
+
+static Wc3Voice *headless_voice(uintptr_t voice, uintptr_t *out_local);
+
+/* S-1: the producer publishes ONLY the region it wrote, at an absolute frame
+ * index.  A successful publish switches this stream to pull semantics, so
+ * advance() renders the same PCM the Android callback would render. */
+static int headless_audio_publish(void *ctx, uintptr_t handle,
+                                  uint64_t frame_base, const void *frames,
+                                  uint32_t bytes, uint32_t *written)
+{
+    (void)ctx;
+    HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
+    if (!stream || !frames || bytes == 0u) return -1;
+    if (stream->mixer_mode) {
+        Wc3Voice *v = headless_voice(stream->primary_voice, NULL);
+        if (!v) return -1;
+        uint32_t got = wc3_voice_publish(v, frame_base, frames, bytes);
+        if (!got) return -1;
+        if (written) *written = got;
+        return 0;
+    }
+    if (!stream->pull_pcm) return -1;
+    uint32_t got = wc3_pull_publish(&stream->pull, frame_base, frames, bytes);
+    if (got == 0u) return -1;
+    stream->pull_mode = 1;
+    if (written) *written = got;
+    return 0;
+}
+
+/* ---- Full nfsu2 port: deterministic voice mixer twin ---------------- */
+static Wc3Voice *headless_voice(uintptr_t voice, uintptr_t *out_local)
+{
+    uintptr_t local = voice & 0xFFFFu;
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (!stream || !local) return NULL;
+    Wc3Voice *v = wc3_mixer_voice(&stream->mixer, local);
+    if (!v) return NULL;
+    if (out_local) *out_local = local;
+    return v;
+}
+
+static int headless_audio_voice_add(void *ctx, uintptr_t handle,
+                                    uint32_t rate, uint32_t channels,
+                                    uint32_t bits, uint32_t bytes,
+                                    uintptr_t *out_voice)
+{
+    (void)ctx;
+    HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
+    if (!stream) stream = g_headless_audio_last;
+    if (!stream || !out_voice) return -1;
+    *out_voice = 0;
+    uint32_t slots = (bytes + WC3_VOICE_SLOT_BYTES - 1u) /
+                     WC3_VOICE_SLOT_BYTES;
+    if (slots == 0u || slots > WC3_VOICE_MAX_SLOTS) return -1;
+    uint8_t *pcm = (uint8_t *)malloc((size_t)slots * WC3_VOICE_SLOT_BYTES);
+    if (!pcm) return -1;
+    uintptr_t local = 0;
+    if (wc3_mixer_voice_add(&stream->mixer, pcm, bytes, rate, channels,
+                            bits, &local) != 0) {
+        free(pcm);
+        return -1;
+    }
+    stream->voice_pcm[(size_t)local - 1u] = pcm;
+    stream->voice_last_publish_ns[(size_t)local - 1u] = 0u;
+    stream->voice_max_gap_ns[(size_t)local - 1u] = 0u;
+    *out_voice = (1u << 16) | local;
+    return 0;
+}
+
+static int headless_audio_voice_remove(void *ctx, uintptr_t voice)
+{
+    (void)ctx;
+    uintptr_t local = 0;
+    Wc3Voice *v = headless_voice(voice, &local);
+    if (!v) return -1;
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (wc3_mixer_voice_remove(&stream->mixer, local) != 0) return -1;
+    headless_audio_wait_render_idle(&stream->mixer);
+    while (atomic_load_explicit(&v->publishing, memory_order_acquire) != 0)
+        sched_yield();
+    wc3_mixer_voice_release(v);
+    free(stream->voice_pcm[(size_t)local - 1u]);
+    stream->voice_pcm[(size_t)local - 1u] = NULL;
+    stream->voice_last_publish_ns[(size_t)local - 1u] = 0u;
+    stream->voice_max_gap_ns[(size_t)local - 1u] = 0u;
+    return 0;
+}
+
+static int headless_audio_voice_publish(void *ctx, uintptr_t voice,
+                                        uint64_t frame_base,
+                                        const void *frames, uint32_t bytes,
+                                        uint32_t *written)
+{
+    (void)ctx;
+    uintptr_t local = 0;
+    Wc3Voice *v = headless_voice(voice, &local);
+    if (written) *written = 0;
+    if (!v || !frames) return -1;
+    uint32_t got = wc3_voice_publish(v, frame_base, frames, bytes);
+    if (!got) return -1;
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (stream) {
+        uint64_t now = stream->virtual_ns;
+        uint64_t last = stream->voice_last_publish_ns[(size_t)local - 1u];
+        if (last && now > last) {
+            uint64_t gap = now - last;
+            if (gap > stream->voice_max_gap_ns[(size_t)local - 1u])
+                stream->voice_max_gap_ns[(size_t)local - 1u] = gap;
+        }
+        stream->voice_last_publish_ns[(size_t)local - 1u] = now;
+    }
+    if (written) *written = got;
+    if (stream) stream->mixer_mode = 1;
+    return 0;
+}
+
+static int headless_audio_voice_publish2(void *ctx, uintptr_t voice,
+                                         uint64_t frame_base1,
+                                         const void *frames1, uint32_t bytes1,
+                                         uint64_t frame_base2,
+                                         const void *frames2, uint32_t bytes2,
+                                         uint32_t *written)
+{
+    (void)ctx;
+    uintptr_t local = 0;
+    Wc3Voice *v = headless_voice(voice, &local);
+    if (written) *written = 0;
+    if (!v || (bytes1 != 0u && !frames1) ||
+        (bytes2 != 0u && !frames2) || (bytes1 == 0u && bytes2 == 0u))
+        return -1;
+    uint32_t got = wc3_voice_publish2(v, frame_base1, frames1, bytes1,
+                                      frame_base2, frames2, bytes2);
+    if (!got) return -1;
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (stream) {
+        uint64_t now = stream->virtual_ns;
+        uint64_t last = stream->voice_last_publish_ns[(size_t)local - 1u];
+        if (last && now > last) {
+            uint64_t gap = now - last;
+            if (gap > stream->voice_max_gap_ns[(size_t)local - 1u])
+                stream->voice_max_gap_ns[(size_t)local - 1u] = gap;
+        }
+        stream->voice_last_publish_ns[(size_t)local - 1u] = now;
+    }
+    if (written) *written = got;
+    if (stream) stream->mixer_mode = 1;
+    return 0;
+}
+
+static int headless_audio_voice_reset(void *ctx, uintptr_t voice)
+{
+    (void)ctx;
+    uintptr_t local = 0;
+    Wc3Voice *v = headless_voice(voice, &local);
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (!v || !stream) return -1;
+    atomic_store_explicit(&v->resetting, 1, memory_order_release);
+    headless_audio_wait_render_idle(&stream->mixer);
+    while (atomic_load_explicit(&v->publishing, memory_order_acquire) != 0)
+        sched_yield();
+    int rc = wc3_voice_reset(v);
+    stream->voice_last_publish_ns[(size_t)local - 1u] = 0u;
+    stream->voice_max_gap_ns[(size_t)local - 1u] = 0u;
+    atomic_store_explicit(&v->resetting, 0, memory_order_release);
+    return rc;
+}
+
+static int headless_audio_voice_position(void *ctx, uintptr_t voice,
+                                         uint32_t *play_bytes,
+                                         uint32_t *write_bytes,
+                                         uint64_t *play_frame)
+{
+    (void)ctx;
+    Wc3Voice *v = headless_voice(voice, NULL);
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (!v) return -1;
+    wc3_voice_position(v, stream ? stream->mixer.rate : 0u, play_bytes,
+                       write_bytes, play_frame);
+    return 0;
+}
+
+static int headless_audio_voice_control(void *ctx, uintptr_t voice,
+                                        int playing, int loop,
+                                        uint32_t frequency, int volume,
+                                        int pan)
+{
+    (void)ctx;
+    Wc3Voice *v = headless_voice(voice, NULL);
+    if (!v) return -1;
+    wc3_voice_control(v, playing, loop, frequency, volume, pan);
+    return 0;
+}
+
+static int headless_audio_voice_seek(void *ctx, uintptr_t voice,
+                                     uint64_t abs_frame)
+{
+    (void)ctx;
+    Wc3Voice *v = headless_voice(voice, NULL);
+    if (!v) return -1;
+    return wc3_voice_seek(v, abs_frame);
+}
+
+static int headless_audio_voice_format(void *ctx, uintptr_t voice,
+                                       uint32_t rate, uint32_t channels,
+                                       uint32_t bits)
+{
+    (void)ctx;
+    Wc3Voice *v = headless_voice(voice, NULL);
+    if (!v) return -1;
+    if (rate < 100u || rate > 200000u || channels == 0u || channels > 2u ||
+        (bits != 8u && bits != 16u))
+        return -1;
+    if (channels * (bits / 8u) != v->bpf) return -1;
+    atomic_store_explicit(&v->frequency, rate, memory_order_relaxed);
+    return 0;
+}
+
+static int headless_audio_voice_state(void *ctx, uintptr_t voice,
+                                      uint32_t *playing, uint32_t *loop,
+                                      uint64_t *position)
+{
+    (void)ctx;
+    Wc3Voice *v = headless_voice(voice, NULL);
+    if (!v) return -1;
+    return wc3_voice_state(v, playing, loop, position);
+}
+
+static uint32_t headless_audio_voice_device_rate(void *ctx, uintptr_t voice)
+{
+    (void)ctx;
+    if (!headless_voice(voice, NULL) || !g_headless_audio_last) return 0u;
+    return g_headless_audio_last->mixer.rate;
+}
+
+static int headless_audio_voice_stats(void *ctx, uintptr_t voice,
+                                      uint32_t *active, uint32_t *clipped,
+                                      float *peak, uint64_t *publish_gap_us,
+                                      uint32_t *ring_ms,
+                                      uint32_t *callback_peak_us)
+{
+    (void)ctx;
+    uintptr_t local = 0;
+    Wc3Voice *v = headless_voice(voice, &local);
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (!v || !stream) return -1;
+    uint64_t clipped64 = 0u;
+    wc3_mixer_stats(&stream->mixer, active, &clipped64, peak,
+                    callback_peak_us);
+    if (clipped) *clipped = (uint32_t)clipped64;
+    if (publish_gap_us) {
+        uint64_t gap = stream->voice_max_gap_ns[(size_t)local - 1u];
+        stream->voice_max_gap_ns[(size_t)local - 1u] = 0u;
+        *publish_gap_us = gap / 1000u;
+    }
+    if (ring_ms)
+        *ring_ms = v->rate
+            ? (uint32_t)((uint64_t)v->frames * 1000u / v->rate) : 0u;
+    return 0;
+}
+
+static uint64_t headless_audio_play_frame(void *ctx, uintptr_t handle)
+{
+    (void)ctx;
+    HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
+    if (!stream) return 0u;
+    Wc3Voice *v = headless_voice(stream->primary_voice, NULL);
+    if (v)
+        return atomic_load_explicit(&v->play_frame, memory_order_acquire);
+    return atomic_load_explicit(&stream->pull.play_frame,
+                                memory_order_acquire);
+}
+
+static uint32_t headless_audio_device_rate(void *ctx, uintptr_t handle)
+{
+    (void)ctx;
+    HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
+    return stream ? stream->mixer.rate : 0u;
+}
+
+static uintptr_t headless_audio_primary_voice(void *ctx, uintptr_t handle)
+{
+    (void)ctx;
+    HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
+    return (stream && stream->mixer_mode) ? stream->primary_voice : 0u;
+}
+
+void wc3_headless_audio_enable_mixer(int enabled)
+{
+    g_headless_mixer_default = enabled ? 1 : 0;
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (stream && stream->primary_voice) stream->mixer_mode = enabled ? 1 : 0;
 }
 
 static int headless_audio_set_consumed(
@@ -366,6 +741,11 @@ static uint64_t headless_audio_consumed_bytes(void *ctx, uintptr_t handle)
     (void)ctx;
     HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
     if (!stream) return 0;
+    if (stream->mixer_mode)
+        return atomic_load_explicit(&stream->consumed, memory_order_acquire);
+    if (stream->pull_mode)
+        return atomic_load_explicit(&stream->pull.consumed,
+                                    memory_order_acquire);
     return atomic_load_explicit(&stream->consumed, memory_order_acquire);
 }
 
@@ -374,6 +754,69 @@ static int headless_audio_advance(void *ctx, uintptr_t handle, uint32_t bytes)
     (void)ctx;
     HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
     if (!stream) return -1;
+
+    uint32_t clock_bpf = stream->mixer_mode ? stream->channels * 2u
+        : (stream->pull_mode ? stream->pull.bytes_per_frame
+                             : stream->channels * (stream->bits / 8u));
+    if (clock_bpf && stream->rate)
+        stream->virtual_ns += (uint64_t)(bytes / clock_bpf) *
+                              1000000000ull / stream->rate;
+
+    if (stream->mixer_mode) {
+        /* T1 twin of the AAudio callback: same voice mixer, same render
+         * order, same FNV-1a PCM hash, advanced by deterministic bursts. */
+        uint32_t bpf = stream->channels * 2u;  /* PCM_I16 headless output */
+        if (bpf == 0u || bytes == 0u || (bytes % bpf) != 0u) return -1;
+        uint8_t scratch[WC3_VOICE_SLOT_BYTES];
+        uint32_t cap = WC3_VOICE_SLOT_BYTES / bpf;
+        uint32_t burst = stream->burst_frames;
+        if (burst == 0u || burst > cap) burst = cap;
+        uint32_t left = bytes / bpf;
+        while (left) {
+            uint32_t n = left < burst ? left : burst;
+            uint32_t got = wc3_mixer_render(&stream->mixer, scratch, n);
+            stream->pcm_hash = wc3_pull_hash(stream->pcm_hash, scratch, got);
+            uint64_t total = atomic_fetch_add_explicit(&stream->consumed,
+                                 (uint64_t)got, memory_order_acq_rel) + got;
+            (void)pthread_mutex_lock(&stream->lock);
+            void (*cb)(void *, uint64_t) = stream->on_consumed;
+            void *opaque = stream->consumed_opaque;
+            (void)pthread_mutex_unlock(&stream->lock);
+            if (cb) cb(opaque, total);
+            left -= n;
+        }
+        return 0;
+    }
+
+    if (stream->pull_mode) {
+        /* I-8: render BEFORE publishing consumption, in bounded bursts, so a
+         * T1 replay sees the same completion cadence as the AAudio callback.
+         * Underrun frames still advance the device clock (I-3). */
+        uint32_t bpf = stream->pull.bytes_per_frame;
+        if (bpf == 0u || bytes == 0u || (bytes % bpf) != 0u) return -1;
+        uint32_t cap_frames = WC3_PULL_SLOT_BYTES / bpf;
+        uint32_t burst = stream->burst_frames;
+        if (burst == 0u || burst > cap_frames) burst = cap_frames;
+        uint8_t scratch[WC3_PULL_SLOT_BYTES];
+        uint32_t left = bytes / bpf;
+
+        while (left) {
+            uint32_t n = left < burst ? left : burst;
+            uint32_t got = wc3_pull_render(&stream->pull, scratch, n);
+            stream->pcm_hash = wc3_pull_hash(stream->pcm_hash, scratch, got);
+            uint64_t total = atomic_load_explicit(&stream->pull.consumed,
+                                                  memory_order_acquire);
+            (void)pthread_mutex_lock(&stream->lock);
+            void (*cb)(void *, uint64_t) = stream->on_consumed;
+            void *opaque = stream->consumed_opaque;
+            (void)pthread_mutex_unlock(&stream->lock);
+            if (cb) cb(opaque, total);
+            left -= n;
+        }
+        return 0;
+    }
+
+    /* Legacy linear path: unchanged, byte-for-byte, for A/B parity. */
     uint64_t queued = atomic_load_explicit(&stream->written,
                                            memory_order_acquire);
     uint64_t done = atomic_load_explicit(&stream->consumed,
@@ -404,6 +847,10 @@ static int headless_audio_close(void *ctx, uintptr_t handle)
     HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)handle;
     if (!stream) return -1;
     pthread_mutex_destroy(&stream->lock);
+    for (unsigned i = 0; i < WC3_MIXER_VOICES; i++) free(stream->voice_pcm[i]);
+    wc3_mixer_deinit(&stream->mixer);
+    free(stream->pull_pcm);
+    if (g_headless_audio_last == stream) g_headless_audio_last = NULL;
     free(stream);
     return 0;
 }
@@ -417,6 +864,47 @@ static int headless_audio_set_callback(
     if (!st || !stream) return -1;
     st->audio_callback = callback;
     st->audio_opaque = opaque;
+    return 0;
+}
+
+void wc3_headless_audio_enable_pull(int enabled)
+{
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (!stream || !stream->pull_pcm) return;
+    stream->pull_mode = enabled ? 1 : 0;
+}
+
+void wc3_headless_audio_set_burst(uint32_t frames)
+{
+    HeadlessAudio *stream = g_headless_audio_last;
+    if (!stream || !stream->pull_pcm) return;
+    uint32_t bpf = stream->pull.bytes_per_frame;
+    uint32_t cap = bpf ? WC3_PULL_SLOT_BYTES / bpf : 1u;
+    if (frames == 0u) frames = cap;
+    stream->burst_frames = frames < cap ? frames : cap;
+}
+
+int wc3_headless_audio_pull_stats(uintptr_t stream_handle,
+                                  Wc3HeadlessPullStats *out)
+{
+    HeadlessAudio *stream = (HeadlessAudio *)(uintptr_t)stream_handle;
+    if (!stream || !out) return -1;
+    memset(out, 0, sizeof *out);
+    out->play_frame = atomic_load_explicit(&stream->pull.play_frame,
+                                           memory_order_acquire);
+    out->published_frame = atomic_load_explicit(&stream->pull.published_frame,
+                                                memory_order_acquire);
+    out->consumed = atomic_load_explicit(&stream->pull.consumed,
+                                         memory_order_acquire);
+    out->stale_frames = atomic_load_explicit(&stream->pull.stale_frames,
+                                             memory_order_relaxed);
+    out->publish_regions = atomic_load_explicit(&stream->pull.publish_regions,
+                                                memory_order_relaxed);
+    out->render_calls = atomic_load_explicit(&stream->pull.render_calls,
+                                             memory_order_relaxed);
+    out->pcm_hash = stream->pcm_hash;
+    out->burst_frames = stream->burst_frames;
+    out->pull_mode = stream->pull_mode;
     return 0;
 }
 
@@ -979,6 +1467,24 @@ void headless_services_install(Wc3Platform *platform, HeadlessState *st)
     platform->audio.consumed_bytes = headless_audio_consumed_bytes;
     platform->audio.advance = headless_audio_advance;
     platform->audio.latency_frames = headless_audio_latency_frames;
+    platform->audio.publish = headless_audio_publish;
+    /* Full nfsu2 port: identical method surface for the T1 DUT.  The mixer is
+     * inert until wc3_headless_audio_enable_mixer() is called by a replay. */
+    platform->audio.voice_add = headless_audio_voice_add;
+    platform->audio.voice_remove = headless_audio_voice_remove;
+    platform->audio.voice_publish = headless_audio_voice_publish;
+    platform->audio.voice_position = headless_audio_voice_position;
+    platform->audio.voice_control = headless_audio_voice_control;
+    platform->audio.voice_seek = headless_audio_voice_seek;
+    platform->audio.voice_format = headless_audio_voice_format;
+    platform->audio.voice_stats = headless_audio_voice_stats;
+    platform->audio.voice_state = headless_audio_voice_state;
+    platform->audio.voice_device_rate = headless_audio_voice_device_rate;
+    platform->audio.voice_publish2 = headless_audio_voice_publish2;
+    platform->audio.voice_reset = headless_audio_voice_reset;
+    platform->audio.play_frame = headless_audio_play_frame;
+    platform->audio.device_rate = headless_audio_device_rate;
+    platform->audio.primary_voice = headless_audio_primary_voice;
 
     platform->clipboard.ctx = st;
     platform->clipboard.get_text = headless_clipboard_get;

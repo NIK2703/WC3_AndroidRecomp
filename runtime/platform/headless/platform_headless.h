@@ -121,6 +121,34 @@ uint64_t wc3_headless_schedule_seed(void);
 const char *wc3_headless_schedule_id(void);
 uint64_t wc3_headless_schedule_hash(void);
 
+/* S-1 (docs/AUDIO_PULL_IMPLEMENTATION_SPEC.md): deterministic pull twin.
+ * These are T0/T1 verification hooks, not product API.  They never change
+ * guest-visible state; enable_pull selects which advance() path a test drives,
+ * set_burst fixes the simulated AAudio callback cadence, and pull_stats
+ * exposes the monotone device clock and the FNV-1a hash of rendered PCM. */
+typedef struct Wc3HeadlessPullStats {
+    uint64_t play_frame;
+    uint64_t published_frame;
+    uint64_t consumed;
+    uint64_t pcm_hash;
+    uint32_t stale_frames;
+    uint32_t publish_regions;
+    uint32_t render_calls;
+    uint32_t burst_frames;
+    int pull_mode;
+} Wc3HeadlessPullStats;
+
+void wc3_headless_audio_enable_pull(int enabled);
+/* Full nfsu2 port: switch the T1 DUT to the voice mixer twin.  Default off
+ * keeps the legacy linear / S-1 pull replays byte-identical.  Call BEFORE
+ * waveOutOpen() so the new stream is created with the mixer active; calling it
+ * later also switches the current stream, but WINMM has already captured its
+ * primary voice during open. */
+void wc3_headless_audio_enable_mixer(int enabled);
+void wc3_headless_audio_set_burst(uint32_t frames);
+int wc3_headless_audio_pull_stats(uintptr_t stream,
+                                  Wc3HeadlessPullStats *out);
+
 #ifdef __cplusplus
 }
 #endif

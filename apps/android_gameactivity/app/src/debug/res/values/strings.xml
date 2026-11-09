@@ -2,7 +2,7 @@
 <resources>
     <!-- BV-2.3: debug variant label overlay.  No debug-only Java code lives in
          main; variant source sets are the preprocessor equivalent here. -->
-    <string name="app_name">WC3 recomp (debug)</string>
-    <string name="app_name_roc">Reign of Chaos (debug)</string>
-    <string name="app_name_tft">Frozen Throne (debug)</string>
+    <string name="app_name" translatable="false">WC3 recomp (debug)</string>
+    <string name="app_name_roc" translatable="false">Reign of Chaos (debug)</string>
+    <string name="app_name_tft" translatable="false">Frozen Throne (debug)</string>
 </resources>

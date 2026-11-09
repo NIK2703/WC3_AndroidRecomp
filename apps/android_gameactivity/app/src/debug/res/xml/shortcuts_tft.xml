@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher_tft"
+        android:shortcutId="launch_settings_tft"
+        android:shortcutLongLabel="@string/shortcut_settings_long"
+        android:shortcutShortLabel="@string/shortcut_settings_short">
+        <intent
+            android:action="wc3.recomp.action.OPEN_SETTINGS"
+            android:targetClass="wc3.recomp.Wc3TftLauncherActivity"
+            android:targetPackage="wc3.recomp.debug" />
+    </shortcut>
+</shortcuts>

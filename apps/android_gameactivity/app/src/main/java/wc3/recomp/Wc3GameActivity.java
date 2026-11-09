@@ -18,6 +18,10 @@ import android.view.inputmethod.EditorInfo;
 
 import com.google.androidgamesdk.GameActivity;
 
+import java.io.File;
+
+import wc3.recomp.launch.LaunchContract;
+
 /**
  * Android host entry point.  GameActivity owns the game SurfaceView and native
  * window; this activity adds one transparent SurfaceView above it for the
@@ -39,7 +43,17 @@ public class Wc3GameActivity extends GameActivity {
 
     private SurfaceView overlayView;
 
+    /* True once this process has started android_main.  The launch overrides
+     * are process environment variables, so applying a second bundle while the
+     * guest is already running would only desynchronize the intent from the
+     * environment.  Settings are documented as applying on the next start. */
+    private static boolean sNativeStarted;
+
     private static native void nativeSetGameMode(String mode);
+
+    private static native void nativeApplyLaunchSettings(
+            String gameDir, int width, int height, boolean sound,
+            String extraArgs, int audioLatencyMs);
 
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
@@ -60,7 +74,11 @@ public class Wc3GameActivity extends GameActivity {
 
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
+        if (!sNativeStarted) {
+            applyLaunchSettings(getIntent());
+        }
         super.onCreate(savedInstanceState);
+        sNativeStarted = true;
         applyDisplayCutoutMode();
         ensureSharedDataAccess();
 
@@ -76,6 +94,33 @@ public class Wc3GameActivity extends GameActivity {
                         | EditorInfo.IME_FLAG_NO_FULLSCREEN);
 
         installOverlaySurface();
+    }
+
+    /**
+     * Applies only the environment variables the settings screen owns.  A
+     * direct host launch without the launch bundle leaves the native defaults
+     * and any diagnostic shell environment untouched.
+     */
+    private void applyLaunchSettings(final Intent intent) {
+        if (intent == null) return;
+        final Bundle settings = intent.getBundleExtra(
+                LaunchContract.EXTRA_LAUNCH);
+        if (settings == null) return;
+        nativeApplyLaunchSettings(
+                settings.getString(LaunchContract.KEY_GAME_DIR),
+                settings.getInt(LaunchContract.KEY_WIDTH, 0),
+                settings.getInt(LaunchContract.KEY_HEIGHT, 0),
+                settings.getBoolean(LaunchContract.KEY_SOUND, true),
+                settings.getString(LaunchContract.KEY_EXTRA_ARGS),
+                settings.getInt(LaunchContract.KEY_AUDIO_LATENCY_MS, 0));
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (isFinishing()) {
+            sNativeStarted = false;
+        }
+        super.onDestroy();
     }
 
     /**
@@ -104,6 +149,18 @@ public class Wc3GameActivity extends GameActivity {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
         if (Environment.isExternalStorageManager()) return;
 
+        // A game directory inside the app sandbox needs no All files access.
+        // The settings screen accepts that fallback; do not interrupt the game
+        // with a permission screen it does not need.
+        final Intent launchIntent = getIntent();
+        final Bundle launch = launchIntent == null
+                ? null
+                : launchIntent.getBundleExtra(LaunchContract.EXTRA_LAUNCH);
+        if (launch != null && isAppPrivatePath(
+                launch.getString(LaunchContract.KEY_GAME_DIR))) {
+            return;
+        }
+
         final Intent appIntent = new Intent(
                 Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
                 Uri.parse("package:" + getPackageName()));
@@ -113,6 +170,37 @@ public class Wc3GameActivity extends GameActivity {
             startActivity(new Intent(
                     Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
         }
+    }
+
+    private boolean isAppPrivatePath(final String path) {
+        if (path == null || path.isEmpty()) return false;
+        final String candidate;
+        try {
+            candidate = new File(path).getCanonicalPath();
+        } catch (Exception ignored) {
+            return false;
+        }
+        final File[] roots = {
+                getDataDir(),
+                getFilesDir(),
+                getCacheDir(),
+                getExternalFilesDir(null),
+                getExternalCacheDir()
+        };
+        for (final File root : roots) {
+            if (root == null) continue;
+            final String rootPath;
+            try {
+                rootPath = root.getCanonicalPath();
+            } catch (Exception ignored) {
+                continue;
+            }
+            if (candidate.equals(rootPath)
+                    || candidate.startsWith(rootPath + File.separator)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void installOverlaySurface() {
