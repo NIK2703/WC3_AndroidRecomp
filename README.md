@@ -11,14 +11,9 @@ that the port is finished. Detailed migration state is tracked in
 
 ## Development status
 
-At the time of writing, the graphics subsystem is fully debugged. The port can
-launch a melee map or a campaign mission.
-
-Known issues:
-
-* Audio is unstable: periodic clicks are audible, and music occasionally drops
-  out.
-* The game freezes intermittently.
+The graphics subsystem is fully debugged, and the port can launch a melee map
+or a campaign mission. Audio playback and in-game freezes are fixed. Saving,
+loading, and LAN play work.
 
 ## Launchers
 
