@@ -4,16 +4,15 @@ Static recompilation of Warcraft III: The Frozen Throne (1.27.1.7085) into a
 native Android arm64-v8a port. The target pipeline lifts the original x86-32
 code to C and compiles it with the Android NDK/Clang for ARM64.
 
-This repository is the canonical target tree. This README describes the target
-design, project boundaries, and current development status; it does not claim
-that the port is finished. Detailed migration state is tracked in
-`config/migration.json`.
-
 ## Development status
 
 The graphics subsystem is fully debugged, and the port can launch a melee map
 or a campaign mission. Audio playback and in-game freezes are fixed. Saving,
 loading, and LAN play work.
+
+<img width="400" height="180" alt="Screenshot_2026-11-07-20-34-58-138_wc3 recomp debug" src="https://github.com/user-attachments/assets/b7035652-e9e1-45c2-9f56-d20b77378dfd" />
+<img width="400" height="180" alt="Screenshot_2026-11-07-20-39-40-093_wc3 recomp debug" src="https://github.com/user-attachments/assets/539d2d96-c366-47a8-8abb-1babd0b6d360" />
+<img width="400" height="180" alt="Screenshot_2026-11-07-20-36-15-019_com miui securitycenter" src="https://github.com/user-attachments/assets/32a04fea-0b6e-4027-9b8a-c1b722f82c8e" />
 
 ## Launchers
 
@@ -82,7 +81,7 @@ after a resume. In-game options are persisted in the guest registry under
 
 ## Graphics
 
-* D3D9 rendering goes through a thin bridge to DXVK.
+* D3D9 rendering goes through a bridge to DXVK.
 * The dual-backend selector and fallback are provisional until they are
   measured.
 * The Vulkan ICD is selected explicitly through `VulkanDriverApi` (`system` or
