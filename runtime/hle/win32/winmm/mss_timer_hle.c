@@ -1,9 +1,10 @@
 /*
  * mss_timer_hle.c - the USER32 timer/pump seam used by Mss32.
  *
- * The nfsu2 audio architecture has no WAVEHDR pool and no WOM_DONE.  Mss32
- * still needs its own mixer timer: it creates it with USER32!SetTimer(50 ms)
- * and lets the owning guest thread pump WM_TIMER through GetMessage,
+ * The DirectSound audio architecture has no WAVEHDR pool and no WOM_DONE.
+ * Mss32 still needs its own mixer timer: it creates it with
+ * USER32!SetTimer(50 ms) and lets the owning guest thread pump WM_TIMER
+ * through GetMessage,
  * PeekMessage and blocking waits.  This file keeps exactly that mechanism.
  *
  * Everything here is HLE bookkeeping only.  No PCM is produced, no AAudio

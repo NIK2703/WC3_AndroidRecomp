@@ -1,9 +1,8 @@
 /*
- * dsound_hle.c - the guest-visible half of the nfsu2 audio architecture,
- * ported to the WC3 HLE seam.  Reference implementation:
- * E:/projects/refs/nfsu2-recompiled/android/app/src/main/cpp/guest_audio.inc
+ * dsound_hle.c - the guest-visible half of the DirectSound audio architecture,
+ * wired into the WC3 HLE seam.
  *
- * nfsu2 has no WAVEHDR pool and no WOM_DONE.  The guest creates ONE looping
+ * The guest has no WAVEHDR pool and no WOM_DONE.  It creates one looping
  * DirectSound buffer, Lock()s a region, writes PCM into guest memory, Unlock()s
  * only that region into a host-owned shadow, and polls GetCurrentPosition.
  * PcmMixer::render() pulls and resamples in the AAudio callback.
@@ -564,7 +563,7 @@ static void ds_create_sound_buffer(CPU *c, DsObject *o)
 
     /* A primary buffer has no PCM region of its own: the device format is
      * set with SetFormat and GetCurrentPosition/GetStatus stay in device
-     * coordinates.  nfsu2 never creates one, but DirectSound applications
+     * coordinates.  The guest never creates one, but DirectSound applications
      * probe for it and some iterate it through the same vtable. */
     if (flags & DSBCAPS_PRIMARYBUFFER) {
         if (flags & DSBCAPS_CTRL3D) {
@@ -853,7 +852,7 @@ static void ds_unlock(CPU *c, DsObject *o)
     uint32_t p2 = wc3_legacy_arg32(c, 3);
     uint32_t n2 = wc3_legacy_arg32(c, 4);
 
-    /* A zero-length Lock/Unlock pair is a legal Windows no-op.  nfsu2 still
+    /* A zero-length Lock/Unlock pair is a legal Windows no-op.  The guest still
      * calls PcmVoice::published(), which clears the stale window and counts
      * one publish while playing; the Mss32 primary-buffer probe uses the same
      * pair with null spans.  Mirror that instead of inventing a failure. */
@@ -889,7 +888,7 @@ static void ds_unlock(CPU *c, DsObject *o)
 
     /* Publish exactly the two regions the guest locked, at the same circular
      * offsets: samples+lockOffset and samples+0.  This is ONE Unlock and must
-     * count as one publish for nfsu2's stale threshold; publishing the spans
+     * count as one publish for the stale threshold; publishing the spans
      * separately made a wrapping Unlock count twice.  The second frame base is
      * the absolute continuation (lockOffset/bpf + first/bpf), which wraps to
      * physical frame 0 by construction. */
@@ -929,9 +928,9 @@ static void dsound_dispatch(CPU *c, unsigned kind, unsigned method)
         case 4u: ds_get_caps(c, o); return;
         case 5u: c->eax = DSERR_UNSUPPORTED; return; /* DuplicateSoundBuffer */
         case 6u: {
-            /* nfsu2 validates a registered guest window and level 1..3.  We do
-             * not keep a window registry at this seam, but a NULL window or an
-             * out-of-range level is invalid on Windows too. */
+            /* The HLE validates a registered guest window and level 1..3.
+             * We do not keep a window registry at this seam, but a NULL
+             * window or an out-of-range level is invalid on Windows too. */
             uint32_t window = wc3_legacy_arg32(c, 1);
             uint32_t level = wc3_legacy_arg32(c, 2);
             /* DSSCL_WRITEPRIMARY (4) is what Mss32's DirectSound driver asks
@@ -1139,7 +1138,7 @@ int wc3_hle_dsound_install(void)
     g_create_thunk = wc3_legacy_hle_thunk_of("dsound.dll",
                                              "DirectSoundCreate");
     if (!g_create_thunk) return -1;
-    /* nfsu2 binds DirectSoundCreate/#1 as well. */
+    /* DirectSoundCreate/#1 is bound as well. */
     if (wc3_legacy_hle_bind_ordinal("dsound.dll", 1u, 3, 0,
                                     h_dsound_create) != 0)
         return -1;

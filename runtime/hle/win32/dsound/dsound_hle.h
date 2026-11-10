@@ -1,5 +1,5 @@
 /*
- * dsound_hle.h - DirectSound guest contract for the full nfsu2 audio port.
+ * dsound_hle.h - DirectSound guest contract for the audio port.
  *
  * The 1.27b corpus imports winmm.dll and Mss32.dll, not dsound.dll.  Mss32
  * nevertheless selects its DirectSound driver through

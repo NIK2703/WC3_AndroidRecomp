@@ -326,9 +326,10 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/dsound/dsound_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/ws2_32/ws2_32_hle.c")
 
-# nfsu2 audio architecture: DirectSound is the only transport.  mss_timer_hle
-# keeps Mss32's USER32 mixer timer alive; winmm_guard_hle makes the frozen
-# waveOut imports explicit no-driver rows; the as-built waveOut sink is gone.
+# DirectSound audio architecture: DirectSound is the only transport.
+# mss_timer_hle keeps Mss32's USER32 mixer timer alive; winmm_guard_hle
+# makes the frozen waveOut imports explicit no-driver rows; the as-built
+# waveOut sink is gone.
 # All diagnostics in these slices are WC3_DEBUG-gated.
 
 target_include_directories(wc3_hle_modules PRIVATE

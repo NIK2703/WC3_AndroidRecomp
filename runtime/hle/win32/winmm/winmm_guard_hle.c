@@ -1,7 +1,7 @@
 /*
  * winmm_guard_hle.c - the only WINMM waveOut implementation in the product.
  *
- * The nfsu2 DirectSound architecture does not use waveOut.  Mss32 still imports
+ * The DirectSound architecture does not use waveOut.  Mss32 still imports
  * the old entry points, so the frozen corpus slots must resolve.  Every row
  * returns "no driver"/"invalid handle" and waveOutGetNumDevs returns zero.
  * No AAudio stream, WAVEHDR completion or old linear ring can be reached.

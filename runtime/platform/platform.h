@@ -331,7 +331,7 @@ typedef struct Wc3InputApi {
 typedef struct Wc3AudioApi {
     void *ctx;
     /* One AAudio stream.  open() also creates the platform primary looping
-     * voice, so the callback is always in nfsu2 mixer mode. */
+     * voice, so the callback is always in voice-mixer mode. */
     int (*open)(void *ctx, uint32_t sample_rate, uint32_t channels,
                 uint32_t bits, uintptr_t *out);
     int (*close)(void *ctx, uintptr_t stream);
@@ -349,12 +349,12 @@ typedef struct Wc3AudioApi {
                          uint32_t *written);
     /* DirectSound GetCurrentPosition: play/write cursors in BYTES, modulo the
      * looping buffer, plus the absolute source-frame play cursor.  write is
-     * play + one 10 ms lookahead, exactly as the nfsu2 guest contract. */
+     * play + one 10 ms lookahead, exactly as the DirectSound guest contract. */
     int (*voice_position)(void *ctx, uintptr_t voice, uint32_t *play_bytes,
                           uint32_t *write_bytes, uint64_t *play_frame);
     int (*voice_control)(void *ctx, uintptr_t voice, int playing, int loop,
                          uint32_t frequency, int volume, int pan);
-    /* Actual AAudio sample rate (the nfsu2 mixer rate), 0 on headless. */
+    /* Actual AAudio sample rate (the voice-mixer rate), 0 on headless. */
     uint32_t (*device_rate)(void *ctx, uintptr_t stream);
     /* The platform primary looping voice, created at open(). */
     uintptr_t (*primary_voice)(void *ctx, uintptr_t stream);
@@ -367,7 +367,7 @@ typedef struct Wc3AudioApi {
     /* Device rate of the stream that owns this voice. */
     uint32_t (*voice_device_rate)(void *ctx, uintptr_t voice);
     /* One guest Unlock() that wraps the physical end of the ring.  Copies both
-     * locked spans under one publish claim, so nfsu2 publishes>=4 streaming
+     * locked spans under one publish claim, so the publish>=4 streaming
      * threshold still counts Unlock calls, not ring spans. */
     int (*voice_publish2)(void *ctx, uintptr_t voice,
                           uint64_t frame_base1, const void *frames1,

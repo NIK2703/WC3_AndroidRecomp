@@ -1,7 +1,7 @@
 /*
  * audio_snapshot_test.c - T0 guard for the N-17/N-18 primary-voice contract.
  *
- * Plan: docs/AUDIO_NFSU2_PORT_PLAN.md (N-17, N-18).
+ * Plan: docs/AUDIO_IMPLEMENTATION_PLAN.md (N-17, N-18).
  *
  * The test has four jobs:
  *   1. Reproduce C-1 on the legacy per-slot path: a slot left in the writing
@@ -804,7 +804,7 @@ static void test_threaded_stress(void)
     for (uint32_t chunk = 0u; chunk < STRESS_CHUNKS; chunk++) {
         /* Keep at least one publish between chunks: the stale window is one
          * ring revolution, and a descheduled writer must not turn a valid
-         * chunk into the nfsu2 stale mute that this test is not measuring. */
+         * chunk into the stale mute that this test is not measuring. */
         while (atomic_load_explicit(&g_stress_published,
                                     memory_order_acquire) == published_seen)
             sched_yield();

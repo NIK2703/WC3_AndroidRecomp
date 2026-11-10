@@ -1,6 +1,6 @@
 /*
  * winmm_guard_timer_test.c - T0 contract for the two WINMM seams that survive
- * the nfsu2 DirectSound cutover.
+ * the DirectSound cutover.
  *
  * The product no longer has a waveOut transport: every frozen WINMM import is
  * bound to winmm_guard_hle.c and must return "no driver"/"invalid handle".

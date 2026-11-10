@@ -304,7 +304,7 @@ static int headless_window_set_title(void *ctx, uintptr_t window,
 
 /* The headless DUT has no hardware clock.  A T1 test calls
  * wc3_headless_audio_advance() with a frame count, which renders the same
- * nfsu2 mixer used on Android and hashes the resulting PCM.  There is no
+ * voice mixer used on Android and hashes the resulting PCM.  There is no
  * linear queue and no pull ring: DirectSound voices are the only input. */
 typedef struct HeadlessAudio {
     uint32_t rate;

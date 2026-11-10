@@ -352,7 +352,8 @@ def test_boot_dispatch_compile() -> int:
 
 
 def test_pass9_release_preprocess() -> int:
-    """nfsu2 audio: the timer and dead-end WINMM guard install in both variants."""
+    """DirectSound audio: the timer and dead-end WINMM guard install in both
+    variants."""
     cc = gcc()
     if not cc:
         print("pass9 release preprocess: unavailable (no host C compiler)")
@@ -1408,7 +1409,8 @@ def test_pass11_tree_snapshot() -> int:
 
 
 def test_pass9_build_guards() -> int:
-    """nfsu2 audio: DirectSound is the only transport; WINMM is a dead end."""
+    """DirectSound audio: DirectSound is the only transport; WINMM is a dead
+    end."""
     boot = (ROOT / "cmake" / "Wc3LegacyBoot.cmake").read_text(
         encoding="utf-8", errors="replace")
     dispatch = (ROOT / "runtime" / "boot" / "dispatch_boot.c").read_text(

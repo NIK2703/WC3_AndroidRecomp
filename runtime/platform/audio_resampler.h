@@ -1,6 +1,6 @@
 /*
- * audio_resampler.h - audio rate conversion, C port of the nfsu2-recompiled
- * PcmMixer kernel (android/app/src/main/cpp/audio_resampler.h).
+ * audio_resampler.h - audio rate conversion, C port of the PcmMixer kernel
+ * used by the Android audio path.
  *
  * A 16-tap Blackman-windowed sinc with 256 interpolated phases, precomputed
  * ONCE at stream open, never in the AAudio real-time callback.  Upsampling

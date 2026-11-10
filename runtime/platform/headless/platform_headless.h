@@ -121,7 +121,7 @@ uint64_t wc3_headless_schedule_seed(void);
 const char *wc3_headless_schedule_id(void);
 uint64_t wc3_headless_schedule_hash(void);
 
-/* T1 verification hooks for the nfsu2 voice mixer.  The headless DUT has no
+/* T1 verification hooks for the voice mixer.  The headless DUT has no
  * audio hardware: advance() renders a deterministic block, hashes the PCM and
  * moves the virtual device clock.  These never change guest-visible state. */
 typedef struct Wc3HeadlessAudioStats {

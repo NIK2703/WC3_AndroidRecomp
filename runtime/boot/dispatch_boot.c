@@ -149,7 +149,7 @@ void wc3_dispatch_init(void)
      * Bind them to the explicit no-driver guard so no waveOut sink can be
      * selected.  There is no rollback trigger. */
     WC3_INSTALL_STEP(wc3_hle_winmm_guard_install());
-    /* ADR-034 / nfsu2 DirectSound product path: the COM contract and the
+    /* ADR-034 / DirectSound product path: the COM contract and the
      * synthetic DSOUND.DLL loader chain are installed in EVERY build.  Mss32
      * reaches these rows through KERNEL32!LoadLibraryA/GetProcAddress, so no
      * corpus re-lift is required. */

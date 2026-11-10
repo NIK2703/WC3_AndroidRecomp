@@ -150,7 +150,7 @@ def _docs_line_counts() -> dict[str, int]:
 
 
 def _audio_contract() -> dict:
-    """Read the nfsu2 voice-mixer constants that replaced the old ring."""
+    """Read the voice-mixer constants that replaced the old ring."""
     header = ROOT / "runtime" / "platform" / "audio_mixer.h"
     asbuilt = ROOT / "runtime" / "hle" / "android" / "hle_android.c"
     contract: dict = {

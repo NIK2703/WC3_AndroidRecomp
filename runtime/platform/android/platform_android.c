@@ -1761,14 +1761,15 @@ int wc3_android_config_load(const char *path)
  * the reference device (3536 frames).  audio_mixer.h owns the slot and floor
  * constants so the Android sink and the headless twin cannot drift. */
 #define WC3_AUDIO_REOPEN_MAX   5
-/* S-4 / P-3: measured A/B inputs from the nfsu2 architecture.  These are
- * NOT a declared fix: A-13.8 already measured 60 ms as -2.4 pp repeats only.
+/* S-4 / P-3: measured A/B inputs from the product audio architecture.
+ * These are NOT a declared fix: A-13.8 already measured 60 ms as -2.4 pp
+ * repeats only.
  * The target is an input; the granted value is the evidence. */
 #define WC3_AUDIO_TARGET_MS    40
 #define WC3_AUDIO_MAX_MS       100
 /* AAudio's capacity request is in DEVICE frames, but the builder does not
  * know the device rate until after open (we deliberately do not force a
- * sample rate).  nfsu2 hard-codes 48 kHz for its 100 ms ceiling.  WC3 uses
+ * sample rate).  The 100 ms ceiling uses 48 kHz as its reference.  WC3 uses
  * 48 kHz as the reference for the common case, raises it for a higher-rate
  * guest, and never exceeds the 192 kHz HLE ceiling.  This is only a maximum:
  * the 40 ms target still sets the actual queue depth, and an xrun grows one
@@ -1816,7 +1817,7 @@ typedef struct AndroidAudioStream {
     uint32_t channels;
     uint32_t bits;
 
-    /* nfsu2 mixer: one primary looping voice created at open(), plus the
+    /* Voice mixer: one primary looping voice created at open(), plus the
      * voices DirectSound registers.  The AAudio callback renders only this
      * mixer; there is no linear or pull transport. */
     Wc3PcmMixer mixer;
@@ -2066,7 +2067,7 @@ static void android_audio_service(AndroidAudioStream *st)
                                         memory_order_relaxed);
     int32_t burst = AAudioStream_getFramesPerBurst(stream);
     int32_t size = AAudioStream_getBufferSizeInFrames(stream);
-    /* nfsu2 measures the growth ceiling in the ACTUAL device rate. */
+    /* The growth ceiling is measured in the ACTUAL device rate. */
     int32_t device_rate = (int32_t)st->device_rate;
     if (device_rate <= 0) device_rate = (int32_t)st->sample_rate;
     int32_t max = audio_frames_for_ms(stream, device_rate,
@@ -2123,7 +2124,7 @@ static void android_audio_service(AndroidAudioStream *st)
         return AAUDIO_CALLBACK_RESULT_CONTINUE;
     }
 
-    /* The nfsu2 mixer is the only producer.  It pulls looping voices,
+    /* The voice mixer is the only producer.  It pulls looping voices,
      * resamples to the DEVICE rate and fills the complete callback block. */
     uint64_t started = android_monotonic_ns(NULL);
     uint32_t got = wc3_mixer_render(&st->mixer, audio_data,
@@ -2182,7 +2183,7 @@ static AAudioStream *audio_create_stream(AndroidAudioStream *st,
         AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
         AAUDIO_PERFORMANCE_MODE_NONE,
     };
-    /* nfsu2 opens PCM_FLOAT at the DEVICE rate and resamples in the mixer.
+    /* The stream opens PCM_FLOAT at the DEVICE rate and resamples in the mixer.
      * PCM_I16 is the compatibility fallback when a driver refuses float. */
     static const aaudio_format_t formats[] = {
         AAUDIO_FORMAT_PCM_FLOAT,
@@ -2273,7 +2274,7 @@ static AAudioStream *audio_create_stream(AndroidAudioStream *st,
          * callback run happens before the first publish simply because the
          * producer has not written yet. */
         atomic_store_explicit(&st->started, 0, memory_order_release);
-        /* nfsu2 startSoundStream() resets soundLastXruns after every open.
+        /* The stream open path resets soundLastXruns after every open.
          * The reopened AAudio stream counts xruns from zero, so keeping the
          * old device's count here would suppress S-4 growth until the new
          * stream exceeded it. */
@@ -2579,7 +2580,7 @@ static int android_audio_open(void *ctx, uint32_t sample_rate,
     return 0;
 }
 
-/* ---- nfsu2 host-owned looping voices --------------------------------- */
+/* ---- host-owned looping voices --------------------------------------- */
 /* Voice handles encode the owning stream so the platform table can stay
  * ctx-free: high 16 bits = stream slot + 1, low 16 bits = mixer voice + 1. */
 #define WC3_AUDIO_STREAM_SLOTS 8u

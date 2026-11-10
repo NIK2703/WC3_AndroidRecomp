@@ -1,9 +1,9 @@
 /*
  * audio_mixer.h - host-owned LOOPING PCM voices, mixed in the AAudio
- * real-time callback.  C port of nfsu2-recompiled's PcmVoice / PcmMixer /
- * guest_audio.inc (the "upper half" of their audio architecture).
+ * real-time callback.  PcmVoice / PcmMixer implementation for the Android
+ * audio path.
  *
- * nfsu2 has no WAVEHDR pool and no WOM_DONE: the guest owns one persistent
+ * The guest has no WAVEHDR pool and no WOM_DONE: it owns one persistent
  * looping DirectSound buffer, publishes only the region it Lock/Unlock'ed,
  * polls GetCurrentPosition, and PcmMixer::render() PULLS and resamples inside
  * the AAudio data callback.  This file supplies exactly those mechanics for
@@ -22,10 +22,10 @@
  *   - non-snapshot voices (DirectSound verification, legacy callers) keep the
  *     old per-slot seqlock: a slot being written produces silence, never torn
  *     PCM.  That path is not the product primary voice;
- *   - the PCM ring is circular, exactly like nfsu2's PcmVoice::samples: a
- *     buffer published once loops on that data every revolution;
+ *   - the PCM ring is circular, exactly like PcmVoice::samples: a buffer
+ *     published once loops on that data every revolution;
  *   - a streaming loop with no publish for a whole ring revolution is muted
- *     (nfsu2 stale policy) instead of replaying its last half second;
+ *     (the stale policy) instead of replaying its last half second;
  *   - a one-shot voice stops at its buffer end and resets its cursor, exactly
  *     like PcmMixer::render();
  *   - voice removal marks the slot dying (used==3), waits for render_users to
@@ -48,7 +48,7 @@
 
 #define WC3_MIXER_VOICES       128u
 #define WC3_VOICE_SLOT_BYTES   1024u
-/* 16 MiB / 1 KiB: the same upper bound as the nfsu2 DirectSound buffer. */
+/* 16 MiB / 1 KiB: the same upper bound as the DirectSound buffer. */
 #define WC3_VOICE_MAX_SLOTS    16384u
 /* Primary-buffer floor: seven 50 ms headers at high guest rates plus reset
  * headroom still fit, while the 16 MiB slot ceiling remains the hard bound. */
@@ -108,7 +108,7 @@ typedef struct Wc3Voice {
     _Atomic uint32_t stale_frames;      /* render snapshot, SOURCE frames */
     _Atomic int publishing;             /* one producer per voice */
     _Atomic int resetting;              /* control-path reinit in progress */
-    double stale_source;                /* render-only, nfsu2 staleFrames */
+    double stale_source;                /* render-only, staleFrames */
     uint32_t reset_seen;                /* render-only */
 
     /* N-18 primary-voice triple snapshot, appended for source compatibility.
@@ -274,9 +274,9 @@ static inline int wc3_mixer_voice_add_impl(Wc3PcmMixer *m, uint8_t *pcm,
                               memory_order_relaxed);
         atomic_store_explicit(&v->right_bits, wc3_float_bits(1.0f),
                               memory_order_relaxed);
-        /* nfsu2 initializes an 8-bit shadow to 128 (unsigned silence), not 0;
-         * a zero byte would decode as -1.0 and make an unpublished region
-         * full-scale negative. */
+        /* The mixer initializes an 8-bit shadow to 128 (unsigned silence),
+         * not 0; a zero byte would decode as -1.0 and make an unpublished
+         * region full-scale negative. */
         memset(pcm, bits == 8u ? 128 : 0,
                snapshots ? 3u * buffer_bytes : buffer_bytes);
         atomic_store_explicit(&v->published_frame, 0u, memory_order_release);
@@ -372,7 +372,7 @@ static inline void wc3_mixer_voice_release(Wc3Voice *v)
 
 /* Copy one region into the circular PCM ring.  `publishing` is already held by
  * the caller.  The logical frame index wraps the physical buffer exactly like
- * nfsu2's PcmVoice::samples. */
+ * PcmVoice::samples. */
 static inline void wc3_voice_copy_locked(Wc3Voice *v, uint64_t frame_base,
                                          const uint8_t *src, uint32_t bytes)
 {
@@ -390,7 +390,7 @@ static inline void wc3_voice_copy_locked(Wc3Voice *v, uint64_t frame_base,
         if (n == 0u) break;
         /* Even -> odd -> write -> even.  The consumer never needs to know the
          * write generation: a stable even seqlock is a complete slot, and the
-         * circular PCM buffer is itself the loop state (nfsu2 semantics). */
+         * circular PCM buffer is itself the loop state (mixer semantics). */
         atomic_fetch_add_explicit(&v->seq[slot], 1u, memory_order_acq_rel);
         memcpy(v->pcm + (size_t)slot * WC3_VOICE_SLOT_BYTES + in_slot,
                src, n);
@@ -544,8 +544,8 @@ static inline int16_t wc3_voice_sample_snap(const Wc3Voice *v,
                                           int loop)
 {
     if (!v || !pcm || v->frames == 0u) return 0;
-    /* `loop` is the render chunk's snapshot of the control state.  nfsu2
-     * holds the mixer mutex for the whole render(), so a Play/Stop cannot
+    /* `loop` is the render chunk's snapshot of the control state.  The
+     * mixer holds its mutex for the whole render(), so a Play/Stop cannot
      * change loop between the stop test and the taps.  Re-reading v->loop
      * here would let a concurrent control call change wrap behavior in the
      * middle of a chunk. */
@@ -567,7 +567,7 @@ static inline int16_t wc3_voice_sample_snap(const Wc3Voice *v,
     return value;
 }
 
-/* nfsu2 PcmVoice::published(): clear the stale window and count the publish
+/* PcmVoice::published(): clear the stale window and count the publish
  * only while playing.  Pre-filling a paused buffer must not make it look like
  * a live streaming ring.  The caller holds `publishing`.  Clear stale BEFORE
  * publishing the count so a render that observes the new count also observes
@@ -582,7 +582,7 @@ static inline void wc3_voice_published_locked(Wc3Voice *v)
 
 /* Commit the copied regions.  One guest Unlock() is one publish even when the
  * locked range wraps the end of the buffer and physically touches two spans:
- * nfsu2's PcmVoice::published() is called once per Unlock. */
+ * PcmVoice::published() is called once per Unlock. */
 static inline void wc3_voice_commit_locked(Wc3Voice *v, uint64_t end_frame)
 {
     uint64_t old = atomic_load_explicit(&v->published_frame,
@@ -664,14 +664,14 @@ static inline uint32_t wc3_voice_publish2(Wc3Voice *v,
     return bytes1 + bytes2;
 }
 
-/* nfsu2 PcmVoice::published() for a zero-byte Unlock: no PCM moves, but the
+/* PcmVoice::published() for a zero-byte Unlock: no PCM moves, but the
  * stale window is cleared and, while playing, the publish count advances.
  * Exactness matters because streaming() is `loop && publishes >= 4`. */
 static inline int wc3_voice_published(Wc3Voice *v)
 {
     if (!v || atomic_load_explicit(&v->used, memory_order_acquire) != 1)
         return -1;
-    /* published() is called under the nfsu2 mixer mutex.  Claim the same
+    /* published() is called under the mixer mutex.  Claim the same
      * per-voice producer gate so it cannot interleave with a real publish or
      * a reset; a concurrent Unlock on one buffer is not valid guest use. */
     int expected = 0;
@@ -778,7 +778,7 @@ static inline void wc3_voice_control(Wc3Voice *v, int playing, int loop,
 {
     if (!v) return;
     if (playing == 1) {
-        /* nfsu2 Play(): a fresh start clears the stale counter.  Publish the
+        /* Play(): a fresh start clears the stale counter.  Publish the
          * reset BEFORE playing=1 so a render that observes the new playing
          * state also observes stale_source=0 (release/acquire pairing). */
         atomic_fetch_add_explicit(&v->stale_reset, 1u, memory_order_release);
@@ -834,7 +834,7 @@ static inline int wc3_voice_state(const Wc3Voice *v, uint32_t *playing,
 }
 
 /* DirectSound GetCurrentPosition: play cursor and the 10 ms write cursor,
- * measured in DEVICE time (nfsu2 uses soundMixer.rate here), both modulo the
+ * measured in DEVICE time, both modulo the
  * looping buffer, plus the absolute source-frame cursor. */
 static inline void wc3_voice_position(const Wc3Voice *v, uint32_t device_rate,
                                       uint32_t *play_bytes,
@@ -862,8 +862,8 @@ static inline void wc3_voice_position(const Wc3Voice *v, uint32_t device_rate,
     if (play_frame) *play_frame = pf;
 }
 
-/* nfsu2 serviceGuestSound(): non-RT health snapshot.  Futures are exchanged
- * so each report covers the interval since the previous one. */
+/* Mixer health snapshot.  Futures are exchanged so each report covers the
+ * interval since the previous one. */
 static inline void wc3_mixer_stats(Wc3PcmMixer *m, uint32_t *active,
                                    uint64_t *clipped, float *peak,
                                    uint32_t *callback_peak_us)

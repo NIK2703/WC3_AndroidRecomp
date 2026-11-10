@@ -3,7 +3,7 @@
  * This is not an audio transport.  Mss32 creates its 50 ms mixer timer with
  * USER32!SetTimer and pumps it from GetMessage/PeekMessage while its owner
  * thread waits.  The old WINMM waveOut path owned that timer table; with the
- * nfsu2 DirectSound architecture the timer survives on its own.
+ * DirectSound architecture the timer survives on its own.
  */
 #ifndef WC3_HLE_WINMM_MSS_TIMER_H
 #define WC3_HLE_WINMM_MSS_TIMER_H
