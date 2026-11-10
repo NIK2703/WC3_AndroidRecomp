@@ -11,7 +11,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "crt_string_hle.h"
 
 /* Test addresses start at 0x100; zero is the NULL pointer and modules check

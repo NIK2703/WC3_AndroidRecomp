@@ -3,7 +3,7 @@
  *
  * The full msvcr80 migration is later in H6.2.  malloc/free/realloc/calloc are
  * a self-contained slice: they already use the guest heap, and moving them now
- * keeps the header arithmetic in the shim instead of in the quarantine.
+ * keeps the header arithmetic in the shim instead of in the as-built HLE.
  */
 #ifndef WC3_HLE_MSVCR80_HEAP_H
 #define WC3_HLE_MSVCR80_HEAP_H

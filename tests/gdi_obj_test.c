@@ -7,7 +7,7 @@
 
 #include "cpu.h"
 #include "gdi_obj_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define MAX_ROWS 32u
 #define GUEST_BASE 0x10000000u

@@ -13,7 +13,7 @@
 
 #include "cpu.h"
 #include "file_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "platform.h"
 #include "stdio_hle.h"
 

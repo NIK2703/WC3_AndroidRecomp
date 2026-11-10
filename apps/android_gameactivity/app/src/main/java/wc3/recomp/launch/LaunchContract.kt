@@ -15,5 +15,4 @@ object LaunchContract {
     const val KEY_HEIGHT = "height"
     const val KEY_SOUND = "sound"
     const val KEY_EXTRA_ARGS = "args"
-    const val KEY_AUDIO_LATENCY_MS = "audio_latency_ms"
 }

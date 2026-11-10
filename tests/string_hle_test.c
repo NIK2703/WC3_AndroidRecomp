@@ -10,7 +10,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "string_hle.h"
 
 #define GUEST_BASE 0x10000u

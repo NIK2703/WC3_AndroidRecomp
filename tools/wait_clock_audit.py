@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Source-only audit of guest wait clocks (O-66).
 
-``runtime/legacy/hle_android.c`` is read-only under R15/BP-3.3.  Its
+``runtime/hle/android/hle_android.c`` is as-built target code.  Its
 ``h_wait_many()`` loop polls with ``usleep(1000)`` and ``h_wait_mutex()``
 builds its deadline from ``CLOCK_REALTIME``.  The Android platform boundary
 already uses monotonic clocks for its own waits.  This tool records that split
@@ -9,7 +9,7 @@ so the M5 cutover cannot silently keep the wall-clock wait or replace the
 completion -> timer -> completion delivery order with a plain condvar.
 
 The audit is report-only unless ``--strict`` is supplied.  Strict mode checks
-that the expected shape is still present; a change means the read-only source
+that the expected shape is still present; a change means the as-built source
 or the platform boundary moved and the O-66 decision needs a fresh review.
 
 Usage:
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
-LEGACY = ROOT / "runtime" / "legacy" / "hle_android.c"
+ASBUILT = ROOT / "runtime" / "hle" / "android" / "hle_android.c"
 PLATFORM = ROOT / "runtime" / "platform" / "android" / "platform_android.c"
 
 
@@ -132,19 +132,19 @@ def usleep_us(text: str) -> int | None:
 
 
 def audit() -> dict[str, object]:
-    if not LEGACY.is_file() or not PLATFORM.is_file():
+    if not ASBUILT.is_file() or not PLATFORM.is_file():
         raise FileNotFoundError("wait-clock sources are missing")
-    legacy_lines = LEGACY.read_text(encoding="utf-8", errors="replace").splitlines()
+    asbuilt_lines = ASBUILT.read_text(encoding="utf-8", errors="replace").splitlines()
     platform_lines = PLATFORM.read_text(
         encoding="utf-8", errors="replace").splitlines()
 
-    wait_mutex = find_function(legacy_lines, "static void h_wait_mutex(")
-    wait_many = find_function(legacy_lines, "static void h_wait_many(")
+    wait_mutex = find_function(asbuilt_lines, "static void h_wait_mutex(")
+    wait_many = find_function(asbuilt_lines, "static void h_wait_many(")
     poll_pause = find_function(platform_lines, "static void android_poll_pause(")
     cond_init = find_function(platform_lines, "static int android_sync_cond_init(")
 
-    wait_mutex_text = span_text(legacy_lines, wait_mutex)
-    wait_many_text = span_text(legacy_lines, wait_many)
+    wait_mutex_text = span_text(asbuilt_lines, wait_mutex)
+    wait_many_text = span_text(asbuilt_lines, wait_many)
     poll_pause_text = span_text(platform_lines, poll_pause)
     cond_init_text = span_text(platform_lines, cond_init)
 
@@ -161,7 +161,7 @@ def audit() -> dict[str, object]:
             "deadline_clock": ("realtime"
                                if "CLOCK_REALTIME" in wait_mutex_text else None),
             "condvar": "pthread_cond_timedwait" in wait_mutex_text,
-            "realtime_line": first_line(legacy_lines, wait_mutex,
+            "realtime_line": first_line(asbuilt_lines, wait_mutex,
                                         "CLOCK_REALTIME"),
         },
     }
@@ -196,10 +196,10 @@ def audit() -> dict[str, object]:
     return {
         "schema": "wc3.wait_clock_audit.v1",
         "finding": "O-66",
-        "status": "blocked-read-only",
+        "status": "blocked-m5",
         "reason": (
-            "h_wait_many()/h_wait_mutex() live in runtime/legacy/, which is "
-            "read-only under R15/BP-3.3.  Changing the poll to a monotonic "
+            "h_wait_many()/h_wait_mutex() live in runtime/hle/android/.  Changing "
+            "the poll to a monotonic "
             "condvar would also change the completion -> timer -> completion "
             "delivery order; A-12.4 rejected a separate guest thread for the "
             "same reason."

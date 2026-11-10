@@ -17,7 +17,7 @@
 
 #include "cpu.h"
 #include "guest_layout.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define RESOURCE_RECORD_MAGIC 0x43525352u /* 'RSRC' */
 #define RESOURCE_RECORD_SIZE 16u

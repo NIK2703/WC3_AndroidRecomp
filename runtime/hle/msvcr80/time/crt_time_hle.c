@@ -19,7 +19,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "platform.h"
 
 #define NS_PER_SEC 1000000000ull

@@ -22,9 +22,10 @@
 
 #include "platform_android.h"
 #include "asset_snapshot.h"
-#include "audio_pull_ring.h"
 #include "audio_mixer.h"
-#include "audio_ring_layout.h"
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+#include "audio_tap.h"
+#endif
 
 #include <aaudio/AAudio.h>
 #include <android/log.h>
@@ -1750,22 +1751,30 @@ int wc3_android_config_load(const char *path)
  * atomic flag and posts a semaphore.  One supervisor thread per stream closes
  * the failed stream and reopens it with an exponential backoff.  After
  * WC3_AUDIO_REOPEN_MAX consecutive failures the stream becomes an explicit
- * silent sink: write() consumes and discards bytes so the guest does not
- * stall, while the failure is recorded in debug builds.
+ * silent sink: the mixer still runs and the guest still publishes, but the
+ * callback emits zeroes.  The failure is recorded in debug builds.
  */
 
-/* A-12.4 S1: the completion feedback loop is the five-WAVEHDR pool, not the
- * ring.  64 KiB is the smallest power of two that still holds all five 50 ms
- * headers (5 * 8832 = 44160 B) and is ~4.6 AAudio bursts on the reference
- * device (3536 frames).  The old 1 MiB ring was 5.7 s of audio and let the
- * guest run arbitrarily far ahead of the speaker.  O-107 keeps this capacity
- * in audio_ring_layout.h so the mask and the T0 assertion cannot drift. */
+/* N-19 sizes the primary voice from the guest format: seven 50 ms headers plus
+ * one frame of guard, rounded to 1 KiB with a 64 KiB floor.  At 44.1/48 kHz
+ * that holds the five 8832-byte headers (44160 B) and is ~4.6 AAudio bursts on
+ * the reference device (3536 frames).  audio_mixer.h owns the slot and floor
+ * constants so the Android sink and the headless twin cannot drift. */
 #define WC3_AUDIO_REOPEN_MAX   5
 /* S-4 / P-3: measured A/B inputs from the nfsu2 architecture.  These are
  * NOT a declared fix: A-13.8 already measured 60 ms as -2.4 pp repeats only.
  * The target is an input; the granted value is the evidence. */
 #define WC3_AUDIO_TARGET_MS    40
 #define WC3_AUDIO_MAX_MS       100
+/* AAudio's capacity request is in DEVICE frames, but the builder does not
+ * know the device rate until after open (we deliberately do not force a
+ * sample rate).  nfsu2 hard-codes 48 kHz for its 100 ms ceiling.  WC3 uses
+ * 48 kHz as the reference for the common case, raises it for a higher-rate
+ * guest, and never exceeds the 192 kHz HLE ceiling.  This is only a maximum:
+ * the 40 ms target still sets the actual queue depth, and an xrun grows one
+ * burst at a time up to 100 ms. */
+#define WC3_AUDIO_REFERENCE_RATE 48000
+#define WC3_AUDIO_MAX_RATE       192000
 
 static int32_t audio_frames_for_ms(AAudioStream *stream, int32_t rate,
                                    int32_t ms);
@@ -1777,32 +1786,23 @@ static int32_t audio_frames_for_ms(AAudioStream *stream, int32_t rate,
 #define AUDIO_LOG(...) ((void)0)
 #endif
 
-typedef void (*AndroidAudioCallback)(void *opaque, void *frames,
-                                     uint32_t bytes);
-/* A-12.4 S1: invoked from the NON-RT supervisor pump, never from the AAudio
- * real-time callback. */
-typedef void (*AndroidAudioConsumed)(void *opaque, uint64_t total);
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+typedef struct AndroidAudioTap AndroidAudioTap;
+#endif
 
 typedef struct AndroidAudioStream {
-    /* O-108: producer and consumer counters are one cache line apart. */
-    Wc3AudioRingPositions positions;
     _Atomic int callback_users;
-    _Atomic int writers;
+    /* C-8: control-path users that hold a stream/voice pointer.  close()
+     * unregisters first, then waits for this to drain before freeing
+     * PCM/mixer storage. */
+    _Atomic int api_users;
     _Atomic int closing;
     _Atomic int silent;
     _Atomic int lost;
     _Atomic uint32_t lost_events;
-    _Atomic AndroidAudioCallback callback;
-    _Atomic(void *) callback_opaque;
+    _Atomic int started;
 
-    /* Device clock: bytes the RT callback actually removed from the ring.
-     * The RT path only ever does an atomic add, an atomic store and sem_post;
-     * the supervisor turns that into one on_consumed() per wake. */
-    _Atomic uint64_t consumed;
-    _Atomic int wake_consumed;
-    _Atomic AndroidAudioConsumed consumed_cb;
-    _Atomic(void *) consumed_opaque;
-    /* Measured AAudio buffer depth after applying WC3_AUDIO_LATENCY_MS. */
+    /* Measured AAudio buffer depth after applying the fixed target. */
     _Atomic int32_t buffer_frames;
 
     /* stream is written by the supervisor and read by close under lifecycle. */
@@ -1815,32 +1815,196 @@ typedef struct AndroidAudioStream {
     uint32_t sample_rate;
     uint32_t channels;
     uint32_t bits;
-    uint32_t bytes_per_frame;
-    uint8_t *ring;
 
-    /* S-2: host-owned pull ring.  publish() writes only the submitted region;
-     * the AAudio real-time callback renders by absolute frame index.  The
-     * linear SPSC ring above stays for the A/B rollback path. */
-    Wc3PullRing pull;
-    uint8_t *pull_pcm;
-    _Atomic int pull_mode;
-    _Atomic int started;
-    /* S-4: non-RT starvation diagnostics and measured xrun growth. */
-    _Atomic int32_t last_xruns;
-    _Atomic uint32_t pump_ticks;
-
-    /* Full nfsu2 port: host-owned looping voices mixed in the AAudio RT
-     * callback.  The mixer owns the device clock; Wc3PullRing above stays as
-     * the byte-exact linear A/B fallback and for the headless twin. */
+    /* nfsu2 mixer: one primary looping voice created at open(), plus the
+     * voices DirectSound registers.  The AAudio callback renders only this
+     * mixer; there is no linear or pull transport. */
     Wc3PcmMixer mixer;
     uint8_t *voice_pcm[WC3_MIXER_VOICES];
-    uint64_t voice_last_publish_ns[WC3_MIXER_VOICES];
-    uint64_t voice_max_gap_ns[WC3_MIXER_VOICES];
     uintptr_t primary_voice;
     uint32_t device_rate;
     uint32_t stream_slot;
     int float_output;
+
+    /* S-4: non-RT starvation diagnostics and measured xrun growth. */
+    _Atomic int32_t last_xruns;
+    _Atomic uint32_t pump_ticks;
+
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+    /* N-16b: optional non-RT post-mix fixture.  NULL in a normal run. */
+    AndroidAudioTap *tap;
+#endif
 } AndroidAudioStream;
+
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+/* N-16b: post-mix device fixture.  The RT callback only converts and pushes
+ * into this preallocated ring.  fopen/fwrite/flush and logging happen on the
+ * writer thread or at open/close, never in the callback. */
+#define WC3_AUDIO_TAP_RING_BYTES (1u << 20)
+#define WC3_AUDIO_TAP_LIMIT      (8u << 20)
+
+struct AndroidAudioTap {
+    Wc3AudioTapRing ring;
+    uint8_t *ring_pcm;
+    FILE *file;
+    pthread_t writer;
+    _Atomic int stop;
+    _Atomic uint32_t file_bytes;
+    _Atomic int truncated;
+    _Atomic int format_invalid;
+    int writer_started;
+    uint32_t rate;
+    uint32_t channels;
+    int is_float;
+};
+
+static void *android_audio_tap_writer(void *arg)
+{
+    AndroidAudioTap *tap = (AndroidAudioTap *)arg;
+    uint8_t buf[16384];
+    unsigned flushes = 0u;
+
+    for (;;) {
+        uint32_t got;
+        while ((got = wc3_audio_tap_pop(&tap->ring, buf, sizeof buf)) != 0u) {
+            uint32_t written = atomic_load_explicit(&tap->file_bytes,
+                                                    memory_order_relaxed);
+            uint32_t remaining = written < WC3_AUDIO_TAP_LIMIT
+                ? WC3_AUDIO_TAP_LIMIT - written : 0u;
+            if (got > remaining) {
+                got = remaining;
+                atomic_store_explicit(&tap->truncated, 1,
+                                      memory_order_release);
+            }
+            if (got) {
+                if (fwrite(buf, 1, got, tap->file) != got) {
+                    atomic_store_explicit(&tap->truncated, 1,
+                                          memory_order_release);
+                    break;
+                }
+                written += got;
+                atomic_store_explicit(&tap->file_bytes, written,
+                                      memory_order_relaxed);
+                if ((++flushes % 64u) == 0u) fflush(tap->file);
+            }
+            if (written >= WC3_AUDIO_TAP_LIMIT) {
+                atomic_store_explicit(&tap->truncated, 1,
+                                      memory_order_release);
+                break;
+            }
+        }
+        if (atomic_load_explicit(&tap->stop, memory_order_acquire))
+            break;
+        struct timespec pause = { 0, 10u * 1000u * 1000u };
+        (void)nanosleep(&pause, NULL);
+    }
+    return NULL;
+}
+
+static void android_audio_tap_start(AndroidAudioStream *st)
+{
+    const char *dir = getenv("WC3_DATA_DIR");
+    char path[768];
+    int n;
+    if (!st || st->tap || !dir || !*dir) return;
+    n = snprintf(path, sizeof path, "%s/audio_out_dump_on", dir);
+    if (n < 0 || n >= (int)sizeof path) return;
+    FILE *probe = fopen(path, "rb");
+    if (!probe) return;
+    fclose(probe);
+
+    AndroidAudioTap *tap = (AndroidAudioTap *)calloc(1, sizeof *tap);
+    if (!tap) return;
+    tap->ring_pcm = (uint8_t *)malloc(WC3_AUDIO_TAP_RING_BYTES);
+    if (!tap->ring_pcm ||
+        wc3_audio_tap_init(&tap->ring, tap->ring_pcm,
+                           WC3_AUDIO_TAP_RING_BYTES) != 0) {
+        free(tap->ring_pcm);
+        free(tap);
+        return;
+    }
+    n = snprintf(path, sizeof path, "%s/audio_out_dump.pcm", dir);
+    if (n < 0 || n >= (int)sizeof path) {
+        free(tap->ring_pcm);
+        free(tap);
+        return;
+    }
+    tap->file = fopen(path, "wb");
+    if (!tap->file) {
+        free(tap->ring_pcm);
+        free(tap);
+        return;
+    }
+    tap->rate = st->device_rate ? st->device_rate : st->sample_rate;
+    tap->channels = st->channels;
+    tap->is_float = st->float_output;
+    atomic_init(&tap->stop, 0);
+    atomic_init(&tap->file_bytes, 0u);
+    atomic_init(&tap->truncated, 0);
+    atomic_init(&tap->format_invalid, 0);
+    if (pthread_create(&tap->writer, NULL, android_audio_tap_writer, tap) != 0) {
+        fclose(tap->file);
+        free(tap->ring_pcm);
+        free(tap);
+        return;
+    }
+    /* Publish the tap only after the writer exists: a concurrent close must
+     * never observe st->tap and skip join because writer_started was not set
+     * yet. */
+    tap->writer_started = 1;
+    st->tap = tap;
+    AUDIO_LOG("[audioout] start rate=%u ch=%u fmt=%s ring=%u limit=%u",
+              tap->rate, tap->channels, tap->is_float ? "f32" : "s16",
+              WC3_AUDIO_TAP_RING_BYTES, WC3_AUDIO_TAP_LIMIT);
+}
+
+static void android_audio_tap_stop(AndroidAudioStream *st)
+{
+    AndroidAudioTap *tap = st ? st->tap : NULL;
+    if (!tap) return;
+    atomic_store_explicit(&tap->stop, 1, memory_order_release);
+    if (tap->writer_started)
+        (void)pthread_join(tap->writer, NULL);
+    fflush(tap->file);
+    AUDIO_LOG("[audioout] stop bytes=%u rate=%u ch=%u fmt=%s dropped=%u "
+              "truncated=%d format_invalid=%d",
+              atomic_load_explicit(&tap->file_bytes, memory_order_relaxed),
+              tap->rate, tap->channels, tap->is_float ? "f32" : "s16",
+              wc3_audio_tap_dropped(&tap->ring),
+              atomic_load_explicit(&tap->truncated, memory_order_relaxed),
+              atomic_load_explicit(&tap->format_invalid, memory_order_relaxed));
+    fclose(tap->file);
+    free(tap->ring_pcm);
+    free(tap);
+    st->tap = NULL;
+}
+
+static void android_audio_tap_push(AndroidAudioStream *st, const void *pcm,
+                                   uint32_t bytes)
+{
+    AndroidAudioTap *tap = st ? st->tap : NULL;
+    if (!tap || !pcm || bytes == 0u) return;
+    if (tap->rate != (st->device_rate ? st->device_rate : st->sample_rate) ||
+        tap->channels != st->channels ||
+        tap->is_float != st->float_output) {
+        atomic_store_explicit(&tap->format_invalid, 1, memory_order_release);
+        return;
+    }
+    if (tap->is_float) {
+        if ((bytes % 4u) != 0u) return;
+        (void)wc3_audio_tap_push_f32(&tap->ring, (const float *)pcm,
+                                     bytes / 4u);
+    } else {
+        if ((bytes % 2u) != 0u) return;
+        (void)wc3_audio_tap_push_s16(&tap->ring, (const int16_t *)pcm,
+                                     bytes / 2u);
+    }
+}
+#else
+#define android_audio_tap_start(st) ((void)0)
+#define android_audio_tap_stop(st) ((void)0)
+#define android_audio_tap_push(st, pcm, bytes) ((void)0)
+#endif
 
 /* voice_remove() frees the shadow PCM as soon as the guest releases a
  * DirectSound buffer.  A render callback may already be inside that voice, so
@@ -1857,17 +2021,31 @@ static void android_audio_wait_render_idle(Wc3PcmMixer *mixer)
     }
 }
 
-/* Start the device once, on the first submitted PCM.  Called from the HLE
- * producer thread, never from the AAudio real-time callback. */
-static void android_audio_ensure_started(AndroidAudioStream *st)
+/* Start the device exactly once.  N-19 calls this from android_audio_open so
+ * the callback plays silence before the first DirectSound publish; the same function
+ * stays the idempotent retry for a reopened stream and for producers that run
+ * before open() has returned.  Never called from the AAudio callback. */
+static int android_audio_ensure_started(AndroidAudioStream *st)
 {
-    if (atomic_load_explicit(&st->started, memory_order_acquire)) return;
+    if (!st) return -1;
+    if (atomic_load_explicit(&st->closing, memory_order_acquire)) return -1;
+    if (atomic_load_explicit(&st->started, memory_order_acquire)) return 0;
+    int started = 0;
     pthread_mutex_lock(&st->lifecycle);
     AAudioStream *stream = st->stream;
-    if (stream && !atomic_load_explicit(&st->started, memory_order_acquire) &&
-        AAudioStream_requestStart(stream) == AAUDIO_OK)
-        atomic_store_explicit(&st->started, 1, memory_order_release);
+    if (stream && !atomic_load_explicit(&st->started, memory_order_acquire)) {
+        aaudio_result_t rc = AAudioStream_requestStart(stream);
+        if (rc == AAUDIO_OK) {
+            atomic_store_explicit(&st->started, 1, memory_order_release);
+            started = 1;
+        } else {
+            AUDIO_LOG("AAudio requestStart failed %d", (int)rc);
+        }
+    } else if (stream) {
+        started = atomic_load_explicit(&st->started, memory_order_acquire);
+    }
     pthread_mutex_unlock(&st->lifecycle);
+    return started ? 0 : -1;
 }
 
 /* S-4: runs on the NON-RT supervisor pump, never in the AAudio callback.
@@ -1878,125 +2056,48 @@ static void android_audio_service(AndroidAudioStream *st)
 {
     pthread_mutex_lock(&st->lifecycle);
     AAudioStream *stream = st->stream;
-    if (stream) {
-        int32_t xruns = AAudioStream_getXRunCount(stream);
-        int32_t last = atomic_load_explicit(&st->last_xruns,
-                                            memory_order_relaxed);
-        int32_t burst = AAudioStream_getFramesPerBurst(stream);
-        int32_t size = AAudioStream_getBufferSizeInFrames(stream);
-        int32_t max = audio_frames_for_ms(stream, (int32_t)st->sample_rate,
-                                          WC3_AUDIO_MAX_MS);
-        if (xruns > last && burst > 0 && size > 0 && size < max) {
-            int32_t grown = size + burst;
-            if (grown > max) grown = max;
-            (void)AAudioStream_setBufferSizeInFrames(stream, grown);
-            size = AAudioStream_getBufferSizeInFrames(stream);
-        }
-        if (xruns >= 0)
-            atomic_store_explicit(&st->last_xruns, xruns,
-                                  memory_order_relaxed);
-        atomic_store_explicit(&st->buffer_frames, size,
-                              memory_order_release);
+    if (!stream) {
         pthread_mutex_unlock(&st->lifecycle);
-
-#if WC3_DEBUG && WC3_DEBUG_AUDIO
-        uint32_t tick = atomic_fetch_add_explicit(&st->pump_ticks, 1u,
-                                                  memory_order_relaxed);
-        if ((tick & 127u) == 0u) {
-            uint64_t consumed = atomic_load_explicit(&st->consumed,
-                                                      memory_order_acquire);
-            uint64_t play = atomic_load_explicit(&st->pull.play_frame,
-                                                 memory_order_acquire);
-            uint64_t published = atomic_load_explicit(
-                &st->pull.published_frame, memory_order_acquire);
-            uint32_t stale = atomic_load_explicit(&st->pull.stale_frames,
-                                                  memory_order_relaxed);
-            uint32_t regions = atomic_load_explicit(
-                &st->pull.publish_regions, memory_order_relaxed);
-            AUDIO_LOG("[wave2] pull xruns=%d buffer=%d burst=%d "
-                      "consumed=%llu play=%llu published=%llu "
-                      "stale=%u regions=%u",
-                      xruns, size, burst,
-                      (unsigned long long)consumed,
-                      (unsigned long long)play,
-                      (unsigned long long)published, stale, regions);
-            if (st->primary_voice) {
-                uint32_t active = 0u, callback_peak = 0u;
-                float peak = 0.0f;
-                uint64_t clipped = 0u;
-                Wc3Voice *v = wc3_mixer_voice(
-                    &st->mixer, st->primary_voice & 0xFFFFu);
-                wc3_mixer_stats(&st->mixer, &active, &clipped, &peak,
-                                &callback_peak);
-                uint64_t gap = 0u, ring_ms = 0u;
-                if (v) {
-                    uintptr_t local = (st->primary_voice & 0xFFFFu) - 1u;
-                    gap = st->voice_max_gap_ns[local];
-                    st->voice_max_gap_ns[local] = 0u;
-                    if (v->bytes && v->bpf && v->rate)
-                        ring_ms = (uint64_t)v->frames * 1000u / v->rate;
-                }
-                AUDIO_LOG("[wave2] mix active=%u peak=%.4f clipped=%llu "
-                          "gap=%llu us ring=%llu ms callbackPeak=%u us",
-                          active, (double)peak,
-                          (unsigned long long)clipped,
-                          (unsigned long long)(gap / 1000u),
-                          (unsigned long long)ring_ms, callback_peak);
-            }
-        }
-#endif
         return;
     }
+
+    int32_t xruns = AAudioStream_getXRunCount(stream);
+    int32_t last = atomic_load_explicit(&st->last_xruns,
+                                        memory_order_relaxed);
+    int32_t burst = AAudioStream_getFramesPerBurst(stream);
+    int32_t size = AAudioStream_getBufferSizeInFrames(stream);
+    /* nfsu2 measures the growth ceiling in the ACTUAL device rate. */
+    int32_t device_rate = (int32_t)st->device_rate;
+    if (device_rate <= 0) device_rate = (int32_t)st->sample_rate;
+    int32_t max = audio_frames_for_ms(stream, device_rate,
+                                      WC3_AUDIO_MAX_MS);
+    if (xruns > last && burst > 0 && size > 0 && size < max) {
+        int32_t grown = size + burst;
+        if (grown > max) grown = max;
+        (void)AAudioStream_setBufferSizeInFrames(stream, grown);
+        size = AAudioStream_getBufferSizeInFrames(stream);
+    }
+    if (xruns >= 0)
+        atomic_store_explicit(&st->last_xruns, xruns, memory_order_relaxed);
+    atomic_store_explicit(&st->buffer_frames, size, memory_order_release);
     pthread_mutex_unlock(&st->lifecycle);
-}
 
-static uint32_t audio_ring_read(AndroidAudioStream *st, void *dst,
-                                uint32_t bytes)
-{
-    uint32_t r = atomic_load_explicit(&st->positions.read_pos,
-                                      memory_order_relaxed);
-    uint32_t w = atomic_load_explicit(&st->positions.write_pos,
-                                      memory_order_acquire);
-    uint32_t available = w - r;
-    if (bytes > available) bytes = available;
-
-    uint32_t offset = r & (WC3_AUDIO_RING_BYTES - 1u);
-    uint32_t first = WC3_AUDIO_RING_BYTES - offset;
-    if (first > bytes) first = bytes;
-    if (first) memcpy(dst, st->ring + offset, first);
-    if (bytes > first)
-        memcpy((uint8_t *)dst + first, st->ring, bytes - first);
-
-    atomic_store_explicit(&st->positions.read_pos, r + bytes,
-                          memory_order_release);
-    return bytes;
-}
-
-static uint32_t audio_ring_write(AndroidAudioStream *st, const void *src,
-                                 uint32_t bytes)
-{
-    uint32_t w = atomic_load_explicit(&st->positions.write_pos,
-                                      memory_order_relaxed);
-    uint32_t r = atomic_load_explicit(&st->positions.read_pos,
-                                      memory_order_acquire);
-    uint32_t used = w - r;
-    if (used >= WC3_AUDIO_RING_BYTES) return 0;
-    uint32_t free_bytes = WC3_AUDIO_RING_BYTES - used;
-    if (bytes > free_bytes) bytes = free_bytes;
-
-    uint32_t offset = w & (WC3_AUDIO_RING_BYTES - 1u);
-    uint32_t first = WC3_AUDIO_RING_BYTES - offset;
-    if (first > bytes) first = bytes;
-    if (first) memcpy(st->ring + offset, src, first);
-    if (bytes > first)
-        memcpy(st->ring, (const uint8_t *)src + first, bytes - first);
-
-    atomic_store_explicit(&st->positions.write_pos, w + bytes,
-                          memory_order_release);
-    return bytes;
-}
-
-static aaudio_data_callback_result_t audio_data_callback(
+#if WC3_DEBUG && WC3_DEBUG_AUDIO
+    uint32_t tick = atomic_fetch_add_explicit(&st->pump_ticks, 1u,
+                                              memory_order_relaxed);
+    if ((tick & 127u) == 0u) {
+        uint32_t active = 0u, callback_peak = 0u;
+        uint64_t clipped = 0u;
+        float peak = 0.0f;
+        wc3_mixer_stats(&st->mixer, &active, &clipped, &peak,
+                        &callback_peak);
+        AUDIO_LOG("[wc3audio] mix xruns=%d buffer=%d burst=%d "
+                  "active=%u peak=%.4f clipped=%llu callbackPeak=%u us",
+                  xruns, size, burst, active, (double)peak,
+                  (unsigned long long)clipped, callback_peak);
+    }
+#endif
+}static aaudio_data_callback_result_t audio_data_callback(
     AAudioStream *stream, void *user, void *audio_data, int32_t num_frames)
 {
     AndroidAudioStream *st = (AndroidAudioStream *)user;
@@ -2011,78 +2112,36 @@ static aaudio_data_callback_result_t audio_data_callback(
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
 
-    /* With voices registered, the nfsu2 mixer owns the callback: it pulls,
-     * resamples to the DEVICE rate and mixes into float/int16 output.  The
-     * linear ring stays as the byte-exact A/B fallback. */
-    int mixer_mode = st->primary_voice != 0u;
-    uint32_t out_bpf = mixer_mode
-        ? (st->float_output ? st->channels * 4u : st->channels * 2u)
-        : st->bytes_per_frame;
+    uint32_t out_bpf = st->float_output ? st->channels * 4u
+                                        : st->channels * 2u;
     uint32_t need = (uint32_t)num_frames * out_bpf;
     int silent = atomic_load_explicit(&st->silent, memory_order_acquire);
-    int pull = atomic_load_explicit(&st->pull_mode, memory_order_acquire);
-    uint32_t got = 0;
-    if (silent) memset(audio_data, 0, (size_t)need);
-    if (mixer_mode && !silent) {
-        uint64_t started = android_monotonic_ns(NULL);
-        got = wc3_mixer_render(&st->mixer, audio_data,
-                               (uint32_t)num_frames);
-        if (got < need)
-            memset((uint8_t *)audio_data + got, 0, need - got);
-        uint64_t elapsed_ns = android_monotonic_ns(NULL) - started;
-        uint32_t elapsed_us = (uint32_t)(elapsed_ns / 1000u);
-        uint32_t peak = atomic_load_explicit(&st->mixer.callback_peak_us,
-                                             memory_order_relaxed);
-        while (elapsed_us > peak &&
-               !atomic_compare_exchange_weak_explicit(
-                   &st->mixer.callback_peak_us, &peak, elapsed_us,
-                   memory_order_relaxed, memory_order_relaxed)) {}
-        atomic_fetch_add_explicit(&st->consumed, got,
-                                  memory_order_relaxed);
-        atomic_store_explicit(&st->wake_consumed, 1,
-                              memory_order_release);
-        (void)sem_post(&st->wake);
-    } else if (pull && !silent) {
-        /* S-2: the device pulls by absolute frame index.  wc3_pull_render
-         * fills the WHOLE buffer, emitting silence for unpublished/stale
-         * frames.  No lock, no allocation, no guest memory, no dispatch. */
-        got = wc3_pull_render(&st->pull, audio_data,
-                              (uint32_t)num_frames);
-        /* I-3: the device clock advances by the full request, even when the
-         * producer has not published that far (underrun is still wall time). */
-        atomic_fetch_add_explicit(&st->consumed, need,
-                                  memory_order_relaxed);
-        atomic_store_explicit(&st->wake_consumed, 1,
-                              memory_order_release);
-        (void)sem_post(&st->wake);
-    } else if (!mixer_mode && !silent) {
-        got = audio_ring_read(st, audio_data, need);
-        if (got) {
-            /* Publish device time.  No locks, no allocation, no guest memory
-             * and no callback invocation on the RT thread. */
-            atomic_fetch_add_explicit(&st->consumed, got,
-                                      memory_order_relaxed);
-            atomic_store_explicit(&st->wake_consumed, 1,
-                                  memory_order_release);
-            (void)sem_post(&st->wake);
-        }
+    if (silent) {
+        memset(audio_data, 0, (size_t)need);
+        atomic_fetch_sub_explicit(&st->callback_users, 1,
+                                  memory_order_acq_rel);
+        return AAUDIO_CALLBACK_RESULT_CONTINUE;
     }
-    if (!silent && !pull && !mixer_mode && got < need) {
-        /* O-106: clear only the underrun tail.  The old unconditional
-         * memset() zeroed the whole callback buffer before copying the same
-         * bytes from the ring, so every one of the ~105 callbacks/s paid for
-         * a full-buffer store that was immediately overwritten. */
+
+    /* The nfsu2 mixer is the only producer.  It pulls looping voices,
+     * resamples to the DEVICE rate and fills the complete callback block. */
+    uint64_t started = android_monotonic_ns(NULL);
+    uint32_t got = wc3_mixer_render(&st->mixer, audio_data,
+                                   (uint32_t)num_frames);
+    if (got < need)
         memset((uint8_t *)audio_data + got, 0, need - got);
-        if (!silent) {
-            AndroidAudioCallback cb = atomic_load_explicit(
-                &st->callback, memory_order_acquire);
-            if (cb) {
-                void *opaque = atomic_load_explicit(
-                    &st->callback_opaque, memory_order_acquire);
-                cb(opaque, (uint8_t *)audio_data + got, need - got);
-            }
-        }
-    }
+    uint64_t elapsed_ns = android_monotonic_ns(NULL) - started;
+    uint32_t elapsed_us = (uint32_t)(elapsed_ns / 1000u);
+    uint32_t peak = atomic_load_explicit(&st->mixer.callback_peak_us,
+                                         memory_order_relaxed);
+    while (elapsed_us > peak &&
+           !atomic_compare_exchange_weak_explicit(
+               &st->mixer.callback_peak_us, &peak, elapsed_us,
+               memory_order_relaxed, memory_order_relaxed)) {}
+
+    /* N-16b: post-mix fixture.  The tap is a preallocated lock-free push;
+     * no file I/O happens in the RT callback. */
+    android_audio_tap_push(st, audio_data, need);
 
     atomic_fetch_sub_explicit(&st->callback_users, 1, memory_order_acq_rel);
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
@@ -2101,40 +2160,6 @@ static void audio_error_callback(AAudioStream *stream, void *user,
     (void)sem_post(&st->wake);
     AUDIO_LOG("AAudio error %d", (int)error);
     atomic_fetch_sub_explicit(&st->callback_users, 1, memory_order_acq_rel);
-}
-
-/* The Winlator/ALSA equivalent of "set the audio latency to 60 ms".
- *
- * Unlike the rev-4 `wave2_delay_*` experiment (which delayed WOM_DONE and
- * starved the producer), this changes ONLY the hardware queue depth.  The
- * requested duration comes from the runtime config key (or the debug env)
- * WC3_AUDIO_LATENCY_MS; 0 keeps AAudio's own default.  The value AAudio
- * actually grants is measured and published through latency_frames(), so a
- * device A/B can never mistake a request for a result. */
-static int32_t audio_apply_latency(AAudioStream *stream, int32_t rate)
-{
-    int ms = android_config_get_int(NULL, "WC3_AUDIO_LATENCY_MS", 0);
-    const char *env = getenv("WC3_AUDIO_LATENCY_MS");
-    if (env && *env) {
-        char *end = NULL;
-        long v = strtol(env, &end, 10);
-        if (end && end != env && *end == '\0') ms = (int)v;
-    }
-    int32_t actual = AAudioStream_getBufferSizeInFrames(stream);
-    if (ms <= 0) return actual;
-    if (ms > 500) ms = 500;
-    if (ms < 1) ms = 1;
-    int32_t want = (int32_t)((int64_t)rate * ms / 1000);
-    int32_t burst = AAudioStream_getFramesPerBurst(stream);
-    int32_t cap = AAudioStream_getBufferCapacityInFrames(stream);
-    if (want < burst) want = burst;
-    if (cap > 0 && want > cap) want = cap;
-    int32_t granted = AAudioStream_setBufferSizeInFrames(stream, want);
-    if (granted > 0) actual = granted;
-    else actual = AAudioStream_getBufferSizeInFrames(stream);
-    AUDIO_LOG("AAudio latency requested=%d ms frames=%d granted=%d "
-              "burst=%d cap=%d", ms, want, actual, burst, cap);
-    return actual;
 }
 
 static int32_t audio_frames_for_ms(AAudioStream *stream, int32_t rate,
@@ -2164,6 +2189,11 @@ static AAudioStream *audio_create_stream(AndroidAudioStream *st,
         AAUDIO_FORMAT_PCM_I16,
     };
     const int32_t rate = (int32_t)st->sample_rate;
+    int32_t capacity_rate = rate;
+    if (capacity_rate < WC3_AUDIO_REFERENCE_RATE)
+        capacity_rate = WC3_AUDIO_REFERENCE_RATE;
+    if (capacity_rate > WC3_AUDIO_MAX_RATE)
+        capacity_rate = WC3_AUDIO_MAX_RATE;
 
     for (size_t f = allow_float ? 0u : 1u;
          f < sizeof formats / sizeof formats[0]; f++) {
@@ -2185,9 +2215,13 @@ static AAudioStream *audio_create_stream(AndroidAudioStream *st,
          * the reason AAudio could silently disagree with the producer. */
         AAudioStreamBuilder_setDataCallback(builder, audio_data_callback, st);
         AAudioStreamBuilder_setErrorCallback(builder, audio_error_callback, st);
-        /* Reserve headroom for growth up to WC3_AUDIO_MAX_MS. */
+        /* Reserve headroom for growth up to WC3_AUDIO_MAX_MS.  Use at least
+         * the 48 kHz reference rate: the device may run at 48 kHz while the
+         * guest opened at 22.05 kHz, and a capacity sized from the guest rate
+         * would cap growth at ~46 ms instead of 100 ms. */
         AAudioStreamBuilder_setBufferCapacityInFrames(
-            builder, (int32_t)((int64_t)rate * WC3_AUDIO_MAX_MS / 1000));
+            builder, (int32_t)((int64_t)capacity_rate *
+                               WC3_AUDIO_MAX_MS / 1000));
 
         AAudioStream *stream = NULL;
         result = AAudioStreamBuilder_openStream(builder, &stream);
@@ -2222,8 +2256,7 @@ static AAudioStream *audio_create_stream(AndroidAudioStream *st,
         if (target > 0)
             (void)AAudioStream_setBufferSizeInFrames(stream, target);
 
-        /* WC3_AUDIO_LATENCY_MS remains the explicit measured A/B override. */
-        int32_t granted = audio_apply_latency(stream, actual);
+        int32_t granted = AAudioStream_getBufferSizeInFrames(stream);
         atomic_store_explicit(&st->buffer_frames, granted,
                               memory_order_release);
 
@@ -2234,11 +2267,17 @@ static AAudioStream *audio_create_stream(AndroidAudioStream *st,
         st->mixer.float_output = st->float_output;
         st->mixer.channels = st->channels;
 
-        /* S-2: defer start until the first submitted PCM.  Starting an empty
-         * pull ring produces a run of silent callbacks at boot (the measured
-         * startup gap in A-13.6).  android_audio_ensure_started() owns the
-         * transition on the producer side. */
+        /* A freshly opened stream is stopped.  android_audio_open() starts it
+         * during open (N-19); a device switch explicitly calls
+         * android_audio_ensure_started() after swapping the stream.  No silent
+         * callback run happens before the first publish simply because the
+         * producer has not written yet. */
         atomic_store_explicit(&st->started, 0, memory_order_release);
+        /* nfsu2 startSoundStream() resets soundLastXruns after every open.
+         * The reopened AAudio stream counts xruns from zero, so keeping the
+         * old device's count here would suppress S-4 growth until the new
+         * stream exceeded it. */
+        atomic_store_explicit(&st->last_xruns, 0, memory_order_relaxed);
 
         AUDIO_LOG("AAudio opened fmt=%d mode=%d rate=%d guest=%d ch=%d "
                   "buffer=%d", (int)f, (int)m, (int)actual,
@@ -2269,29 +2308,23 @@ static void *audio_supervisor(void *arg)
     unsigned failures = 0;
 
     for (;;) {
+        /* Periodic service tick: xrun growth and the health report must run
+         * even when the device never posts an error.  The old completion pump
+         * is gone; this timeout is the only non-RT wake source. */
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 100000000L;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000L;
+        }
         int wait_result;
         do {
-            wait_result = sem_wait(&st->wake);
+            wait_result = sem_timedwait(&st->wake, &ts);
         } while (wait_result != 0 && errno == EINTR);
-        if (wait_result != 0) break;
+        if (wait_result != 0 && errno != ETIMEDOUT) break;
         if (atomic_load_explicit(&st->closing, memory_order_acquire)) break;
 
-        /* A-12.4 S1 layer 2: the completion pump.  One coalesced call per
-         * wake, on a normal host thread, so the callee may safely write guest
-         * memory, walk its header pool and wake the winmm callback thread. */
-        if (atomic_exchange_explicit(&st->wake_consumed, 0,
-                                     memory_order_acq_rel)) {
-            AndroidAudioConsumed cb = atomic_load_explicit(
-                &st->consumed_cb, memory_order_acquire);
-            if (cb) {
-                void *opaque = atomic_load_explicit(
-                    &st->consumed_opaque, memory_order_acquire);
-                cb(opaque, atomic_load_explicit(&st->consumed,
-                                                memory_order_acquire));
-            }
-        }
-        /* S-4: xrun-driven buffer growth and starvation report, off the RT
-         * path.  Never inside the AAudio data callback. */
         android_audio_service(st);
         if (atomic_load_explicit(&st->silent, memory_order_acquire)) continue;
         if (!atomic_load_explicit(&st->lost, memory_order_acquire)) continue;
@@ -2327,8 +2360,6 @@ static void *audio_supervisor(void *arg)
                 break;
             }
             st->stream = fresh;
-            /* The reopened device must start immediately: PCM is already in
-             * the pull ring, so there is no first-write event to wait for. */
             if (AAudioStream_requestStart(fresh) == AAUDIO_OK)
                 atomic_store_explicit(&st->started, 1,
                                       memory_order_release);
@@ -2372,6 +2403,55 @@ static int android_audio_voice_add(void *ctx, uintptr_t handle,
 static void android_audio_register_stream(AndroidAudioStream *st);
 static void android_audio_unregister_stream(AndroidAudioStream *st);
 
+/* N-19: the primary ring must hold seven 50 ms headers (five Miles headers
+ * plus reset headroom) at up to 192 kHz.  Round to 1 KiB so the voice's slot
+ * layout and the 1 KiB staging pool share one alignment. */
+static uint32_t android_audio_primary_ring_bytes(uint32_t rate,
+                                                 uint32_t out_align)
+{
+    if (!rate || !out_align) return 0u;
+    uint64_t bytes = ((uint64_t)rate / 20u) * out_align + out_align;
+    uint64_t header = ((bytes + WC3_VOICE_SLOT_BYTES - 1u) /
+                       WC3_VOICE_SLOT_BYTES) * WC3_VOICE_SLOT_BYTES;
+    uint64_t ring = 7u * header;
+    if (ring < WC3_VOICE_MIN_RING_BYTES) ring = WC3_VOICE_MIN_RING_BYTES;
+    ring = ((ring + WC3_VOICE_SLOT_BYTES - 1u) /
+            WC3_VOICE_SLOT_BYTES) * WC3_VOICE_SLOT_BYTES;
+    if (ring > (uint64_t)WC3_VOICE_MAX_SLOTS * WC3_VOICE_SLOT_BYTES)
+        return 0u;
+    return (uint32_t)ring;
+}
+
+/* N-18: the primary voice publishes whole-ring snapshot versions.  Its PCM
+ * allocation is three full rings (3 * slots * 1 KiB); the generic voice_add()
+ * stays one-ring/per-slot for DirectSound buffers. */
+static int android_audio_primary_add(AndroidAudioStream *st, uint32_t rate,
+                                     uint32_t channels, uint32_t bits,
+                                     uint32_t bytes, uintptr_t *out_voice)
+{
+    if (!st || !out_voice || !st->stream_slot) return -1;
+    *out_voice = 0;
+    uint32_t bpf = channels * (bits / 8u);
+    if (bpf == 0u || (WC3_VOICE_SLOT_BYTES % bpf) != 0u ||
+        bytes < bpf || (bytes % bpf) != 0u) return -1;
+    uint32_t slots = (bytes + WC3_VOICE_SLOT_BYTES - 1u) /
+                     WC3_VOICE_SLOT_BYTES;
+    if (slots == 0u || slots > WC3_VOICE_MAX_SLOTS) return -1;
+    size_t total = (size_t)slots * WC3_VOICE_SLOT_BYTES *
+                   WC3_VOICE_SNAPSHOTS;
+    uint8_t *pcm = (uint8_t *)calloc(1, total);
+    if (!pcm) return -1;
+    uintptr_t local = 0;
+    if (wc3_mixer_voice_add_snapshot(&st->mixer, pcm, bytes, rate, channels,
+                                     bits, &local) != 0) {
+        free(pcm);
+        return -1;
+    }
+    st->voice_pcm[(size_t)local - 1u] = pcm;
+    *out_voice = ((uintptr_t)st->stream_slot << 16) | local;
+    return 0;
+}
+
 static int android_audio_open(void *ctx, uint32_t sample_rate,
                               uint32_t channels, uint32_t bits,
                               uintptr_t *out)
@@ -2379,7 +2459,7 @@ static int android_audio_open(void *ctx, uint32_t sample_rate,
     (void)ctx;
     if (!out) return -1;
     *out = 0;
-    if (bits != 16u) return -1;
+    if (bits != 8u && bits != 16u) return -1;
     if (sample_rate < 8000u || sample_rate > 192000u) return -1;
     if (channels < 1u || channels > 8u) return -1;
 
@@ -2388,103 +2468,64 @@ static int android_audio_open(void *ctx, uint32_t sample_rate,
     st->sample_rate = sample_rate;
     st->channels = channels;
     st->bits = bits;
-    st->bytes_per_frame = channels * 2u;
-    st->ring = (uint8_t *)malloc(WC3_AUDIO_RING_BYTES);
-    if (!st->ring) {
-        free(st);
-        return -1;
-    }
+
     if (pthread_mutex_init(&st->lifecycle, NULL) != 0) {
-        free(st->ring);
         free(st);
         return -1;
     }
     if (sem_init(&st->wake, 0, 0) != 0) {
         pthread_mutex_destroy(&st->lifecycle);
-        free(st->ring);
         free(st);
         return -1;
     }
 
-    atomic_init(&st->positions.read_pos, 0);
-    atomic_init(&st->positions.write_pos, 0);
     atomic_init(&st->callback_users, 0);
-    atomic_init(&st->writers, 0);
+    atomic_init(&st->api_users, 0);
     atomic_init(&st->closing, 0);
     atomic_init(&st->silent, 0);
     atomic_init(&st->lost, 0);
     atomic_init(&st->lost_events, 0);
-    atomic_init(&st->callback, (AndroidAudioCallback)NULL);
-    atomic_init(&st->callback_opaque, NULL);
-    atomic_init(&st->consumed, 0);
-    atomic_init(&st->wake_consumed, 0);
-    atomic_init(&st->consumed_cb, (AndroidAudioConsumed)NULL);
-    atomic_init(&st->consumed_opaque, NULL);
-    atomic_init(&st->buffer_frames, 0);
-    atomic_init(&st->pull_mode, 0);
     atomic_init(&st->started, 0);
+    atomic_init(&st->buffer_frames, 0);
     atomic_init(&st->last_xruns, 0);
     atomic_init(&st->pump_ticks, 0);
-
-    st->pull_pcm = (uint8_t *)calloc(1, WC3_PULL_RING_BYTES);
-    if (!st->pull_pcm ||
-        wc3_pull_ring_init(&st->pull, st->pull_pcm,
-                           st->bytes_per_frame) != 0) {
-        free(st->pull_pcm);
-        sem_destroy(&st->wake);
-        pthread_mutex_destroy(&st->lifecycle);
-        free(st->ring);
-        free(st);
-        return -1;
-    }
 
     AAudioStream *stream = audio_create_stream(st, 1);
     if (!stream) {
         sem_destroy(&st->wake);
         pthread_mutex_destroy(&st->lifecycle);
-        free(st->pull_pcm);
-        free(st->ring);
         free(st);
         return -1;
     }
     st->stream = stream;
 
-    /* Full nfsu2 port: the mixer runs at the ACTUAL device rate and owns one
-     * primary looping voice.  The guest rate is a voice property only; rate
-     * conversion belongs to wc3_mixer_render(), never to the HLE. */
+    /* One mixer at the ACTUAL device rate owns one primary looping voice.
+     * The guest rate/format is a voice property only; rate conversion belongs
+     * to wc3_mixer_render(), never to the HLE. */
     android_audio_register_stream(st);
-    if (wc3_mixer_init(&st->mixer,
+    uint32_t guest_bpf = channels * (bits / 8u);
+    uint32_t primary_bytes = android_audio_primary_ring_bytes(
+        st->sample_rate, guest_bpf);
+    if (primary_bytes == 0u ||
+        wc3_mixer_init(&st->mixer,
                        st->device_rate ? st->device_rate : st->sample_rate,
                        st->channels, st->float_output) != 0 ||
-        android_audio_voice_add(NULL, (uintptr_t)st, st->sample_rate,
-                                st->channels, st->bits,
-                                WC3_PULL_RING_BYTES,
-                                &st->primary_voice) != 0) {
+        android_audio_primary_add(st, st->sample_rate, st->channels, st->bits,
+                                  primary_bytes,
+                                  &st->primary_voice) != 0) {
+        AUDIO_LOG("primary voice unavailable; audio open fails");
         st->primary_voice = 0;
-    }
-
-    /* The byte-exact pull fallback writes PCM_I16.  If the voice mixer could
-     * not be created (allocation failure), do not hand that fallback a float
-     * AAudio buffer: reopen the still-unstarted stream in I16.  The mixer path
-     * keeps PCM_FLOAT whenever a primary voice exists. */
-    if (!st->primary_voice && st->float_output) {
         (void)AAudioStream_requestStop(stream);
         (void)AAudioStream_close(stream);
         st->stream = NULL;
-        stream = audio_create_stream(st, 0);
-        if (!stream) {
-            sem_destroy(&st->wake);
-            pthread_mutex_destroy(&st->lifecycle);
-            android_audio_unregister_stream(st);
-            for (unsigned i = 0; i < WC3_MIXER_VOICES; i++)
-                free(st->voice_pcm[i]);
-            wc3_mixer_deinit(&st->mixer);
-            free(st->pull_pcm);
-            free(st->ring);
-            free(st);
-            return -1;
-        }
-        st->stream = stream;
+        sem_destroy(&st->wake);
+        pthread_mutex_destroy(&st->lifecycle);
+        android_audio_unregister_stream(st);
+        for (unsigned i = 0; i < WC3_MIXER_VOICES; i++)
+            free(st->voice_pcm[i]);
+        wc3_mixer_deinit(&st->mixer);
+        free(st);
+        return -1;
     }
 
     if (pthread_create(&st->supervisor, NULL, audio_supervisor, st) != 0) {
@@ -2498,97 +2539,55 @@ static int android_audio_open(void *ctx, uint32_t sample_rate,
         android_audio_unregister_stream(st);
         for (unsigned i = 0; i < WC3_MIXER_VOICES; i++) free(st->voice_pcm[i]);
         wc3_mixer_deinit(&st->mixer);
-        free(st->pull_pcm);
-        free(st->ring);
         free(st);
         return -1;
     }
     st->supervisor_started = 1;
+    /* N-16b: arm the optional post-mix tap before requestStart(), so the
+     * first callback is captured.  Failure is diagnostic-only. */
+    android_audio_tap_start(st);
+
+    if (android_audio_ensure_started(st) != 0) {
+        AUDIO_LOG("AAudio failed to start during open");
+        atomic_store_explicit(&st->closing, 1, memory_order_release);
+        (void)sem_post(&st->wake);
+        (void)pthread_join(st->supervisor, NULL);
+        st->supervisor_started = 0;
+        pthread_mutex_lock(&st->lifecycle);
+        AAudioStream *failed = st->stream;
+        st->stream = NULL;
+        pthread_mutex_unlock(&st->lifecycle);
+        if (failed) {
+            (void)AAudioStream_requestStop(failed);
+            (void)AAudioStream_close(failed);
+        }
+        while (atomic_load_explicit(&st->callback_users,
+                                    memory_order_acquire) != 0)
+            android_poll_pause();
+        android_audio_tap_stop(st);
+        sem_destroy(&st->wake);
+        pthread_mutex_destroy(&st->lifecycle);
+        android_audio_unregister_stream(st);
+        for (unsigned i = 0; i < WC3_MIXER_VOICES; i++)
+            free(st->voice_pcm[i]);
+        wc3_mixer_deinit(&st->mixer);
+        free(st);
+        return -1;
+    }
+
     *out = (uintptr_t)st;
     return 0;
 }
 
-static int android_audio_write(void *ctx, uintptr_t handle, const void *frames,
-                               uint32_t bytes, uint32_t *written)
-{
-    (void)ctx;
-    if (written) *written = 0;
-    AndroidAudioStream *st = (AndroidAudioStream *)handle;
-    if (!st || (!frames && bytes)) return -1;
-    if (bytes % st->bytes_per_frame != 0) return -1;
-
-    atomic_fetch_add_explicit(&st->writers, 1, memory_order_acq_rel);
-    if (atomic_load_explicit(&st->closing, memory_order_acquire)) {
-        atomic_fetch_sub_explicit(&st->writers, 1, memory_order_acq_rel);
-        return -1;
-    }
-
-    uint32_t accepted;
-    if (atomic_load_explicit(&st->silent, memory_order_acquire)) {
-        /* Explicit silent sink: the bytes are "played" as silence immediately
-         * so completions keep their device-clock cadence instead of stalling
-         * the five-header pool forever. */
-        accepted = bytes;
-        atomic_fetch_add_explicit(&st->consumed, accepted,
-                                  memory_order_relaxed);
-        atomic_store_explicit(&st->wake_consumed, 1, memory_order_release);
-        (void)sem_post(&st->wake);
-    } else {
-        accepted = audio_ring_write(st, frames, bytes);
-    }
-    if (written) *written = accepted;
-    atomic_fetch_sub_explicit(&st->writers, 1, memory_order_acq_rel);
-    if (accepted) android_audio_ensure_started(st);
-    return 0;
-}
-
-/* S-2: producer side of the host-owned pull ring.  Only the submitted region
- * is copied, at an absolute frame index.  A successful publish switches the
- * RT callback to pull rendering; the device clock then comes from real
- * consumed frames rather than from linear queue depth. */
-static int android_audio_publish(void *ctx, uintptr_t handle,
-                                 uint64_t frame_base, const void *frames,
-                                 uint32_t bytes, uint32_t *written)
-{
-    (void)ctx;
-    if (written) *written = 0;
-    AndroidAudioStream *st = (AndroidAudioStream *)handle;
-    if (!st || !frames || bytes == 0u) return -1;
-    if (atomic_load_explicit(&st->closing, memory_order_acquire)) return -1;
-
-    /* Full port: publish() is now a thin wrapper around the primary looping
-     * voice, so the WINMM path and the DirectSound path share ONE mixer. */
-    if (st->primary_voice) {
-        Wc3Voice *v = wc3_mixer_voice(&st->mixer,
-                                      st->primary_voice & 0xFFFFu);
-        if (!v) return -1;
-        uint32_t got = wc3_voice_publish(v, frame_base, frames, bytes);
-        if (!got) return -1;
-        if (written) *written = got;
-        atomic_store_explicit(&st->pull_mode, 1, memory_order_release);
-        android_audio_ensure_started(st);
-        return 0;
-    }
-
-    /* Byte-exact A/B fallback when no voice was registered. */
-    if (!st->pull_pcm) return -1;
-    atomic_fetch_add_explicit(&st->writers, 1, memory_order_acq_rel);
-    uint32_t got = wc3_pull_publish(&st->pull, frame_base, frames, bytes);
-    if (got) {
-        atomic_store_explicit(&st->pull_mode, 1, memory_order_release);
-        if (written) *written = got;
-    }
-    atomic_fetch_sub_explicit(&st->writers, 1, memory_order_acq_rel);
-    if (got) android_audio_ensure_started(st);
-    return got ? 0 : -1;
-}
-
-/* ---- Full nfsu2 port: host-owned looping voices ---------------------- */
+/* ---- nfsu2 host-owned looping voices --------------------------------- */
 /* Voice handles encode the owning stream so the platform table can stay
  * ctx-free: high 16 bits = stream slot + 1, low 16 bits = mixer voice + 1. */
 #define WC3_AUDIO_STREAM_SLOTS 8u
 static AndroidAudioStream *g_audio_streams[WC3_AUDIO_STREAM_SLOTS];
 static _Atomic uint32_t g_audio_stream_next;
+/* Serializes stream table publication against lookup+ref.  Control path only;
+ * the RT callback never touches this table or this lock. */
+static pthread_mutex_t g_audio_stream_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void android_audio_register_stream(AndroidAudioStream *st)
 {
@@ -2596,15 +2595,61 @@ static void android_audio_register_stream(AndroidAudioStream *st)
                                               memory_order_relaxed) %
                     WC3_AUDIO_STREAM_SLOTS;
     st->stream_slot = slot + 1u;
+    pthread_mutex_lock(&g_audio_stream_lock);
     g_audio_streams[slot] = st;
+    pthread_mutex_unlock(&g_audio_stream_lock);
 }
 
 static void android_audio_unregister_stream(AndroidAudioStream *st)
 {
     if (!st || !st->stream_slot || st->stream_slot > WC3_AUDIO_STREAM_SLOTS)
         return;
+    pthread_mutex_lock(&g_audio_stream_lock);
     if (g_audio_streams[st->stream_slot - 1u] == st)
         g_audio_streams[st->stream_slot - 1u] = NULL;
+    pthread_mutex_unlock(&g_audio_stream_lock);
+}
+
+static void android_audio_stream_release(AndroidAudioStream *st)
+{
+    if (st) atomic_fetch_sub_explicit(&st->api_users, 1, memory_order_acq_rel);
+}
+
+/* Find a stream and take an api_users ref while the table lock is held, so
+ * close() cannot unregister and free it between lookup and ref. */
+static AndroidAudioStream *android_audio_stream_acquire(AndroidAudioStream *hint)
+{
+    AndroidAudioStream *st = NULL;
+    pthread_mutex_lock(&g_audio_stream_lock);
+    if (hint) {
+        for (unsigned i = 0; i < WC3_AUDIO_STREAM_SLOTS; i++) {
+            if (g_audio_streams[i] == hint) { st = hint; break; }
+        }
+    } else {
+        st = g_audio_streams[0];
+    }
+    if (st && !atomic_load_explicit(&st->closing, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&st->api_users, 1, memory_order_acq_rel);
+    } else {
+        st = NULL;
+    }
+    pthread_mutex_unlock(&g_audio_stream_lock);
+    return st;
+}
+
+static AndroidAudioStream *android_audio_stream_acquire_slot(uint32_t slot)
+{
+    AndroidAudioStream *st = NULL;
+    pthread_mutex_lock(&g_audio_stream_lock);
+    if (slot && slot <= WC3_AUDIO_STREAM_SLOTS)
+        st = g_audio_streams[slot - 1u];
+    if (st && !atomic_load_explicit(&st->closing, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&st->api_users, 1, memory_order_acq_rel);
+    } else {
+        st = NULL;
+    }
+    pthread_mutex_unlock(&g_audio_stream_lock);
+    return st;
 }
 
 static Wc3Voice *android_audio_voice(uintptr_t voice,
@@ -2614,10 +2659,13 @@ static Wc3Voice *android_audio_voice(uintptr_t voice,
     uint32_t slot = (uint32_t)(voice >> 16);
     uintptr_t local = voice & 0xFFFFu;
     if (!slot || slot > WC3_AUDIO_STREAM_SLOTS || !local) return NULL;
-    AndroidAudioStream *st = g_audio_streams[slot - 1u];
+    AndroidAudioStream *st = android_audio_stream_acquire_slot(slot);
     if (!st) return NULL;
     Wc3Voice *v = wc3_mixer_voice(&st->mixer, local);
-    if (!v) return NULL;
+    if (!v) {
+        android_audio_stream_release(st);
+        return NULL;
+    }
     if (out_stream) *out_stream = st;
     if (out_local) *out_local = local;
     return v;
@@ -2629,27 +2677,37 @@ static int android_audio_voice_add(void *ctx, uintptr_t handle,
                                    uintptr_t *out_voice)
 {
     (void)ctx;
-    AndroidAudioStream *st = (AndroidAudioStream *)handle;
     /* DirectSoundCreate has no WINMM stream handle: fall back to the first
      * registered device, which already owns the primary voice. */
-    if (!st) st = g_audio_streams[0];
-    if (!st || !out_voice || !st->stream_slot) return -1;
+    AndroidAudioStream *st = android_audio_stream_acquire(
+        (AndroidAudioStream *)handle);
+    if (!st || !out_voice || !st->stream_slot) {
+        android_audio_stream_release(st);
+        return -1;
+    }
     *out_voice = 0;
     uint32_t slots = (bytes + WC3_VOICE_SLOT_BYTES - 1u) /
                      WC3_VOICE_SLOT_BYTES;
-    if (slots == 0u || slots > WC3_VOICE_MAX_SLOTS) return -1;
+    if (slots == 0u || slots > WC3_VOICE_MAX_SLOTS ||
+        bytes > WC3_VOICE_MAX_SLOTS * WC3_VOICE_SLOT_BYTES) {
+        android_audio_stream_release(st);
+        return -1;
+    }
     uint8_t *pcm = (uint8_t *)malloc((size_t)slots * WC3_VOICE_SLOT_BYTES);
-    if (!pcm) return -1;
+    if (!pcm) {
+        android_audio_stream_release(st);
+        return -1;
+    }
     uintptr_t local = 0;
     if (wc3_mixer_voice_add(&st->mixer, pcm, bytes, rate, channels, bits,
                             &local) != 0) {
         free(pcm);
+        android_audio_stream_release(st);
         return -1;
     }
     st->voice_pcm[(size_t)local - 1u] = pcm;
-    st->voice_last_publish_ns[(size_t)local - 1u] = 0u;
-    st->voice_max_gap_ns[(size_t)local - 1u] = 0u;
     *out_voice = ((uintptr_t)st->stream_slot << 16) | local;
+    android_audio_stream_release(st);
     return 0;
 }
 
@@ -2660,7 +2718,10 @@ static int android_audio_voice_remove(void *ctx, uintptr_t voice)
     uintptr_t local = 0;
     Wc3Voice *v = android_audio_voice(voice, &st, &local);
     if (!v) return -1;
-    if (wc3_mixer_voice_remove(&st->mixer, local) != 0) return -1;
+    if (wc3_mixer_voice_remove(&st->mixer, local) != 0) {
+        android_audio_stream_release(st);
+        return -1;
+    }
     android_audio_wait_render_idle(&st->mixer);
     while (atomic_load_explicit(&v->publishing, memory_order_acquire) != 0)
         android_poll_pause();
@@ -2669,8 +2730,7 @@ static int android_audio_voice_remove(void *ctx, uintptr_t voice)
     wc3_mixer_voice_release(v);
     free(st->voice_pcm[(size_t)local - 1u]);
     st->voice_pcm[(size_t)local - 1u] = NULL;
-    st->voice_last_publish_ns[(size_t)local - 1u] = 0u;
-    st->voice_max_gap_ns[(size_t)local - 1u] = 0u;
+    android_audio_stream_release(st);
     return 0;
 }
 
@@ -2682,22 +2742,19 @@ static int android_audio_voice_publish(void *ctx, uintptr_t voice,
     (void)ctx;
     if (written) *written = 0;
     AndroidAudioStream *st = NULL;
-    uintptr_t local = 0;
-    Wc3Voice *v = android_audio_voice(voice, &st, &local);
-    if (!v || !frames || bytes == 0u) return -1;
-    uint32_t got = wc3_voice_publish(v, frame_base, frames, bytes);
-    if (!got) return -1;
-    uint64_t now = android_monotonic_ns(NULL);
-    uint64_t last = st->voice_last_publish_ns[(size_t)local - 1u];
-    if (last && now > last) {
-        uint64_t gap = now - last;
-        if (gap > st->voice_max_gap_ns[(size_t)local - 1u])
-            st->voice_max_gap_ns[(size_t)local - 1u] = gap;
+    Wc3Voice *v = android_audio_voice(voice, &st, NULL);
+    if (!v || !frames || bytes == 0u) {
+        android_audio_stream_release(st);
+        return -1;
     }
-    st->voice_last_publish_ns[(size_t)local - 1u] = now;
+    uint32_t got = wc3_voice_publish(v, frame_base, frames, bytes);
+    if (!got) {
+        android_audio_stream_release(st);
+        return -1;
+    }
     if (written) *written = got;
-    atomic_store_explicit(&st->pull_mode, 1, memory_order_release);
     android_audio_ensure_started(st);
+    android_audio_stream_release(st);
     return 0;
 }
 
@@ -2711,25 +2768,21 @@ static int android_audio_voice_publish2(void *ctx, uintptr_t voice,
     (void)ctx;
     if (written) *written = 0;
     AndroidAudioStream *st = NULL;
-    uintptr_t local = 0;
-    Wc3Voice *v = android_audio_voice(voice, &st, &local);
+    Wc3Voice *v = android_audio_voice(voice, &st, NULL);
     if (!v || (bytes1 != 0u && !frames1) ||
-        (bytes2 != 0u && !frames2) || (bytes1 == 0u && bytes2 == 0u))
+        (bytes2 != 0u && !frames2) || (bytes1 == 0u && bytes2 == 0u)) {
+        android_audio_stream_release(st);
         return -1;
+    }
     uint32_t got = wc3_voice_publish2(v, frame_base1, frames1, bytes1,
                                       frame_base2, frames2, bytes2);
-    if (!got) return -1;
-    uint64_t now = android_monotonic_ns(NULL);
-    uint64_t last = st->voice_last_publish_ns[(size_t)local - 1u];
-    if (last && now > last) {
-        uint64_t gap = now - last;
-        if (gap > st->voice_max_gap_ns[(size_t)local - 1u])
-            st->voice_max_gap_ns[(size_t)local - 1u] = gap;
+    if (!got) {
+        android_audio_stream_release(st);
+        return -1;
     }
-    st->voice_last_publish_ns[(size_t)local - 1u] = now;
     if (written) *written = got;
-    atomic_store_explicit(&st->pull_mode, 1, memory_order_release);
     android_audio_ensure_started(st);
+    android_audio_stream_release(st);
     return 0;
 }
 
@@ -2737,42 +2790,18 @@ static int android_audio_voice_published(void *ctx, uintptr_t voice)
 {
     (void)ctx;
     AndroidAudioStream *st = NULL;
-    uintptr_t local = 0;
-    Wc3Voice *v = android_audio_voice(voice, &st, &local);
+    Wc3Voice *v = android_audio_voice(voice, &st, NULL);
     if (!v) return -1;
     int rc = wc3_voice_published(v);
-    if (rc != 0) return rc;
-    uint64_t now = android_monotonic_ns(NULL);
-    uint64_t last = st->voice_last_publish_ns[(size_t)local - 1u];
-    if (last && now > last) {
-        uint64_t gap = now - last;
-        if (gap > st->voice_max_gap_ns[(size_t)local - 1u])
-            st->voice_max_gap_ns[(size_t)local - 1u] = gap;
+    if (rc != 0) {
+        android_audio_stream_release(st);
+        return rc;
     }
-    st->voice_last_publish_ns[(size_t)local - 1u] = now;
     /* A zero-byte Unlock carries no PCM, so it must not start the device on
      * its own; the first real publish does that. */
+    android_audio_stream_release(st);
     return 0;
 }
-
-static int android_audio_voice_reset(void *ctx, uintptr_t voice)
-{
-    (void)ctx;
-    AndroidAudioStream *st = NULL;
-    uintptr_t local = 0;
-    Wc3Voice *v = android_audio_voice(voice, &st, &local);
-    if (!v) return -1;
-    atomic_store_explicit(&v->resetting, 1, memory_order_release);
-    android_audio_wait_render_idle(&st->mixer);
-    while (atomic_load_explicit(&v->publishing, memory_order_acquire) != 0)
-        android_poll_pause();
-    int rc = wc3_voice_reset(v);
-    st->voice_last_publish_ns[(size_t)local - 1u] = 0u;
-    st->voice_max_gap_ns[(size_t)local - 1u] = 0u;
-    atomic_store_explicit(&v->resetting, 0, memory_order_release);
-    return rc;
-}
-
 static int android_audio_voice_position(void *ctx, uintptr_t voice,
                                         uint32_t *play_bytes,
                                         uint32_t *write_bytes,
@@ -2783,6 +2812,7 @@ static int android_audio_voice_position(void *ctx, uintptr_t voice,
     Wc3Voice *v = android_audio_voice(voice, &st, NULL);
     if (!v) return -1;
     wc3_voice_position(v, st->mixer.rate, play_bytes, write_bytes, play_frame);
+    android_audio_stream_release(st);
     return 0;
 }
 
@@ -2792,9 +2822,11 @@ static int android_audio_voice_control(void *ctx, uintptr_t voice,
                                        int pan)
 {
     (void)ctx;
-    Wc3Voice *v = android_audio_voice(voice, NULL, NULL);
+    AndroidAudioStream *st = NULL;
+    Wc3Voice *v = android_audio_voice(voice, &st, NULL);
     if (!v) return -1;
     wc3_voice_control(v, playing, loop, frequency, volume, pan);
+    android_audio_stream_release(st);
     return 0;
 }
 
@@ -2802,79 +2834,35 @@ static int android_audio_voice_seek(void *ctx, uintptr_t voice,
                                     uint64_t abs_frame)
 {
     (void)ctx;
-    Wc3Voice *v = android_audio_voice(voice, NULL, NULL);
+    AndroidAudioStream *st = NULL;
+    Wc3Voice *v = android_audio_voice(voice, &st, NULL);
     if (!v) return -1;
-    return wc3_voice_seek(v, abs_frame);
+    int rc = wc3_voice_seek(v, abs_frame);
+    android_audio_stream_release(st);
+    return rc;
 }
-
-static int android_audio_voice_format(void *ctx, uintptr_t voice,
-                                      uint32_t rate, uint32_t channels,
-                                      uint32_t bits)
-{
-    (void)ctx;
-    Wc3Voice *v = android_audio_voice(voice, NULL, NULL);
-    if (!v) return -1;
-    if (rate < 100u || rate > 200000u || channels == 0u || channels > 2u ||
-        (bits != 8u && bits != 16u))
-        return -1;
-    if (channels * (bits / 8u) != v->bpf) return -1;
-    atomic_store_explicit(&v->frequency, rate, memory_order_relaxed);
-    return 0;
-}
-
 static int android_audio_voice_state(void *ctx, uintptr_t voice,
                                      uint32_t *playing, uint32_t *loop,
                                      uint64_t *position)
 {
     (void)ctx;
-    Wc3Voice *v = android_audio_voice(voice, NULL, NULL);
+    AndroidAudioStream *st = NULL;
+    Wc3Voice *v = android_audio_voice(voice, &st, NULL);
     if (!v) return -1;
-    return wc3_voice_state(v, playing, loop, position);
+    int rc = wc3_voice_state(v, playing, loop, position);
+    android_audio_stream_release(st);
+    return rc;
 }
 
 static uint32_t android_audio_voice_device_rate(void *ctx, uintptr_t voice)
 {
     (void)ctx;
     AndroidAudioStream *st = NULL;
-    if (!android_audio_voice(voice, &st, NULL) || !st) return 0u;
-    return st->mixer.rate;
-}
-
-static int android_audio_voice_stats(void *ctx, uintptr_t voice,
-                                     uint32_t *active, uint32_t *clipped,
-                                     float *peak, uint64_t *publish_gap_us,
-                                     uint32_t *ring_ms,
-                                     uint32_t *callback_peak_us)
-{
-    (void)ctx;
-    AndroidAudioStream *st = NULL;
-    uintptr_t local = 0;
-    Wc3Voice *v = android_audio_voice(voice, &st, &local);
-    if (!v) return -1;
-    uint64_t clipped64 = 0u;
-    wc3_mixer_stats(&st->mixer, active, &clipped64, peak, callback_peak_us);
-    if (clipped) *clipped = (uint32_t)clipped64;
-    if (publish_gap_us) {
-        uint64_t gap = st->voice_max_gap_ns[(size_t)local - 1u];
-        st->voice_max_gap_ns[(size_t)local - 1u] = 0u;
-        *publish_gap_us = gap / 1000u;
-    }
-    if (ring_ms)
-        *ring_ms = v->rate
-            ? (uint32_t)((uint64_t)v->frames * 1000u / v->rate) : 0u;
-    return 0;
-}
-
-static uint64_t android_audio_play_frame(void *ctx, uintptr_t handle)
-{
-    (void)ctx;
-    AndroidAudioStream *st = (AndroidAudioStream *)handle;
-    if (!st) return 0u;
-    Wc3Voice *v = wc3_mixer_voice(&st->mixer,
-                                  st->primary_voice & 0xFFFFu);
-    if (v)
-        return atomic_load_explicit(&v->play_frame, memory_order_acquire);
-    return atomic_load_explicit(&st->pull.play_frame, memory_order_acquire);
+    Wc3Voice *v = android_audio_voice(voice, &st, NULL);
+    if (!v || !st) return 0u;
+    uint32_t rate = st->mixer.rate;
+    android_audio_stream_release(st);
+    return rate;
 }
 
 static uint32_t android_audio_device_rate(void *ctx, uintptr_t handle)
@@ -2888,67 +2876,10 @@ static uintptr_t android_audio_primary_voice(void *ctx, uintptr_t handle)
 {
     (void)ctx;
     AndroidAudioStream *st = (AndroidAudioStream *)handle;
-    /* DirectSoundCreate has no WINMM stream handle; use the same first
-     * registered stream fallback as voice_add(). */
+    /* DirectSoundCreate has no stream handle; use the same first registered
+     * stream fallback as voice_add(). */
     if (!st) st = g_audio_streams[0];
     return st ? st->primary_voice : 0u;
-}
-
-static int android_audio_set_consumed(
-    void *ctx, uintptr_t handle,
-    void (*on_consumed)(void *opaque, uint64_t total), void *opaque)
-{
-    (void)ctx;
-    AndroidAudioStream *st = (AndroidAudioStream *)handle;
-    if (!st) return -1;
-    if (atomic_load_explicit(&st->closing, memory_order_acquire)) return -1;
-    atomic_store_explicit(&st->consumed_opaque, opaque, memory_order_release);
-    atomic_store_explicit(&st->consumed_cb, on_consumed,
-                          memory_order_release);
-    /* Catch bytes consumed before the callback was installed. */
-    atomic_store_explicit(&st->wake_consumed, 1, memory_order_release);
-    (void)sem_post(&st->wake);
-    return 0;
-}
-
-static uint64_t android_audio_consumed_bytes(void *ctx, uintptr_t handle)
-{
-    (void)ctx;
-    AndroidAudioStream *st = (AndroidAudioStream *)handle;
-    if (!st) return 0;
-    return atomic_load_explicit(&st->consumed, memory_order_acquire);
-}
-
-static int android_audio_advance(void *ctx, uintptr_t handle, uint32_t bytes)
-{
-    (void)ctx; (void)handle; (void)bytes;
-    /* The Android device owns its clock; only the headless DUT can step it. */
-    return -1;
-}
-
-static uint32_t android_audio_latency_frames(void *ctx, uintptr_t handle)
-{
-    (void)ctx;
-    AndroidAudioStream *st = (AndroidAudioStream *)handle;
-    if (!st) return 0u;
-    int32_t frames = atomic_load_explicit(&st->buffer_frames,
-                                          memory_order_acquire);
-    return frames > 0 ? (uint32_t)frames : 0u;
-}
-
-static int android_audio_set_callback(void *ctx, uintptr_t handle,
-                                      void (*callback)(void *opaque,
-                                                       void *frames,
-                                                       uint32_t bytes),
-                                      void *opaque)
-{
-    (void)ctx;
-    AndroidAudioStream *st = (AndroidAudioStream *)handle;
-    if (!st) return -1;
-    if (atomic_load_explicit(&st->closing, memory_order_acquire)) return -1;
-    atomic_store_explicit(&st->callback_opaque, opaque, memory_order_release);
-    atomic_store_explicit(&st->callback, callback, memory_order_release);
-    return 0;
 }
 
 static int android_audio_close(void *ctx, uintptr_t handle)
@@ -2958,6 +2889,10 @@ static int android_audio_close(void *ctx, uintptr_t handle)
     if (!st) return -1;
     if (atomic_exchange_explicit(&st->closing, 1, memory_order_acq_rel))
         return -1;
+
+    /* Stop new voice lookups first.  A publisher that already took api_users
+     * is waited out below; one that starts now sees closing and fails. */
+    android_audio_unregister_stream(st);
 
     (void)sem_post(&st->wake);
     if (st->supervisor_started) {
@@ -2975,16 +2910,18 @@ static int android_audio_close(void *ctx, uintptr_t handle)
 
     while (atomic_load_explicit(&st->callback_users, memory_order_acquire) != 0)
         android_poll_pause();
-    while (atomic_load_explicit(&st->writers, memory_order_acquire) != 0)
+    /* N-16b: no callback can push after callback_users reaches zero.  Stop the
+     * writer and drain the fixture before any mixer/PCM storage is freed. */
+    android_audio_tap_stop(st);
+    /* C-8: no publish/remove/reset may still hold this stream.  Registered
+     * voice calls cannot enter after the unregister above. */
+    while (atomic_load_explicit(&st->api_users, memory_order_acquire) != 0)
         android_poll_pause();
 
     sem_destroy(&st->wake);
     pthread_mutex_destroy(&st->lifecycle);
-    android_audio_unregister_stream(st);
     for (unsigned i = 0; i < WC3_MIXER_VOICES; i++) free(st->voice_pcm[i]);
     wc3_mixer_deinit(&st->mixer);
-    free(st->pull_pcm);
-    free(st->ring);
     free(st);
     return 0;
 }
@@ -3073,35 +3010,18 @@ int wc3_android_platform_init(Wc3Platform *platform)
 
     platform->audio.ctx = NULL;
     platform->audio.open = android_audio_open;
-    platform->audio.write = android_audio_write;
     platform->audio.close = android_audio_close;
-    platform->audio.set_callback = android_audio_set_callback;
-    platform->audio.set_consumed = android_audio_set_consumed;
-    platform->audio.consumed_bytes = android_audio_consumed_bytes;
-    platform->audio.advance = android_audio_advance;
-    platform->audio.latency_frames = android_audio_latency_frames;
-    /* S-2: product pull sink.  The HLE WINMM slice uses publish() when this
-     * is non-NULL; NULL would keep the linear write() A/B path. */
-    platform->audio.publish = android_audio_publish;
-
-    /* Full nfsu2 port (ADR-033): looping voices, play cursor and device rate.
-     * The HLE prefers these over publish()/written_bytes; the old table stays
-     * intact for the byte-exact headless twin and the A/B rollback. */
     platform->audio.voice_add = android_audio_voice_add;
     platform->audio.voice_remove = android_audio_voice_remove;
     platform->audio.voice_publish = android_audio_voice_publish;
     platform->audio.voice_position = android_audio_voice_position;
     platform->audio.voice_control = android_audio_voice_control;
-    platform->audio.play_frame = android_audio_play_frame;
     platform->audio.device_rate = android_audio_device_rate;
     platform->audio.primary_voice = android_audio_primary_voice;
     platform->audio.voice_seek = android_audio_voice_seek;
-    platform->audio.voice_format = android_audio_voice_format;
-    platform->audio.voice_stats = android_audio_voice_stats;
     platform->audio.voice_state = android_audio_voice_state;
     platform->audio.voice_device_rate = android_audio_voice_device_rate;
     platform->audio.voice_publish2 = android_audio_voice_publish2;
-    platform->audio.voice_reset = android_audio_voice_reset;
     platform->audio.voice_published = android_audio_voice_published;
 
     platform->log.ctx = NULL;

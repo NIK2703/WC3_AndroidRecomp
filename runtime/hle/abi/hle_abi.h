@@ -17,7 +17,7 @@
 #include "cpu.h"
 /* The target ABI always uses the runtime/guest layout.  A plain
  * "guest_layout.h" is ambiguous: the legacy shim target also has
- * runtime/legacy on its include path, and that copy predates GUEST_HLE_MAX. */
+ * runtime/hle/android on its include path, and that copy predates GUEST_HLE_MAX. */
 #include "../../guest/guest_layout.h"
 
 #ifndef WC3_DEBUG

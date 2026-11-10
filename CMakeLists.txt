@@ -40,15 +40,15 @@ set(WC3_RELIFTED_CORPUS_ROOT "" CACHE PATH
 # without the pinned corpus failed instead of skipping the boot link graph.
 if(WC3_RELIFTED_CORPUS_ROOT OR
    EXISTS "${WC3_LEGACY_ROOT}/build/android/boot_probe/probe_list.h")
-    set(WC3_WITH_LEGACY_BOOT_DEFAULT ON)
+    set(WC3_WITH_ASBUILT_HLE_DEFAULT ON)
 else()
-    set(WC3_WITH_LEGACY_BOOT_DEFAULT OFF)
+    set(WC3_WITH_ASBUILT_HLE_DEFAULT OFF)
 endif()
 
 option(WC3_BUILD_PLATFORM_TEST "Build the arm64 device platform test" ON)
 option(WC3_BUILD_APP "Build libwc3gameactivity.so" OFF)
-option(WC3_WITH_LEGACY_BOOT "Link the transitional lifted corpus and as-built HLE"
-       ${WC3_WITH_LEGACY_BOOT_DEFAULT})
+option(WC3_WITH_ASBUILT_HLE "Link the transitional lifted corpus and as-built HLE"
+       ${WC3_WITH_ASBUILT_HLE_DEFAULT})
 # O-51/O-52: the NDK defaults to compiler-rt emulated TLS for the Android
 # target, so every x87/SoftFloat THREAD_LOCAL access becomes a call to
 # __emutls_get_address.  Native ELF TLS is supported by bionic on this
@@ -188,6 +188,55 @@ if(WC3_DEBUG_TAG_DEFINITIONS)
 endif()
 
 set(WC3_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+
+# W3L / PvPGN / rubattle compatibility profile.  This is a build profile, not
+# a third applicationId: the exact baseline is WC3_W3L_COMPAT=OFF, and the
+# compat code and corpus edits exist only when it is ON.  The profile edits
+# generated C through tools/lift/passes/w3l_compat.py; no source file under
+# build/corpus-full is modified in place.  See docs/W3L_COMPAT.md.
+if(WC3_RELIFTED_CORPUS_ROOT AND WC3_BUILD_APP AND WC3_WITH_ASBUILT_HLE)
+    set(WC3_W3L_COMPAT_DEFAULT ON)
+else()
+    set(WC3_W3L_COMPAT_DEFAULT OFF)
+endif()
+option(WC3_W3L_COMPAT
+       "Apply the W3L/PvPGN/rubattle compatibility profile to the relifted corpus"
+       ${WC3_W3L_COMPAT_DEFAULT})
+set(WC3_W3L_PROFILE "rubattle" CACHE STRING
+    "W3L compat profile: rubattle (PvPGN + rubattle extras) or pvpgn")
+set_property(CACHE WC3_W3L_PROFILE PROPERTY STRINGS rubattle pvpgn)
+set(WC3_W3L_LATENCY "100" CACHE STRING
+    "wl27 delay_reducer latency in milliseconds (30..255)")
+if(WC3_W3L_COMPAT)
+    if(NOT WC3_RELIFTED_CORPUS_ROOT)
+        message(FATAL_ERROR
+            "WC3_W3L_COMPAT=ON requires WC3_RELIFTED_CORPUS_ROOT; the legacy "
+            "prebuilt corpus cannot be patched through a LiftPass.  Pass "
+            "-W3LCompat off for an exact baseline build.")
+    endif()
+    if(NOT WC3_BUILD_APP OR NOT WC3_WITH_ASBUILT_HLE)
+        message(FATAL_ERROR
+            "WC3_W3L_COMPAT=ON requires WC3_BUILD_APP=ON and "
+            "WC3_WITH_ASBUILT_HLE=ON; the compat LiftPass and wc3_compat "
+            "library are part of the product link graph.")
+    endif()
+    if(NOT WC3_W3L_PROFILE MATCHES "^(rubattle|pvpgn)$")
+        message(FATAL_ERROR
+            "WC3_W3L_PROFILE must be rubattle or pvpgn, got '${WC3_W3L_PROFILE}'")
+    endif()
+    if(NOT WC3_W3L_LATENCY MATCHES "^[0-9]+$")
+        message(FATAL_ERROR
+            "WC3_W3L_LATENCY must be an integer in 30..255, got "
+            "'${WC3_W3L_LATENCY}'")
+    elseif(WC3_W3L_LATENCY LESS 30 OR WC3_W3L_LATENCY GREATER 255)
+        message(FATAL_ERROR
+            "WC3_W3L_LATENCY must be in the wl27 range 30..255, got "
+            "${WC3_W3L_LATENCY}")
+    endif()
+    message(STATUS
+        "w3l compat: profile ${WC3_W3L_PROFILE}, latency ${WC3_W3L_LATENCY} ms")
+endif()
+
 include("${WC3_ROOT}/cmake/Wc3CompilerCache.cmake")
 # O-65: this is a compile-time experiment, so it must be set before the target
 # definitions below.  It is never part of the product default.
@@ -324,7 +373,7 @@ if(WC3_BUILD_APP)
         wc3_overlay
         -Wl,--whole-archive game_activity_static -Wl,--no-whole-archive
         android log aaudio m)
-    if(NOT WC3_WITH_LEGACY_BOOT)
+    if(NOT WC3_WITH_ASBUILT_HLE)
         target_link_libraries(wc3gameactivity PRIVATE wc3_guest)
     endif()
     target_compile_options(wc3gameactivity PRIVATE -fPIC -O2 -Wall -Wextra)
@@ -372,11 +421,11 @@ if(WC3_BUILD_APP)
         OUTPUT_NAME wc3gameactivity
         PREFIX "lib")
 
-    # Transitional first-run link graph: the lifted corpus + the quarantined
-    # as-built HLE, consumed as inputs through runtime/hle/legacy_shim.  The
-    # option is ON by default because the product path needs it; a platform-
-    # only build can set WC3_WITH_LEGACY_BOOT=OFF.
-    if(WC3_WITH_LEGACY_BOOT)
+    # Transitional first-run link graph: the lifted corpus + the as-built
+    # Android HLE, consumed as normal inputs and sharing the registry through
+    # runtime/hle/hle_bridge.  The option is ON by default because the product
+    # path needs it; a platform-only build can set WC3_WITH_ASBUILT_HLE=OFF.
+    if(WC3_WITH_ASBUILT_HLE)
         include("${WC3_ROOT}/cmake/Wc3LegacyBoot.cmake")
     endif()
 endif()

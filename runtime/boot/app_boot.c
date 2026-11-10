@@ -22,7 +22,7 @@
 #include <unistd.h>
 
 #include "init_array_probe.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #ifndef WC3_DEBUG
 #define WC3_DEBUG 0
@@ -37,7 +37,7 @@
 #define LOGE(...) ((void)0)
 #endif
 
-/* Implemented by runtime/legacy/boot_probe.c. */
+/* Implemented by runtime/hle/android/boot_probe.c. */
 int wc3_boot_probe_main(int argc, char **argv);
 
 /* Implemented by the DXVK Win32 shim (dxvk_win32.cpp). */
@@ -124,7 +124,7 @@ static void start_report_thread(const char *state_dir) { (void)state_dir; }
 /* The Windows Reign of Chaos launcher starts war3.exe with -classic; the
  * Frozen Throne launcher starts it with no game switch.  Keep the switch in
  * the product boot layer, before the guest command line is assembled, so the
- * quarantined legacy source does not need another edit. */
+ * as-built HLE source does not need another edit. */
 static void set_game_args(int roc)
 {
     if (!roc)

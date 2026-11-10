@@ -22,7 +22,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "platform.h"
 
 #define WIN32_CURRENT_PROCESS ((uint32_t)-1)

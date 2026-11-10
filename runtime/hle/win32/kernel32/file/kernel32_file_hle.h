@@ -1,8 +1,8 @@
 /*
  * kernel32_file_hle.h - bounded target-side extension of the file HLE.
  *
- * O-26/O-27 cannot edit runtime/legacy/hle_android.c (R15, BP-3.3).  This
- * module stays on the M5 seam: it chains the as-built CreateFileA,
+ * O-26/O-27 stay on the M5 seam instead of editing the as-built monolith
+ * directly: this module chains the as-built CreateFileA,
  * GetFileAttributesA and SetCurrentDirectoryA rows, keeps the as-built handle
  * table and read/write semantics, and only changes the path spelling and the
  * host read-ahead hint.

@@ -11,7 +11,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define DRAG_QUERY_FILE_COUNT 0xFFFFFFFFu
 

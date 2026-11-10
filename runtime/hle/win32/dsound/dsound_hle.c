@@ -11,14 +11,15 @@
  * Here the COM vtable lives in guest memory and points into the project's
  * frozen thunk window (wc3_legacy_hle_thunk_of); the host-owned shadow is a
  * Wc3Voice from runtime/platform/audio_mixer.h.  No OS headers, no host locks,
- * no allocation in the real-time path, no edits to runtime/legacy or to the
+ * no allocation in the real-time path, no edits to runtime/hle/android or to the
  * generated corpus.
  *
  * IMPORTANT (G-14/G-15): the rows are APPENDED at the end of the registry at
  * boot (ADR-034), so the frozen fast-bind slot indices of the shipped corpus
  * do not move.  A corpus that actually imports dsound.dll needs a re-lift;
- * until then WINMM uses the same voice mixer through
- * Wc3AudioApi.primary_voice/voice_publish.  Installation is unconditional.
+ * Mss32 reaches the synthetic module through LoadLibraryA/GetProcAddress
+ * instead.  Installation is unconditional.  WINMM is a no-driver guard and
+ * never creates a stream.
  */
 #include <stdatomic.h>
 #include <stdint.h>
@@ -27,7 +28,8 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "direct_call.h"
+#include "hle_bridge.h"
 #include "platform.h"
 #include "wc3_debug.h"
 #include "dsound_hle.h"
@@ -57,6 +59,8 @@
 
 #define DS_METHODS              24u
 #define DS_OBJ_MAX              64u
+#define DS_HMOD                 0x000A3000u
+#define DS_DISPATCH_RETURN      0x7EFFFFF1u
 
 static void dsound_dispatch(CPU *c, unsigned kind, unsigned method);
 
@@ -106,14 +110,19 @@ static _Atomic int g_installed;
 typedef struct {
     uint32_t self, table, guest_samples;
     uintptr_t voice;
+    uintptr_t stream;
     uint32_t bytes, bpf, rate, channels, bits, flags;
     uint32_t refs, kind;
+    uint32_t parent_self, children;
     uint32_t lock_offset, lock_bytes;
     int locked, playing, loop, volume, pan;
+    int owns_stream, zombie;
     uint32_t frequency;
 } DsObject;
 
 static DsObject g_obj[DS_OBJ_MAX];
+
+static const Wc3AudioApi *ds_audio(void);
 
 static DsObject *ds_find(uint32_t self)
 {
@@ -153,13 +162,35 @@ static DsObject *ds_alloc(uint32_t kind)
 
 static void ds_free(DsObject *o)
 {
-    const Wc3AudioApi *a = &wc3_platform()->audio;
-    if (o->voice && a->voice_remove)
+    if (!o || !o->self) return;
+
+    /* A DirectSound buffer keeps its device alive even if the guest drops the
+     * device reference first.  Defer the device close until the last child is
+     * gone; otherwise closing the device would tear down the only AAudio
+     * stream while a playing buffer still points at its voice. */
+    if (o->kind == 1u && o->children && !o->zombie) {
+        o->zombie = 1;
+        return;
+    }
+
+    const Wc3AudioApi *a = ds_audio();
+    uint32_t parent_self = o->parent_self;
+    if (o->voice && a && a->voice_remove)
         (void)a->voice_remove(a->ctx, o->voice);
+    if (o->kind == 1u && o->owns_stream && o->stream && a && a->close)
+        (void)a->close(a->ctx, o->stream);
     if (o->guest_samples) wc3_legacy_guest_free(o->guest_samples);
     if (o->table) wc3_legacy_guest_free(o->table);
     if (o->self) wc3_legacy_guest_free(o->self);
     memset(o, 0, sizeof *o);
+
+    if (parent_self) {
+        DsObject *p = ds_find(parent_self);
+        if (p) {
+            if (p->children) p->children--;
+            if (p->zombie && !p->children) ds_free(p);
+        }
+    }
 }
 
 /* IID_IDirectSound and IID_IDirectSoundBuffer, from guest_audio.inc.
@@ -217,6 +248,224 @@ static const Wc3AudioApi *ds_audio(void)
     return p ? &p->audio : NULL;
 }
 
+/* ------------------------------------------------------------------ */
+/* synthetic DSOUND.DLL                                                */
+/* ------------------------------------------------------------------ */
+
+/* Mss32 imports WINMM statically, but its DirectSound driver is selected
+ * through LoadLibraryA("DSOUND.DLL") + GetProcAddress.  The as-built loader
+ * has no dsound row, so without this synthetic module the game can never take
+ * the DirectSound path even though the COM handlers are installed. */
+static uint32_t g_create_thunk;
+static uint32_t g_enum_thunk;
+static void (*previous_load_library)(CPU *c);
+static void (*previous_get_proc_address)(CPU *c);
+static void (*previous_get_module_handle)(CPU *c);
+static void (*previous_get_module_file_name)(CPU *c);
+
+static int ds_ascii_ieq(const char *a, const char *b)
+{
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        unsigned ca = (unsigned char)*a++;
+        unsigned cb = (unsigned char)*b++;
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb) return 0;
+    }
+    return *a == *b;
+}
+
+static int ds_guest_cstr(uint32_t va, char *out, size_t cap)
+{
+    if (!va || !out || cap == 0u) return 0;
+    for (size_t i = 0; i < cap; i++) {
+        if (!wc3_legacy_guest_ok(va + (uint32_t)i, 1u)) return 0;
+        char ch = (char)wc3_legacy_rd8g(va + (uint32_t)i);
+        out[i] = ch;
+        if (!ch) return 1;
+    }
+    out[cap - 1u] = '\0';
+    return 0;
+}
+
+static void ds_write_guest_cstr(uint32_t va, const char *s, uint32_t cap)
+{
+    if (!va || !cap || !s) return;
+    uint32_t i = 0u;
+    for (; s[i] && i + 1u < cap; i++)
+        wc3_legacy_wr8g(va + i, (uint8_t)s[i]);
+    wc3_legacy_wr8g(va + i, 0u);
+}
+
+static const char *ds_module_name(uint32_t handle)
+{
+    return handle == DS_HMOD ? "dsound.dll" : NULL;
+}
+
+static uint32_t ds_module_from_name(const char *name)
+{
+    if (!name) return 0;
+    const char *leaf = name;
+    for (const char *p = name; *p; p++)
+        if (*p == '\\' || *p == '/') leaf = p + 1;
+    if (ds_ascii_ieq(leaf, "dsound.dll") || ds_ascii_ieq(leaf, "dsound"))
+        return DS_HMOD;
+    return 0;
+}
+
+static void ds_guest_call(CPU *c, uint32_t target, const uint32_t *args,
+                          unsigned n)
+{
+    if (!c || !target || !args || !n) {
+        if (c) c->eax = 0u;
+        return;
+    }
+    uint32_t esp = c->esp;
+    uint32_t ebx = c->ebx, esi = c->esi, edi = c->edi, ebp = c->ebp;
+    int ok = 1;
+    for (int k = (int)n - 1; k >= 0; k--) {
+        if (c->esp < 4u || !wc3_legacy_guest_ok(c->esp - 4u, 4u)) {
+            ok = 0;
+            break;
+        }
+        c->esp -= 4u;
+        wc3_legacy_wr32g(c->esp, args[k]);
+    }
+    if (ok && c->esp >= 4u && wc3_legacy_guest_ok(c->esp - 4u, 4u)) {
+        c->esp -= 4u;
+        wc3_legacy_wr32g(c->esp, DS_DISPATCH_RETURN);
+        dispatch(c, target);
+    } else {
+        c->eax = 0u;
+    }
+    c->esp = esp;
+    c->ebx = ebx;
+    c->esi = esi;
+    c->edi = edi;
+    c->ebp = ebp;
+}
+
+static void h_dsound_enumerate(CPU *c)
+{
+    uint32_t callback = wc3_legacy_arg32(c, 0);
+    uint32_t context = wc3_legacy_arg32(c, 1);
+    if (!callback) {
+        c->eax = DSERR_INVALIDPARAM;
+        return;
+    }
+    uint32_t desc = wc3_legacy_guest_alloc0(32u);
+    uint32_t module = wc3_legacy_guest_alloc0(16u);
+    if (!desc || !module) {
+        if (desc) wc3_legacy_guest_free(desc);
+        if (module) wc3_legacy_guest_free(module);
+        c->eax = DSERR_OUTOFMEMORY;
+        return;
+    }
+    ds_write_guest_cstr(desc, "Primary Sound Driver", 32u);
+    ds_write_guest_cstr(module, "dsound.dll", 16u);
+    /* The default device is identified by a NULL GUID, exactly like Windows'
+     * first DirectSoundEnumerateA callback.  Mss32 stores the result and only
+     * needs the enumeration to return success. */
+    uint32_t args[4] = { 0u, desc, module, context };
+    ds_guest_call(c, callback, args, 4u);
+    wc3_legacy_guest_free(desc);
+    wc3_legacy_guest_free(module);
+    c->eax = DS_OK;
+}
+
+static void h_load_library_a(CPU *c)
+{
+    uint32_t name_ptr = wc3_legacy_arg32(c, 0);
+    char name[128];
+    if (ds_guest_cstr(name_ptr, name, sizeof name)) {
+        uint32_t module = ds_module_from_name(name);
+        if (module) {
+            c->eax = module;
+            return;
+        }
+    }
+    if (previous_load_library) previous_load_library(c);
+    else {
+        wc3_legacy_set_last_error(126u);
+        c->eax = 0u;
+    }
+}
+
+static void h_get_proc_address(CPU *c)
+{
+    uint32_t module = wc3_legacy_arg32(c, 0);
+    uint32_t name_or_ordinal = wc3_legacy_arg32(c, 1);
+    if (module != DS_HMOD) {
+        if (previous_get_proc_address) previous_get_proc_address(c);
+        else {
+            wc3_legacy_set_last_error(127u);
+            c->eax = 0u;
+        }
+        return;
+    }
+
+    uint32_t thunk = 0u;
+    if (name_or_ordinal <= 0xFFFFu) {
+        if (name_or_ordinal == 1u) thunk = g_create_thunk;
+    } else {
+        char name[128];
+        if (ds_guest_cstr(name_or_ordinal, name, sizeof name)) {
+            if (!strcmp(name, "DirectSoundCreate")) thunk = g_create_thunk;
+            else if (!strcmp(name, "DirectSoundEnumerateA"))
+                thunk = g_enum_thunk;
+        }
+    }
+    if (!thunk) {
+        wc3_legacy_set_last_error(127u);
+        c->eax = 0u;
+        return;
+    }
+    c->eax = thunk;
+}
+
+static void h_get_module_handle_a(CPU *c)
+{
+    uint32_t name_ptr = wc3_legacy_arg32(c, 0);
+    char name[128];
+    if (ds_guest_cstr(name_ptr, name, sizeof name)) {
+        uint32_t module = ds_module_from_name(name);
+        if (module) {
+            c->eax = module;
+            return;
+        }
+    }
+    if (previous_get_module_handle) previous_get_module_handle(c);
+    else c->eax = 0u;
+}
+
+static void h_get_module_file_name_a(CPU *c)
+{
+    uint32_t module = wc3_legacy_arg32(c, 0);
+    uint32_t buffer = wc3_legacy_arg32(c, 1);
+    uint32_t capacity = wc3_legacy_arg32(c, 2);
+    const char *name = ds_module_name(module);
+    if (!name) {
+        if (previous_get_module_file_name) previous_get_module_file_name(c);
+        else c->eax = 0u;
+        return;
+    }
+    if (!buffer || !capacity) {
+        c->eax = 0u;
+        return;
+    }
+    size_t len = strlen(name);
+    uint32_t copy = (uint32_t)len;
+    if (copy >= capacity) copy = capacity - 1u;
+    if (!wc3_legacy_guest_ok(buffer, copy + 1u)) {
+        c->eax = 0u;
+        return;
+    }
+    if (copy) memcpy((void *)(uintptr_t)buffer, name, copy);
+    wc3_legacy_wr8g(buffer + copy, 0u);
+    c->eax = copy;
+}
+
 static void ds_query_interface(CPU *c, DsObject *o)
 {
     uint32_t riid = wc3_legacy_arg32(c, 1);
@@ -241,26 +490,45 @@ static void ds_release(CPU *c, DsObject *o)
 static void ds_get_caps(CPU *c, DsObject *o)
 {
     uint32_t out = wc3_legacy_arg32(c, 1);
-    if (!out || !wc3_legacy_guest_ok(out, 96u) ||
-        wc3_legacy_rd32g(out) != 96u) {
-        c->eax = DSERR_INVALIDPARAM;
-        return;
+    if (o->kind == 1u) {
+        /* IDirectSound::GetCaps uses DSCAPS (96 bytes).  Mss32 reads dwFlags
+         * and dwPrimaryBuffers and treats bit 5 (DSCAPS_EMULDRIVER) as "no
+         * write-primary"; keep it clear so the driver takes its native path. */
+        if (!out || !wc3_legacy_guest_ok(out, 96u) ||
+            wc3_legacy_rd32g(out) != 96u) {
+            c->eax = DSERR_INVALIDPARAM;
+            return;
+        }
+        for (uint32_t i = 4u; i < 96u; i += 4u)
+            wc3_legacy_wr32g(out + i, 0u);
+        /* 0xF1F: primary mono/stereo/8/16, continuous rate, secondary
+         * mono/stereo and 8/16-bit. */
+        wc3_legacy_wr32g(out + 4u, 0xF1Fu);
+        wc3_legacy_wr32g(out + 8u, 100u);
+        wc3_legacy_wr32g(out + 12u, 200000u);
+        wc3_legacy_wr32g(out + 16u, 1u);
+    } else {
+        /* IDirectSoundBuffer::GetCaps uses DSBCAPS (20 bytes).  The Mss32
+         * DSSCL_WRITEPRIMARY probe reads dwBufferBytes at +8 and then calls
+         * Lock(0, dwBufferBytes); returning the device DSCAPS layout here
+         * made that probe lock 100 bytes and fail. */
+        if (!out || !wc3_legacy_guest_ok(out, 20u) ||
+            wc3_legacy_rd32g(out) != 20u) {
+            c->eax = DSERR_INVALIDPARAM;
+            return;
+        }
+        uint32_t status = o->playing ? DSBSTATUS_PLAYING : 0u;
+        if (o->playing && o->loop) status |= DSBSTATUS_LOOPING;
+        wc3_legacy_wr32g(out + 4u, o->flags | status);
+        wc3_legacy_wr32g(out + 8u, o->bytes);
+        wc3_legacy_wr32g(out + 12u, 0u);
+        wc3_legacy_wr32g(out + 16u, 0u);
     }
-    for (uint32_t i = 4u; i < 96u; i += 4u)
-        wc3_legacy_wr32g(out + i, 0u);
-    /* 0xF1F matches a Windows DirectSound format-capability probe: primary
-     * 16-bit, secondary 8/16-bit mono/stereo and continuous rate range. */
-    wc3_legacy_wr32g(out + 4u, 0xF1Fu);
-    wc3_legacy_wr32g(out + 8u, 100u);
-    wc3_legacy_wr32g(out + 12u, 200000u);
-    wc3_legacy_wr32g(out + 16u, 1u);
-    (void)o;
     c->eax = DS_OK;
 }
 
 static void ds_create_sound_buffer(CPU *c, DsObject *o)
 {
-    (void)o;
     uint32_t desc = wc3_legacy_arg32(c, 1);
     uint32_t out = wc3_legacy_arg32(c, 2);
     if (!out || !wc3_legacy_guest_ok(out, 4u)) {
@@ -304,12 +572,15 @@ static void ds_create_sound_buffer(CPU *c, DsObject *o)
             c->eax = DSERR_UNSUPPORTED;
             return;
         }
+        b->stream = o->stream;
+        b->parent_self = o->self;
         b->bytes = 0u;
         b->rate = 44100u;
         b->channels = 2u;
         b->bits = 16u;
         b->bpf = 4u;
         b->frequency = b->rate;
+        o->children++;
         wc3_legacy_wr32g(out, b->self);
         c->eax = DS_OK;
         return;
@@ -333,8 +604,8 @@ static void ds_create_sound_buffer(CPU *c, DsObject *o)
 
     const Wc3AudioApi *a = ds_audio();
     if (!a || !a->voice_add ||
-        a->voice_add(a->ctx, 0u, b->rate, b->channels, b->bits, b->bytes,
-                     &b->voice) != 0) {
+        a->voice_add(a->ctx, o->stream, b->rate, b->channels, b->bits,
+                     b->bytes, &b->voice) != 0) {
         ds_free(b);
         c->eax = DSERR_NO_VOICE;
         return;
@@ -347,6 +618,9 @@ static void ds_create_sound_buffer(CPU *c, DsObject *o)
     }
     if (b->bits == 8u)
         memset((void *)(uintptr_t)b->guest_samples, 0x80, b->bytes);
+    b->parent_self = o->self;
+    b->stream = o->stream;
+    o->children++;
     wc3_legacy_wr32g(out, b->self);
     c->eax = DS_OK;
 }
@@ -505,7 +779,7 @@ static void ds_lock(CPU *c, DsObject *o)
         !wc3_legacy_guest_ok(p2, 4u) ||
         (p3 && !wc3_legacy_guest_ok(p3, 4u)) ||
         (p4 && !wc3_legacy_guest_ok(p4, 4u)) ||
-        (flags & ~3u) || o->locked || !o->bytes) {
+        (flags & ~3u) || o->locked) {
         c->eax = DSERR_INVALIDPARAM;
         return;
     }
@@ -521,6 +795,27 @@ static void ds_lock(CPU *c, DsObject *o)
         offset = write;
     }
     if (flags & DSBLOCK_ENTIREBUFFER) { offset = 0u; length = o->bytes; }
+
+    /* A primary buffer has no guest-retained PCM storage, but Mss32's
+     * DSSCL_WRITEPRIMARY probe still performs Lock(0, 0)/Unlock(0, 0) on it.
+     * Windows accepts that no-op and returns null spans; rejecting it made the
+     * DirectSound driver fall back to WaveOut. */
+    if (!o->bytes) {
+        if (offset != 0u || length != 0u) {
+            c->eax = DSERR_INVALIDPARAM;
+            return;
+        }
+        o->locked = 1;
+        o->lock_offset = 0u;
+        o->lock_bytes = 0u;
+        wc3_legacy_wr32g(p1, 0u);
+        wc3_legacy_wr32g(p2, 0u);
+        if (p3) wc3_legacy_wr32g(p3, 0u);
+        if (p4) wc3_legacy_wr32g(p4, 0u);
+        c->eax = DS_OK;
+        return;
+    }
+
     if (offset >= o->bytes || length > o->bytes ||
         (offset % o->bpf) != 0u || (length % o->bpf) != 0u) {
         c->eax = DSERR_INVALIDPARAM;
@@ -546,7 +841,7 @@ static void ds_lock(CPU *c, DsObject *o)
 static void ds_unlock(CPU *c, DsObject *o)
 {
     const Wc3AudioApi *a = ds_audio();
-    if (!o->locked || !o->guest_samples || !o->bytes || !o->bpf) {
+    if (!o->locked || !o->bpf) {
         c->eax = DSERR_INVALIDPARAM;
         return;
     }
@@ -557,7 +852,27 @@ static void ds_unlock(CPU *c, DsObject *o)
     uint32_t n1 = wc3_legacy_arg32(c, 2);
     uint32_t p2 = wc3_legacy_arg32(c, 3);
     uint32_t n2 = wc3_legacy_arg32(c, 4);
-    if (p1 != o->guest_samples + o->lock_offset || n1 != first ||
+
+    /* A zero-length Lock/Unlock pair is a legal Windows no-op.  nfsu2 still
+     * calls PcmVoice::published(), which clears the stale window and counts
+     * one publish while playing; the Mss32 primary-buffer probe uses the same
+     * pair with null spans.  Mirror that instead of inventing a failure. */
+    if (o->lock_bytes == 0u) {
+        uint32_t expect = o->guest_samples
+            ? o->guest_samples + o->lock_offset : 0u;
+        if (p1 != expect || n1 != 0u || p2 != 0u || n2 != 0u) {
+            c->eax = DSERR_INVALIDPARAM;
+            return;
+        }
+        if (o->voice && a && a->voice_published)
+            (void)a->voice_published(a->ctx, o->voice);
+        o->locked = 0;
+        c->eax = DS_OK;
+        return;
+    }
+
+    if (!o->guest_samples || !o->bytes ||
+        p1 != o->guest_samples + o->lock_offset || n1 != first ||
         p2 != (second ? o->guest_samples : 0u) || n2 != second) {
         c->eax = DSERR_INVALIDPARAM;
         return;
@@ -565,17 +880,6 @@ static void ds_unlock(CPU *c, DsObject *o)
     if (!wc3_legacy_guest_ok(p1, first) ||
         (second && !wc3_legacy_guest_ok(p2, second))) {
         c->eax = DSERR_INVALIDPARAM;
-        return;
-    }
-
-    /* A zero-length Lock/Unlock pair is a legal Windows no-op.  nfsu2 still
-     * calls PcmVoice::published(), which clears the stale window and counts
-     * one publish while playing; mirror that instead of inventing a failure. */
-    if (o->lock_bytes == 0u) {
-        if (a && a->voice_published)
-            (void)a->voice_published(a->ctx, o->voice);
-        o->locked = 0;
-        c->eax = DS_OK;
         return;
     }
     if (!a || !a->voice_publish2) {
@@ -630,7 +934,10 @@ static void dsound_dispatch(CPU *c, unsigned kind, unsigned method)
              * out-of-range level is invalid on Windows too. */
             uint32_t window = wc3_legacy_arg32(c, 1);
             uint32_t level = wc3_legacy_arg32(c, 2);
-            if (!window || level < 1u || level > 3u) {
+            /* DSSCL_WRITEPRIMARY (4) is what Mss32's DirectSound driver asks
+             * for on a non-emulated device; it then probes the primary buffer.
+             * Levels 1..4 are valid, higher values are not. */
+            if (!window || level < 1u || level > 4u) {
                 c->eax = DSERR_INVALIDPARAM; return;
             }
             c->eax = DS_OK;
@@ -771,15 +1078,40 @@ static void h_dsound_create(CPU *c)
     if (guid) { c->eax = DSERR_NODRIVER; return; }
 
     const Wc3AudioApi *a = ds_audio();
-    if (!a || !a->voice_add || !a->primary_voice ||
-        !a->primary_voice(a->ctx, 0u)) {
+    if (!a || !a->voice_add || !a->open || !a->primary_voice) {
         c->eax = DSERR_NODRIVER;
         return;
     }
-    /* The WINMM path already opened the AAudio stream and registered its
-     * primary voice; DirectSoundCreate only builds the COM object. */
+
+    /* Mss32 chooses DirectSound instead of WaveOut.  Open the single AAudio
+     * output here and let the platform create its persistent primary voice.
+     * If the platform already has a primary (a second DirectSound device or
+     * a reopen), reuse it instead of creating a second stream. */
+    uintptr_t stream = 0u;
+    uintptr_t voice = a->primary_voice(a->ctx, 0u);
+    int owns_stream = 0;
+    if (!voice) {
+        if (a->open(a->ctx, 44100u, 2u, 16u, &stream) != 0 || !stream) {
+            c->eax = DSERR_NODRIVER;
+            return;
+        }
+        voice = a->primary_voice(a->ctx, stream);
+        if (!voice) {
+            if (a->close) (void)a->close(a->ctx, stream);
+            c->eax = DSERR_NODRIVER;
+            return;
+        }
+        owns_stream = 1;
+    }
+
     DsObject *o = ds_alloc(1u);
-    if (!o) { c->eax = DSERR_OUTOFMEMORY; return; }
+    if (!o) {
+        if (owns_stream && a->close) (void)a->close(a->ctx, stream);
+        c->eax = DSERR_OUTOFMEMORY;
+        return;
+    }
+    o->stream = stream;
+    o->owns_stream = owns_stream;
     o->rate = 44100u;
     o->channels = 2u;
     o->bits = 16u;
@@ -787,8 +1119,11 @@ static void h_dsound_create(CPU *c)
     wc3_legacy_wr32g(out, o->self);
     c->eax = DS_OK;
 #if WC3_DEBUG && WC3_DEBUG_HLE
-    fprintf(stderr, "[dsound] DirectSoundCreate -> %08X refs=%u\n",
-            o->self, o->refs);
+    fprintf(stderr,
+            "[dsound] DirectSoundCreate -> %08X refs=%u stream=%s"
+            " voice=%08X\n",
+            o->self, o->refs, owns_stream ? "open" : "shared",
+            (unsigned)voice);
 #endif
 }
 
@@ -801,10 +1136,20 @@ int wc3_hle_dsound_install(void)
     if (wc3_legacy_hle_add("dsound.dll", "DirectSoundCreate", 3, 0,
                            h_dsound_create) != 0)
         return -1;
-    /* nfsu2 binds DirectSoundCreate/#1 as well.  A missing ordinal row is
-     * harmless: the as-built loader only creates it when a PE needs it. */
-    (void)wc3_legacy_hle_bind_ordinal("dsound.dll", 1u, 3, 0,
-                                      h_dsound_create);
+    g_create_thunk = wc3_legacy_hle_thunk_of("dsound.dll",
+                                             "DirectSoundCreate");
+    if (!g_create_thunk) return -1;
+    /* nfsu2 binds DirectSoundCreate/#1 as well. */
+    if (wc3_legacy_hle_bind_ordinal("dsound.dll", 1u, 3, 0,
+                                    h_dsound_create) != 0)
+        return -1;
+
+    if (wc3_legacy_hle_add("dsound.dll", "DirectSoundEnumerateA", 2, 0,
+                           h_dsound_enumerate) != 0)
+        return -1;
+    g_enum_thunk = wc3_legacy_hle_thunk_of("dsound.dll",
+                                           "DirectSoundEnumerateA");
+    if (!g_enum_thunk) return -1;
 
     for (unsigned i = 0; i < sizeof g_rows / sizeof g_rows[0]; i++) {
         const DsRow *r = &g_rows[i];
@@ -817,9 +1162,31 @@ int wc3_hle_dsound_install(void)
             wc3_legacy_hle_thunk_of("dsound.dll", name);
         if (!g_thunk[r->kind][r->method]) return -1;
     }
+
+    /* Mss32's DirectSound loader is a KERNEL32 dynamic-load sequence.  Chain
+     * after WS2_32 (installed first), so unknown names still reach the as-built
+     * loader and the existing network synthetic modules keep working. */
+    if (wc3_legacy_hle_chain("KERNEL32.dll", "LoadLibraryA",
+                             h_load_library_a,
+                             &previous_load_library) != 0)
+        return -1;
+    if (wc3_legacy_hle_chain("KERNEL32.dll", "GetProcAddress",
+                             h_get_proc_address,
+                             &previous_get_proc_address) != 0)
+        return -1;
+    if (wc3_legacy_hle_chain("KERNEL32.dll", "GetModuleHandleA",
+                             h_get_module_handle_a,
+                             &previous_get_module_handle) != 0)
+        return -1;
+    if (wc3_legacy_hle_chain("KERNEL32.dll", "GetModuleFileNameA",
+                             h_get_module_file_name_a,
+                             &previous_get_module_file_name) != 0)
+        return -1;
+
 #if WC3_DEBUG && WC3_DEBUG_HLE
-    fprintf(stderr, "[dsound] installed %u COM rows\n",
-            (unsigned)(sizeof g_rows / sizeof g_rows[0]));
+    fprintf(stderr,
+            "[dsound] installed %u COM rows; synthetic DSOUND.DLL %08X\n",
+            (unsigned)(sizeof g_rows / sizeof g_rows[0]), DS_HMOD);
 #endif
     return 0;
 }

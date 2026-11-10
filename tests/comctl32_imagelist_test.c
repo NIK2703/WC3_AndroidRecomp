@@ -7,7 +7,7 @@
 
 #include "cpu.h"
 #include "imagelist_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define MAX_ROWS 16u
 

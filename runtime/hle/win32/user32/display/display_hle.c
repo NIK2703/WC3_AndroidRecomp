@@ -4,7 +4,7 @@
  * The guest sees a single Android display whose mode table is derived from the
  * native surface: heights start at 360 and grow in 180-pixel steps to the
  * native height, with the width chosen to keep the screen aspect ratio.  That
- * table and the selected mode live in the quarantine for now, so this slice
+ * table and the selected mode live in the as-built HLE for now, so this slice
  * only translates between the Win32 structures and the shim accessors.
  *
  * ChangeDisplaySettingsA and ChangeDisplaySettingsExA do not share an argument
@@ -19,7 +19,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define DEVMODEA_SIZE 156u
 #define DEVMODE_DM_SIZE_OFFSET 36u

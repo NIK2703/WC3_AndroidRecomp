@@ -335,7 +335,7 @@ def test_boot_dispatch_compile() -> int:
         ROOT / "runtime" / "guest",
         ROOT / "runtime" / "boot",
         ROOT / "runtime" / "hle",
-        ROOT / "runtime" / "legacy",
+        ROOT / "runtime" / "hle" / "android",
         ROOT / "runtime" / "platform",
         ROOT / "runtime" / "platform" / "android",
         ROOT / "runtime" / "diag",
@@ -352,7 +352,7 @@ def test_boot_dispatch_compile() -> int:
 
 
 def test_pass9_release_preprocess() -> int:
-    """O-91: release dispatch preprocesses without v2; debug keeps it."""
+    """nfsu2 audio: the timer and dead-end WINMM guard install in both variants."""
     cc = gcc()
     if not cc:
         print("pass9 release preprocess: unavailable (no host C compiler)")
@@ -379,7 +379,7 @@ def test_pass9_release_preprocess() -> int:
         ROOT / "runtime" / "guest",
         ROOT / "runtime" / "boot",
         ROOT / "runtime" / "hle",
-        ROOT / "runtime" / "legacy",
+        ROOT / "runtime" / "hle" / "android",
         ROOT / "runtime" / "platform",
         ROOT / "runtime" / "platform" / "android",
         ROOT / "runtime" / "diag",
@@ -410,22 +410,23 @@ def test_pass9_release_preprocess() -> int:
     except RuntimeError:
         return 1
 
-    fast = "wc3_hle_winmm_fast_bind_rows"
-    v2 = "wc3_hle_winmm_waveout_install"
+    timer = "wc3_hle_mss_timer_install"
+    guard = "wc3_hle_winmm_guard_install"
+    dsound = "wc3_hle_dsound_install"
     problems = []
-    if fast not in release:
-        problems.append("release dispatch lost the product fast-bind")
-    if v2 in release:
-        problems.append("release dispatch still installs v2")
-    if fast not in debug:
-        problems.append("debug dispatch lost the product fast-bind")
-    if v2 not in debug:
-        problems.append("debug dispatch lost the v2 install")
+    for label, text in (("release", release), ("debug", debug)):
+        for name in (timer, guard, dsound):
+            if name not in text:
+                problems.append(f"{label} dispatch lost {name}")
+        if "wc3_hle_winmm_waveout_install" in text:
+            problems.append(f"{label} dispatch still installs old waveOut")
+        if "wc3_hle_winmm_fast_bind_rows" in text:
+            problems.append(f"{label} dispatch still uses old fast-bind")
     if problems:
         for problem in problems:
             print(f"pass9_release_preprocess: {problem}", file=sys.stderr)
         return 1
-    print("pass9_release_preprocess: release has no v2; debug keeps it")
+    print("pass9_release_preprocess: release and debug install timer, guard, and DirectSound")
     return 0
 
 
@@ -905,17 +906,17 @@ def test_window_settle() -> int:
     return 0
 
 
-def test_waveout_install() -> int:
-    """T0: WINMM install selection, including both rollback triggers."""
+def test_dsound_hle() -> int:
+    """DirectSound activation: synthetic DSOUND.DLL, Mss32 probe, voice path."""
     cc = gcc()
     if not cc:
-        print("waveout install: unavailable (no host C compiler)")
+        print("dsound hle: unavailable (no host C compiler)")
         return 2
     BUILD.mkdir(parents=True, exist_ok=True)
     include = [
         "-I" + str(ROOT / "runtime" / "diag"),
         "-I" + str(ROOT / "runtime" / "hle"),
-        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "winmm"),
+        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "dsound"),
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "platform"),
@@ -930,53 +931,27 @@ def test_waveout_install() -> int:
         "-Wextra",
         "-Werror",
         *include,
-        str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "winmm_fast_bind.c"),
-        str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "waveout_hle.c"),
-        str(ROOT / "tests" / "waveout_install_test.c"),
+        str(ROOT / "runtime" / "hle" / "win32" / "dsound" / "dsound_hle.c"),
+        str(ROOT / "tests" / "dsound_hle_test.c"),
     ]
-    cases = (
-        ("disabled", 0, "disabled", None),
-        ("enabled", 1, "enabled", None),
-        ("trigger_on", 0, "enabled", "wave2_v2_on"),
-        ("trigger_off", 1, "disabled", "wave2_v2_off"),
-    )
-    saved_data_dir = os.environ.pop("WC3_DATA_DIR", None)
-    saved_audio_v2 = os.environ.pop("WC3_AUDIO_V2", None)
-    try:
-        for mode, enabled, expected, trigger in cases:
-            for debug in (1, 0):
-                exe = BUILD / f"waveout_install_test_{mode}_{debug}.exe"
-                rc = run([*common, f"-DWC3_AUDIO_V2_ENABLED={enabled}",
-                          f"-DWC3_DEBUG={debug}",
-                          f"-DWC3_DEBUG_AUDIO={debug}", "-o", str(exe)])
-                if rc != 0:
-                    return rc
-                marker = BUILD / trigger if trigger else None
-                if marker:
-                    marker.write_text("", encoding="utf-8")
-                    os.environ["WC3_DATA_DIR"] = str(BUILD)
-                try:
-                    rc = run([str(exe), expected])
-                finally:
-                    if marker:
-                        marker.unlink(missing_ok=True)
-                    os.environ.pop("WC3_DATA_DIR", None)
-                if rc != 0:
-                    return rc
-    finally:
-        os.environ.pop("WC3_DATA_DIR", None)
-        if saved_data_dir is not None:
-            os.environ["WC3_DATA_DIR"] = saved_data_dir
-        if saved_audio_v2 is not None:
-            os.environ["WC3_AUDIO_V2"] = saved_audio_v2
+    for name, debug in (("dsound_hle_test_debug.exe", 1),
+                        ("dsound_hle_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}",
+                  f"-DWC3_DEBUG_HLE={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
     return 0
 
 
-def test_waveout_runtime() -> int:
-    """T0: real WINMM handlers for WOM_DONE, WM_TIMER, spill, NOMEM."""
+def test_winmm_guard_timer() -> int:
+    """T0: dead-end waveOut rows and the standalone Mss32 USER32 timer."""
     cc = gcc()
     if not cc:
-        print("waveout runtime: unavailable (no host C compiler)")
+        print("winmm guard/timer: unavailable (no host C compiler)")
         return 2
     BUILD.mkdir(parents=True, exist_ok=True)
     include = [
@@ -990,35 +965,21 @@ def test_waveout_runtime() -> int:
         "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
     ]
     common = [
-        cc,
-        "-std=c11",
-        "-O2",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-        *include,
-        str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "waveout_hle.c"),
-        str(ROOT / "tests" / "waveout_runtime_test.c"),
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", *include,
+        str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "winmm_guard_hle.c"),
+        str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "mss_timer_hle.c"),
+        str(ROOT / "tests" / "winmm_guard_timer_test.c"),
     ]
-    saved_data_dir = os.environ.pop("WC3_DATA_DIR", None)
-    saved_audio_v2 = os.environ.pop("WC3_AUDIO_V2", None)
-    try:
-        for name, debug in (("waveout_runtime_test_debug.exe", 1),
-                            ("waveout_runtime_test_release.exe", 0)):
-            exe = BUILD / name
-            rc = run([*common, "-DWC3_AUDIO_V2_ENABLED=1",
-                      f"-DWC3_DEBUG={debug}", f"-DWC3_DEBUG_AUDIO={debug}",
-                      "-o", str(exe)])
-            if rc != 0:
-                return rc
-            rc = run([str(exe)])
-            if rc != 0:
-                return rc
-    finally:
-        if saved_data_dir is not None:
-            os.environ["WC3_DATA_DIR"] = saved_data_dir
-        if saved_audio_v2 is not None:
-            os.environ["WC3_AUDIO_V2"] = saved_audio_v2
+    for name, debug in (("winmm_guard_timer_test_debug.exe", 1),
+                        ("winmm_guard_timer_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([*common, f"-DWC3_DEBUG={debug}",
+                  f"-DWC3_DEBUG_AUDIO={debug}", "-o", str(exe)])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
     return 0
 
 
@@ -1061,69 +1022,6 @@ def test_ws2_32_hle() -> int:
         rc = run([str(exe)])
         if rc != 0:
             return rc
-    return 0
-
-
-def test_waveout_headless() -> int:
-    """T0: real WINMM handlers on the real headless Wc3AudioApi."""
-    cc = gcc()
-    if not cc:
-        print("waveout headless: unavailable (no host C compiler)")
-        return 2
-    BUILD.mkdir(parents=True, exist_ok=True)
-    include = [
-        "-I" + str(ROOT / "runtime" / "diag"),
-        "-I" + str(ROOT / "runtime" / "hle"),
-        "-I" + str(ROOT / "runtime" / "hle" / "win32" / "winmm"),
-        "-I" + str(ROOT / "runtime" / "cpu"),
-        "-I" + str(ROOT / "runtime" / "guest"),
-        "-I" + str(ROOT / "runtime" / "platform"),
-        "-I" + str(ROOT / "runtime" / "platform" / "headless"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
-    ]
-    headless = ROOT / "runtime" / "platform" / "headless"
-    common = [
-        cc,
-        "-std=c11",
-        "-O2",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-        *include,
-        str(ROOT / "runtime" / "platform" / "platform.c"),
-        str(headless / "headless_mem.c"),
-        str(headless / "headless_file.c"),
-        str(headless / "headless_time.c"),
-        str(headless / "headless_schedule.c"),
-        str(headless / "headless_sched.c"),
-        str(headless / "headless_thread.c"),
-        str(headless / "headless_sync.c"),
-        str(headless / "headless_services.c"),
-        str(headless / "headless_init.c"),
-        str(ROOT / "runtime" / "hle" / "win32" / "winmm" / "waveout_hle.c"),
-        str(ROOT / "tests" / "waveout_headless_test.c"),
-        "-pthread",
-    ]
-    saved_data_dir = os.environ.pop("WC3_DATA_DIR", None)
-    saved_audio_v2 = os.environ.pop("WC3_AUDIO_V2", None)
-    try:
-        for name, debug in (("waveout_headless_test_debug.exe", 1),
-                            ("waveout_headless_test_release.exe", 0)):
-            exe = BUILD / name
-            rc = run([*common, "-DWC3_AUDIO_V2_ENABLED=1",
-                      f"-DWC3_DEBUG={debug}", f"-DWC3_DEBUG_AUDIO={debug}",
-                      "-o", str(exe)])
-            if rc != 0:
-                return rc
-            rc = run([str(exe)])
-            if rc != 0:
-                return rc
-    finally:
-        if saved_data_dir is not None:
-            os.environ["WC3_DATA_DIR"] = saved_data_dir
-        if saved_audio_v2 is not None:
-            os.environ["WC3_AUDIO_V2"] = saved_audio_v2
     return 0
 
 
@@ -1252,6 +1150,35 @@ def test_dead_flags_pass() -> int:
     """P0-2 source check: only fully overwritten flag writes are elided."""
     return run([sys.executable,
                 str(ROOT / "tools" / "lift" / "passes" / "dead_flags.py"),
+                "--self-test"])
+
+
+def test_w3l_compat() -> int:
+    """W3L compat: PvPGN hash and the rubattle 0x83 helper keep the guest ABI."""
+    cc = gcc()
+    if not cc:
+        print("w3l_compat: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "w3l_compat_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "compat"),
+        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
+        str(ROOT / "tests" / "w3l_compat_test.c"),
+        str(ROOT / "runtime" / "compat" / "w3l_compat.c"),
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_w3l_compat_pass() -> int:
+    """W3L compat LiftPass: profile, idempotence, fail-closed and coverage."""
+    return run([sys.executable,
+                str(ROOT / "tools" / "lift" / "passes" / "w3l_compat.py"),
                 "--self-test"])
 
 
@@ -1430,18 +1357,18 @@ def test_pass7_build_guards() -> int:
     return 0
 
 
-def test_audio_ring_layout() -> int:
-    """O-107/O-108: the platform ring stays 64 KiB with split SPSC counters."""
+def test_audio_tap() -> int:
+    """N-16b: post-mix tap ring conversion, wrap and drop accounting."""
     cc = gcc()
     if not cc:
-        print("audio_ring_layout: unavailable (no host C compiler)")
+        print("audio_tap: unavailable (no host C compiler)")
         return 2
     BUILD.mkdir(parents=True, exist_ok=True)
-    exe = BUILD / "audio_ring_layout_test.exe"
+    exe = BUILD / "audio_tap_test.exe"
     rc = run([
         cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
-        "-I" + str(ROOT / "runtime" / "platform" / "android"),
-        str(ROOT / "tests" / "audio_ring_layout_test.c"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        str(ROOT / "tests" / "audio_tap_test.c"),
         "-o", str(exe),
     ])
     if rc != 0:
@@ -1449,54 +1376,29 @@ def test_audio_ring_layout() -> int:
     return run([str(exe)])
 
 
-def test_audio_pull_ring() -> int:
-    """S-1: host-owned pull ring, seqlock and deterministic device clock."""
+def test_audio_snapshot() -> int:
+    """N-17/N-18: region-atomic primary voice, refs, NOMEM and 1M-frame race."""
     cc = gcc()
     if not cc:
-        print("audio_pull_ring: unavailable (no host C compiler)")
+        print("audio_snapshot: unavailable (no host C compiler)")
         return 2
-    header = ROOT / "runtime" / "platform" / "audio_pull_ring.h"
-    text = header.read_text(encoding="utf-8", errors="replace")
-    problems = []
-    for token in ("malloc(", "calloc(", "free(", "pthread_mutex",
-                  "#include <pthread"):
-        if token in text:
-            problems.append("header must not use " + token)
-    if problems:
-        for problem in problems:
-            print("audio_pull_ring:", problem)
-        return 1
     BUILD.mkdir(parents=True, exist_ok=True)
-    exe = BUILD / "audio_pull_ring_test.exe"
-    rc = run([
-        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
-        "-I" + str(ROOT / "runtime" / "platform"),
-        str(ROOT / "tests" / "audio_pull_ring_test.c"),
-        "-pthread", "-o", str(exe),
-    ])
-    if rc != 0:
-        return rc
-    return run([str(exe)])
-
-
-def test_audio_pull_difftest() -> int:
-    """S-5: V5.9/E11 semantic difftest harness must self-check."""
-    return run([sys.executable,
-                str(ROOT / "tools" / "audio_pull_difftest.py"),
-                "--self-test"])
-
-
-def test_audio_runtime_profile() -> int:
-    """O-105: recreate the PASS11 counters from the historical device log."""
-    script = ROOT / "tools" / "audio_runtime_profile.py"
-    rc = run([sys.executable, str(script), "--self-test"])
-    if rc != 0:
-        return rc
-    log = ROOT / "build" / "device_run.txt"
-    if not log.is_file():
-        print("audio_runtime_profile: historical log absent; self-test only")
-        return 0
-    return run([sys.executable, str(script), "--check"])
+    for name, debug in (("audio_snapshot_test_debug.exe", 1),
+                        ("audio_snapshot_test_release.exe", 0)):
+        exe = BUILD / name
+        rc = run([
+            cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+            "-I" + str(ROOT / "runtime" / "platform"),
+            f"-DWC3_DEBUG={debug}", f"-DWC3_DEBUG_AUDIO={debug}",
+            str(ROOT / "tests" / "audio_snapshot_test.c"),
+            "-pthread", "-o", str(exe),
+        ])
+        if rc != 0:
+            return rc
+        rc = run([str(exe)])
+        if rc != 0:
+            return rc
+    return 0
 
 
 def test_pass11_tree_snapshot() -> int:
@@ -1505,155 +1407,40 @@ def test_pass11_tree_snapshot() -> int:
     return run([sys.executable, str(script), "--self-test"])
 
 
-def test_pass11_audio_guards() -> int:
-    """O-106/O-107/O-108: platform and bounded legacy ring stay wired."""
-    platform_path = (ROOT / "runtime" / "platform" / "android" /
-                     "platform_android.c")
-    header_path = (ROOT / "runtime" / "platform" / "android" /
-                   "audio_ring_layout.h")
-    legacy_path = ROOT / "runtime" / "legacy" / "hle_android.c"
-    platform = platform_path.read_text(encoding="utf-8", errors="replace")
-    header = header_path.read_text(encoding="utf-8", errors="replace")
-    legacy = legacy_path.read_text(encoding="utf-8", errors="replace")
-    problems: list[str] = []
-
-    if '#include "audio_ring_layout.h"' not in platform:
-        problems.append("platform_android.c does not include the ring layout")
-    if "#define WC3_AUDIO_RING_BYTES" in platform:
-        problems.append("platform_android.c defines the ring size locally")
-    if "Wc3AudioRingPositions positions;" not in platform:
-        problems.append("AndroidAudioStream does not own split positions")
-    if "st->read_pos" in platform or "st->write_pos" in platform:
-        problems.append("platform_android.c still uses adjacent counter fields")
-
-    if "#define WC3_AUDIO_RING_BYTES" not in header or \
-            "1u << 16" not in header:
-        problems.append("audio_ring_layout.h does not pin the 64 KiB ring")
-    if "offsetof(Wc3AudioRingPositions, write_pos)" not in header:
-        problems.append("audio_ring_layout.h lacks the cache-line assertion")
-
-    if "memset(audio_data, 0, need);" in platform:
-        problems.append("O-106 full-buffer memset is back on the RT path")
-    if "memset((uint8_t *)audio_data + got, 0, need - got);" not in platform:
-        problems.append("O-106 underrun-tail clear is missing")
-    read_at = platform.find("audio_ring_read(st, audio_data, need)")
-    clear_at = platform.find("memset((uint8_t *)audio_data + got, 0, need - got);")
-    if read_at < 0 or clear_at < 0 or read_at > clear_at:
-        problems.append("O-106 clears before the ring read")
-
-    # O-107 landed in the as-built winmm path as a bounded, overridable ring.
-    # The invariant is the bound, not the literal 128 KiB: a later M5 move may
-    # choose 64 KiB (the platform value) without rewriting this guard.
-    ring = re.search(
-        r"#define\s+WC3_WAVE_RING_BYTES\s+\((\d+)u\s*\*\s*(\d+)u\)", legacy)
-    if not ring:
-        problems.append("legacy ring has no WC3_WAVE_RING_BYTES bound")
-    else:
-        ring_bytes = int(ring.group(1)) * int(ring.group(2))
-        if ring_bytes >= 8 * 1024 * 1024:
-            problems.append("legacy ring was not reduced from 8 MiB")
-        if ring_bytes < 5 * 8832 + 2 * 3536 * 4:
-            problems.append("legacy ring is smaller than the A-12.4 prefill")
-    if not re.search(r"#define\s+WAVE_RING_BYTES\s+WC3_WAVE_RING_BYTES",
-                     legacy):
-        problems.append("legacy WAVE_RING_BYTES is not the A/B alias")
-    if "_Static_assert(WAVE_RING_BYTES >=" not in legacy:
-        problems.append("legacy ring lost its compile-time lower bound")
-
-    # O-110/O-111 remain pending: the guard fails if they change without the
-    # corresponding T1/difftest update.
-    if "pthread_cond_broadcast(&e->cv);" not in legacy:
-        problems.append("legacy broadcast site changed without O-110 update")
-    if "WaveBlock blk[WAVE_HDR_MAX];" not in legacy:
-        problems.append("legacy WaveBlock queue changed without O-111 update")
-
-    if problems:
-        for problem in problems:
-            print(f"pass11_audio_guards: {problem}", file=sys.stderr)
-        return 1
-    print("pass11_audio_guards: O-106/O-107/O-108 wired; "
-          "legacy ring bounded; O-110/O-111 pending")
-    return 0
-
-
 def test_pass9_build_guards() -> int:
-    """S-2/S-3: the WINMM pull slice is product code; fast-bind stays first."""
+    """nfsu2 audio: DirectSound is the only transport; WINMM is a dead end."""
     boot = (ROOT / "cmake" / "Wc3LegacyBoot.cmake").read_text(
         encoding="utf-8", errors="replace")
     dispatch = (ROOT / "runtime" / "boot" / "dispatch_boot.c").read_text(
-        encoding="utf-8", errors="replace")
-    v2 = (ROOT / "runtime" / "hle" / "win32" / "winmm" /
-          "waveout_hle.c").read_text(encoding="utf-8", errors="replace")
-    fast = (ROOT / "runtime" / "hle" / "win32" / "winmm" /
-            "winmm_fast_bind.c").read_text(encoding="utf-8",
-                                           errors="replace")
-    hygiene = (ROOT / "tools" / "check_release_hygiene.py").read_text(
         encoding="utf-8", errors="replace")
     problems: list[str] = []
 
     base = re.search(
         r"add_library\(wc3_hle_modules STATIC(.*?)\)", boot, re.S)
     base_block = base.group(1) if base else ""
-    if "winmm_fast_bind.c" not in base_block:
-        problems.append("release HLE list is missing winmm_fast_bind.c")
-    if "waveout_hle.c" not in base_block:
-        problems.append("release HLE list does not compile the pull slice")
-    if re.search(
-        r"if\(WC3_DEBUG\)\s*target_sources\(wc3_hle_modules PRIVATE"
-        r".*?waveout_hle\.c.*?\)", boot, re.S):
-        problems.append("pull slice is still debug-only")
+    for required in ("mss_timer_hle.c", "winmm_guard_hle.c", "dsound_hle.c"):
+        if required not in base_block:
+            problems.append(f"release HLE list is missing {required}")
+    for forbidden in ("waveout_hle.c", "winmm_fast_bind.c"):
+        if forbidden in base_block:
+            problems.append(f"old audio file is still compiled: {forbidden}")
 
-    if '#include "winmm_fast_bind.h"' not in dispatch:
-        problems.append("dispatch does not include the product fast-bind")
-    if '#include "waveout_hle.h"' not in dispatch:
-        problems.append("dispatch does not include the pull slice")
-    if re.search(r'#if WC3_DEBUG\s*\n\s*#include "waveout_hle\.h"',
-                 dispatch):
-        problems.append("pull slice header is still debug-only")
-    if not re.search(
-            r"WC3_INSTALL_STEP\(wc3_hle_winmm_fast_bind_rows\(\)\);",
-            dispatch):
-        problems.append("dispatch does not bind the product WINMM rows")
-    if not re.search(
-            r"WC3_INSTALL_STEP\(wc3_hle_winmm_waveout_install\(\)\);",
-            dispatch):
-        problems.append("dispatch does not install the pull slice")
-    if dispatch.find("wc3_hle_winmm_fast_bind_rows()") > \
-            dispatch.find("wc3_hle_winmm_waveout_install()"):
-        problems.append("pull install runs before the product fast-bind")
-
-    if "#define WC3_AUDIO_V2_ENABLED 1" not in v2:
-        problems.append("pull slice is not the product default")
-    if 'w2_trigger("wave2_v2_off")' not in v2:
-        problems.append("hard rollback trigger is missing")
-    if "g_as_built_fast_rows" in v2 or \
-            "wc3_legacy_hle_fast_bind" in v2:
-        problems.append("pull slice still owns the product fast-bind list")
-    if "wc3_legacy_hle_fast_bind" not in fast:
-        problems.append("winmm_fast_bind.c does not use the shim")
-
-    debug_markers = re.search(
-        r"DEBUG_ONLY_MARKERS = \((.*?)\)", hygiene, re.S)
-    product_markers = re.search(
-        r"PRODUCT_MARKERS = \((.*?)\)", hygiene, re.S)
-    if not debug_markers or \
-            '"[wave2] missing WINMM row"' not in debug_markers.group(1):
-        problems.append("pull slice diagnostics are not debug-only markers")
-    if not product_markers or "[wave2]" in product_markers.group(1):
-        problems.append("pull slice diagnostics are still product markers")
-    debug_only_prefixes = re.search(
-        r"SOURCE_DEBUG_ONLY_PREFIXES = \((.*?)\)", hygiene, re.S)
-    if debug_only_prefixes and \
-            '"runtime/hle/win32/winmm/waveout_hle.c"' in \
-            debug_only_prefixes.group(1):
-        problems.append("release source audit still skips the pull slice")
+    for header in ("mss_timer_hle.h", "winmm_guard_hle.h", "dsound_hle.h"):
+        if f'#include "{header}"' not in dispatch:
+            problems.append(f"dispatch does not include {header}")
+    for install in ("wc3_hle_mss_timer_install()",
+                    "wc3_hle_winmm_guard_install()",
+                    "wc3_hle_dsound_install()"):
+        if f"WC3_INSTALL_STEP({install});" not in dispatch:
+            problems.append(f"dispatch does not install {install}")
+    if "waveout_hle" in dispatch or "winmm_fast_bind" in dispatch:
+        problems.append("dispatch still references the old WINMM path")
 
     if problems:
         for problem in problems:
             print(f"pass9_build_guards: {problem}", file=sys.stderr)
         return 1
-    print("pass9_build_guards: WINMM pull slice ships in release; "
-          "fast-bind stays first; rollback trigger present")
+    print("pass9_build_guards: DirectSound product path; timer kept; WINMM guarded")
     return 0
 
 
@@ -1873,11 +1660,11 @@ def test_pass4_build() -> int:
         encoding="utf-8")
     check("wc3_legacy_hle_call(target, c);" in dispatch_boot,
           "O-46 product dispatcher bypasses the legacy shim")
-    legacy_shim = (ROOT / "runtime" / "hle" / "legacy_shim.c").read_text(
+    bridge = (ROOT / "runtime" / "hle" / "hle_bridge.c").read_text(
         encoding="utf-8")
-    direct_start = legacy_shim.find("static void legacy_call_direct")
-    direct_end = legacy_shim.find("\n}\n", direct_start)
-    direct_body = (legacy_shim[direct_start:direct_end + 3]
+    direct_start = bridge.find("static void legacy_call_direct")
+    direct_end = bridge.find("\n}\n", direct_start)
+    direct_body = (bridge[direct_start:direct_end + 3]
                    if direct_start >= 0 and direct_end >= 0 else "")
     check(bool(direct_body) and "e->calls++" not in direct_body,
           "O-46 release direct path still runs the diagnostic counter")
@@ -2668,10 +2455,13 @@ def test_registry_hle() -> int:
         str(ROOT / "tests" / "registry_hle_test.c"),
         "-pthread",
     ]
-    for name, debug in (("registry_hle_test_debug.exe", 1),
-                        ("registry_hle_test_release.exe", 0)):
+    for name, debug, extra in (
+            ("registry_hle_test_debug.exe", 1, []),
+            ("registry_hle_test_release.exe", 0, []),
+            ("registry_hle_test_gateway_debug.exe", 1,
+             ["-DWC3_W3L_GATEWAY_RUBATTLE=1"])):
         exe = BUILD / name
-        rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
+        rc = run([*common, f"-DWC3_DEBUG={debug}", *extra, "-o", str(exe)])
         if rc != 0:
             return rc
         rc = run([str(exe)])
@@ -3150,11 +2940,11 @@ def test_msvcr80_heap() -> int:
     return 0
 
 
-def test_legacy_shim() -> int:
-    """T0: real H6.3 shim against a fake registry and low guest mapping."""
+def test_hle_bridge() -> int:
+    """T0: real H6.3 bridge against a fake registry and low guest mapping."""
     cc = gcc()
     if not cc:
-        print("legacy shim: unavailable (no host C compiler)")
+        print("hle bridge: unavailable (no host C compiler)")
         return 2
     BUILD.mkdir(parents=True, exist_ok=True)
     include = [
@@ -3162,7 +2952,7 @@ def test_legacy_shim() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "abi"),
-        "-I" + str(ROOT / "runtime" / "legacy"),
+        "-I" + str(ROOT / "runtime" / "hle" / "android"),
         "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
@@ -3176,13 +2966,13 @@ def test_legacy_shim() -> int:
         "-Wno-unused-parameter",
         "-Wno-sign-compare",
         *include,
-        str(ROOT / "runtime" / "hle" / "legacy_shim.c"),
+        str(ROOT / "runtime" / "hle" / "hle_bridge.c"),
         str(ROOT / "runtime" / "hle" / "abi" / "hle_abi.c"),
         str(ROOT / "runtime" / "guest" / "guest_memory.c"),
-        str(ROOT / "tests" / "legacy_shim_test.c"),
+        str(ROOT / "tests" / "hle_bridge_test.c"),
     ]
-    for name, debug in (("legacy_shim_test_debug.exe", 1),
-                        ("legacy_shim_test_release.exe", 0)):
+    for name, debug in (("hle_bridge_test_debug.exe", 1),
+                        ("hle_bridge_test_release.exe", 0)):
         exe = BUILD / name
         rc = run([*common, f"-DWC3_DEBUG={debug}", "-o", str(exe)])
         if rc != 0:
@@ -3289,18 +3079,17 @@ TESTS = {
     "direct_call_multi_tu": test_direct_call_multi_tu,
     "devirtualize_pass": test_devirtualize_pass,
     "dead_flags_pass": test_dead_flags_pass,
+    "w3l_compat": test_w3l_compat,
+    "w3l_compat_pass": test_w3l_compat_pass,
     "return_address_elide_pass": test_return_address_elide_pass,
     "flag_read_audit": test_flag_read_audit,
     "corpus_flag_policy": test_corpus_flag_policy,
     "pass5_build_guards": test_pass5_build_guards,
     "pass6_build_guards": test_pass6_build_guards,
     "pass7_build_guards": test_pass7_build_guards,
-    "audio_ring_layout": test_audio_ring_layout,
-    "audio_pull_ring": test_audio_pull_ring,
-    "audio_pull_difftest": test_audio_pull_difftest,
-    "audio_runtime_profile": test_audio_runtime_profile,
+    "audio_tap": test_audio_tap,
+    "audio_snapshot": test_audio_snapshot,
     "pass11_tree_snapshot": test_pass11_tree_snapshot,
-    "pass11_audio_guards": test_pass11_audio_guards,
     "pass9_build_guards": test_pass9_build_guards,
     "pass9_release_preprocess": test_pass9_release_preprocess,
     "icf_audit": test_icf_audit,
@@ -3343,7 +3132,7 @@ TESTS = {
     "msvcr80_time": test_msvcr80_time,
     "msvcr80_string": test_msvcr80_string,
     "msvcr80_rand": test_msvcr80_rand,
-    "legacy_shim": test_legacy_shim,
+    "hle_bridge": test_hle_bridge,
     "pass4_build": test_pass4_build,
     "overlay": test_overlay,
     "file_layout": test_file_layout,
@@ -3374,9 +3163,8 @@ TESTS = {
     "platform_headless": test_platform_headless,
     "guest_memory": test_guest_memory,
     "window_settle": test_window_settle,
-    "waveout_install": test_waveout_install,
-    "waveout_runtime": test_waveout_runtime,
-    "waveout_headless": test_waveout_headless,
+    "dsound_hle": test_dsound_hle,
+    "winmm_guard_timer": test_winmm_guard_timer,
     "ws2_32_hle": test_ws2_32_hle,
     "release_hygiene": test_release_hygiene,
     "null_gfx": test_null_gfx,

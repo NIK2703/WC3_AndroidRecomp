@@ -17,7 +17,6 @@ import java.io.File
 object LaunchValidator {
     const val MAX_PATH_BYTES = 1000
     const val MAX_ARGS_CHARS = 200
-    const val MAX_LATENCY_MS = 500
     const val MIN_WIDTH = 320
     const val MAX_WIDTH = 7680
     const val MIN_HEIGHT = 240
@@ -34,8 +33,7 @@ object LaunchValidator {
         FILES,
         WRITABLE,
         RESOLUTION,
-        ARGS,
-        LATENCY
+        ARGS
     }
 
     fun validate(context: Context, settings: LaunchSettings): Result {
@@ -104,13 +102,6 @@ object LaunchValidator {
             return Result.Error(
                 Kind.ARGS,
                 context.getString(R.string.launch_error_args)
-            )
-        }
-
-        if (settings.audioLatencyMs !in 0..MAX_LATENCY_MS) {
-            return Result.Error(
-                Kind.LATENCY,
-                context.getString(R.string.launch_error_latency)
             )
         }
 

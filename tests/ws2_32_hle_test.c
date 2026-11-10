@@ -32,7 +32,7 @@
 #include <pthread.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "platform.h"
 #include "ws2_32_hle.h"
 

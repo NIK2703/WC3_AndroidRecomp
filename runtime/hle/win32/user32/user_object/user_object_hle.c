@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define WINDOW_STATION_HANDLE 0x00170000u
 #define DESKTOP_HANDLE 0x00170004u

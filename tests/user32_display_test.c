@@ -12,7 +12,7 @@
 
 #include "cpu.h"
 #include "display_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define MAX_ROWS 8u
 #define GUEST_BASE 0x20000u

@@ -1,8 +1,8 @@
 /*
- * legacy_shim_test.c - T0 contract test for the real H6.3 shim.
+ * hle_bridge_test.c - T0 contract test for the real H6.3 bridge.
  *
- * The memory/process/time module tests use fake shim functions.  This test
- * links the actual runtime/hle/legacy_shim.c against a fake legacy registry and
+ * The memory/process/time module tests use fake bridge functions.  This test
+ * links the actual runtime/hle/hle_bridge.c against a fake as-built registry and
  * a low-32-bit guest mapping, so the override matcher, argument reader, heap
  * header validation, and display/input forwarding are exercised as shipped.
  *
@@ -21,7 +21,7 @@
 #include "cpu.h"
 #include "hle_android.h"
 #include "hle_registry.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define GUEST_BASE 0x10000000u
 #define GUEST_SIZE 0x10000u
@@ -36,7 +36,7 @@ static uint32_t g_heap_end;
 
 static uint32_t g_last_thunk;
 static CPU *g_last_cpu;
-static const char *g_describe = "legacy-test";
+static const char *g_describe = "bridge-test";
 static uint32_t g_screen_w, g_screen_h;
 static int g_display_default;
 static uint32_t g_display_w, g_display_h;
@@ -320,7 +320,7 @@ int main(void)
     CHECK(wc3_legacy_hle_add("KERNEL32.dll", "TestD", 0x10000, 1, fn_a) == -1,
           "add oversized argc");
 
-    /* O-46: a row appended by the quarantine is not fast-bound, so release
+    /* O-46: a row appended by the as-built HLE is not fast-bound, so release
      * must call its as-built handler directly.  That handler deliberately
      * moves esp and clobbers every callee-saved field; the direct path has to
      * preserve hle_call()'s forced cleanup and register contract, not just
@@ -376,7 +376,7 @@ int main(void)
     CHECK(c.esp == 8u, "release direct legacy stack cleanup");
     CHECK(g_last_thunk == 0u, "release direct bypasses hle_call");
 #endif
-    CHECK(strcmp(wc3_legacy_hle_describe(0), "legacy-test") == 0,
+    CHECK(strcmp(wc3_legacy_hle_describe(0), "bridge-test") == 0,
           "hle_describe");
 
     /* O-08: an overridden slot goes through the clean fast bridge and never
@@ -471,7 +471,7 @@ int main(void)
     }
 
     if (map_guest() != 0) {
-        printf("legacy shim OK (registry only; no low guest mapping)\n");
+        printf("hle bridge OK (registry only; no low guest mapping)\n");
         return 0;
     }
 
@@ -509,7 +509,7 @@ int main(void)
     CHECK(wc3_legacy_guest_size(p) == 0u, "guest_free");
     CHECK(wc3_legacy_guest_size(0xFFFFFFFFu) == 0u, "guest_size invalid");
 
-    /* O-57: a row appended by the quarantine after the lookup index was built
+    /* O-57: a row appended by the as-built HLE after the lookup index was built
      * must be found on the next lookup, not only after a fresh process start. */
     HleEnt *direct = &g_hle[g_hle_count++];
     memset(direct, 0, sizeof *direct);
@@ -534,6 +534,6 @@ int main(void)
               "index override");
     }
 
-    printf("legacy shim OK (registry + guest memory)\n");
+    printf("hle bridge OK (registry + guest memory)\n");
     return 0;
 }

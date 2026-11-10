@@ -38,7 +38,7 @@ launcher entry. Long-press the game icon and choose **Launch settings** (or
 English and Russian.
 
 Launch settings can override the game directory, guest resolution, sound,
-extra `war3.exe` arguments, and the experimental AAudio latency. The default
+and extra `war3.exe` arguments. The default
 game directory is `/storage/emulated/0/Warcraft 3`. It can be typed, found
 automatically, or chosen with the system folder picker (SAF); the picker result
 must map to a real filesystem path because the native host reads the licensed
@@ -46,8 +46,8 @@ files with POSIX calls. Resolution is chosen by height from 360 px in 180 px
 steps up to the screen height, with the width derived from the display aspect
 ratio; the native entry keeps the current surface size. A selected path reaches
 the native picker through `WC3_GAME_DATA_DIR`, resolution maps to
-`WC3_DXVK_WIDTH`/`WC3_DXVK_HEIGHT`, sound-off to `-nosound` in `WC3_ARGS`, and
-latency to `WC3_AUDIO_LATENCY_MS`. Values are stored in the default process and
+`WC3_DXVK_WIDTH`/`WC3_DXVK_HEIGHT`, and sound-off to `-nosound` in `WC3_ARGS`.
+Values are stored in the default process and
 passed to both hosts through the launch intent, so the `:roc` process never
 reads another process's preferences.
 
@@ -150,6 +150,13 @@ after a resume. In-game options are persisted in the guest registry under
 The canonical Android build is driven by `tools/android/build_app.ps1`. It
 requires ccache: `WC3_USE_CCACHE=ON` and `WC3_REQUIRE_CCACHE=ON`, so a missing
 ccache is an error rather than a silent fallback.
+
+APKs are packaged by `tools/android/build_apk.ps1`:
+
+```powershell
+tools\android\build_apk.ps1                 # debug, wc3.recomp.debug
+tools\android\build_apk.ps1 -Release        # release, wc3.recomp
+```
 
 Host-side T0 checks are run with:
 

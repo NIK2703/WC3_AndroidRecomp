@@ -15,7 +15,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 static void h_malloc(CPU *c)
 {

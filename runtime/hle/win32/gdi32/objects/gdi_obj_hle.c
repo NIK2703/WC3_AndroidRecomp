@@ -17,7 +17,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define REGION_HANDLE_BASE 0x000F0000u
 #define REGION_HANDLE_STRIDE 4u

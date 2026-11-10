@@ -3,31 +3,18 @@
     <!-- Russian settings UI.  The project brand and the two game titles are
          product names and stay in values/strings.xml. -->
     <string name="launch_title">Настройки запуска</string>
-    <string name="launch_subtitle">Изменения применяются при следующем запуске игры.</string>
 
     <string name="launch_folder_label">Каталог игры</string>
-    <string name="launch_folder_help">Папка с war3.exe, game.dll и war3.mpq. Выберите её системным проводником или введите путь.</string>
     <string name="launch_folder_choose">Выбрать</string>
     <string name="launch_folder_find">Найти</string>
 
     <string name="launch_resolution_label">Разрешение</string>
-    <string name="launch_resolution_help">Высота — от 360 с шагом 180 до высоты экрана; ширина подбирается по соотношению сторон экрана.</string>
-    <string name="launch_resolution_native">Нативное — %1$d × %2$d</string>
 
     <string name="launch_sound_label">Звук</string>
 
     <string name="launch_args_label">Дополнительные аргументы</string>
 
-    <string name="launch_latency_label">Задержка звука</string>
-    <string name="launch_latency_help">0 — авто. Экспериментальное переопределение буфера AAudio, 0–500 мс.</string>
-
-    <string name="launch_done">Готово</string>
     <string name="launch_play">Играть</string>
-    <string name="launch_reset">Сбросить</string>
-    <string name="launch_cancel">Отмена</string>
-    <string name="launch_reset_title">Сбросить настройки запуска?</string>
-    <string name="launch_reset_message">Все параметры запуска вернутся к значениям по умолчанию.</string>
-    <string name="launch_reset_confirm">Сбросить</string>
     <string name="launch_grant">Разрешить</string>
 
     <string name="launch_status_ok">Готово: %1$s</string>
@@ -46,7 +33,6 @@
     <string name="launch_error_missing_files">Не хватает обязательных файлов: %1$s</string>
     <string name="launch_error_resolution">Разрешение должно быть 0 × 0 или оба значения в диапазоне 320–7680 × 240–4320.</string>
     <string name="launch_error_args">Аргументы: до 200 печатных ASCII-символов, без переносов строк.</string>
-    <string name="launch_error_latency">Задержка звука должна быть в диапазоне 0–500 мс.</string>
     <string name="launch_error_save">Не удалось сохранить настройки.</string>
 
     <string name="launch_toast_permission">Нет доступа к файлам. Долгое нажатие на иконку → «Настройки запуска».</string>

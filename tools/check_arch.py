@@ -84,7 +84,8 @@ PLATFORM_PREFIX = "runtime/platform/"
 # implicit lock zone.
 OWNED_DIAG_LOCK_FILES = ("runtime/diag/wc3_lock_trace.c",)
 
-FORBIDDEN_NET = ("NetApi", "Wc3NetApi")
+# NetApi is a required platform boundary (ADR-031): LAN is in scope and the
+# winsock HLE owns the guest-visible socket semantics.
 REQUIRED_APIS = (
     "Wc3MemApi",
     "Wc3FileApi",
@@ -98,6 +99,7 @@ REQUIRED_APIS = (
     "Wc3LogApi",
     "Wc3ConfigApi",
     "Wc3AssetApi",
+    "Wc3NetApi",
     "Wc3ThreadApi",
     "Wc3SyncApi",
     "Wc3VulkanDriverApi",
@@ -538,8 +540,6 @@ def _zone_of(key: str) -> str:
         return "hle"
     if key.startswith(PLATFORM_PREFIX):
         return "platform"
-    if key.startswith("runtime/legacy/"):
-        return "legacy"
     if any(key.startswith(prefix) for prefix in GUEST_ZONES):
         return "guest"
     if any(key.startswith(prefix) for prefix in LOCK_FREE_ZONES):
@@ -861,8 +861,8 @@ def check_concurrency() -> list[str]:
         body = strip_comments(path.read_text(encoding="utf-8", errors="replace"))
         guest_zone = any(key.startswith(prefix) for prefix in GUEST_ZONES)
         lock_free_zone = any(key.startswith(prefix) for prefix in LOCK_FREE_ZONES)
-        hle_zone = key.startswith(HLE_PREFIX) and not key.startswith(
-            "runtime/hle/abi/"
+        hle_zone = (
+            key.startswith(HLE_PREFIX) and not key.startswith("runtime/hle/abi/")
         )
         platform_zone = key.startswith(PLATFORM_PREFIX)
         owned_diag_lock = key in OWNED_DIAG_LOCK_FILES
@@ -873,7 +873,11 @@ def check_concurrency() -> list[str]:
                 errors.append(
                     f"{key}:{line}: host lock in guest/lock-free zone: {m.group(0)}"
                 )
-            elif not hle_zone and not platform_zone and not owned_diag_lock:
+            elif (
+                not hle_zone
+                and not platform_zone
+                and not owned_diag_lock
+            ):
                 line = body[: m.start()].count("\n") + 1
                 errors.append(f"{key}:{line}: unowned host lock: {m.group(0)}")
 
@@ -901,9 +905,6 @@ def check_platform_contract() -> list[str]:
     for api in REQUIRED_APIS:
         if api not in body:
             errors.append(f"platform.h: missing {api}")
-    for bad in FORBIDDEN_NET:
-        if bad in body:
-            errors.append(f"platform.h: forbidden {bad} (LAN is out of scope)")
     if "wc3_platform_install" not in body or "wc3_platform" not in body:
         errors.append("platform.h: missing platform installation contract")
     if "guest" not in text.lower():
@@ -914,11 +915,6 @@ def check_platform_contract() -> list[str]:
 def check_release() -> list[str]:
     errors: list[str] = []
     for path in source_files():
-        # runtime/legacy/ is read-only quarantine (R15); its M5 replacement is
-        # checked when the file moves into the target tree.  Failing here would
-        # force edits to the quarantined copy, which H6.3 forbids.
-        if rel(path).startswith("runtime/legacy/"):
-            continue
         body = path.read_text(encoding="utf-8", errors="replace")
         if "#ifdef WC3_DEBUG" in body:
             errors.append(f"{rel(path)}: use #if WC3_DEBUG, not #ifdef")

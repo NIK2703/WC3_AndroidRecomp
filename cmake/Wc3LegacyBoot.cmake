@@ -1,11 +1,10 @@
-# Transitional first-run link: lifted corpus + quarantined as-built HLE.
+# Transitional first-run link: lifted corpus + as-built HLE.
 #
-# The lifted C objects and the as-built HLE still live in the read-only legacy
-# tree while the corpus is re-lifted into this tree.  They are consumed as
-# pinned inputs, not as build scripts.  Target code reaches the quarantine only
-# through runtime/hle/legacy_shim (R15/H6.3).
+# The lifted C objects and the as-built Android HLE are normal target inputs.
+# They are consumed as pinned sources, not as build scripts.  Target modules
+# share the registry through runtime/hle/hle_bridge.
 #
-# Set WC3_WITH_LEGACY_BOOT=OFF for configurations that only build platform
+# Set WC3_WITH_ASBUILT_HLE=OFF for configurations that only build platform
 # targets; the product path in this milestone needs the corpus.
 
 if(NOT DEFINED WC3_FLAGS_FAST_PF_AF_DEFINE)
@@ -163,7 +162,7 @@ add_custom_command(
 add_custom_target(wc3_boot_dispatch_gen
     DEPENDS "${WC3_BOOT_DISPATCH_LIST}" "${WC3_BOOT_DISPATCH_HASH}")
 
-# --- target-side boot code (no quarantine headers) ------------------------
+# --- target-side boot code ------------------------------------------------
 add_library(wc3_boot STATIC
     "${WC3_ROOT}/runtime/boot/app_boot.c"
     "${WC3_ROOT}/runtime/boot/dispatch_boot.c"
@@ -229,36 +228,66 @@ target_compile_options(wc3_boot PRIVATE
     -Wno-sign-compare)
 set_target_properties(wc3_boot PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# --- the one allowed door into runtime/legacy -----------------------------
-add_library(wc3_legacy_shim STATIC
-    "${WC3_ROOT}/runtime/hle/legacy_shim.c"
+# --- registry bridge shared by target HLE modules --------------------------
+add_library(wc3_hle_bridge STATIC
+    "${WC3_ROOT}/runtime/hle/hle_bridge.c"
     "${WC3_ROOT}/runtime/hle/abi/hle_abi.c")
-target_include_directories(wc3_legacy_shim PRIVATE
+target_include_directories(wc3_hle_bridge PRIVATE
     "${WC3_ROOT}/runtime/hle"
     "${WC3_ROOT}/runtime/hle/abi"
-    "${WC3_ROOT}/runtime/legacy"
+    "${WC3_ROOT}/runtime/hle/android"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/runtime/platform"
     "${WC3_ROOT}/third_party/softfloat/source/include"
     "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
-target_compile_definitions(wc3_legacy_shim PRIVATE
+target_compile_definitions(wc3_hle_bridge PRIVATE
     SOFTFLOAT_FAST_INT64
     LITTLEENDIAN
     THREAD_LOCAL=_Thread_local)
-target_compile_options(wc3_legacy_shim PRIVATE
+target_compile_options(wc3_hle_bridge PRIVATE
     -fno-strict-aliasing
     -fwrapv
     -ffp-contract=off
     -Wno-unused-parameter
     -U_FORTIFY_SOURCE
     -D_FORTIFY_SOURCE=0)
-set_target_properties(wc3_legacy_shim PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(wc3_hle_bridge PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# --- optional W3L/PvPGN/rubattle compat helpers ----------------------------
+# Not HLE and not part of the exact baseline: this library exists only when
+# WC3_W3L_COMPAT=ON, and the generated corpus calls it through the LiftPass.
+if(WC3_W3L_COMPAT)
+    add_library(wc3_compat STATIC
+        "${WC3_ROOT}/runtime/compat/w3l_compat.c")
+    target_include_directories(wc3_compat PRIVATE
+        "${WC3_ROOT}/runtime/compat"
+        "${WC3_ROOT}/runtime/cpu"
+        "${WC3_ROOT}/runtime/guest"
+        "${WC3_ROOT}/third_party/softfloat/source/include"
+        "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
+    target_compile_definitions(wc3_compat PRIVATE
+        SOFTFLOAT_FAST_INT64
+        LITTLEENDIAN
+        THREAD_LOCAL=_Thread_local
+        GVA_DELTA=0
+        WC3_W3L_LATENCY=${WC3_W3L_LATENCY}
+        WC3_DEBUG=${WC3_DEBUG_DEFINE})
+    target_compile_options(wc3_compat PRIVATE
+        -fno-strict-aliasing
+        -fwrapv
+        -ffp-contract=off
+        -Wno-unused-parameter
+        -Wno-sign-compare
+        -U_FORTIFY_SOURCE
+        -D_FORTIFY_SOURCE=0)
+    set_target_properties(wc3_compat PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # --- target HLE modules (M5 migration, H6.2 order) -------------------------
-# Each module is a normal target translation unit: no legacy headers, OS
-# services only through Wc3Platform, and registration over the as-built table
-# through the shim.  The quarantine file itself is never edited.
+# Each module is a normal target translation unit: no as-built headers, OS
+# services only through Wc3Platform, and registration over the shared table
+# through the bridge.
 add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/msvcr80/convert/convert_hle.c"
     "${WC3_ROOT}/runtime/hle/msvcr80/crt/crt_hle.c"
@@ -292,16 +321,15 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/user32/user_object/user_object_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/window/window_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts/window_facts_hle.c"
-    "${WC3_ROOT}/runtime/hle/win32/winmm/winmm_fast_bind.c"
-    "${WC3_ROOT}/runtime/hle/win32/winmm/waveout_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/winmm/mss_timer_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/winmm/winmm_guard_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/dsound/dsound_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/ws2_32/ws2_32_hle.c")
 
-# S-2/S-3 (owner decision 2026-11-09): the new WINMM pull slice is PRODUCT
-# code and is compiled in every variant, including release.  O-91's debug-only
-# isolation is intentionally lifted; wave2_v2_off remains the instant runtime
-# rollback to the as-built legacy WINMM path.  All diagnostics in the slice
-# are WC3_DEBUG-gated so release hygiene stays clean.
+# nfsu2 audio architecture: DirectSound is the only transport.  mss_timer_hle
+# keeps Mss32's USER32 mixer timer alive; winmm_guard_hle makes the frozen
+# waveOut imports explicit no-driver rows; the as-built waveOut sink is gone.
+# All diagnostics in these slices are WC3_DEBUG-gated.
 
 target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle"
@@ -354,29 +382,33 @@ target_compile_definitions(wc3_hle_modules PRIVATE
 if(WC3_DEBUG)
     target_compile_definitions(wc3_hle_modules PRIVATE WC3_DEBUG=1)
 endif()
+if(WC3_W3L_COMPAT AND WC3_W3L_PROFILE STREQUAL "rubattle")
+    target_compile_definitions(wc3_hle_modules PRIVATE
+        WC3_W3L_GATEWAY_RUBATTLE=1)
+endif()
 target_compile_options(wc3_hle_modules PRIVATE
     -fno-strict-aliasing
     -fwrapv
     -ffp-contract=off
     -Wno-unused-parameter
     -Wno-sign-compare)
-target_link_libraries(wc3_hle_modules PUBLIC wc3_legacy_shim wc3_platform)
+target_link_libraries(wc3_hle_modules PUBLIC wc3_hle_bridge wc3_platform)
 set_target_properties(wc3_hle_modules PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# --- quarantined as-built sources (read-only inputs) ----------------------
-add_library(wc3_legacy_boot STATIC
-    "${WC3_ROOT}/runtime/legacy/boot_probe.c"
-    "${WC3_ROOT}/runtime/legacy/hle_android.c"
-    "${WC3_ROOT}/runtime/legacy/pe32.c"
-    "${WC3_ROOT}/runtime/legacy/guest_mem.c"
-    "${WC3_ROOT}/runtime/legacy/hle_widescreen127.c")
-target_include_directories(wc3_legacy_boot PRIVATE
-    "${WC3_ROOT}/runtime/legacy"
+# --- as-built Android HLE (normal target inputs) --------------------------
+add_library(wc3_hle_android STATIC
+    "${WC3_ROOT}/runtime/hle/android/boot_probe.c"
+    "${WC3_ROOT}/runtime/hle/android/hle_android.c"
+    "${WC3_ROOT}/runtime/hle/android/pe32.c"
+    "${WC3_ROOT}/runtime/hle/android/guest_mem.c"
+    "${WC3_ROOT}/runtime/hle/android/hle_widescreen127.c")
+target_include_directories(wc3_hle_android PRIVATE
+    "${WC3_ROOT}/runtime/hle/android"
     "${WC3_ROOT}/runtime/diag"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/third_party/softfloat/source/include"
     "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
-target_compile_definitions(wc3_legacy_boot PRIVATE
+target_compile_definitions(wc3_hle_android PRIVATE
     SOFTFLOAT_FAST_INT64
     LITTLEENDIAN
     THREAD_LOCAL=_Thread_local
@@ -384,9 +416,9 @@ target_compile_definitions(wc3_legacy_boot PRIVATE
     WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
     WC3_NO_MAIN=1)
 if(WC3_DEBUG)
-    target_compile_definitions(wc3_legacy_boot PRIVATE WC3_DEBUG=1)
+    target_compile_definitions(wc3_hle_android PRIVATE WC3_DEBUG=1)
 endif()
-target_compile_options(wc3_legacy_boot PRIVATE
+target_compile_options(wc3_hle_android PRIVATE
     -fno-strict-aliasing
     -fwrapv
     -ffp-contract=off
@@ -394,7 +426,7 @@ target_compile_options(wc3_legacy_boot PRIVATE
     -Wno-sign-compare
     -U_FORTIFY_SOURCE
     -D_FORTIFY_SOURCE=0)
-set_target_properties(wc3_legacy_boot PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(wc3_hle_android PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # --- DXVK entry point ------------------------------------------------------
 # Rebuilt from source rather than inherited from the legacy tree so the
@@ -409,7 +441,7 @@ target_include_directories(wc3_dxvk_entry PRIVATE
     "${WC3_LEGACY_ROOT}/build27"
     "${WC3_LEGACY_ROOT}/runtime/android"
     "${WC3_ROOT}/runtime/cpu"
-    "${WC3_ROOT}/runtime/legacy"
+    "${WC3_ROOT}/runtime/hle/android"
     "${WC3_ROOT}/third_party/softfloat/source/include"
     "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
 target_compile_features(wc3_dxvk_entry PRIVATE cxx_std_17)
@@ -473,9 +505,9 @@ target_sources(wc3gameactivity PRIVATE
 target_link_libraries(wc3gameactivity PRIVATE
     wc3_boot
     wc3_hle_modules
-    wc3_legacy_shim
+    wc3_hle_bridge
     wc3_guest
-    wc3_legacy_boot
+    wc3_hle_android
     ${WC3_CORPUS_LIBS}
     wc3_dxvk_entry
     wc3_softfloat
@@ -490,6 +522,11 @@ target_link_libraries(wc3gameactivity PRIVATE
     dl
     m)
 
+if(WC3_W3L_COMPAT)
+    # Static link order: after the corpus that references wc3_w3l_*.
+    target_link_libraries(wc3gameactivity PRIVATE wc3_compat)
+endif()
+
 # The widescreen wrapper is linked with --wrap so neither the generated
 # dispatcher nor the generated corpus is edited for the two RenderEdge hooks.
 target_link_options(wc3gameactivity PRIVATE
@@ -498,4 +535,4 @@ target_link_options(wc3gameactivity PRIVATE
     -Wl,--wrap=wc3_vulkan_major_minor
     -nostdlib++)
 
-target_compile_definitions(wc3gameactivity PRIVATE WC3_WITH_LEGACY_BOOT=1)
+target_compile_definitions(wc3gameactivity PRIVATE WC3_WITH_ASBUILT_HLE=1)

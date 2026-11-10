@@ -12,7 +12,7 @@
 
 #include "cpu.h"
 #include "heap_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define GUEST_BASE 0x10000000u
 #define ARENA_SIZE 4096u

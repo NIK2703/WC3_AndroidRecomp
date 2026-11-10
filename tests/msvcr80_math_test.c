@@ -8,7 +8,7 @@
  *
  * The fake shim records the row names and supplies the cdecl argument words.
  * Expected values are exact where possible; transcendental cases use the same
- * host libm the quarantine used, so the test pins ABI and argument order rather
+ * host libm the as-built HLE used, so the test pins ABI and argument order rather
  * than claiming Windows CRT bit identity.
  */
 #include <math.h>
@@ -18,7 +18,7 @@
 
 #include "cpu.h"
 #include "math_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define MAX_ROWS 64u
 #define EXPECTED_ROWS 36u

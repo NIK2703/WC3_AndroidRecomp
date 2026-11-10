@@ -53,7 +53,7 @@ public class Wc3GameActivity extends GameActivity {
 
     private static native void nativeApplyLaunchSettings(
             String gameDir, int width, int height, boolean sound,
-            String extraArgs, int audioLatencyMs);
+            String extraArgs);
 
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
@@ -111,8 +111,7 @@ public class Wc3GameActivity extends GameActivity {
                 settings.getInt(LaunchContract.KEY_WIDTH, 0),
                 settings.getInt(LaunchContract.KEY_HEIGHT, 0),
                 settings.getBoolean(LaunchContract.KEY_SOUND, true),
-                settings.getString(LaunchContract.KEY_EXTRA_ARGS),
-                settings.getInt(LaunchContract.KEY_AUDIO_LATENCY_MS, 0));
+                settings.getString(LaunchContract.KEY_EXTRA_ARGS));
     }
 
     @Override

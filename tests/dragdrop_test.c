@@ -7,7 +7,7 @@
 
 #include "cpu.h"
 #include "dragdrop_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define MAX_ROWS 8u
 

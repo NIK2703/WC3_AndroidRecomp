@@ -36,7 +36,7 @@
 #include "input_adapter.h"
 #include "input_ring.h"
 #include "input_wake.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "overlay.h"
 #include "overlay_android.h"
 #include "overlay_canvas.h"
@@ -46,7 +46,7 @@
 #include "wc3_debug.h"
 #include "window_settle.h"
 
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
 #include "overlay_actions_legacy.h"
 #endif
 
@@ -54,8 +54,8 @@
 #define WC3_DEBUG 0
 #endif
 
-#ifndef WC3_WITH_LEGACY_BOOT
-#define WC3_WITH_LEGACY_BOOT 0
+#ifndef WC3_WITH_ASBUILT_HLE
+#define WC3_WITH_ASBUILT_HLE 0
 #endif
 
 #if WC3_DEBUG
@@ -936,7 +936,7 @@ static int has_arg_token(const char *args, const char *token)
 JNIEXPORT void JNICALL
 Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     JNIEnv *env, jclass clazz, jstring game_dir, jint width, jint height,
-    jboolean sound, jstring extra_args, jint audio_latency_ms)
+    jboolean sound, jstring extra_args)
 {
     (void)clazz;
     const char *dir = NULL;
@@ -982,16 +982,6 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
         setenv("WC3_ARGS", args, 1);
     else
         unsetenv("WC3_ARGS");
-
-    if (audio_latency_ms > 0 && audio_latency_ms <= 500) {
-        char value[16];
-        snprintf(value, sizeof value, "%d", (int)audio_latency_ms);
-        setenv("WC3_AUDIO_LATENCY_MS", value, 1);
-    } else {
-        /* The settings bundle owns this key.  Explicit 0 also masks a
-         * diagnostic wc3.cfg value, so "auto" really means auto. */
-        setenv("WC3_AUDIO_LATENCY_MS", "0", 1);
-    }
 
     if (dir)
         (*env)->ReleaseStringUTFChars(env, game_dir, dir);
@@ -1271,7 +1261,7 @@ static int overlay_input_start(int width, int height)
         return -1;
     }
 
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
     overlay_actions_init(width, height);
     overlay_actions_set_haptic_sink(host_haptic_sink, NULL);
     controls_set_action_sink(overlay_actions_handle, NULL);
@@ -1283,7 +1273,7 @@ static int overlay_input_start(int width, int height)
         OVERLAY_LOGE("controls init failed: %s", controls_last_error());
         free(profile);
         controls_set_action_sink(NULL, NULL);
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
         overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
         return -1;
@@ -1298,11 +1288,11 @@ static int overlay_input_start(int width, int height)
     if (!g_input_wake) {
         OVERLAY_LOGE("cannot create the controls wake primitive");
         controls_cancel_all();
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
         overlay_actions_release_all();
 #endif
         controls_set_action_sink(NULL, NULL);
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
         overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
         input_ring_destroy(&g_touch_ring);
@@ -1318,11 +1308,11 @@ static int overlay_input_start(int width, int height)
     if (pthread_create(&g_input_thread, NULL, input_thread_main, NULL) != 0) {
         OVERLAY_LOGE("cannot start the controls input thread");
         controls_cancel_all();
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
         overlay_actions_release_all();
 #endif
         controls_set_action_sink(NULL, NULL);
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
         overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
         input_wake_destroy(g_input_wake);
@@ -1352,11 +1342,11 @@ static void overlay_input_stop(void)
     }
 
     controls_cancel_all();
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
     overlay_actions_release_all();
 #endif
     controls_set_action_sink(NULL, NULL);
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
     overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
     if (g_input_wake) {
@@ -1468,7 +1458,7 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
 #endif
             LOGI("window %ux%u", width, height);
             overlay_input_start((int)width, (int)height);
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
             if (!g_boot_started && g_data_dir[0]) {
                 g_boot_started = 1;
                 if (pthread_create(&g_boot_thread, NULL, boot_thread, NULL) != 0) {
@@ -1612,7 +1602,7 @@ static void push_pointer(uint32_t kind, const GameActivityPointerAxes *pointer,
     event.time_ns = time_ns;
     push_input(&event);
 
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
     /* The game only consumes one virtual cursor.  The touch fraction of the
      * physical surface is the same fraction of DXVK's scaled client image, so
      * no display-mode conversion is needed here. */
@@ -1802,7 +1792,7 @@ static void inspect_assets(void)
     }
 }
 
-#if !WC3_WITH_LEGACY_BOOT
+#if !WC3_WITH_ASBUILT_HLE
 static int load_image(const char *dir, const char *name, uint32_t base)
 {
     char path[1024];
@@ -1896,7 +1886,7 @@ void android_main(struct android_app *app)
      * guest threads exist so the shim fast path needs no lazy init race. */
     wc3_guest_static_init();
 
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
     /* The boot path owns the fixed guest mappings and maps the PE images at
      * the exact bases the lifted corpus was generated for.  Do not initialize
      * the new guest-memory manager here: two owners of [0, 4 GiB) would make
@@ -1936,19 +1926,19 @@ void android_main(struct android_app *app)
         }
 
         const char *memory_state =
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
             "boot-owned";
 #else
             g_guest_ready ? "ready" : "failed";
 #endif
         const char *corpus_state =
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
             "linked";
 #else
             "missing";
 #endif
         const char *game_state =
-#if WC3_WITH_LEGACY_BOOT
+#if WC3_WITH_ASBUILT_HLE
             (g_war3_mapped && g_game_mapped) ? "starting on window"
                                              : "waiting for assets";
 #else

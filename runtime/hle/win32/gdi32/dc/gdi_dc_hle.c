@@ -25,7 +25,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define GDI_CLR_INVALID 0xFFFFFFFFu
 #define GDI_ERROR 0xFFFFFFFFu

@@ -10,18 +10,31 @@
     android:paddingEnd="24dp"
     android:paddingBottom="16dp">
 
-    <TextView
-        style="@style/Wc3Title"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="@string/launch_title" />
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
 
-    <TextView
-        style="@style/Wc3Helper"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="@string/launch_subtitle" />
+        <TextView
+            style="@style/Wc3Title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/launch_title" />
+
+        <Button
+            android:id="@+id/play_button"
+            style="@style/Wc3ButtonPrimary"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginStart="16dp"
+            android:drawableStart="@drawable/ic_play"
+            android:drawablePadding="8dp"
+            android:drawableTint="@color/button_primary_text"
+            android:enabled="false"
+            android:text="@string/launch_play" />
+    </LinearLayout>
 
     <LinearLayout
         android:id="@+id/error_banner"
@@ -75,13 +88,6 @@
                 android:layout_height="wrap_content"
                 android:text="@string/launch_folder_label" />
 
-            <TextView
-                style="@style/Wc3Helper"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="@string/launch_folder_help" />
-
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -96,7 +102,6 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:hint="@string/launch_folder_hint"
                     android:importantForAutofill="no"
                     android:inputType="textNoSuggestions"
                     android:maxLength="1000"
@@ -139,13 +144,6 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="20dp"
                 android:text="@string/launch_resolution_label" />
-
-            <TextView
-                style="@style/Wc3Helper"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="@string/launch_resolution_help" />
 
             <FrameLayout
                 android:layout_width="match_parent"
@@ -208,83 +206,10 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:hint="@string/launch_args_hint"
                 android:importantForAutofill="no"
                 android:inputType="textNoSuggestions"
                 android:maxLength="200"
                 android:saveEnabled="false" />
-
-            <TextView
-                style="@style/Wc3RowLabel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:text="@string/launch_latency_label" />
-
-            <TextView
-                style="@style/Wc3Helper"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="@string/launch_latency_help" />
-
-            <EditText
-                android:id="@+id/latency_input"
-                style="@style/Wc3Field"
-                android:layout_width="120dp"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:gravity="center"
-                android:hint="@string/launch_latency_hint"
-                android:importantForAutofill="no"
-                android:inputType="number"
-                android:maxLength="3"
-                android:saveEnabled="false" />
         </LinearLayout>
     </ScrollView>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingTop="12dp">
-
-        <Button
-            android:id="@+id/reset_button"
-            style="?android:attr/borderlessButtonStyle"
-            android:layout_width="wrap_content"
-            android:layout_height="48dp"
-            android:minWidth="0dp"
-            android:paddingStart="8dp"
-            android:paddingEnd="8dp"
-            android:text="@string/launch_reset"
-            android:textAllCaps="false"
-            android:textColor="@color/launch_muted"
-            android:textSize="12sp" />
-
-        <Space
-            android:layout_width="0dp"
-            android:layout_height="1dp"
-            android:layout_weight="1" />
-
-        <Button
-            android:id="@+id/done_button"
-            style="@style/Wc3ButtonGhost"
-            android:layout_width="wrap_content"
-            android:layout_height="48dp"
-            android:text="@string/launch_done" />
-
-        <Button
-            android:id="@+id/play_button"
-            style="@style/Wc3ButtonPrimary"
-            android:layout_width="wrap_content"
-            android:layout_height="48dp"
-            android:layout_marginStart="8dp"
-            android:drawableStart="@drawable/ic_play"
-            android:drawablePadding="8dp"
-            android:drawableTint="@color/button_primary_text"
-            android:enabled="false"
-            android:text="@string/launch_play" />
-    </LinearLayout>
 </LinearLayout>

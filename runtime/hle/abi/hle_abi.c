@@ -174,8 +174,8 @@ static uint32_t hle_abi_call_entry(HleEntry *e, uint32_t thunk, CPU *c)
 
     /* Win32 callee-saved registers are part of the guest ABI: every target
      * handler must leave ebx/esi/edi/ebp unchanged.  A source audit of all
-     * target HLE handlers found exactly one writer, waveout_hle.c's
-     * w2_invoke(), and it saves/restores the four fields itself around its
+     * target HLE handlers found exactly one writer, mss_timer_hle.c's
+     * mss_invoke(), and it saves/restores the four fields itself around its
      * guest callback.  The bridge deliberately does not save or restore them:
      * that would hide a handler which violates the ABI and add four loads and
      * stores to every HLE call. */

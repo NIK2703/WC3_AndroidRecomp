@@ -12,7 +12,7 @@
  * WC3_RELIFTED_CORPUS_ROOT is set.  An unknown target is fatal instead of a
  * fabricated return value.
  */
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "direct_call.h"
 #include "convert_hle.h"
 #include "crt_hle.h"
@@ -47,11 +47,9 @@
 #include "user_object_hle.h"
 #include "window_facts_hle.h"
 #include "window_hle.h"
-#include "winmm_fast_bind.h"
+#include "mss_timer_hle.h"
+#include "winmm_guard_hle.h"
 #include "ws2_32_hle.h"
-
-/* S-2/S-3: the WINMM pull slice is product code in every variant. */
-#include "waveout_hle.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,6 +60,12 @@
 /* Temporary hang watchdog hook; see wc3_watch_dispatch() in hle_android.c. */
 void wc3_watch_dispatch(CPU *c, uint32_t target);
 #include "wc3_lock_trace.h"
+#endif
+
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+/* Exact-address Battle.net probes.  Keep this separate from the HLE hang
+ * watchdog: the dispatcher must call it even when WC3_DEBUG_HLE is off. */
+void wc3_battle_net_dispatch(CPU *c, uint32_t target);
 #endif
 
 #define X(a) void L_##a(CPU *c);
@@ -89,11 +93,11 @@ void wc3_dispatch_init(void)
 {
     /* M5 order H6.2: the first target HLE module replaces its as-built rows
      * before the dispatcher becomes visible to the guest.  A missing row is a
-     * startup configuration error, not a fallback to the quarantined handler.
+     * startup configuration error, not a fallback to the as-built handler.
      * The CRT heap subset is installed here because it shares the guest heap;
      * the math slice owns the x87/SSE2 return conventions, and the time slice
-     * reads both clocks through Wc3TimeApi.  The rest of msvcr80 remains
-     * quarantined for its later H6.2 step. */
+     * reads both clocks through Wc3TimeApi.  The rest of msvcr80 remains in
+     * the as-built HLE for its later H6.2 step. */
 #if WC3_DEBUG && WC3_DEBUG_HLE
 #define WC3_INSTALL_STEP(fn) do { \
         int _r = (fn); \
@@ -138,22 +142,19 @@ void wc3_dispatch_init(void)
     WC3_INSTALL_STEP(msvcr80_convert_install());
     WC3_INSTALL_STEP(wc3_hle_msvcr80_time_install());
     WC3_INSTALL_STEP(wc3_hle_ws2_32_install());
-    /* Product fast registry binds the 11 as-built WINMM rows first. */
-    WC3_INSTALL_STEP(wc3_hle_winmm_fast_bind_rows());
-    /* S-2/S-3: the new WINMM pull slice chains on top in EVERY variant.
-     * Installed last so the pump chains sit above the already-installed
-     * USER32 handlers.  wave2_v2_off disables the overrides at runtime. */
-    WC3_INSTALL_STEP(wc3_hle_winmm_waveout_install());
+    /* Mss32's 50 ms mixer timer is USER32 SetTimer, not waveOut.  This owns
+     * only the timer/message/wait seam; it produces no PCM. */
+    WC3_INSTALL_STEP(wc3_hle_mss_timer_install());
+    /* The frozen corpus still imports the eleven WINMM waveOut entry points.
+     * Bind them to the explicit no-driver guard so no waveOut sink can be
+     * selected.  There is no rollback trigger. */
+    WC3_INSTALL_STEP(wc3_hle_winmm_guard_install());
+    /* ADR-034 / nfsu2 DirectSound product path: the COM contract and the
+     * synthetic DSOUND.DLL loader chain are installed in EVERY build.  Mss32
+     * reaches these rows through KERNEL32!LoadLibraryA/GetProcAddress, so no
+     * corpus re-lift is required. */
+    WC3_INSTALL_STEP(wc3_hle_dsound_install());
 #undef WC3_INSTALL_STEP
-
-    /* ADR-034: the full DirectSound COM guest contract is installed in EVERY
-     * build, not behind a trigger.  wc3_legacy_hle_add() only APPENDS rows at
-     * g_hle_count, so the 11 frozen as-built WINMM fast-bind slots and the
-     * generated import slot indices keep their positions; the appended dsound
-     * rows are simply unused until the corpus is re-lifted (G-14/G-15).  A
-     * registration failure must not abort boot of the current corpus, hence
-     * the plain call instead of WC3_INSTALL_STEP. */
-    (void)wc3_hle_dsound_install();
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
     /* Ownership tracing for the registry lock: a frozen guest can show its
@@ -228,6 +229,9 @@ static void dispatch_common(CPU *c, uint32_t target, int tail,
             pending_fn = NULL;
             fn(c);
         } else {
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+            wc3_battle_net_dispatch(c, target);
+#endif
 #if WC3_DEBUG && WC3_DEBUG_HLE
             wc3_watch_dispatch(c, target);
 #endif

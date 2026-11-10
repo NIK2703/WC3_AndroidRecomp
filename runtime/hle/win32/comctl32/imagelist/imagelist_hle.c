@@ -28,7 +28,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define IMAGE_LIST_TABLE_SIZE 64u
 #define IMAGE_LIST_HANDLE_BASE 0x000B0000u

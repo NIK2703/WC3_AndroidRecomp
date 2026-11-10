@@ -29,14 +29,13 @@ DEFAULT_RELEASE = ROOT / "build" / "android_app" / "release" / "cmake" / \
 DEFAULT_DEBUG = ROOT / "build" / "android_app" / "debug" / "cmake" / \
     "libwc3gameactivity.so"
 
-# Diagnostics that must not survive into a release APK.  Since S-2/S-3 the
-# WINMM pull slice ships in release, but every stderr site in it is
+# Diagnostics that must not survive into a release APK.  The Mss32 timer and
+# DirectSound guard are product code, but every stderr site in them is
 # WC3_DEBUG-gated, so these strings remain debug-only binary markers.
 DEBUG_ONLY_MARKERS = (
     "unknown guest target",
-    "[wave2] disabled: as-built WINMM rollback",
-    "[wave2] USER32 rows missing",
-    "[wave2] missing WINMM row",
+    "[mss] USER32/KERNEL32 timer or pump row missing",
+    "[mss] installed USER32 timer",
     "[dispatch]",
 )
 
@@ -48,10 +47,10 @@ PRODUCT_MARKERS = ()
 
 # O-72 site-level companion to the marker scan.  These are the only ungated
 # stderr sites in the product tree that are product errors rather than
-# diagnostics.  Everything else must be inside a WC3_DEBUG guard; legacy and
-# vendor sources are counted separately because they are read-only (R15).
-# S-2/S-3: waveout_hle.c now ships in release and has no ungated stderr,
-# so it still needs no site-level exception.
+# diagnostics.  Everything else must be inside a WC3_DEBUG guard; as-built
+# Android HLE is counted separately while its M5 split is in progress.
+# The Mss32 timer and WINMM guard ship in release and have no ungated
+# stderr, so they need no site-level exception.
 SOURCE_EXCEPTIONS = ()
 SOURCE_SUFFIXES = (".c", ".h", ".cc", ".cpp", ".hpp")
 SOURCE_ROOTS = (ROOT / "runtime", ROOT / "apps")
@@ -61,11 +60,11 @@ SOURCE_NON_PRODUCT_PREFIXES = (
 )
 SOURCE_DEBUG_ONLY_PREFIXES = (
     "runtime/diag/",
-    # S-2/S-3: waveout_hle.c is now product code in every variant and is
-    # audited like any other HLE source.  Its stderr sites are WC3_DEBUG-gated.
+    # The Mss32 timer and WINMM guard are product code in every variant and
+    # are audited like any other HLE source.  Their stderr sites are gated.
 )
-SOURCE_READ_ONLY_PREFIXES = (
-    "runtime/legacy/",
+SOURCE_ASBUILT_PREFIXES = (
+    "runtime/hle/android/",
 )
 
 
@@ -240,7 +239,7 @@ def source_audit(
         "debug-gated": 0,
         "product-error": 0,
         "debug-only-file": 0,
-        "read-only-legacy": 0,
+        "as-built": 0,
         "ungated": 0,
     }
     files = _source_files(root)
@@ -254,9 +253,9 @@ def source_audit(
             if not site_re.search(line):
                 continue
             source_line = original[index] if index < len(original) else ""
-            if relpath.startswith(SOURCE_READ_ONLY_PREFIXES):
-                kind = "read-only-legacy"
-                reason = "runtime/legacy is read-only (R15/M5)"
+            if relpath.startswith(SOURCE_ASBUILT_PREFIXES):
+                kind = "as-built"
+                reason = "as-built Android HLE, M5 split pending"
             elif relpath.startswith(SOURCE_NON_PRODUCT_PREFIXES):
                 continue
             elif relpath.startswith(SOURCE_DEBUG_ONLY_PREFIXES):
@@ -298,7 +297,7 @@ def print_source_report(report: dict[str, object]) -> None:
         "debug-gated",
         "product-error",
         "debug-only-file",
-        "read-only-legacy",
+        "as-built",
         "ungated",
     ):
         print(f"  {kind:18s} {counts[kind]}")  # type: ignore[index]
@@ -436,21 +435,21 @@ def run_self_test() -> int:
             "fprintf(stderr, \"PRODUCT failure\");\n",
             encoding="utf-8",
         )
-        legacy = root / "runtime" / "legacy" / "old.c"
-        legacy.parent.mkdir(parents=True)
-        legacy.write_text("fprintf(stderr, \"legacy\");\n", encoding="utf-8")
+        asbuilt = root / "runtime" / "hle" / "android" / "old.c"
+        asbuilt.parent.mkdir(parents=True)
+        asbuilt.write_text("fprintf(stderr, \"as-built\");\n", encoding="utf-8")
         debug_only = root / "runtime" / "diag" / "probe.c"
         debug_only.parent.mkdir(parents=True)
         debug_only.write_text("fprintf(stderr, \"diag\");\n",
                               encoding="utf-8")
-        # S-2/S-3: the WINMM pull slice ships in release, so its stderr must
-        # be debug-gated rather than excused as a debug-only file.
-        pull_slice = root / "runtime" / "hle" / "win32" / "winmm" / \
-            "waveout_hle.c"
-        pull_slice.parent.mkdir(parents=True)
-        pull_slice.write_text(
+        # The Mss32 timer ships in release, so its stderr must be
+        # debug-gated rather than excused as a debug-only file.
+        timer_slice = root / "runtime" / "hle" / "win32" / "winmm" / \
+            "mss_timer_hle.c"
+        timer_slice.parent.mkdir(parents=True)
+        timer_slice.write_text(
             "#if WC3_DEBUG && WC3_DEBUG_AUDIO\n"
-            "fprintf(stderr, \"[wave2] diagnostic\");\n"
+            "fprintf(stderr, \"[mss] diagnostic\");\n"
             "#endif\n",
             encoding="utf-8",
         )
@@ -461,7 +460,7 @@ def run_self_test() -> int:
             source_report["errors"]
             or counts["debug-gated"] != 2
             or counts["product-error"] != 1
-            or counts["read-only-legacy"] != 1
+            or counts["as-built"] != 1
             or counts["debug-only-file"] != 1
         ):
             print("release source self-test: false failure")

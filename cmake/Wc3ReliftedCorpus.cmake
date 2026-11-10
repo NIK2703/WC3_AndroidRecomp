@@ -50,7 +50,18 @@ endif()
 
 set(WC3_RELIFTED_SOURCES)
 set(_wc3_check_commands)
+set(_wc3_compat_jsons)
 math(EXPR _wc3_last_mod "${_wc3_nmod} - 1")
+
+if(WC3_W3L_COMPAT)
+    set(WC3_W3L_PASS "${WC3_ROOT}/tools/lift/passes/w3l_compat.py")
+    if(NOT EXISTS "${WC3_W3L_PASS}")
+        message(FATAL_ERROR
+            "W3L compat LiftPass missing: ${WC3_W3L_PASS}")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${WC3_W3L_PASS}")
+endif()
 
 # V5.9: a stale lift tool used to drop the atomic lowering while the corpus
 # still looked structurally valid.  Check the generated source before the split
@@ -213,6 +224,45 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             endforeach()
             set(_chunks "${_dead_chunks}")
         endif()
+        if(WC3_W3L_COMPAT)
+            # The W3L/PvPGN/rubattle profile runs after every other enabled
+            # pass, so it sees the final instruction text.  The profile and
+            # latency are part of the output path: switching either one can
+            # never reuse a stale chunk from another profile.
+            set(_compat_dir
+                "${CMAKE_CURRENT_BINARY_DIR}/w3l_compat/${_name}/${_kind}/${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}")
+            file(MAKE_DIRECTORY "${_compat_dir}")
+            set(_compat_chunks)
+            foreach(_chunk IN LISTS _chunks)
+                get_filename_component(_chunk_name "${_chunk}" NAME)
+                set(_compat_out "${_compat_dir}/${_chunk_name}")
+                set(_compat_json "${_compat_out}.json")
+                if(NOT EXISTS "${_compat_out}" OR
+                   NOT EXISTS "${_compat_json}" OR
+                   "${_chunk}" IS_NEWER_THAN "${_compat_out}" OR
+                   "${WC3_W3L_PASS}" IS_NEWER_THAN "${_compat_out}")
+                    execute_process(
+                        COMMAND "${Python3_EXECUTABLE}" "${WC3_W3L_PASS}"
+                                --profile "${WC3_W3L_PROFILE}"
+                                --latency "${WC3_W3L_LATENCY}"
+                                --lift "${_chunk}"
+                                --out "${_compat_out}"
+                                --json "${_compat_json}"
+                                --quiet
+                        RESULT_VARIABLE _compat_rc
+                        OUTPUT_VARIABLE _compat_stdout
+                        ERROR_VARIABLE _compat_stderr)
+                    if(NOT _compat_rc EQUAL 0)
+                        message(FATAL_ERROR
+                            "w3l_compat failed for ${_chunk} (rc=${_compat_rc}):\n"
+                            "${_compat_stdout}\n${_compat_stderr}")
+                    endif()
+                endif()
+                list(APPEND _compat_chunks "${_compat_out}")
+                list(APPEND _wc3_compat_jsons "${_compat_json}")
+            endforeach()
+            set(_chunks "${_compat_chunks}")
+        endif()
         list(APPEND WC3_RELIFTED_SOURCES ${_chunks})
     endforeach()
 
@@ -222,6 +272,32 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                      --active-list "${_module_dir}/corpus.list.h" --top 5)
     endif()
 endforeach()
+
+if(WC3_W3L_COMPAT)
+    # Per-chunk runs cannot use --require-all, because sites are spread over
+    # several chunks.  Verify the union instead: every site of the selected
+    # profile must be applied exactly once, or the configure fails closed.
+    set(_wc3_compat_manifest
+        "${CMAKE_CURRENT_BINARY_DIR}/w3l_compat_change_sets.txt")
+    file(WRITE "${_wc3_compat_manifest}" "")
+    foreach(_json IN LISTS _wc3_compat_jsons)
+        file(APPEND "${_wc3_compat_manifest}" "${_json}\n")
+    endforeach()
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" "${WC3_W3L_PASS}"
+                --profile "${WC3_W3L_PROFILE}"
+                --latency "${WC3_W3L_LATENCY}"
+                --verify-coverage "@${_wc3_compat_manifest}"
+                --quiet
+        RESULT_VARIABLE _wc3_cov_rc
+        OUTPUT_VARIABLE _wc3_cov_stdout
+        ERROR_VARIABLE _wc3_cov_stderr)
+    if(NOT _wc3_cov_rc EQUAL 0)
+        message(FATAL_ERROR
+            "w3l_compat coverage check failed (rc=${_wc3_cov_rc}):\n"
+            "${_wc3_cov_stdout}\n${_wc3_cov_stderr}")
+    endif()
+endif()
 
 if(NOT WC3_RELIFTED_SOURCES)
     message(FATAL_ERROR "relifted corpus has no translation units")
@@ -264,6 +340,19 @@ target_compile_options(wc3_corpus_relifted PRIVATE
     -Wno-parentheses-equality)
 set_target_properties(wc3_corpus_relifted PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
+
+if(WC3_W3L_COMPAT)
+    # The pass emits direct calls to the native helpers and uses the
+    # WC3_W3L_LATENCY macro.  Force-include one header instead of editing the
+    # include block of every chunk; both the include path and the definition
+    # exist only in a compat build.
+    target_include_directories(wc3_corpus_relifted PRIVATE
+        "${WC3_ROOT}/runtime/compat")
+    target_compile_definitions(wc3_corpus_relifted PRIVATE
+        WC3_W3L_LATENCY=${WC3_W3L_LATENCY})
+    target_compile_options(wc3_corpus_relifted PRIVATE
+        -include "${WC3_ROOT}/runtime/compat/w3l_compat.h")
+endif()
 
 if(_wc3_check_commands)
     add_custom_target(wc3_corpus_manifest_check

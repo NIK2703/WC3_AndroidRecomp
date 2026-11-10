@@ -34,7 +34,7 @@ static const struct {
     uint32_t hi;
 } g_arenas[] = {
     /* Kept byte-for-byte equivalent to the as-built table in
-     * runtime/legacy/hle_android.c: the WAR3 upper bound is absolute, not
+     * runtime/hle/android/hle_android.c: the WAR3 upper bound is absolute, not
      * GUEST_IMAGE_WAR3 + 0x01000000.  O-07 must not widen the accepted set. */
     {GUEST_IMAGE_WAR3, 0x01000000u},
     {GUEST_HEAP_BASE, GUEST_HEAP_BASE + GUEST_HEAP_SIZE},

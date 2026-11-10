@@ -23,7 +23,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 /* Largest chunk to validate with one guest_ok() call.  The chunk stays inside
  * the 32-bit address space and never exceeds the caller's byte budget. */

@@ -11,11 +11,19 @@
  *
  * Invariants (H7 / TA-7):
  *   - render() takes no host lock, allocates nothing, touches no guest memory;
- *   - the producer publishes a region under a per-slot seqlock (release),
- *     the consumer accepts only a stable even seqlock (acquire);
+ *   - a PRIMARY voice added with wc3_mixer_voice_add_snapshot() publishes a
+ *     whole-ring version: the producer copies the active snapshot to a free
+ *     one, applies the guest region, then release-stores snap_active.  A
+ *     region spanning several 1 KiB slots therefore becomes visible as one
+ *     complete version, never as per-slot silence or a mix of generations.
+ *     The reader takes one snapshot per voice/chunk with a per-snapshot
+ *     refcount and rechecks snap_active after the ref, so the producer never
+ *     overwrites a snapshot the reader is using;
+ *   - non-snapshot voices (DirectSound verification, legacy callers) keep the
+ *     old per-slot seqlock: a slot being written produces silence, never torn
+ *     PCM.  That path is not the product primary voice;
  *   - the PCM ring is circular, exactly like nfsu2's PcmVoice::samples: a
- *     buffer published once loops on that data every revolution; a slot that
- *     is being written at this instant produces silence, never torn PCM;
+ *     buffer published once loops on that data every revolution;
  *   - a streaming loop with no publish for a whole ring revolution is muted
  *     (nfsu2 stale policy) instead of replaying its last half second;
  *   - a one-shot voice stops at its buffer end and resets its cursor, exactly
@@ -42,7 +50,30 @@
 #define WC3_VOICE_SLOT_BYTES   1024u
 /* 16 MiB / 1 KiB: the same upper bound as the nfsu2 DirectSound buffer. */
 #define WC3_VOICE_MAX_SLOTS    16384u
+/* Primary-buffer floor: seven 50 ms headers at high guest rates plus reset
+ * headroom still fit, while the 16 MiB slot ceiling remains the hard bound. */
+#define WC3_VOICE_MIN_RING_BYTES 65536u
 #define WC3_MIX_CHUNK          256u
+#define WC3_VOICE_SNAPSHOTS    3u
+
+/* Test-only instrumentation.  Production translation units never define
+ * WC3_MIXER_TEST_HOOKS, so the publish/acquire hooks compile out completely
+ * and the real-time path is unchanged.  N-17 uses them to stop the writer
+ * between "active copied" / "region applied" / "active swapped" and to stop
+ * the reader between load(active) and refs++. */
+#if defined(WC3_MIXER_TEST_HOOKS)
+struct Wc3Voice;
+enum {
+    WC3_MIXER_PHASE_COPIED = 1,   /* writer: active -> free copy done */
+    WC3_MIXER_PHASE_APPLIED = 2,  /* writer: guest region overlaid */
+    WC3_MIXER_PHASE_LOADED = 3,   /* reader: active loaded, no ref yet */
+    WC3_MIXER_PHASE_REFED = 4     /* reader: ref taken, active not rechecked */
+};
+extern void wc3_mixer_test_phase(const struct Wc3Voice *voice, int phase);
+#define WC3_MIXER_ON_PHASE(v, p) wc3_mixer_test_phase((v), (p))
+#else
+#define WC3_MIXER_ON_PHASE(v, p) ((void)0)
+#endif
 
 static inline uint32_t wc3_float_bits(float value)
 {
@@ -79,7 +110,36 @@ typedef struct Wc3Voice {
     _Atomic int resetting;              /* control-path reinit in progress */
     double stale_source;                /* render-only, nfsu2 staleFrames */
     uint32_t reset_seen;                /* render-only */
+
+    /* N-18 primary-voice triple snapshot, appended for source compatibility.
+     * snap_count==0 keeps the legacy per-slot seqlock path.  For a snapshot
+     * voice the three PCM rings live in one platform allocation:
+     * snap_pcm[i] == pcm + i * slots * WC3_VOICE_SLOT_BYTES.  snap_pub[i] is
+     * the high-water published source frame that belongs to snapshot i, so
+     * old PCM can never be paired with a newer published_frame. */
+    uint8_t *snap_pcm[WC3_VOICE_SNAPSHOTS];
+    _Atomic uint64_t snap_pub[WC3_VOICE_SNAPSHOTS];
+    _Atomic uint32_t snap_refs[WC3_VOICE_SNAPSHOTS];
+    _Atomic uint32_t snap_active;
+    uint32_t snap_count;
+
+    /* Debug-only N-16b counters.  They never exist in release builds; the
+     * snapshot path increments stale_read only when a tap actually produces
+     * silence, so a healthy primary voice pays no atomic RMW per sample. */
+#if WC3_DEBUG
+    _Atomic uint32_t inflight_zero;  /* legacy seqlock tap saw a write */
+    _Atomic uint32_t seq_retry;      /* snapshot acquire recheck failed */
+    _Atomic uint32_t stale_read;     /* sample returned silence: no publication */
+#endif
 } Wc3Voice;
+
+#if WC3_DEBUG
+#define WC3_VOICE_DBG_INC(v, field) \
+    atomic_fetch_add_explicit(&((Wc3Voice *)(v))->field, 1u, \
+                              memory_order_relaxed)
+#else
+#define WC3_VOICE_DBG_INC(v, field) ((void)0)
+#endif
 
 typedef struct Wc3PcmMixer {
     Wc3Voice voices[WC3_MIXER_VOICES];
@@ -115,6 +175,11 @@ static inline int wc3_mixer_init(Wc3PcmMixer *m, uint32_t device_rate,
         atomic_init(&voice->stale_frames, 0u);
         atomic_init(&voice->publishing, 0);
         atomic_init(&voice->resetting, 0);
+#if WC3_DEBUG
+        atomic_init(&voice->inflight_zero, 0u);
+        atomic_init(&voice->seq_retry, 0u);
+        atomic_init(&voice->stale_read, 0u);
+#endif
     }
     atomic_init(&m->render_users, 0u);
     atomic_init(&m->peak_bits, wc3_float_bits(0.0f));
@@ -137,16 +202,22 @@ static inline void wc3_mixer_deinit(Wc3PcmMixer *m)
         free(voice->seq);
         voice->seq = NULL;
         voice->pcm = NULL;
+        for (unsigned s = 0; s < WC3_VOICE_SNAPSHOTS; s++)
+            voice->snap_pcm[s] = NULL;
+        voice->snap_count = 0u;
         atomic_store_explicit(&voice->used, 0, memory_order_release);
     }
 }
 
-/* The caller owns the PCM buffer for the life of the voice.  Returns a
- * 1-based handle so 0 can never be a valid guest-visible voice id. */
-static inline int wc3_mixer_voice_add(Wc3PcmMixer *m, uint8_t *pcm,
-                                      uint32_t bytes, uint32_t rate,
-                                      uint32_t channels, uint32_t bits,
-                                      uintptr_t *out_voice)
+/* Shared allocation path.  `snapshots` selects the N-18 primary-voice
+ * contract: the caller's PCM allocation is then 3 * slots * 1 KiB and all
+ * three rings are initialized to format silence.  Non-snapshot voices keep
+ * exactly the old layout and per-slot seqlock behavior. */
+static inline int wc3_mixer_voice_add_impl(Wc3PcmMixer *m, uint8_t *pcm,
+                                           uint32_t bytes, uint32_t rate,
+                                           uint32_t channels, uint32_t bits,
+                                           int snapshots,
+                                           uintptr_t *out_voice)
 {
     if (!m || !pcm || !out_voice || rate == 0u || channels == 0u ||
         m->rate == 0u || (bits != 8u && bits != 16u)) return -1;
@@ -156,6 +227,7 @@ static inline int wc3_mixer_voice_add(Wc3PcmMixer *m, uint8_t *pcm,
     uint32_t slots = (bytes + WC3_VOICE_SLOT_BYTES - 1u) /
                      WC3_VOICE_SLOT_BYTES;
     if (slots == 0u || slots > WC3_VOICE_MAX_SLOTS) return -1;
+    size_t buffer_bytes = (size_t)slots * WC3_VOICE_SLOT_BYTES;
 
     for (unsigned i = 0; i < WC3_MIXER_VOICES; i++) {
         Wc3Voice *v = &m->voices[i];
@@ -187,6 +259,16 @@ static inline int wc3_mixer_voice_add(Wc3PcmMixer *m, uint8_t *pcm,
         v->stale_source = 0.0;
         v->reset_seen = 0u;
         v->seek_seen = 0u;
+
+        v->snap_count = snapshots ? WC3_VOICE_SNAPSHOTS : 0u;
+        for (uint32_t s = 0; s < WC3_VOICE_SNAPSHOTS; s++) {
+            v->snap_pcm[s] = snapshots
+                ? pcm + (size_t)s * buffer_bytes : NULL;
+            atomic_init(&v->snap_pub[s], 0u);
+            atomic_init(&v->snap_refs[s], 0u);
+        }
+        atomic_init(&v->snap_active, 0u);
+
         atomic_store_explicit(&v->frequency, rate, memory_order_relaxed);
         atomic_store_explicit(&v->left_bits, wc3_float_bits(1.0f),
                               memory_order_relaxed);
@@ -196,7 +278,7 @@ static inline int wc3_mixer_voice_add(Wc3PcmMixer *m, uint8_t *pcm,
          * a zero byte would decode as -1.0 and make an unpublished region
          * full-scale negative. */
         memset(pcm, bits == 8u ? 128 : 0,
-               (size_t)slots * WC3_VOICE_SLOT_BYTES);
+               snapshots ? 3u * buffer_bytes : buffer_bytes);
         atomic_store_explicit(&v->published_frame, 0u, memory_order_release);
         atomic_store_explicit(&v->play_frame, 0u, memory_order_release);
         atomic_store_explicit(&v->seek_to, 0u, memory_order_release);
@@ -206,6 +288,11 @@ static inline int wc3_mixer_voice_add(Wc3PcmMixer *m, uint8_t *pcm,
         atomic_store_explicit(&v->stale_frames, 0u, memory_order_release);
         atomic_store_explicit(&v->publishing, 0, memory_order_release);
         atomic_store_explicit(&v->resetting, 0, memory_order_release);
+#if WC3_DEBUG
+        atomic_store_explicit(&v->inflight_zero, 0u, memory_order_relaxed);
+        atomic_store_explicit(&v->seq_retry, 0u, memory_order_relaxed);
+        atomic_store_explicit(&v->stale_read, 0u, memory_order_relaxed);
+#endif
         atomic_store_explicit(&v->playing, 0, memory_order_release);
         atomic_store_explicit(&v->loop, 0, memory_order_release);
         atomic_store_explicit(&v->used, 1, memory_order_release);
@@ -213,6 +300,27 @@ static inline int wc3_mixer_voice_add(Wc3PcmMixer *m, uint8_t *pcm,
         return 0;
     }
     return -1;
+}
+
+/* Legacy/DirectSound-verification voice: one PCM ring, per-slot seqlock. */
+static inline int wc3_mixer_voice_add(Wc3PcmMixer *m, uint8_t *pcm,
+                                      uint32_t bytes, uint32_t rate,
+                                      uint32_t channels, uint32_t bits,
+                                      uintptr_t *out_voice)
+{
+    return wc3_mixer_voice_add_impl(m, pcm, bytes, rate, channels, bits, 0,
+                                    out_voice);
+}
+
+/* Product primary voice: three full-ring snapshots.  `pcm` must point to
+ * 3 * slots * 1 KiB (slots = ceil(bytes / 1 KiB)); the platform owns it. */
+static inline int wc3_mixer_voice_add_snapshot(Wc3PcmMixer *m, uint8_t *pcm,
+                                               uint32_t bytes, uint32_t rate,
+                                               uint32_t channels, uint32_t bits,
+                                               uintptr_t *out_voice)
+{
+    return wc3_mixer_voice_add_impl(m, pcm, bytes, rate, channels, bits, 1,
+                                    out_voice);
 }
 
 static inline Wc3Voice *wc3_mixer_voice(Wc3PcmMixer *m, uintptr_t handle)
@@ -251,6 +359,14 @@ static inline void wc3_mixer_voice_release(Wc3Voice *v)
     free(v->seq);
     v->seq = NULL;
     v->pcm = NULL;
+    for (unsigned s = 0; s < WC3_VOICE_SNAPSHOTS; s++)
+        v->snap_pcm[s] = NULL;
+    v->snap_count = 0u;
+#if WC3_DEBUG
+    atomic_store_explicit(&v->inflight_zero, 0u, memory_order_relaxed);
+    atomic_store_explicit(&v->seq_retry, 0u, memory_order_relaxed);
+    atomic_store_explicit(&v->stale_read, 0u, memory_order_relaxed);
+#endif
     atomic_store_explicit(&v->used, 0, memory_order_release);
 }
 
@@ -283,6 +399,172 @@ static inline void wc3_voice_copy_locked(Wc3Voice *v, uint64_t frame_base,
         left -= n;
         pos = (pos + n / v->bpf) % v->frames;
     }
+}
+
+/* Raw region copy into an explicit ring buffer.  No seqlock: a snapshot target
+ * is invisible until snap_active is release-stored, so the reader can only
+ * observe a complete version.  Used only by the non-RT producer. */
+static inline void wc3_voice_published_locked(Wc3Voice *v);
+static inline void wc3_voice_copy_bytes(Wc3Voice *v, uint8_t *dst,
+                                        uint64_t frame_base,
+                                        const uint8_t *src, uint32_t bytes)
+{
+    uint64_t pos = frame_base % v->frames;
+    uint32_t left = bytes;
+    while (left) {
+        uint32_t byte_off = (uint32_t)(pos * v->bpf);
+        uint32_t until_end = v->bytes - byte_off;
+        uint32_t n = left;
+        if (n > until_end) n = until_end;
+        if (n == 0u) break;
+        memcpy(dst + byte_off, src, n);
+        src += n;
+        left -= n;
+        pos = (pos + n / v->bpf) % v->frames;
+    }
+}
+
+/* Pick a snapshot that is neither active nor held by a reader.  A reader can
+ * only ref the active snapshot; if it loaded a stale active index, its recheck
+ * fails before it reads (unless the writer already published that snapshot,
+ * in which case the copy is complete).  Therefore this selection plus the
+ * reader recheck is atomic without a writer-side claim. */
+static inline int wc3_voice_snapshot_pick(Wc3Voice *v)
+{
+    uint32_t active = atomic_load_explicit(&v->snap_active,
+                                           memory_order_acquire);
+    if (active >= v->snap_count) active = 0u;
+    for (uint32_t i = 0; i < v->snap_count; i++) {
+        if (i == active) continue;
+        if (atomic_load_explicit(&v->snap_refs[i],
+                                 memory_order_acquire) == 0u)
+            return (int)i;
+    }
+    return -1;
+}
+
+/* One guest region (or one wrapped Unlock's two spans) becomes one complete
+ * snapshot version.  The active snapshot is copied to the free target, the
+ * region is overlaid, snap_pub travels with the copy, and only then is
+ * snap_active switched.  Returns 0 when every non-active snapshot is held by
+ * a reader: the caller reports NOMEM instead of overwriting a held buffer. */
+static inline uint32_t wc3_voice_publish_snapshot_locked(
+    Wc3Voice *v, uint64_t frame_base1, const uint8_t *frames1, uint32_t bytes1,
+    uint64_t frame_base2, const uint8_t *frames2, uint32_t bytes2)
+{
+    int target = wc3_voice_snapshot_pick(v);
+    if (target < 0) {
+        atomic_store_explicit(&v->publishing, 0, memory_order_release);
+        return 0u;
+    }
+    uint32_t active = atomic_load_explicit(&v->snap_active,
+                                           memory_order_acquire);
+    if (active >= v->snap_count) active = 0u;
+    uint8_t *dst = v->snap_pcm[target];
+    const uint8_t *base = v->snap_pcm[active];
+    if (!dst || !base) {
+        atomic_store_explicit(&v->publishing, 0, memory_order_release);
+        return 0u;
+    }
+    memcpy(dst, base, (size_t)v->slots * WC3_VOICE_SLOT_BYTES);
+    WC3_MIXER_ON_PHASE(v, WC3_MIXER_PHASE_COPIED);
+    if (bytes1 != 0u)
+        wc3_voice_copy_bytes(v, dst, frame_base1, frames1, bytes1);
+    if (bytes2 != 0u)
+        wc3_voice_copy_bytes(v, dst, frame_base2, frames2, bytes2);
+    WC3_MIXER_ON_PHASE(v, WC3_MIXER_PHASE_APPLIED);
+
+    uint64_t pub = atomic_load_explicit(&v->snap_pub[active],
+                                        memory_order_acquire);
+    uint64_t end1 = frame_base1 + bytes1 / v->bpf;
+    uint64_t end2 = frame_base2 + bytes2 / v->bpf;
+    if (end1 > pub) pub = end1;
+    if (end2 > pub) pub = end2;
+    atomic_store_explicit(&v->snap_pub[target], pub, memory_order_release);
+    /* Mirror for legacy readers and GetCurrentPosition.  The real-time reader
+     * uses snap_pub, so a delayed mirror can never pair old PCM with a newer
+     * high-water value. */
+    uint64_t old = atomic_load_explicit(&v->published_frame,
+                                        memory_order_relaxed);
+    while (pub > old &&
+           !atomic_compare_exchange_weak_explicit(
+               &v->published_frame, &old, pub, memory_order_release,
+               memory_order_relaxed)) {}
+    atomic_store_explicit(&v->snap_active, (uint32_t)target,
+                          memory_order_release);
+    wc3_voice_published_locked(v);
+    atomic_store_explicit(&v->publishing, 0, memory_order_release);
+    return bytes1 + bytes2;
+}
+
+/* Reader side: take one snapshot ref, then recheck snap_active.  A changed
+ * active means the writer may have reused the old target after the reader's
+ * stale load; the reader backs off without touching the buffer.  The returned
+ * pcm/pub pair is immutable until wc3_voice_snapshot_release(). */
+static inline int wc3_voice_snapshot_acquire(Wc3Voice *v,
+                                             const uint8_t **pcm,
+                                             uint64_t *pub)
+{
+    if (!v || v->snap_count == 0u || !pcm || !pub) return -1;
+    for (;;) {
+        uint32_t active = atomic_load_explicit(&v->snap_active,
+                                               memory_order_acquire);
+        if (active >= v->snap_count) return -1;
+        WC3_MIXER_ON_PHASE(v, WC3_MIXER_PHASE_LOADED);
+        atomic_fetch_add_explicit(&v->snap_refs[active], 1u,
+                                  memory_order_acq_rel);
+        WC3_MIXER_ON_PHASE(v, WC3_MIXER_PHASE_REFED);
+        uint32_t again = atomic_load_explicit(&v->snap_active,
+                                              memory_order_acquire);
+        if (again == active) {
+            *pcm = v->snap_pcm[active];
+            *pub = atomic_load_explicit(&v->snap_pub[active],
+                                        memory_order_acquire);
+            return (int)active;
+        }
+        atomic_fetch_sub_explicit(&v->snap_refs[active], 1u,
+                                  memory_order_release);
+        WC3_VOICE_DBG_INC(v, seq_retry);
+    }
+}
+
+static inline void wc3_voice_snapshot_release(Wc3Voice *v, int snapshot)
+{
+    if (!v || snapshot < 0 || (uint32_t)snapshot >= v->snap_count) return;
+    atomic_fetch_sub_explicit(&v->snap_refs[snapshot], 1u,
+                              memory_order_release);
+}
+
+/* Sample one immutable snapshot at an absolute SOURCE frame.  All taps in one
+ * mixer chunk pass the same pcm/pub pair, so no acquire or seqlock runs per
+ * tap. */
+static inline int16_t wc3_voice_sample_snap(const Wc3Voice *v,
+                                          const uint8_t *pcm, uint64_t pub,
+                                          uint64_t abs, unsigned channel,
+                                          int loop)
+{
+    if (!v || !pcm || v->frames == 0u) return 0;
+    /* `loop` is the render chunk's snapshot of the control state.  nfsu2
+     * holds the mixer mutex for the whole render(), so a Play/Stop cannot
+     * change loop between the stop test and the taps.  Re-reading v->loop
+     * here would let a concurrent control call change wrap behavior in the
+     * middle of a chunk. */
+    if (loop) {
+        if (pub == 0u) { WC3_VOICE_DBG_INC(v, stale_read); return 0; }
+    } else if (abs >= pub) {
+        WC3_VOICE_DBG_INC(v, stale_read);
+        return 0;
+    }
+    uint64_t pos = loop ? abs % v->frames : abs;
+    if (pos >= v->frames) { WC3_VOICE_DBG_INC(v, stale_read); return 0; }
+    unsigned ch = channel < v->channels ? channel : v->channels - 1u;
+    const uint8_t *p = pcm + (size_t)pos * v->bpf +
+                       (size_t)ch * (v->bits / 8u);
+    if (v->bits == 8u) return (int16_t)(((int)p[0] - 128) << 8);
+    uint16_t w = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    int16_t value;
+    memcpy(&value, &w, sizeof value);
+    return value;
 }
 
 /* nfsu2 PcmVoice::published(): clear the stale window and count the publish
@@ -320,7 +602,7 @@ static inline uint32_t wc3_voice_publish(Wc3Voice *v, uint64_t frame_base,
 {
     const uint8_t *src = (const uint8_t *)frames;
     if (!v || !src || bytes == 0u || v->frames == 0u ||
-        (bytes % v->bpf) != 0u) return 0u;
+        bytes > v->bytes || (bytes % v->bpf) != 0u) return 0u;
     int expected = 0;
     if (!atomic_compare_exchange_strong_explicit(
             &v->publishing, &expected, 1, memory_order_acq_rel,
@@ -335,6 +617,9 @@ static inline uint32_t wc3_voice_publish(Wc3Voice *v, uint64_t frame_base,
         atomic_store_explicit(&v->publishing, 0, memory_order_release);
         return 0u;
     }
+    if (v->snap_count != 0u)
+        return wc3_voice_publish_snapshot_locked(v, frame_base, src, bytes,
+                                                 0u, NULL, 0u);
     wc3_voice_copy_locked(v, frame_base, src, bytes);
     wc3_voice_commit_locked(v, frame_base + bytes / v->bpf);
     return bytes;
@@ -355,6 +640,7 @@ static inline uint32_t wc3_voice_publish2(Wc3Voice *v,
     const uint8_t *src2 = (const uint8_t *)frames2;
     if (!v || v->frames == 0u || (bytes1 == 0u && bytes2 == 0u)) return 0u;
     if ((bytes1 != 0u && !src1) || (bytes2 != 0u && !src2)) return 0u;
+    if (bytes1 > v->bytes || bytes2 > v->bytes) return 0u;
     if ((bytes1 % v->bpf) != 0u || (bytes2 % v->bpf) != 0u) return 0u;
     int expected = 0;
     if (!atomic_compare_exchange_strong_explicit(
@@ -369,6 +655,9 @@ static inline uint32_t wc3_voice_publish2(Wc3Voice *v,
     }
     uint64_t end1 = frame_base1 + bytes1 / v->bpf;
     uint64_t end2 = frame_base2 + bytes2 / v->bpf;
+    if (v->snap_count != 0u)
+        return wc3_voice_publish_snapshot_locked(
+            v, frame_base1, src1, bytes1, frame_base2, src2, bytes2);
     if (bytes1 != 0u) wc3_voice_copy_locked(v, frame_base1, src1, bytes1);
     if (bytes2 != 0u) wc3_voice_copy_locked(v, frame_base2, src2, bytes2);
     wc3_voice_commit_locked(v, end1 > end2 ? end1 : end2);
@@ -400,11 +689,11 @@ static inline int wc3_voice_published(Wc3Voice *v)
     return 0;
 }
 
-/* waveOutReset(): discard every queued/old sample without freeing or
- * reallocating the voice.  The caller must first set `resetting` (render skips
- * the voice), wait render_users()==0 and publishing==0, and keep the producer
- * side serialized.  The layout is immutable, so a reset is just "silence +
- * cursor zero + publish generation zero". */
+/* DirectSound buffer reset/restore: discard every queued/old sample without
+ * freeing or reallocating the voice.  The caller must first set `resetting`
+ * (render skips the voice), wait render_users()==0 and publishing==0, and keep
+ * the producer side serialized.  The layout is immutable, so a reset is just
+ * "silence + cursor zero + publish generation zero". */
 static inline int wc3_voice_reset(Wc3Voice *v)
 {
     if (!v || !v->pcm || !v->seq || v->frames == 0u) return -1;
@@ -418,40 +707,60 @@ static inline int wc3_voice_reset(Wc3Voice *v)
     atomic_store_explicit(&v->publishes, 0u, memory_order_release);
     atomic_fetch_add_explicit(&v->stale_reset, 1u, memory_order_release);
     atomic_store_explicit(&v->stale_frames, 0u, memory_order_release);
+#if WC3_DEBUG
+    atomic_store_explicit(&v->inflight_zero, 0u, memory_order_relaxed);
+    atomic_store_explicit(&v->seq_retry, 0u, memory_order_relaxed);
+    atomic_store_explicit(&v->stale_read, 0u, memory_order_relaxed);
+#endif
     v->position = 0.0;
     v->stale_source = 0.0;
     v->seek_seen = atomic_load_explicit(&v->seek_serial,
                                         memory_order_relaxed);
     v->reset_seen = atomic_load_explicit(&v->stale_reset,
                                          memory_order_relaxed);
-    /* 8-bit PCM is unsigned: 128 is silence, 0 is full-scale negative. */
-    memset(v->pcm, v->bits == 8u ? 128 : 0,
-           (size_t)v->slots * WC3_VOICE_SLOT_BYTES);
+    /* 8-bit PCM is unsigned: 128 is silence, 0 is full-scale negative.
+     * A snapshot voice owns three full rings: reset must discard all of them,
+     * not only the logical bytes of the first one. */
+    if (v->snap_count != 0u) {
+        for (uint32_t i = 0; i < v->snap_count; i++) {
+            memset(v->snap_pcm[i], v->bits == 8u ? 128 : 0,
+                   (size_t)v->slots * WC3_VOICE_SLOT_BYTES);
+            atomic_store_explicit(&v->snap_pub[i], 0u,
+                                  memory_order_release);
+        }
+        atomic_store_explicit(&v->snap_active, 0u, memory_order_release);
+    } else {
+        memset(v->pcm, v->bits == 8u ? 128 : 0,
+               (size_t)v->slots * WC3_VOICE_SLOT_BYTES);
+    }
     for (uint32_t s = 0; s < v->slots; s++)
         atomic_store_explicit(&v->seq[s], 0u, memory_order_release);
     return 0;
 }
 
-/* One 16-bit sample.  Stale / unpublished / in-flight slots are silence. */
+/* One 16-bit sample from the legacy per-slot seqlock path (non-snapshot
+ * voices).  Stale / unpublished / in-flight slots are silence here; the
+ * primary voice never uses this function after N-18. */
 static inline int16_t wc3_voice_sample(const Wc3Voice *v, uint64_t abs,
-                                       unsigned channel)
+                                       unsigned channel, int loop)
 {
     if (!v || !v->pcm || !v->seq || v->frames == 0u) return 0;
     uint64_t pub = atomic_load_explicit(&v->published_frame,
                                         memory_order_acquire);
-    int loop = atomic_load_explicit(&v->loop, memory_order_relaxed);
+    /* Use the render chunk's loop snapshot, exactly like the snapshot path. */
     if (loop) {
-        if (pub == 0u) return 0;
+        if (pub == 0u) { WC3_VOICE_DBG_INC(v, stale_read); return 0; }
     } else if (abs >= pub) {
+        WC3_VOICE_DBG_INC(v, stale_read);
         return 0;
     }
     uint64_t pos = loop ? abs % v->frames : abs;
-    if (pos >= v->frames) return 0;
+    if (pos >= v->frames) { WC3_VOICE_DBG_INC(v, stale_read); return 0; }
     uint32_t byte_off = (uint32_t)(pos * v->bpf);
     uint32_t slot = byte_off / WC3_VOICE_SLOT_BYTES;
     uint32_t in_slot = byte_off % WC3_VOICE_SLOT_BYTES;
     uint32_t s1 = atomic_load_explicit(&v->seq[slot], memory_order_acquire);
-    if (s1 & 1u) return 0;
+    if (s1 & 1u) { WC3_VOICE_DBG_INC(v, inflight_zero); return 0; }
     unsigned ch = channel < v->channels ? channel : v->channels - 1u;
     const uint8_t *p = v->pcm + (size_t)slot * WC3_VOICE_SLOT_BYTES +
                        in_slot + (size_t)ch * (v->bits / 8u);
@@ -460,6 +769,7 @@ static inline int16_t wc3_voice_sample(const Wc3Voice *v, uint64_t abs,
     else { uint16_t w = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
            memcpy(&value, &w, sizeof value); }
     uint32_t s2 = atomic_load_explicit(&v->seq[slot], memory_order_acquire);
+    if (s1 != s2) WC3_VOICE_DBG_INC(v, inflight_zero);
     return (s1 == s2) ? value : 0;
 }
 
@@ -643,6 +953,17 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
             float gr = wc3_bits_float(atomic_load_explicit(
                 &v->right_bits, memory_order_relaxed));
 
+            /* N-18: one complete snapshot per voice/chunk.  The ref is held
+             * for every tap of this chunk and released before control state
+             * is stamped; the next chunk may observe a newer version. */
+            const uint8_t *snap_pcm = v->pcm;
+            uint64_t snap_pub = 0u;
+            int snap = -1;
+            if (v->snap_count != 0u) {
+                snap = wc3_voice_snapshot_acquire(v, &snap_pcm, &snap_pub);
+                if (snap < 0) muted = 1;
+            }
+
             for (uint32_t f = 0; f < n; f++) {
                 if (!loop && v->position >= (double)v->frames) {
                     atomic_store_explicit(&v->playing, 0,
@@ -678,8 +999,12 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
                                 float w = m->kernel.weights[index][t] +
                                     (m->kernel.weights[index + 1u][t] -
                                      m->kernel.weights[index][t]) * blend;
-                                int16_t s = wc3_voice_sample(
-                                    v, (uint64_t)src, ch);
+                                int16_t s = snap >= 0
+                                    ? wc3_voice_sample_snap(
+                                          v, snap_pcm, snap_pub,
+                                          (uint64_t)src, ch, loop)
+                                    : wc3_voice_sample(
+                                          v, (uint64_t)src, ch, loop);
                                 sum += ((float)s / 32768.0f) * w;
                             }
                             mix[f * 2u + ch] += sum * (ch ? gr : gl);
@@ -688,8 +1013,14 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
                         uint64_t a1 = a + 1u;
                         if (!loop && a1 >= v->frames) a1 = v->frames - 1u;
                         for (unsigned ch = 0; ch < mix_ch; ch++) {
-                            int16_t s0 = wc3_voice_sample(v, a, ch);
-                            int16_t s1 = wc3_voice_sample(v, a1, ch);
+                            int16_t s0 = snap >= 0
+                                ? wc3_voice_sample_snap(v, snap_pcm, snap_pub,
+                                                      a, ch, loop)
+                                : wc3_voice_sample(v, a, ch, loop);
+                            int16_t s1 = snap >= 0
+                                ? wc3_voice_sample_snap(v, snap_pcm, snap_pub,
+                                                      a1, ch, loop)
+                                : wc3_voice_sample(v, a1, ch, loop);
                             float s = (float)s0 / 32768.0f +
                                 ((float)s1 - (float)s0) / 32768.0f *
                                 (float)frac;
@@ -700,6 +1031,7 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
                 v->position += step;
                 if (!muted) v->stale_source += step;
             }
+            if (snap >= 0) wc3_voice_snapshot_release(v, snap);
 
             uint32_t seek_after = atomic_load_explicit(&v->seek_serial,
                                                        memory_order_acquire);

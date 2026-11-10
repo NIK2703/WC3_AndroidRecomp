@@ -156,7 +156,7 @@ void hle_android_post_enter(void);
  * GetModuleHandleA and GetProcAddress see it. */
 void hle_register_module(const char *name, uint32_t base, const void *img);
 
-#ifdef WC3_DEBUG
+#if WC3_DEBUG
 /* Same flag the generated dispatcher reads. */
 extern int g_dispatch_diag;
 extern int g_stack_guard;

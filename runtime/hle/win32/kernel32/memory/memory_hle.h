@@ -3,7 +3,7 @@
  *
  * First bounded part of the H6.2 kernel32/memory module: the Windows heap and
  * the Global/Local families already have an allocator in the as-built heap.
- * VirtualAlloc/VirtualFree stay in the quarantine for now because their live
+ * VirtualAlloc/VirtualFree stay in the as-built HLE for now because their live
  * range table is private to the as-built boot; replacing them without moving
  * that ownership would break guest_ok().
  */

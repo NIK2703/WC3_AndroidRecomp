@@ -21,7 +21,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define SCROLLINFO_SIZE 28u
 #define SCROLLINFO_CB_SIZE 0u

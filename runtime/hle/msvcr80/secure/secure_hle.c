@@ -21,7 +21,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define CRT_EINVAL 22u
 #define CRT_ERANGE 34u

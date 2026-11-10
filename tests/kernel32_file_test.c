@@ -28,7 +28,7 @@
 
 #include "cpu.h"
 #include "kernel32_file_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define PATH_MAX_LOCAL 512u
 
@@ -89,7 +89,9 @@ static void previous_create_file(CPU *c);
 static void previous_get_attributes(CPU *c);
 static void previous_set_cwd(CPU *c);
 
-static Row g_rows[4];
+/* Three production rows plus the debug ReadFile/GetFileTime/GetFileSize/
+ * SetFilePointer/CloseHandle chains installed when WC3_DEBUG_HLE is on. */
+static Row g_rows[16];
 static unsigned g_row_count;
 static uint8_t g_guest[GUEST_SIZE];
 static uint32_t g_heap_next = HEAP_ADDR;
@@ -140,6 +142,14 @@ uint32_t wc3_legacy_arg32(const CPU *cpu, unsigned index)
 {
     if (!cpu) return 0;
     return wc3_legacy_rd32g(cpu->esp + 4u + index * 4u);
+}
+
+/* The HLE debug chains print the guest LastError next to every I/O result.
+ * The host-side stub has no TEB, so a fixed zero keeps the test focused on the
+ * file-cache behaviour instead of emulating the thread state. */
+uint32_t wc3_legacy_get_last_error(void)
+{
+    return 0;
 }
 
 uint32_t wc3_legacy_guest_alloc(uint32_t size)
@@ -199,7 +209,9 @@ int wc3_legacy_hle_chain(const char *dll, const char *name,
                          void (*impl)(CPU *c),
                          void (**previous)(CPU *c))
 {
-    if (!dll || !name || !impl || !previous || g_row_count >= 4u) return -1;
+    if (!dll || !name || !impl || !previous ||
+        g_row_count >= sizeof g_rows / sizeof g_rows[0])
+        return -1;
     g_rows[g_row_count].dll = dll;
     g_rows[g_row_count].name = name;
     g_rows[g_row_count].impl = impl;

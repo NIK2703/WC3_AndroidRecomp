@@ -15,7 +15,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define PALETTE_HANDLE_BASE 0x00120000u
 #define PALETTE_HANDLE_STRIDE 4u

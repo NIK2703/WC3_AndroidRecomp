@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "corpus": "1.27b",
-  "updated_at": "2026-11-06",
+  "updated_at": "2026-11-10",
   "note": "Machine-readable state of docs/FILE_LAYOUT.md section 5 (R19). The table in section 5 is a projection, not the source of truth. A 'done' step requires non-empty evidence.",
   "statuses": ["pending", "in_progress", "done", "blocked"],
   "steps": [
@@ -56,7 +56,7 @@
     {
       "id": "M7",
       "status": "in_progress",
-      "owner": "Rev 2 / R15-R22",
+      "owner": "Rev 3 / R16-R22",
       "gate": "python tools/check_docs.py --strict + python tools/check_file_layout.py --strict",
       "evidence": null,
       "updated_at": "2026-11-06"
@@ -71,7 +71,7 @@
     }
   ],
   "rules": [
-    {"id": "R15", "status": "specified", "owner": "M5", "check": "check_file_layout.py: QUARANTINE.md manifest and expiry"},
+    {"id": "R15", "status": "retired", "owner": "M5", "check": "none; as-built HLE lives in runtime/hle/android as a normal module"},
     {"id": "R16", "status": "specified", "owner": "M7", "check": "tools/check_deps.py --strict against config/dep_matrix.json"},
     {"id": "R17", "status": "specified", "owner": "M4", "check": "check_file_layout.py: single src/main per Gradle module"},
     {"id": "R18", "status": "specified", "owner": "B6", "check": "check_file_layout.py: config/file_owners.json coverage"},

@@ -4,7 +4,7 @@
  * These functions are byte-oriented and do not depend on the CRT heap except
  * _strdup, which uses the shim's guest allocator.  wcsrchr/wcsstr operate on
  * 16-bit Windows code units and stay in this slice; the remaining wide-
- * character conversion stays in the quarantine.
+ * character conversion stays in the as-built HLE.
  */
 #ifndef WC3_HLE_MSVCR80_STRING_H
 #define WC3_HLE_MSVCR80_STRING_H

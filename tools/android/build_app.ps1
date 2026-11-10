@@ -31,7 +31,13 @@ param(
     [switch]$NativeTls,
     # O-55: opt-in A/B only.  The default keeps the NDK stack canary and
     # Fortify on every non-corpus target.
-    [switch]$NoHostHardening
+    [switch]$NoHostHardening,
+    # W3L/PvPGN/rubattle compat profile.  auto = rubattle when -CorpusRoot is
+    # given, otherwise off; off is the exact baseline.
+    [ValidateSet('auto', 'rubattle', 'pvpgn', 'off')]
+    [string]$W3LCompat = 'auto',
+    [ValidateRange(30, 255)]
+    [int]$W3LLatency = 100
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +49,23 @@ if ($CorpusRoot) {
         Join-Path $root $CorpusRoot
     }
     $CorpusRoot = (Resolve-Path $corpusPath).Path
+}
+
+# The compat profile edits generated C, so it needs the relifted corpus.  An
+# explicit rubattle/pvpgn request without -CorpusRoot is a caller error, not a
+# silent downgrade to the baseline.
+$w3lProfile = 'rubattle'
+switch ($W3LCompat) {
+    'off' { $w3lCompatValue = 'OFF' }
+    'pvpgn' { $w3lCompatValue = 'ON'; $w3lProfile = 'pvpgn' }
+    'rubattle' { $w3lCompatValue = 'ON' }
+    default {
+        $w3lCompatValue = if ($CorpusRoot) { 'ON' } else { 'OFF' }
+    }
+}
+if ($w3lCompatValue -eq 'ON' -and -not $CorpusRoot) {
+    Write-Host '[app] -W3LCompat rubattle/pvpgn requires -CorpusRoot'
+    exit 1
 }
 
 function Get-AndroidSdk {
@@ -133,11 +156,13 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $debugValue = if ($Variant -eq 'debug') { 'ON' } else { 'OFF' }
 # BV-5.3: release never activates a tag.  Debug gets a default host-shell set
 # so the existing T2 smoke markers (boot/surface/PE) stay observable; callers
-# may narrow it with -DebugTags 'GRAPHICS;HLE_SYNC'.
+# may narrow it with -DebugTags 'GRAPHICS;HLE_SYNC'.  BATTLE_NET is included
+# by default because it emits one decoded header per packet, gateway selection
+# and Battle.net file accesses, not NET's full hex dump.
 if ($Variant -eq 'release') {
     $DebugTags = ''
 } elseif (-not $DebugTags) {
-    $DebugTags = 'BOOT;ASSETS;INPUT;GRAPHICS;JNI;MEMORY;CRASH'
+    $DebugTags = 'BOOT;ASSETS;INPUT;GRAPHICS;JNI;MEMORY;CRASH;BATTLE_NET'
 }
 $configure = @(
     '-S', $root,
@@ -160,7 +185,17 @@ $configure = @(
 )
 if ($CorpusRoot) {
     $configure += "-DWC3_RELIFTED_CORPUS_ROOT=$CorpusRoot"
+} else {
+    # CMake cache entries survive a previous configure.  Clear a stale corpus
+    # selection explicitly so an exact-baseline build cannot silently reuse
+    # generated units from an earlier -CorpusRoot build.
+    $configure += '-DWC3_RELIFTED_CORPUS_ROOT='
 }
+# Pass the compat mode on every configure: a cached ON from an earlier
+# rubattle build must not survive an explicit -W3LCompat off.
+$configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
+$configure += "-DWC3_W3L_PROFILE=$w3lProfile"
+$configure += "-DWC3_W3L_LATENCY=$W3LLatency"
 # O-43/O-70 experiment: the product default stays unpacked until T2 proves
 # the bionic API 26 loader and PM-22/GB-5.2 show a benefit.  Pass both values
 # on every configure, not only when the switch is set: CMake cache entries
@@ -199,6 +234,7 @@ Write-Host "[app] pack_dyn_relocs $($PackDynRelocs.IsPresent) ($PackDynRelocsMod
 Write-Host "[app] icf $($Icf.IsPresent) ($IcfMode)"
 Write-Host "[app] fno_plt $($FnoPlt.IsPresent)"
 Write-Host "[app] native_tls $($nativeTlsValue -eq 'ON')"
+Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
 Write-Host "[app] hide_dynsym $hideDynsym"
 Write-Host "[app] aar   $GamesActivityAar"

@@ -12,35 +12,19 @@
          Russian translation.  Protocol and package values are non-translatable
          in LaunchContract and the manifest. -->
     <string name="launch_title">Launch settings</string>
-    <string name="launch_subtitle">Changes apply the next time the game starts.</string>
 
     <string name="launch_folder_label">Game folder</string>
-    <string name="launch_folder_help">Folder with war3.exe, game.dll and war3.mpq. Choose it with the system picker or type a path.</string>
-    <string name="launch_folder_hint" translatable="false">/storage/emulated/0/Warcraft 3</string>
     <string name="launch_folder_choose">Choose</string>
     <string name="launch_folder_find">Find</string>
 
     <string name="launch_resolution_label">Resolution</string>
-    <string name="launch_resolution_help">Height starts at 360 and grows in steps of 180 up to the screen height; width follows the screen aspect ratio.</string>
     <string name="launch_resolution_option" translatable="false">%1$d × %2$d</string>
-    <string name="launch_resolution_native">Native — %1$d × %2$d</string>
 
     <string name="launch_sound_label">Sound</string>
 
     <string name="launch_args_label">Extra arguments</string>
-    <string name="launch_args_hint" translatable="false">-window</string>
 
-    <string name="launch_latency_label">Audio latency</string>
-    <string name="launch_latency_help">0 = auto. Experimental AAudio buffer override, 0–500 ms.</string>
-    <string name="launch_latency_hint" translatable="false">0</string>
-
-    <string name="launch_done">Done</string>
     <string name="launch_play">Play</string>
-    <string name="launch_reset">Reset</string>
-    <string name="launch_cancel">Cancel</string>
-    <string name="launch_reset_title">Reset launch settings?</string>
-    <string name="launch_reset_message">All launch parameters will return to their defaults.</string>
-    <string name="launch_reset_confirm">Reset</string>
     <string name="launch_grant">Grant access</string>
 
     <string name="launch_status_ok">Ready: %1$s</string>
@@ -59,7 +43,6 @@
     <string name="launch_error_missing_files">Missing required files: %1$s</string>
     <string name="launch_error_resolution">Resolution must be 0 × 0 or both values within 320–7680 × 240–4320.</string>
     <string name="launch_error_args">Arguments: up to 200 printable ASCII characters, no line breaks.</string>
-    <string name="launch_error_latency">Audio latency must be between 0 and 500 ms.</string>
     <string name="launch_error_save">Could not save settings.</string>
 
     <string name="launch_toast_permission">No storage access. Long-press the game icon → Launch settings.</string>

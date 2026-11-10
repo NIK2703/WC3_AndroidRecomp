@@ -11,7 +11,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "strerror_hle.h"
 
 #define MAX_ROWS 4u

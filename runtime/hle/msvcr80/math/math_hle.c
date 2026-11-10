@@ -1,7 +1,7 @@
 /*
  * math_hle.c - target-side MSVCR80 floating-point imports.
  *
- * The as-built handlers in the quarantine are host-libm wrappers, but three
+ * The as-built handlers in the HLE monolith are host-libm wrappers, but three
  * different guest ABIs are involved and a generic integer stub cannot serve
  * any of them:
  *
@@ -30,10 +30,10 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 /* The guest x87 register file is an exact 80-bit SoftFloat value.  The
- * conversion through a host double is the same narrowing the quarantine used,
+ * conversion through a host double is the same narrowing the as-built HLE used,
  * so moving the handler does not add a second rounding step. */
 static double pop_f64(CPU *c)
 {

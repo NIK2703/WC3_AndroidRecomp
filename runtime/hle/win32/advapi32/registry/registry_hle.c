@@ -21,7 +21,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "wc3_debug.h"
 
 #define REG_ROOT "Software\\Blizzard Entertainment\\Warcraft III"
@@ -59,6 +59,7 @@
 
 #define REG_SZ 1u
 #define REG_DWORD 4u
+#define REG_MULTI_SZ 7u
 
 typedef struct RegKey {
     uint8_t used;
@@ -136,6 +137,71 @@ static int ci_prefix(const char *text, const char *prefix)
     }
     return 1;
 }
+
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+/* A Battle.net gateway value is an ANSI REG_MULTI_SZ:
+ * "version\0default-index\0host\0zone\0label\0...".  The raw registry trace
+ * only prints the first dword, which is the version string and hides the
+ * default index.  Decode the list after the lock is released so the log never
+ * runs under g_lock. */
+static int battle_net_text_precision(const char *text)
+{
+    size_t n = text ? strlen(text) : 0u;
+    return n > 96u ? 96 : (int)n;
+}
+
+static void battle_net_trace_gateways(const char *operation, const char *path,
+                                      const char *name, const uint8_t *data,
+                                      uint32_t type, uint32_t length,
+                                      uint32_t capacity, uint32_t status)
+{
+    if (!ci_equal(name, "Battle.net Gateways")) return;
+
+    fprintf(stderr,
+            "[bnet] registry %s %s\\%s type=%u len=%u cap=%u status=%u\n",
+            operation, path, name, (unsigned)type, (unsigned)length,
+            (unsigned)capacity, (unsigned)status);
+    if (type != REG_MULTI_SZ || !data || length < 2u) return;
+
+    const char *items[32];
+    unsigned count = 0;
+    const uint8_t *cursor = data;
+    uint32_t remaining = length;
+    while (remaining && count < 32u) {
+        const uint8_t *nul = (const uint8_t *)memchr(cursor, 0, remaining);
+        if (!nul || nul == cursor) break;
+        items[count++] = (const char *)cursor;
+        remaining -= (uint32_t)(nul + 1 - cursor);
+        cursor = nul + 1;
+    }
+    if (count < 2u) return;
+
+    const unsigned triples = (count - 2u) / 3u;
+    fprintf(stderr,
+            "[bnet] gateways version=\"%.*s\" default=\"%.*s\" (%u triples)\n",
+            battle_net_text_precision(items[0]), items[0],
+            battle_net_text_precision(items[1]), items[1], triples);
+
+    char *end = NULL;
+    const unsigned long selected = strtoul(items[1], &end, 10);
+    if (end != items[1] && end && *end == '\0' && selected < triples) {
+        const char *host = items[2u + (unsigned)selected * 3u];
+        fprintf(stderr, "[bnet] gateway selected[%lu] host=\"%.*s\"\n",
+                selected, battle_net_text_precision(host), host);
+    }
+
+    for (unsigned i = 0; i < triples; i++) {
+        const char *host = items[2u + i * 3u];
+        const char *zone = items[3u + i * 3u];
+        const char *label = items[4u + i * 3u];
+        fprintf(stderr,
+                "[bnet] gateway[%u] host=\"%.*s\" zone=\"%.*s\" name=\"%.*s\"\n",
+                i, battle_net_text_precision(host), host,
+                battle_net_text_precision(zone), zone,
+                battle_net_text_precision(label), label);
+    }
+}
+#endif
 
 static void copy_text(char *dst, size_t capacity, const char *src)
 {
@@ -787,6 +853,10 @@ static void h_query_value(CPU *c)
     operation_path_copy_locked(handle, path, sizeof path, &invalid);
     if (invalid) {
         pthread_mutex_unlock(&g_lock);
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+        battle_net_trace_gateways("get", path, name, NULL, 0u, 0u, 0u,
+                                  REG_INVALID_HANDLE);
+#endif
         c->eax = REG_INVALID_HANDLE;
         return;
     }
@@ -795,6 +865,10 @@ static void h_query_value(CPU *c)
         pthread_mutex_unlock(&g_lock);
 #if WC3_DEBUG && WC3_DEBUG_HLE
         fprintf(stderr, "[registry] get %s\\%s = missing\n", path, name);
+#endif
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+        battle_net_trace_gateways("get", path, name, NULL, 0u, 0u, 0u,
+                                  REG_FILE_NOT_FOUND);
 #endif
         c->eax = REG_FILE_NOT_FOUND;
         return;
@@ -815,24 +889,24 @@ static void h_query_value(CPU *c)
      * length_io is read, so overlapping type_out/length_io behave as before. */
     write_u32(type_out, type);
     const uint32_t capacity = wc3_legacy_rd32g(length_io);
+    uint32_t status = REG_SUCCESS;
     if (!data_out) {
         wc3_legacy_wr32g(length_io, length);
-        c->eax = REG_SUCCESS;
-        return;
-    }
-    if (capacity < length) {
+    } else if (capacity < length) {
         wc3_legacy_wr32g(length_io, length);
-        c->eax = REG_MORE_DATA;
-        return;
+        status = REG_MORE_DATA;
+    } else if (length && !wc3_legacy_guest_ok(data_out, length)) {
+        status = REG_INVALID_PARAMETER;
+    } else {
+        for (uint32_t i = 0; i < length; i++)
+            wc3_legacy_wr8g(data_out + i, snapshot[i]);
+        wc3_legacy_wr32g(length_io, length);
     }
-    if (length && !wc3_legacy_guest_ok(data_out, length)) {
-        c->eax = REG_INVALID_PARAMETER;
-        return;
-    }
-    for (uint32_t i = 0; i < length; i++)
-        wc3_legacy_wr8g(data_out + i, snapshot[i]);
-    wc3_legacy_wr32g(length_io, length);
-    c->eax = REG_SUCCESS;
+    c->eax = status;
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    battle_net_trace_gateways("get", path, name, snapshot, type, length,
+                              capacity, status);
+#endif
 }
 
 static void h_set_value(CPU *c)
@@ -869,6 +943,10 @@ static void h_set_value(CPU *c)
     operation_path_copy_locked(handle, path, sizeof path, &invalid);
     if (invalid) {
         pthread_mutex_unlock(&g_lock);
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+        battle_net_trace_gateways("set", path, name, NULL, type, length, length,
+                                  REG_INVALID_HANDLE);
+#endif
         c->eax = REG_INVALID_HANDLE;
         return;
     }
@@ -896,6 +974,10 @@ static void h_set_value(CPU *c)
     maybe_persist_locked();
     pthread_mutex_unlock(&g_lock);
 
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    battle_net_trace_gateways("set", path, name, snapshot, type, length, length,
+                              REG_SUCCESS);
+#endif
 #if WC3_DEBUG && WC3_DEBUG_HLE
     uint32_t stored = 0u;
     if (length >= 4u) memcpy(&stored, snapshot, 4u);
@@ -932,6 +1014,9 @@ static void h_delete_value(CPU *c)
     }
     pthread_mutex_unlock(&g_lock);
     c->eax = removed ? REG_SUCCESS : REG_FILE_NOT_FOUND;
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    battle_net_trace_gateways("delete", path, name, NULL, 0u, 0u, 0u, c->eax);
+#endif
 }
 
 static void h_delete_key(CPU *c)
@@ -1171,6 +1256,52 @@ static void seed_dword_locked(const char *path, const char *name,
     set_value_locked(path, name, REG_DWORD, bytes, 4u);
 }
 
+#if defined(WC3_W3L_GATEWAY_RUBATTLE)
+/* Same value that gate.reg writes on Windows: an ANSI REG_MULTI_SZ list of
+ * "version", "default gateway index", then host/zone/display-name triples.
+ * The game asks Storm's SRegQueryValueEx for this value under
+ * Software\Blizzard Entertainment\Warcraft III before it tries
+ * BattleNet\bnserver-WAR3.ini and realms.ini, so seeding it here is the
+ * Android equivalent of importing gate.reg.  The seed stays in memory and is
+ * not written to wc3_registry.dat by itself. */
+static const char g_rubattle_gateways[] =
+    /* The PC 1.27.1.7085 registry value observed on the working
+     * rubattle.net setup is "1014", then the default gateway index "00".
+     * The default index is zero-based: "00" selects the first triple
+     * (rubattle.net); the old "01" selected playground.ru. */
+    "1014" "\0"
+    "00" "\0"
+    "rubattle.net" "\0"
+    "-3" "\0"
+    "Rubattle.net" "\0"
+    "playground.ru" "\0"
+    "-3" "\0"
+    "PlayGround.ru" "\0"
+    "eu.rubattle.net" "\0"
+    "-1" "\0"
+    "Eu.Rubattle.net" "\0"
+    "uswest.battle.net" "\0"
+    "8" "\0"
+    "Lordaeron (U.S. West)" "\0"
+    "useast.battle.net" "\0"
+    "6" "\0"
+    "Azeroth (U.S. East)" "\0"
+    "asia.battle.net" "\0"
+    "-9" "\0"
+    "Kalimdor (Asia)" "\0"
+    "europe.battle.net" "\0"
+    "-1" "\0"
+    "Northrend (Europe)" "\0";
+
+static void seed_rubattle_gateways_locked(void)
+{
+    ensure_key_and_parents_locked(REG_ROOT);
+    set_value_locked(REG_ROOT, "Battle.net Gateways", REG_MULTI_SZ,
+                     (const uint8_t *)g_rubattle_gateways,
+                     (uint32_t)sizeof g_rubattle_gateways);
+}
+#endif
+
 static void seed_defaults_locked(void)
 {
     ensure_key_and_parents_locked(REG_ROOT);
@@ -1273,6 +1404,11 @@ int wc3_hle_advapi32_registry_install(void)
     const int loaded = load_persisted_locked();
 #else
     load_persisted_locked();
+#endif
+#if defined(WC3_W3L_GATEWAY_RUBATTLE)
+    /* Restore the rubattle gateway list after persisted values, so a stale
+     * save cannot hide the server from the Battle.net gateway picker. */
+    seed_rubattle_gateways_locked();
 #endif
     pthread_mutex_unlock(&g_lock);
 #if WC3_DEBUG && WC3_DEBUG_HLE

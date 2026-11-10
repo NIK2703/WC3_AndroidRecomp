@@ -110,6 +110,16 @@ int wc3_legacy_hle_override(const char *dll, const char *name,
     return 0;
 }
 
+/* The test bootstrap supplies every time row, so the add fallback is only here
+ * to satisfy the target module's link contract. */
+int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
+                       int cdecl_abi, void (*impl)(CPU *c))
+{
+    (void)argc;
+    (void)cdecl_abi;
+    return wc3_legacy_hle_override(dll, name, impl);
+}
+
 static void (*find_override(const char *name))(CPU *)
 {
     for (unsigned i = 0; i < g_override_count; i++)

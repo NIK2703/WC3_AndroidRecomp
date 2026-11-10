@@ -17,8 +17,7 @@ class LaunchSettingsStore(context: Context) {
         width = prefs.getInt(KEY_WIDTH, 0),
         height = prefs.getInt(KEY_HEIGHT, 0),
         sound = prefs.getBoolean(KEY_SOUND, true),
-        extraArgs = prefs.getString(KEY_EXTRA_ARGS, "").orEmpty().trim(),
-        audioLatencyMs = prefs.getInt(KEY_AUDIO_LATENCY_MS, 0)
+        extraArgs = prefs.getString(KEY_EXTRA_ARGS, "").orEmpty().trim()
     )
 
     fun save(settings: LaunchSettings): Boolean =
@@ -28,7 +27,6 @@ class LaunchSettingsStore(context: Context) {
             .putInt(KEY_HEIGHT, settings.height)
             .putBoolean(KEY_SOUND, settings.sound)
             .putString(KEY_EXTRA_ARGS, settings.extraArgs)
-            .putInt(KEY_AUDIO_LATENCY_MS, settings.audioLatencyMs)
             .commit()
 
     private companion object {
@@ -38,6 +36,5 @@ class LaunchSettingsStore(context: Context) {
         const val KEY_HEIGHT = "height"
         const val KEY_SOUND = "sound"
         const val KEY_EXTRA_ARGS = "args"
-        const val KEY_AUDIO_LATENCY_MS = "audio_latency_ms"
     }
 }

@@ -4,7 +4,7 @@
  * These handlers are fixed machine facts and structure writers: they do not
  * depend on the legacy registry, handles, paths, or threads.  They are moved
  * together so the OSVERSIONINFOA size contract and the SYSTEM_INFO/MEMORYSTATUS
- * layouts live in target code with a T0 test instead of in the quarantine.
+ * layouts live in target code with a T0 test instead of in the as-built HLE.
  *
  * GetModuleHandleW is an addition: it returns the fixed guest image bases for
  * the modules the corpus loads, rather than the resolver's zero stub.

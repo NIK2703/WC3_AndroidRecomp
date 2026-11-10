@@ -1,14 +1,14 @@
 /*
  * hle_fast.h - the cutover adapter for the new HLE call bridge.
  *
- * The legacy registry in runtime/legacy/hle_android.c still owns the thunk
+ * The as-built registry in runtime/hle/android/hle_android.c still owns the thunk
  * slots.  New HLE modules override selected slots through
  * wc3_legacy_hle_override(); those slots use the clean hle_abi bridge.  The
- * O-46 release path in legacy_shim.c converts the thunk once and calls an
+ * O-46 release path in hle_bridge.c converts the thunk once and calls an
  * unbound as-built handler directly, preserving its register/stack contract;
  * debug builds keep hle_call() so its call ring and missing/stack diagnostics
  * remain available.  The clean entry point is hle_abi_call(); the target tree
- * cannot also define hle_call() because the as-built quarantine already
+ * cannot also define hle_call() because the as-built HLE already
  * exports that symbol.
  */
 #ifndef WC3_HLE_FAST_H

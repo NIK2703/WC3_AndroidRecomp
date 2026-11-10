@@ -1019,55 +1019,40 @@ static void test_config(const Wc3ConfigApi *c)
     (void)unlink(path);
 }
 
-static _Atomic uint32_t g_audio_callbacks;
-
-static void audio_test_callback(void *opaque, void *frames, uint32_t bytes)
-{
-    (void)opaque;
-    memset(frames, 0, bytes);
-    atomic_fetch_add_explicit(&g_audio_callbacks, 1, memory_order_relaxed);
-}
-
 static void test_audio(const Wc3AudioApi *a)
 {
-    check(a->open && a->write && a->close && a->set_callback,
+    check(a->open && a->close && a->primary_voice && a->voice_add &&
+              a->voice_remove && a->voice_publish && a->voice_control,
           "audio table");
 
     uintptr_t stream = 0;
-    check(a->open(a->ctx, 44100, 2, 8, &stream) == -1,
-          "audio rejects 8-bit");
-    check(stream == 0u, "audio rejected leaves output");
-
     check(a->open(a->ctx, 44100, 2, 16, &stream) == 0, "audio open");
     if (!stream) return;
+    check(a->primary_voice(a->ctx, stream) != 0u, "audio primary voice");
+    check(a->device_rate(a->ctx, stream) != 0u, "audio device rate");
 
-    atomic_store_explicit(&g_audio_callbacks, 0, memory_order_relaxed);
-    check(a->set_callback(a->ctx, stream, audio_test_callback, NULL) == 0,
-          "audio callback set");
-
-    const uint32_t frames = 4410;
-    const uint32_t bytes = frames * 2u * 2u;
-    void *pcm = calloc(1, bytes);
-    check(pcm != NULL, "audio pcm alloc");
-    if (pcm) {
-        uint32_t written = 0;
-        check(a->write(a->ctx, stream, pcm, bytes, &written) == 0,
-              "audio write");
-        check(written == bytes, "audio written");
-        check(a->write(a->ctx, stream, pcm, bytes - 1u, &written) == -1,
-              "audio rejects partial frame");
-        free(pcm);
+    uintptr_t voice = 0;
+    check(a->voice_add(a->ctx, stream, 44100, 2, 16, 8192, &voice) == 0 &&
+              voice != 0u, "audio voice add");
+    if (voice) {
+        const uint32_t bytes = 8192u;
+        uint8_t *pcm = (uint8_t *)calloc(1, bytes);
+        check(pcm != NULL, "audio pcm alloc");
+        if (pcm) {
+            uint32_t written = 0;
+            check(a->voice_publish(a->ctx, voice, 0, pcm, bytes, &written) == 0 &&
+                      written == bytes, "audio voice publish");
+            check(a->voice_control(a->ctx, voice, 1, 1, 44100, 0, 0) == 0,
+                  "audio voice play");
+            free(pcm);
+        }
+        usleep(200000);
+        uint32_t play_bytes = 0, write_bytes = 0;
+        uint64_t play_frame = 0;
+        check(a->voice_position(a->ctx, voice, &play_bytes, &write_bytes,
+                                &play_frame) == 0, "audio voice position");
+        check(a->voice_remove(a->ctx, voice) == 0, "audio voice remove");
     }
-
-    for (int i = 0; i < 200 && atomic_load_explicit(
-                                      &g_audio_callbacks,
-                                      memory_order_relaxed) == 0;
-         i++) {
-        usleep(5000);
-    }
-    check(atomic_load_explicit(&g_audio_callbacks,
-                               memory_order_relaxed) > 0,
-          "audio callback ran");
     check(a->close(a->ctx, stream) == 0, "audio close");
 }
 
@@ -1093,7 +1078,8 @@ int main(int argc, char **argv)
     check(p.mem.reserve && p.file.open && p.file.stat && p.time.monotonic_ns &&
               p.thread.create && p.sync.wait && p.input.push &&
               p.input.set_text_focus && p.surface.acquire && p.audio.open &&
-              p.audio.set_callback && p.config.get && p.asset.init,
+              p.audio.primary_voice && p.audio.voice_add &&
+              p.config.get && p.asset.init,
           "platform table");
     test_guest_memory();
     if (argc >= 2) test_pe(&p, argv[1], GUEST_IMAGE_WAR3, 1);

@@ -150,53 +150,25 @@ def _docs_line_counts() -> dict[str, int]:
 
 
 def _audio_contract() -> dict:
-    """Read the constants that O-107/O-108 actually promise."""
-    header = ROOT / "runtime" / "platform" / "android" / "audio_ring_layout.h"
-    legacy = ROOT / "runtime" / "legacy" / "hle_android.c"
+    """Read the nfsu2 voice-mixer constants that replaced the old ring."""
+    header = ROOT / "runtime" / "platform" / "audio_mixer.h"
+    asbuilt = ROOT / "runtime" / "hle" / "android" / "hle_android.c"
     contract: dict = {
-        "platform_ring_bytes": None,
-        "legacy_ring_bytes": None,
-        "read_write_offset_delta": None,
-        "positions_size": None,
-        "legacy_sha256": None,
-        "legacy_manifest_sha256": None,
-        "legacy_manifest_match": None,
+        "voice_min_ring_bytes": None,
+        "voice_slot_bytes": None,
+        "voice_max_slots": None,
     }
     if header.is_file():
         text = header.read_text(encoding="utf-8", errors="replace")
-        match = re.search(r"#define\s+WC3_AUDIO_RING_BYTES\s+\(1u\s*<<\s*16\)", text)
-        if match:
-            contract["platform_ring_bytes"] = 1 << 16
-        # The static assertions are the machine-readable contract.  The test
-        # binary proves them at compile time; the snapshot records their text.
-        if "offsetof(Wc3AudioRingPositions, write_pos)" in text:
-            contract["read_write_offset_delta"] = 64
-        if "WC3_AUDIO_CACHE_LINE_BYTES * 2u" in text:
-            contract["positions_size"] = 128
-    if legacy.is_file():
-        text = legacy.read_text(encoding="utf-8", errors="replace")
-        match = re.search(
-            r"#define\s+WC3_WAVE_RING_BYTES\s+\((\d+)u\s*\*\s*(\d+)u\)",
-            text)
-        if match:
-            contract["legacy_ring_bytes"] = (
-                int(match.group(1)) * int(match.group(2)))
-        try:
-            contract["legacy_sha256"] = _sha256(legacy)
-        except OSError:
-            pass
-        manifest = ROOT / "docs" / "QUARANTINE.md"
-        if manifest.is_file() and contract["legacy_sha256"]:
-            manifest_text = manifest.read_text(encoding="utf-8", errors="replace")
-            row = re.search(r"\| `hle_android.c` .*?\| `([0-9a-f]{64})` \|",
-                            manifest_text)
-            if row:
-                contract["legacy_manifest_sha256"] = row.group(1)
-                contract["legacy_manifest_match"] = (
-                    contract["legacy_manifest_sha256"] ==
-                    contract["legacy_sha256"])
+        for key, macro in (("voice_min_ring_bytes", "WC3_VOICE_MIN_RING_BYTES"),
+                           ("voice_slot_bytes", "WC3_VOICE_SLOT_BYTES"),
+                           ("voice_max_slots", "WC3_VOICE_MAX_SLOTS")):
+            match = re.search(rf"#define\s+{macro}\s+(\d+)u", text)
+            if match:
+                contract[key] = int(match.group(1))
+    # The as-built HLE is a normal source input; the snapshot records only the
+    # live voice-mixer contract and does not depend on a migration manifest.
     return contract
-
 
 def snapshot() -> dict:
     porcelain = _git("status", "--porcelain=v1")

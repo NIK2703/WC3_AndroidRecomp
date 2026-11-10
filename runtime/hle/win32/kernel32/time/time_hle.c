@@ -19,7 +19,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "platform.h"
 
 #define FILETIME_UNIX_EPOCH 116444736000000000ull
@@ -743,25 +743,36 @@ static void h_get_time_format(CPU *c)
 typedef struct TimeOverride {
     const char *dll;
     const char *name;
+    int argc;
     void (*impl)(CPU *c);
 } TimeOverride;
 
 static const TimeOverride g_overrides[] = {
-    { "KERNEL32.dll", "GetTickCount", h_get_tick_count },
-    { "KERNEL32.dll", "QueryPerformanceCounter", h_query_perf_counter },
-    { "KERNEL32.dll", "QueryPerformanceFrequency", h_query_perf_freq },
-    { "KERNEL32.dll", "GetSystemTimeAsFileTime", h_get_system_time_as_file_time },
-    { "KERNEL32.dll", "GetSystemTime", h_get_system_time },
-    { "KERNEL32.dll", "GetLocalTime", h_get_local_time },
-    { "KERNEL32.dll", "GetTimeZoneInformation", h_get_time_zone_information },
-    { "KERNEL32.dll", "FileTimeToSystemTime", h_filetime_to_system_time },
-    { "KERNEL32.dll", "FileTimeToLocalFileTime", h_filetime_to_local_file_time },
-    { "KERNEL32.dll", "SystemTimeToFileTime", h_system_time_to_file_time },
-    { "KERNEL32.dll", "CompareFileTime", h_compare_file_time },
-    { "KERNEL32.dll", "GetDateFormatA", h_get_date_format },
-    { "KERNEL32.dll", "GetTimeFormatA", h_get_time_format },
-    { "WINMM.dll", "timeGetTime", h_time_get_time },
+    { "KERNEL32.dll", "GetTickCount", 0, h_get_tick_count },
+    { "KERNEL32.dll", "QueryPerformanceCounter", 1, h_query_perf_counter },
+    { "KERNEL32.dll", "QueryPerformanceFrequency", 1, h_query_perf_freq },
+    { "KERNEL32.dll", "GetSystemTimeAsFileTime", 1, h_get_system_time_as_file_time },
+    { "KERNEL32.dll", "GetSystemTime", 1, h_get_system_time },
+    { "KERNEL32.dll", "GetLocalTime", 1, h_get_local_time },
+    { "KERNEL32.dll", "GetTimeZoneInformation", 1, h_get_time_zone_information },
+    { "KERNEL32.dll", "FileTimeToSystemTime", 2, h_filetime_to_system_time },
+    { "KERNEL32.dll", "FileTimeToLocalFileTime", 2, h_filetime_to_local_file_time },
+    { "KERNEL32.dll", "SystemTimeToFileTime", 2, h_system_time_to_file_time },
+    { "KERNEL32.dll", "CompareFileTime", 2, h_compare_file_time },
+    { "KERNEL32.dll", "GetDateFormatA", 6, h_get_date_format },
+    { "KERNEL32.dll", "GetTimeFormatA", 6, h_get_time_format },
+    { "WINMM.dll", "timeGetTime", 0, h_time_get_time },
 };
+
+/* The as-built waveOut sink used to own the WINMM!timeGetTime row.  With that
+ * sink removed, the time module is the owner of the timer query as well, so it
+ * adds the row when the bootstrap no longer provides one. */
+static int time_bind_or_add(const TimeOverride *o)
+{
+    if (wc3_legacy_hle_override(o->dll, o->name, o->impl) == 0)
+        return 0;
+    return wc3_legacy_hle_add(o->dll, o->name, o->argc, 0, o->impl);
+}
 
 int wc3_hle_kernel32_time_install(void)
 {
@@ -772,8 +783,7 @@ int wc3_hle_kernel32_time_install(void)
     g_time = &platform->time;
 
     for (unsigned i = 0; i < sizeof g_overrides / sizeof g_overrides[0]; i++) {
-        if (wc3_legacy_hle_override(g_overrides[i].dll, g_overrides[i].name,
-                                    g_overrides[i].impl) != 0)
+        if (time_bind_or_add(&g_overrides[i]) != 0)
             return -1;
     }
     return (int)(sizeof g_overrides / sizeof g_overrides[0]);

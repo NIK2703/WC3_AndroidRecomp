@@ -11,7 +11,7 @@
 
 #include "cpu.h"
 #include "convert_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define MAX_ROWS 16u
 #define GUEST_BASE 0x20000u

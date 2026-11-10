@@ -1,7 +1,7 @@
 /*
  * window_facts_hle.c - target-side USER32 window-creation facts.
  *
- * Window creation and the input queue are still owned by the quarantine.  A
+ * Window creation and the input queue are still owned by the as-built HLE.  A
  * thin chain override calls the as-built handler first and records the handle,
  * class, parent and placement it produced.  The query imports then answer from
  * that table.  No host lock is held while the as-built handler or guest memory
@@ -23,7 +23,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "platform.h"
 
 #define DESKTOP_WINDOW_HANDLE 0x00010000u

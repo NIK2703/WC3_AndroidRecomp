@@ -4,7 +4,7 @@
  * M5 migration, H6.2 order step "kernel32/time".  The handlers use the
  * Wc3TimeApi from runtime/platform, so this module has no POSIX/Android
  * include.  During the strangler window the as-built table row is replaced
- * through legacy_shim (wc3_legacy_hle_override); its argc and call convention
+ * through hle_bridge (wc3_legacy_hle_override); its argc and call convention
  * stay authoritative, so the handlers below must keep the Win32 signatures.
  */
 #ifndef WC3_HLE_WIN32_KERNEL32_TIME_H

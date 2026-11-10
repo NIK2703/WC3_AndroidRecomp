@@ -24,9 +24,179 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "platform.h"
 #include "wc3_debug.h"
+
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+/* Battle.net failures happen between a received SID_AUTH_INFO and the
+ * SID_AUTH_CHECK the client should send back.  The byte counts alone cannot
+ * tell a bad formula/filetime from a file-read failure, so dump the first
+ * bytes of every game packet.  The cap keeps a runaway LAN loop from filling
+ * the log; one Battle.net handshake is far below it.
+ *
+ * The client frames Battle.net packets as FF <id> <length-lo> <length-hi>.
+ * The old trace printed only the FF marker as the packet id, which hid the
+ * SID_AUTH_INFO/SID_AUTH_CHECK distinction.  Decode the inner id as well. */
+#if WC3_DEBUG_NET
+#define WC3_PACKET_TAG "net"
+#else
+#define WC3_PACKET_TAG "bnet"
+#endif
+
+static _Atomic unsigned g_packet_dumps;
+
+#if WC3_DEBUG_BATTLE_NET
+static const char *battle_net_packet_name(uint32_t id)
+{
+    switch (id) {
+    case 0x50u: return "SID_AUTH_INFO";
+    case 0x51u: return "SID_AUTH_CHECK";
+    case 0x52u: return "SID_AUTH_ACCOUNTCREATE";
+    case 0x53u: return "SID_AUTH_ACCOUNTLOGON";
+    case 0x54u: return "SID_AUTH_ACCOUNTLOGONPROOF";
+    case 0x55u: return "SID_AUTH_ACCOUNTCHANGE";
+    case 0x56u: return "SID_AUTH_ACCOUNTCHANGEPROOF";
+    default:     return NULL;
+    }
+}
+
+static uint32_t battle_net_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint32_t battle_net_cstr_len(const uint8_t *p, uint32_t length,
+                                    uint32_t offset)
+{
+    uint32_t n = 0;
+    while (offset + n < length && p[offset + n] != 0) n++;
+    return n;
+}
+
+/* SID_AUTH_INFO has two different layouts.  Decode the fields that decide the
+ * next step, especially the server's FILETIME and version filename.  A mismatch
+ * there sends the client down the patch path instead of SID_AUTH_CHECK. */
+static void battle_net_decode_0x50(const char *direction,
+                                   const uint8_t *bytes, uint32_t length)
+{
+    if (length < 4u) return;
+
+    if (strcmp(direction, "send") == 0) {
+        if (length < 48u) {
+            fprintf(stderr, "[bnet] 0x50 client short len=%u\n", length);
+            return;
+        }
+        char platform[5] = { (char)bytes[8], (char)bytes[9],
+                             (char)bytes[10], (char)bytes[11], 0 };
+        char product[5] = { (char)bytes[12], (char)bytes[13],
+                            (char)bytes[14], (char)bytes[15], 0 };
+        char language[5] = { (char)bytes[20], (char)bytes[21],
+                             (char)bytes[22], (char)bytes[23], 0 };
+        fprintf(stderr,
+                "[bnet] 0x50 client protocol=%u platform=\"%s\" product=\"%s\" "
+                "version=%u language=\"%s\" ip=%u.%u.%u.%u tz=%d "
+                "locale=%u langid=%u len=%u\n",
+                battle_net_le32(bytes + 4), platform, product,
+                battle_net_le32(bytes + 16), language,
+                bytes[24], bytes[25], bytes[26], bytes[27],
+                (int32_t)battle_net_le32(bytes + 28),
+                battle_net_le32(bytes + 32), battle_net_le32(bytes + 36),
+                length);
+        return;
+    }
+
+    if (length < 24u) {
+        fprintf(stderr, "[bnet] 0x50 server short len=%u\n", length);
+        return;
+    }
+    uint32_t off = 24u;
+    uint32_t fn_len = battle_net_cstr_len(bytes, length, off);
+    uint32_t fn_off = off;
+    off += fn_len;
+    if (off < length) off++;
+    uint32_t formula_len = battle_net_cstr_len(bytes, length, off);
+    uint32_t formula_off = off;
+    off += formula_len;
+    if (off < length) off++;
+    fprintf(stderr,
+            "[bnet] 0x50 server logon=%u token=%08X udp=%08X "
+            "filetime=%08X%08X filename=\"%.*s\" formula=\"%.*s\" "
+            "trailing=%u len=%u\n",
+            battle_net_le32(bytes + 4), battle_net_le32(bytes + 8),
+            battle_net_le32(bytes + 12), battle_net_le32(bytes + 20),
+            battle_net_le32(bytes + 16),
+            (int)fn_len, (const char *)(bytes + fn_off),
+            (int)formula_len, (const char *)(bytes + formula_off),
+            length - off, length);
+}
+#endif
+
+static void debug_dump_packet(const char *direction, uint32_t handle,
+                              const void *data, uint32_t length)
+{
+    const uint8_t *bytes = (const uint8_t *)data;
+    unsigned sequence;
+    uint32_t bnet_id = 0;
+
+    if (!bytes || !length) return;
+    sequence = atomic_fetch_add_explicit(&g_packet_dumps, 1u,
+                                         memory_order_relaxed);
+    if (sequence >= 256u) return;
+
+    fprintf(stderr, "[" WC3_PACKET_TAG "] %s packet h=%08X len=%u id=%02X",
+            direction, (unsigned)handle, (unsigned)length,
+            (unsigned)bytes[0]);
+    if (length >= 4u && bytes[0] == 0xFFu) {
+        const uint32_t declared = (uint32_t)bytes[2] |
+                                  ((uint32_t)bytes[3] << 8);
+        bnet_id = bytes[1];
+        fprintf(stderr, " bnet=%02X declared=%u", (unsigned)bnet_id,
+                (unsigned)declared);
+#if WC3_DEBUG_BATTLE_NET
+        const char *name = battle_net_packet_name(bnet_id);
+        if (name) fprintf(stderr, " (%s)", name);
+#endif
+    }
+    fputc('\n', stderr);
+#if WC3_DEBUG_BATTLE_NET
+    if (bnet_id == 0x50u) battle_net_decode_0x50(direction, bytes, length);
+#endif
+#if WC3_DEBUG_NET
+    int dump_hex = 1;
+#elif WC3_DEBUG_BATTLE_NET
+    /* The auth exchange is small and the fields alone do not reveal a malformed
+     * filetime or a missing trailing byte; show those two frames in full. */
+    int dump_hex = (bnet_id == 0x50u || bnet_id == 0x51u);
+#else
+    int dump_hex = 0;
+#endif
+#if WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET
+    if (dump_hex) {
+        uint32_t shown = length > 384u ? 384u : length;
+        for (uint32_t offset = 0; offset < shown; offset += 16u) {
+            fprintf(stderr, "[" WC3_PACKET_TAG "]  %04X:", (unsigned)offset);
+            for (uint32_t i = 0; i < 16u; i++) {
+                if (offset + i < shown)
+                    fprintf(stderr, " %02X", (unsigned)bytes[offset + i]);
+                else
+                    fprintf(stderr, "   ");
+            }
+            fprintf(stderr, "  ");
+            for (uint32_t i = 0; i < 16u && offset + i < shown; i++) {
+                unsigned char ch = bytes[offset + i];
+                fputc(ch >= 0x20u && ch < 0x7Fu ? (int)ch : '.', stderr);
+            }
+            fputc('\n', stderr);
+        }
+        if (shown < length)
+            fprintf(stderr, "[" WC3_PACKET_TAG "]  ... %u bytes omitted\n",
+                    (unsigned)(length - shown));
+    }
+#endif
+}
+#endif
 
 /* WinSock 2 constants used by the guest. */
 #define WSA_SOCKET_ERROR        0xFFFFFFFFu
@@ -709,7 +879,7 @@ static uint32_t socket_accept_context(uint32_t handle)
 /* completion-port bridge                                              */
 /* ------------------------------------------------------------------ */
 
-/* The quarantine owns the completion-port object and the file-I/O queues.
+/* The as-built HLE owns the completion-port object and the file-I/O queues.
  * Sockets are not GHandle files, so its CreateIoCompletionPort association
  * rejects them.  This bridge keeps the socket-to-port mapping and a private
  * completion queue, and GetQueuedCompletionStatus checks that queue before
@@ -1164,6 +1334,9 @@ static int io_worker_main(void *arg)
 
             int is_send = e->is_send;
             Wc3NetSocket host = e->socket_host;
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+            uint32_t guest_handle = e->socket_guest;
+#endif
             uint8_t *data = e->data;
             uint32_t total = e->total_length;
             uint32_t sent = e->sent;
@@ -1217,6 +1390,11 @@ static int io_worker_main(void *arg)
                     pthread_mutex_unlock(&g_io_lock);
                     continue;
                 }
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+                if (moved > total) moved = total;
+                if (moved)
+                    debug_dump_packet("recv", guest_handle, data, moved);
+#endif
                 pthread_mutex_lock(&g_io_lock);
                 if (e->used) {
                     if (moved > total) moved = total;
@@ -1407,6 +1585,11 @@ static void io_submit(CPU *c, int is_send)
         }
     }
 
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+    if (is_send && parsed.total_length)
+        debug_dump_packet("send", handle, data, parsed.total_length);
+#endif
+
     /* Publish the initial zeroes now, while the caller's stack frame is still
      * alive.  Completion must not write these in/out parameters again: the
      * 1.27 client points them at StartReceive/StartSend stack locals. */
@@ -1508,6 +1691,11 @@ static void socket_file_io(CPU *c, int is_send)
          * form real instead of pretending it succeeded. */
         if (is_send) {
             uint32_t total = 0;
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+            if (length)
+                debug_dump_packet("send", handle,
+                                  (const void *)(uintptr_t)buffer, length);
+#endif
             while (total < length) {
                 uint32_t moved = 0;
                 int r = g_net->send(g_net->ctx, host,
@@ -1552,6 +1740,11 @@ static void socket_file_io(CPU *c, int is_send)
                 return;
             }
             if (bytes_ptr) wc3_legacy_wr32g(bytes_ptr, moved);
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+            if (moved)
+                debug_dump_packet("recv", handle,
+                                  (const void *)(uintptr_t)buffer, moved);
+#endif
             c->eax = 1;
         }
         return;
@@ -1600,6 +1793,12 @@ static void socket_file_io(CPU *c, int is_send)
         }
         request.data_owned = 1;
     }
+
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+    if (is_send && length)
+        debug_dump_packet("send", handle,
+                          (const void *)(uintptr_t)buffer, length);
+#endif
 
     /* Overlapped ReadFile/WriteFile do not use lpNumberOfBytes*.  The guest
      * passes NULL here, but zero a non-NULL slot before the frame dies. */
@@ -1877,6 +2076,11 @@ static void h_socket(CPU *c)
             (unsigned)family, (unsigned)type, (unsigned)protocol,
             (unsigned)guest);
 #endif
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    fprintf(stderr, "[bnet] socket family=%u type=%u proto=%u -> %08X\n",
+            (unsigned)family, (unsigned)type, (unsigned)protocol,
+            (unsigned)guest);
+#endif
     c->eax = guest;
 }
 
@@ -1891,14 +2095,23 @@ static void h_closesocket(CPU *c)
     accept_cancel_listener(handle);
     accept_cancel_accept(handle);
     io_cancel_socket(handle);
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+    uint32_t ra = wc3_legacy_rd32g(c->esp);
+#endif
     int r = g_net ? g_net->close(g_net->ctx, host) : -WC3_NET_ERR_BADF;
     socket_release(handle);
-#if WC3_DEBUG && WC3_DEBUG_NET
-    fprintf(stderr, "[net] closesocket handle=%08X -> %s\n",
-            (unsigned)handle, r < 0 ? "failed" : "ok");
-#endif
     if (r < 0) c->eax = fail_net(r);
     else c->eax = 0;
+#if WC3_DEBUG && WC3_DEBUG_NET
+    fprintf(stderr, "[net] closesocket handle=%08X -> %s last=%u ra=%08X\n",
+            (unsigned)handle, r < 0 ? "failed" : "ok",
+            (unsigned)wc3_legacy_get_last_error(), (unsigned)ra);
+#endif
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    fprintf(stderr, "[bnet] closesocket handle=%08X -> %s last=%u ra=%08X\n",
+            (unsigned)handle, r < 0 ? "failed" : "ok",
+            (unsigned)wc3_legacy_get_last_error(), (unsigned)ra);
+#endif
 }
 
 static int address_argument(CPU *c, unsigned addr_index, unsigned len_index,
@@ -1956,6 +2169,17 @@ static void h_connect(CPU *c)
     if (r == -WC3_NET_ERR_INPROGRESS) status = "pending";
     fprintf(stderr, "[net] connect %s:%u -> %s (%d)\n", text,
             (unsigned)bswap16(port), status, r);
+#endif
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    uint32_t bnet_ip = 0;
+    uint16_t bnet_port = 0;
+    char bnet_text[32] = "?";
+    if (read_sockaddr_in(addr, len, &bnet_ip, &bnet_port))
+        format_ipv4(bnet_ip, bnet_text, sizeof bnet_text);
+    const char *bnet_status = r < 0 ? "failed" : "ok";
+    if (r == -WC3_NET_ERR_INPROGRESS) bnet_status = "pending";
+    fprintf(stderr, "[bnet] connect %s:%u -> %s (%d)\n", bnet_text,
+            (unsigned)bswap16(bnet_port), bnet_status, r);
 #endif
     if (r == -WC3_NET_ERR_INPROGRESS) {
         /* A nonblocking Winsock connect returns WSAEWOULDBLOCK, not
@@ -2094,12 +2318,18 @@ static void h_send(CPU *c)
         return;
     }
     uint32_t sent = 0;
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+    debug_dump_packet("send", wc3_legacy_arg32(c, 0),
+                      (const void *)(uintptr_t)buf, len);
+#endif
     int r = g_net->send(g_net->ctx, host,
                         (const void *)(uintptr_t)buf, len, flags, &sent);
-#if WC3_DEBUG && WC3_DEBUG_NET
-    fprintf(stderr, "[net] send handle=%08X len=%u -> %s (%d)\n",
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+    fprintf(stderr, "[" WC3_PACKET_TAG "] send handle=%08X len=%u -> "
+            "%s (%d) last=%d\n",
             (unsigned)wc3_legacy_arg32(c, 0), (unsigned)len,
-            r < 0 ? "failed" : "ok", r);
+            r < 0 ? "failed" : "ok", r,
+            r < 0 ? net_error_result(r) : 0);
 #endif
     c->eax = r < 0 ? fail_net(r) : sent;
 }
@@ -2122,10 +2352,17 @@ static void h_recv(CPU *c)
     uint32_t received = 0;
     int r = g_net->recv(g_net->ctx, host, (void *)(uintptr_t)buf, len,
                         flags, &received);
-#if WC3_DEBUG && WC3_DEBUG_NET
-    fprintf(stderr, "[net] recv handle=%08X len=%u -> %s (%d)\n",
+#if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
+    fprintf(stderr, "[" WC3_PACKET_TAG "] recv handle=%08X len=%u -> "
+            "%s (%d) last=%d\n",
             (unsigned)wc3_legacy_arg32(c, 0), (unsigned)received,
-            r < 0 ? "failed" : "ok", r);
+            r < 0 ? "failed" : "ok", r,
+            r < 0 ? net_error_result(r) : 0);
+    if (r >= 0 && received) {
+        if (received > len) received = len;
+        debug_dump_packet("recv", wc3_legacy_arg32(c, 0),
+                          (const void *)(uintptr_t)buf, received);
+    }
 #endif
     c->eax = r < 0 ? fail_net(r) : received;
 }
@@ -2227,6 +2464,12 @@ static void h_shutdown(CPU *c)
     if (!socket_from_arg(c, 0, &host)) { c->eax = WSA_SOCKET_ERROR; return; }
     int r = g_net->shutdown(g_net->ctx, host, (int)wc3_legacy_arg32(c, 1));
     c->eax = r < 0 ? fail_net(r) : 0;
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    fprintf(stderr, "[bnet] shutdown h=%08X how=%u -> %s (%d)\n",
+            (unsigned)wc3_legacy_arg32(c, 0),
+            (unsigned)wc3_legacy_arg32(c, 1),
+            r < 0 ? "failed" : "ok", r);
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -2600,6 +2843,9 @@ static void h_gethostbyname(CPU *c)
     uint32_t addresses[32];
     uint32_t count = 0;
     if (!resolve_ipv4(node, addresses, 32u, &count) || !count) {
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+        fprintf(stderr, "[bnet] dns \"%s\" -> not found\n", node);
+#endif
         c->eax = 0;
         g_wsa_error = WSAHOST_NOT_FOUND;
         return;
@@ -2618,6 +2864,13 @@ static void h_gethostbyname(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_NET
     fprintf(stderr, "[net] gethostbyname(%s) -> %u addr(s)\n", node,
             (unsigned)count);
+#endif
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    for (uint32_t i = 0; i < count; i++) {
+        char text[32] = "?";
+        format_ipv4(addresses[i], text, sizeof text);
+        fprintf(stderr, "[bnet] dns \"%s\" -> %s\n", node, text);
+    }
 #endif
     c->eax = hostent;
 }
@@ -2680,7 +2933,14 @@ static void h_getaddrinfo(CPU *c)
     int r = g_net->resolve(g_net->ctx, node_ptr ? node : NULL,
                            service_ptr ? service : NULL, &hints, info, 16u,
                            &count);
-    if (r < 0) { c->eax = gai_error_code(r); return; }
+    if (r < 0) {
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+        fprintf(stderr, "[bnet] getaddrinfo(%s,%s) -> failed (%d)\n",
+                node, service, r);
+#endif
+        c->eax = gai_error_code(r);
+        return;
+    }
 
     uint32_t head = 0, tail = 0;
     for (uint32_t i = 0; i < count; i++) {
@@ -2720,6 +2980,10 @@ static void h_getaddrinfo(CPU *c)
     wc3_legacy_wr32g(result_ptr, head);
 #if WC3_DEBUG && WC3_DEBUG_NET
     fprintf(stderr, "[net] getaddrinfo(%s,%s) -> %u\n", node, service,
+            (unsigned)count);
+#endif
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    fprintf(stderr, "[bnet] getaddrinfo(%s,%s) -> %u\n", node, service,
             (unsigned)count);
 #endif
     c->eax = 0;

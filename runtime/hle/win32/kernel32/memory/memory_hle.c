@@ -10,7 +10,7 @@
  *   - GlobalUnlock returns FALSE for fixed blocks, which is what GMEM_FIXED
  *     GlobalAlloc produces here.
  *
- * VirtualAlloc/VirtualFree/VirtualProtect/VirtualQuery remain quarantined:
+ * VirtualAlloc/VirtualFree/VirtualProtect/VirtualQuery remain in the as-built HLE:
  * their live-range table is private and must move together with guest_ok().
  */
 #include "memory_hle.h"
@@ -18,7 +18,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define GMEM_ZEROINIT     0x0040u
 #define HEAP_ZERO_MEMORY  0x00000008u

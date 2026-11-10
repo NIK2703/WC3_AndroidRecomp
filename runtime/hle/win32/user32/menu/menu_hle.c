@@ -27,7 +27,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define MENU_HANDLE_BASE 0x00110000u
 #define MENU_HANDLE_STRIDE 4u

@@ -3,7 +3,7 @@
  *
  * The guest comparator is a lifted cdecl function.  It receives two guest
  * pointers and returns a signed integer in eax; the return address pushed
- * below them is the dispatcher sentinel the quarantine has always used.
+ * below them is the dispatcher sentinel the as-built HLE has always used.
  *
  * The as-built implementation kept a thread-local 256-byte guest scratch
  * block, which silently refused every element wider than 256 bytes.  game.dll's
@@ -26,7 +26,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define DISPATCH_RETURN 0x7EFFFFF1u
 

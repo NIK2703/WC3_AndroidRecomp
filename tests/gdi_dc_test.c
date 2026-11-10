@@ -5,7 +5,7 @@
 
 #include "cpu.h"
 #include "gdi_dc_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define MAX_ROWS 24u
 #define CLR_INVALID 0xFFFFFFFFu

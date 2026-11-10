@@ -19,7 +19,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 static int add_ok(uint32_t base, uint32_t off)
 {

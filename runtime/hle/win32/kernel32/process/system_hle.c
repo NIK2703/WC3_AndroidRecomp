@@ -20,7 +20,7 @@
 
 #include "cpu.h"
 #include "guest_layout.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 /* GetVersion packs major/minor into the low word and the build into the high
  * word: 5.1 build 2600. */

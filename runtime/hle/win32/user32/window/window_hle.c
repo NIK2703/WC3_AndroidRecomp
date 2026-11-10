@@ -1,7 +1,7 @@
 /*
  * window_hle.c - target-side USER32 window/display facts.
  *
- * GetSystemMetrics is the first USER32 handler to leave the quarantine: its
+ * GetSystemMetrics is the first USER32 handler to leave the as-built monolith: its
  * only external input is the current display mode, which the shim already
  * exposes.  The as-built default of 800 for unrelated metrics is preserved:
  * the game uses those metrics only as loose layout hints, and changing them
@@ -21,7 +21,7 @@
 #include <strings.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define DESKTOP_WINDOW_HANDLE 0x00010000u
 #define PROPERTY_TABLE_SIZE 256u

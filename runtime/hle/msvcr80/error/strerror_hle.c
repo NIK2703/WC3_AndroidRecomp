@@ -23,7 +23,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define STRERROR_BUFFER_SIZE 134u
 #define UNKNOWN_MESSAGE "Unknown error"

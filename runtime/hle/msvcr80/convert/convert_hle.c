@@ -36,7 +36,7 @@
 #include <stdlib.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define ATOF_BUFFER 1024u
 

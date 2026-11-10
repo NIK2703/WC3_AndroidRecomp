@@ -1,18 +1,18 @@
 /*
- * overlay_actions_legacy.c - TouchAction to legacy-shim bridge.
+ * overlay_actions_legacy.c - TouchAction to HLE bridge.
  *
  * This is the only UI-side file that translates Winlator X11 keycodes and
  * pointer buttons into the guest input surface.  It calls runtime/hle through
  * wc3_legacy_* only, so the overlay module itself remains independent of the
- * quarantined implementation.
+ * as-built implementation.
  */
 #include "overlay_actions_legacy.h"
 
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 /* Standard Windows virtual-key values.  The overlay action layer is the only
- * UI-side owner of this translation; the legacy shim forwards the result to
- * the as-built HLE without exposing a legacy header here. */
+ * UI-side owner of this translation; the HLE bridge forwards the result to
+ * the as-built HLE without exposing an as-built header here. */
 #define WC3_VK_ADD        0x6B
 #define WC3_VK_BACK       0x08
 #define WC3_VK_CAPITAL    0x14

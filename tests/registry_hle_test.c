@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "cpu.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 #include "registry_hle.h"
 
 #define MAX_ROWS 32u
@@ -229,6 +229,39 @@ int main(void)
     const uint32_t root = get_u32(0x1000u);
     CHECK(root >= 0x00150000u, "root handle");
 
+#if defined(WC3_W3L_GATEWAY_RUBATTLE)
+    put_string(0x0350u, "Battle.net Gateways");
+    put_u32(0x1020u, 0u);
+    put_u32(0x1024u, 0u);
+    const uint32_t gateway_size_args[6] = { root, guest(0x0350u), 0u,
+                                            guest(0x1020u), 0u,
+                                            guest(0x1024u) };
+    CHECK(invoke("RegQueryValueExA", gateway_size_args, 6u) == 0u,
+          "gateway size query");
+    CHECK(get_u32(0x1020u) == 7u, "gateway type");
+    const uint32_t gateway_length = get_u32(0x1024u);
+    CHECK(gateway_length == 261u, "gateway length");
+    put_u32(0x1024u, gateway_length);
+    const uint32_t gateway_value_args[6] = { root, guest(0x0350u), 0u,
+                                             guest(0x1020u), guest(0x4000u),
+                                             guest(0x1024u) };
+    CHECK(invoke("RegQueryValueExA", gateway_value_args, 6u) == 0u,
+          "gateway value query");
+    CHECK(memcmp(g_memory + 0x4000u, "1014\0" "00\0" "rubattle.net", 20u) == 0,
+          "gateway prefix");
+    CHECK(g_memory[0x4000u + gateway_length - 1u] == 0u &&
+          g_memory[0x4000u + gateway_length - 2u] == 0u,
+          "gateway double NUL");
+    int found_rubattle = 0;
+    for (uint32_t i = 0u; i + 12u <= gateway_length; i++) {
+        if (memcmp(g_memory + 0x4000u + i, "rubattle.net", 12u) == 0) {
+            found_rubattle = 1;
+            break;
+        }
+    }
+    CHECK(found_rubattle, "gateway rubattle host");
+#endif
+
     put_string(0x0200u,
                "Software\\Blizzard Entertainment\\Warcraft III\\Sound");
     const uint32_t open_sound[5] = { HKCU, guest(0x0200u), 0u, 0u,
@@ -338,9 +371,15 @@ int main(void)
     CHECK(get_u32(0x1080u) == 3u, "info subkeys");
     CHECK(get_u32(0x1084u) == 6u, "info max subkey");
     CHECK(get_u32(0x1088u) == 0u, "info max class");
+#if defined(WC3_W3L_GATEWAY_RUBATTLE)
+    CHECK(get_u32(0x108Cu) == 1u, "info values");
+    CHECK(get_u32(0x1090u) == 19u, "info max value name");
+    CHECK(get_u32(0x1094u) == 261u, "info max data");
+#else
     CHECK(get_u32(0x108Cu) == 0u, "info values");
     CHECK(get_u32(0x1090u) == 0u, "info max value name");
     CHECK(get_u32(0x1094u) == 0u, "info max data");
+#endif
 
     const uint32_t delete_sub[2] = { root, guest(0x0500u) };
     CHECK(invoke("RegDeleteKeyA", delete_sub, 2u) == 0u, "delete subkey");

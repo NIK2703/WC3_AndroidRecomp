@@ -80,7 +80,7 @@ static float widescreen_factor_logged(void)
 {
     int w = 0, h = 0;
     float factor = widescreen_factor(&w, &h);
-#ifdef WC3_DEBUG_RESOLUTION
+#if WC3_DEBUG && WC3_DEBUG_RESOLUTION
     static int last_w = -1, last_h = -1;
     if (w != last_w || h != last_h) {
         fprintf(stderr, "[resolution] widescreen client %dx%d factor %.6f\n",
@@ -161,7 +161,7 @@ void hle_widescreen127_client_size_changed(void)
      * lives in that image. */
     wr32(0x6FD3D400u, 0);
     wr32(0x6FD3D404u, 0);
-#ifdef WC3_DEBUG_RESOLUTION
+#if WC3_DEBUG && WC3_DEBUG_RESOLUTION
     fprintf(stderr, "[resolution] invalidate guest client rect cache\n");
 #endif
 }

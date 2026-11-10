@@ -3,13 +3,13 @@
 
 /*
  * Transitional bridge from the Winlator touch engine's TouchAction stream to
- * the target-side legacy shim.
+ * the target-side HLE bridge.
  *
  * The engine emits X11 keycodes (the values in profile/bind.c).  This adapter
  * is the only place that translates them into Windows virtual keys, and it
- * reaches the as-built HLE only through runtime/hle/legacy_shim.h.  It will be
+ * reaches the as-built HLE only through runtime/hle/hle_bridge.h.  It will be
  * replaced by a Wc3Platform InputApi consumer when user32 owns the message
- * queue; until then the shim keeps the UI layer free of legacy headers.
+ * queue; until then the bridge keeps the UI layer free of as-built headers.
  */
 
 #include <stdbool.h>

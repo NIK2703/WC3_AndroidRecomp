@@ -12,7 +12,7 @@
  *     single-byte code page, so the lead-byte predicate is always false and
  *     the space predicate is the ASCII whitespace set.
  *
- * Formatting, scanning, strcpy_s, _fullpath and qsort stay in the quarantine.
+ * Formatting, scanning, strcpy_s, _fullpath and qsort stay in the as-built HLE.
  */
 #ifndef WC3_HLE_MSVCR80_CONVERT_H
 #define WC3_HLE_MSVCR80_CONVERT_H

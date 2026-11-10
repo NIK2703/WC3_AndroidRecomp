@@ -3,7 +3,7 @@
  *
  * The byte-oriented string primitives that do not depend on the locale layer
  * are moved here.  MultiByteToWideChar, LCMapString and the character-type
- * APIs remain in the quarantine until Wc3LocaleApi owns their encoding
+ * APIs remain in the as-built HLE until Wc3LocaleApi owns their encoding
  * decisions.
  */
 #ifndef WC3_HLE_KERNEL32_STRING_H

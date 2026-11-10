@@ -19,7 +19,7 @@
 
 #include "cpu.h"
 #include "crt_hle.h"
-#include "legacy_shim.h"
+#include "hle_bridge.h"
 
 #define MAX_ROWS 5u
 #define CELL_ADDR 0x2000u

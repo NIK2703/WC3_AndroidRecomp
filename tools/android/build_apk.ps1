@@ -1,4 +1,4 @@
-# Build the canonical Android debug APK from this tree.
+# Build the canonical Android APK from this tree.
 #
 # Native code is built by build_app.ps1/CMake; Gradle only packages the Java
 # activity and the already-built libwc3gameactivity.so.  No script from the old
@@ -22,6 +22,12 @@ param(
     # O-52/O-55: forward the unmeasured A/B switches to build_app.ps1.
     [switch]$NativeTls,
     [switch]$NoHostHardening,
+    # W3L/PvPGN/rubattle compat profile.  auto = rubattle when -CorpusRoot is
+    # given, otherwise off; off is the exact baseline.
+    [ValidateSet('auto', 'rubattle', 'pvpgn', 'off')]
+    [string]$W3LCompat = 'auto',
+    [ValidateRange(30, 255)]
+    [int]$W3LLatency = 100,
     [string]$Serial = '',
     [string]$GamesActivityAar = '',
     [string]$DebugTags = '',
@@ -141,6 +147,10 @@ if ($FnoPlt) { $nativeParams['FnoPlt'] = $true }
 if ($KeepDynsym) { $nativeParams['KeepDynsym'] = $true }
 if ($NativeTls) { $nativeParams['NativeTls'] = $true }
 if ($NoHostHardening) { $nativeParams['NoHostHardening'] = $true }
+# Forward the compat choice on every APK build; build_app resolves auto
+# against CorpusRoot and passes ON/OFF explicitly to CMake.
+$nativeParams['W3LCompat'] = $W3LCompat
+$nativeParams['W3LLatency'] = $W3LLatency
 $ErrorActionPreference = 'Continue'
 & $nativeScript @nativeParams 2>&1 | ForEach-Object { Write-Host $_ }
 $nativeRc = $LASTEXITCODE
@@ -159,10 +169,11 @@ if (-not (Test-Path $nativeSo)) {
 }
 if (-not (Test-Path $nativeSo)) { Write-Host '[apk] native library missing'; exit 1 }
 
-$jniRoot = Join-Path $outDir 'jniLibs'
+$jniRoot = Join-Path $outDir "$variant\jniLibs"
 $jniDir = Join-Path $jniRoot 'arm64-v8a'
 New-Item -ItemType Directory -Force $jniDir | Out-Null
-Copy-Item $nativeSo (Join-Path $jniDir 'libwc3gameactivity.so') -Force
+$jniSo = Join-Path $jniDir 'libwc3gameactivity.so'
+Copy-Item $nativeSo $jniSo -Force
 
 # The native host is linked against the NDK's shared C++ runtime.  Android
 # does not provide libc++_shared.so as a platform library, so it must ship in
@@ -184,7 +195,6 @@ Copy-Item $libcxx (Join-Path $jniDir 'libc++_shared.so') -Force
 # base plus the unstripped .symtab through tools/symbolize_crash.py.
 # The debug copy intentionally keeps symbols for the wc3.recomp.debug package.
 if ($variant -eq 'release') {
-    $jniSo = Join-Path $jniDir 'libwc3gameactivity.so'
     $strip = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe'
     $readelf = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-readelf.exe'
     if (-not (Test-Path $strip) -or -not (Test-Path $readelf)) {
@@ -221,6 +231,14 @@ if ($variant -eq 'release') {
     Write-Host "[apk] stripped release .so: $((Get-Item $jniSo).Length) bytes"
 }
 
+# The APK must contain the library produced by this native build.  Gradle can
+# silently pick a stale src/main/jniLibs copy when the per-buildType source
+# directory is misconfigured.  Pin size and bytes before packaging, then
+# verify the APK entry instead of trusting the source-set wiring.
+$jniSoInfo = Get-Item -LiteralPath $jniSo
+$jniSoHash = (Get-FileHash -LiteralPath $jniSo -Algorithm SHA256).Hash
+if ($jniSoInfo.Length -le 0) { Write-Host '[apk] native library is empty'; exit 1 }
+
 # A local Maven repository keeps the build offline and independent of a
 # network cache descriptor.  games-activity has no POM dependencies, so this
 # is the only artifact Gradle needs for the app module.
@@ -241,6 +259,13 @@ $gradleCache = Join-Path $outDir 'gradle-cache'
 $aapt2 = Join-Path $buildTools 'aapt2.exe'
 $gradleTask = 'assemble' + $variant.Substring(0, 1).ToUpper() +
     $variant.Substring(1)
+# BV-3.2: jniLibs belong to the Gradle buildType source set, so use the
+# per-buildType property and keep the native directories separate.
+$jniProperty = if ($variant -eq 'debug') {
+    "-Pwc3JniLibsDebug=$jniRoot"
+} else {
+    "-Pwc3JniLibsRelease=$jniRoot"
+}
 # Always repackage from a clean Gradle build directory.  AGP/zipflinger
 # incremental packaging keeps old entry offsets when the 153 MiB native
 # library changes; repeated builds then leave unreferenced holes inside the
@@ -253,7 +278,7 @@ $gradleArgs = @(
     '--project-cache-dir', $gradleCache,
     '-p', $projectDir,
     "-Pwc3GameActivityBuildDir=$gradleApp",
-    "-Pwc3JniLibs=$jniRoot",
+    $jniProperty,
     "-Pwc3LocalMaven=$localMaven",
     "-Pandroid.aapt2FromMavenOverride=$aapt2",
     ':app:clean',
@@ -301,6 +326,30 @@ try {
             exit 1
         }
         Write-Host "[apk] lib     $($entry.FullName) ($($entry.Length) bytes, stored)"
+        if ($name -eq 'lib/arm64-v8a/libwc3gameactivity.so') {
+            if ($entry.Length -ne $jniSoInfo.Length) {
+                Write-Host "[apk] APK native library size $($entry.Length) != $variant $($jniSoInfo.Length)"
+                exit 1
+            }
+            $entryStream = $entry.Open()
+            try {
+                $sha = [System.Security.Cryptography.SHA256]::Create()
+                try {
+                    $entryHash = [System.BitConverter]::ToString(
+                        $sha.ComputeHash($entryStream)
+                    ).Replace('-', '')
+                } finally {
+                    $sha.Dispose()
+                }
+            } finally {
+                $entryStream.Dispose()
+            }
+            if ($entryHash -ne $jniSoHash) {
+                Write-Host "[apk] APK native library does not match $variant"
+                exit 1
+            }
+            Write-Host "[apk] native  packaged .so matches $variant"
+        }
     }
     # A clean package has only local/central-directory headers and the APK
     # signing block outside the entry payload.  Reject the 600+ MiB holes that
