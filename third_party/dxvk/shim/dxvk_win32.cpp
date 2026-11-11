@@ -42,6 +42,29 @@
 #include <mutex>
 #include <string>
 
+#if WC3_DEBUG && WC3_DEBUG_DXVK_DEBUG
+#include <android/log.h>
+
+#include <cstdarg>
+#include <cstdio>
+
+/* The app redirects stderr line-by-line, so a trace line survives even when
+ * logcat is not readable from the device session. */
+static void shimTrace(const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    __android_log_print(ANDROID_LOG_INFO, "DXVK_DEBUG", "shim: %s", buf);
+    fprintf(stderr, "[DXVK_DEBUG] shim: %s\n", buf);
+    fflush(stderr);
+}
+#define DXVK_SHIM_TRACE(...) shimTrace(__VA_ARGS__)
+#else
+#define DXVK_SHIM_TRACE(...) ((void)0)
+#endif
+
 /* ------------------------------------------------------------------ misc */
 
 namespace {
@@ -101,6 +124,9 @@ extern "C" void wc3_android_set_window(ANativeWindow* window,
     g_androidWindowHeight = height;
     if (window && window != previous)
         g_androidWindowGeneration++;
+    DXVK_SHIM_TRACE("set_window old=%p new=%p %ux%u generation=%u",
+                    (void*)previous, (void*)window, width, height,
+                    g_androidWindowGeneration);
 }
 
 /* Set the physical Android surface buffer geometry and publish that same size
@@ -124,6 +150,8 @@ extern "C" int wc3_android_set_surface_size(uint32_t width, uint32_t height) {
      * and DXVK should still see the requested extent instead of the stale one. */
     g_androidWindowWidth = width;
     g_androidWindowHeight = height;
+    DXVK_SHIM_TRACE("set_surface_size request=%ux%u window=%p rc=%d",
+                    width, height, (void*)g_androidWindow, rc);
     return rc;
 }
 
@@ -134,6 +162,8 @@ extern "C" int wc3_android_set_surface_size(uint32_t width, uint32_t height) {
  * not lost. */
 extern "C" void wc3_android_clear_window(ANativeWindow* window) {
     std::lock_guard<std::mutex> lock(g_androidWindowMutex);
+    DXVK_SHIM_TRACE("clear_window window=%p current=%p",
+                    (void*)window, (void*)g_androidWindow);
     if (g_androidWindow == window) {
         g_androidWindow = nullptr;
         g_androidWindowWidth = 0;
@@ -1067,7 +1097,12 @@ DWORD GetEnvironmentVariableW(LPCWSTR name, LPWSTR buf, DWORD n) {
 /* ------------------------------------------------------------- console */
 
 void OutputDebugStringA(LPCSTR s) {
-#ifdef WC3_DEBUG_GRAPHICS
+#if WC3_DEBUG && WC3_DEBUG_DXVK_DEBUG
+    if (s) {
+        fprintf(stderr, "[DXVK_DEBUG] dxvk: %s", s);
+        fflush(stderr);
+    }
+#elif WC3_DEBUG && WC3_DEBUG_GRAPHICS
     if (s) fprintf(stderr, "%s", s);
 #else
     (void)s;
@@ -1075,7 +1110,7 @@ void OutputDebugStringA(LPCSTR s) {
 }
 
 void OutputDebugStringW(LPCWSTR s) {
-#ifdef WC3_DEBUG_GRAPHICS
+#if WC3_DEBUG && (WC3_DEBUG_GRAPHICS || WC3_DEBUG_DXVK_DEBUG)
     std::string narrow = wideToUtf8(s);
     OutputDebugStringA(narrow.c_str());
 #else

@@ -525,7 +525,8 @@ set_target_properties(wc3_hle_d3d9 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ADPkg driver is opened by vulkan_driver_android.c through libadrenotools and
 # only its vkGetInstanceProcAddr is handed to the two DXVK copies.
 add_library(wc3_dxvk_entry STATIC
-    "${WC3_ROOT}/runtime/gfx/android/dxvk_entry.cpp")
+    "${WC3_ROOT}/runtime/gfx/android/dxvk_entry.cpp"
+    "${WC3_ROOT}/runtime/gfx/android/dxvk_trace.cpp")
 target_include_directories(wc3_dxvk_entry PRIVATE
     "${WC3_ROOT}/runtime/platform"
     "${WC3_ROOT}/runtime/platform/android"

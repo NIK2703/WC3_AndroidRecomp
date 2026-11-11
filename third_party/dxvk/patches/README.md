@@ -6,10 +6,23 @@ the target build.
 
 ## Applied source state
 
-| Tree | Android/static patch | WC3 compatibility | Android debug | WC3 low-memory |
-|---|---|---|---|---|
-| `3.1.1/` | `dxvk-3.1.1-android.patch` (includes `dxvk-3.1.1-static.patch`) | `dxvk-3.1.1-wc3-d3d9.patch` | `dxvk-3.1.1-android-debug.patch` | `dxvk-3.1.1-lowmem-placed.patch` |
-| `1.10.3/` | `dxvk-1.10.3-android.patch` (includes `dxvk-1.10.3-static.patch`) | none | none | `dxvk-1.10.3-lowmem-placed.patch` |
+| Tree | Android/static patch | WC3 compatibility | Android debug | WC3 low-memory | Android pacing | Android present |
+|---|---|---|---|---|---|---|
+| `3.1.1/` | `dxvk-3.1.1-android.patch` (includes `dxvk-3.1.1-static.patch`) | `dxvk-3.1.1-wc3-d3d9.patch` | `dxvk-3.1.1-android-debug.patch` | `dxvk-3.1.1-lowmem-placed.patch` | `dxvk-3.1.1-android-pacing.patch` | `dxvk-3.1.1-android-present.patch` |
+| `1.10.3/` | `dxvk-1.10.3-android.patch` (includes `dxvk-1.10.3-static.patch`) | none | none | `dxvk-1.10.3-lowmem-placed.patch` | `dxvk-1.10.3-android-pacing.patch` | none |
+
+The pacing snapshots are deltas on top of the already-patched vendored trees,
+not on the upstream revisions; they are not replayed by the build.  They make
+Android use an absolute `clock_nanosleep` deadline instead of DXVK's Windows
+busy-wait timer branch.  The rationale is in `../../VENDOR_PATCHES.md`.
+
+The present snapshot is also a delta on the already-patched 3.1.1 tree.  It
+keeps the swap chain when Android reports `VK_SUBOPTIMAL_KHR` from
+`vkQueuePresentKHR`; that result means the frame was presented but the surface
+is not pre-rotated.  The unpatched presenter treats any non-`VK_SUCCESS` result
+as a reason to destroy and recreate every swap chain image, which at 60 FPS
+reallocates the whole buffer queue every frame.  The rationale is in
+`../../VENDOR_PATCHES.md`.
 
 The Android patches add the Vulkan loader/WSI changes and the static-library
 Meson shape; the static patches are included in them.  The WC3 patch makes
@@ -37,6 +50,6 @@ git -C third_party/dxvk/1.10.3 diff
 
 `tools/android/build_dxvk.ps1` fails if the WC3 compatibility markers
 (`storageBuffer8BitAccess, false`, optional maintenance6, and the command
-fallbacks) or either low-memory patch marker is absent.  The build does not
-apply patches automatically because the working trees are already in the
-pinned post-patch state.
+fallbacks), either low-memory patch marker, or either Android pacing marker is
+absent.  The build does not apply patches automatically because the working
+trees are already in the pinned post-patch state.

@@ -32,6 +32,24 @@ revision, the patch snapshot and the reason.
     singleton construction retryable, guards the D3D9 interface against a null
     instance, and keeps DXVK stderr logging in the Android build.  The app
     redirects stderr to `run.txt`.
+  * `third_party/dxvk/patches/dxvk-3.1.1-android-pacing.patch` — treats
+    Android as POSIX inside `Sleep` even though the shim defines `_WIN32`, and
+    sleeps on an absolute `CLOCK_MONOTONIC` deadline with
+    `clock_nanosleep(TIMER_ABSTIME)` instead of the Windows
+    `4 ms + duration/6` busy-wait tail.  Device profile 2026-11-11: presenter
+    thread 32.52% of app CPU, 66.85% of it in `__kernel_clock_gettime`; at
+    60 FPS the old path spun about 6.8 ms of every 16.7 ms frame.
+  * `third_party/dxvk/patches/dxvk-3.1.1-android-present.patch` — treats
+    `VK_SUBOPTIMAL_KHR` as a success result in `Presenter::acquireNextImage()`
+    and `Presenter::presentImage()`.  Android's WSI returns it from
+    `vkQueuePresentKHR` whenever the swap chain's `preTransform` differs from
+    `NATIVE_WINDOW_TRANSFORM_HINT`; DXVK creates every swap chain with
+    `IDENTITY`, so a landscape activity on a portrait-natural display got it
+    on every frame.  DXVK then set `m_dirtySwapchain` and destroyed/recreated
+    all 5 images, 10 semaphores and 5 fences per frame; the captured menu run
+    logged 48,921 recreations.  The frame had already been presented, so only
+    negative results recreate the swap chain now.  DXVK 1.10.3 already used
+    this rule in `vulkan_presenter.cpp`; 3.1.1 lost it.
   * `third_party/dxvk/patches/dxvk-3.1.1-lowmem-placed.patch` — places
     host-visible memory below 4 GB with `VK_EXT_map_memory_placed` so the thin
     D3D9 bridge can hand the pointer to the 32-bit guest without a shadow

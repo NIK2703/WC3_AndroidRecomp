@@ -375,6 +375,7 @@ namespace dxvk {
 
     bool                        m_dirtySwapchain = false;
     bool                        m_dirtySurface = false;
+    bool                        m_suboptimalLogged = false;
 
     bool                        m_hasPresentId = false;
     bool                        m_hasPresentWait = false;

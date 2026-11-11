@@ -16,7 +16,7 @@
 #
 # DXVK objects are profile-independent and live in a shared cache.  Only the
 # Win32 shim object and the isolated archives are per-variant, because the shim
-# carries the WC3_DEBUG_GRAPHICS branch.
+# carries the WC3_DEBUG_GRAPHICS and WC3_DEBUG_DXVK_DEBUG branches.
 
 [CmdletBinding()]
 param(
@@ -203,6 +203,31 @@ if (-not (Select-String -LiteralPath $lowmem1Memory -Pattern 'm_usePlacedMemory'
     throw "DXVK 1.10.3 source does not contain the WC3 low-memory placed-mapping patch"
 }
 
+# Device profile 2026-11-11: the Android build defines _WIN32 for the DXVK
+# shim, so DXVK's Windows timer branch (1 ms granularity, 4 ms + duration/6
+# busy-wait) was compiled into the target.  At 60 FPS the presenter thread
+# spun ~6.8 ms per frame and 66.85% of its CPU was clock_gettime.  Both trees
+# must keep the Android absolute-clock_nanosleep path; fail early if a vendor
+# refresh drops it.
+$sleepHeader3 = Join-Path $dxvk3 'src\util\util_sleep.h'
+$sleepSource3 = Join-Path $dxvk3 'src\util\util_sleep.cpp'
+$fpsLimiter1 = Join-Path $dxvk1 'src\util\util_fps_limiter.cpp'
+if (-not (Select-String -LiteralPath $sleepHeader3 -SimpleMatch -Pattern 'defined(_WIN32) && !defined(__ANDROID__)' -Quiet) -or
+    -not (Select-String -LiteralPath $sleepSource3 -SimpleMatch -Pattern 'clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME' -Quiet) -or
+    -not (Select-String -LiteralPath $fpsLimiter1 -SimpleMatch -Pattern 'clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME' -Quiet)) {
+    throw "DXVK source does not contain the Android no-busy-wait pacing patch"
+}
+
+# Android's WSI reports VK_SUBOPTIMAL_KHR from vkQueuePresentKHR whenever the
+# swap chain is not pre-rotated.  DXVK 3.1.1 treated every non-success result
+# as dirty and recreated the whole swap chain per frame; 1.10.3 already keeps
+# it.  Fail early if a vendor refresh restores the 3.1.1 behaviour.
+$presenter3 = Join-Path $dxvk3 'src\dxvk\dxvk_presenter.cpp'
+if (-not (Select-String -LiteralPath $presenter3 -SimpleMatch -Pattern 'if (m_acquireStatus < 0 || !m_swapchain)' -Quiet) -or
+    -not (Select-String -LiteralPath $presenter3 -SimpleMatch -Pattern 'Presenter: VK_SUBOPTIMAL_KHR (surface is not pre-rotated), keeping swapchain' -Quiet)) {
+    throw "DXVK 3.1.1 source does not contain the Android suboptimal-present patch"
+}
+
 $buildRoot = Join-Path $root 'build\android\dxvk'
 $obj1 = Join-Path $buildRoot 'obj\1.10.3'
 $obj3 = Join-Path $buildRoot 'obj\3.1.1'
@@ -237,17 +262,23 @@ if (-not $forceFull) {
 
 $debug = ($Variant -eq 'debug')
 $graphicsDebug = $false
+$dxvkDebug = $false
 if ($debug) {
     $tagPath = Join-Path $root 'config\debug_tags.txt'
     if (Test-Path $tagPath) {
-        $tags = (Get-Content -LiteralPath $tagPath) -join ' '
-        $tags = $tags -replace '#.*', ''
+        # Strip comments per line.  Joining the whole file first would let the
+        # first '#' swallow every tag after it.
+        $tags = @(Get-Content -LiteralPath $tagPath | ForEach-Object {
+            ($_ -replace '#.*', '').Trim()
+        } | Where-Object { $_ }) -join ';'
         $graphicsDebug = [bool]($tags -match '(^|[\s;,])GRAPHICS([\s;,]|$)')
+        $dxvkDebug = [bool]($tags -match '(^|[\s;,])DXVK_DEBUG([\s;,]|$)')
     }
 }
 $debugFlags = @()
 if ($debug) { $debugFlags += '-DWC3_DEBUG=1' }
 if ($graphicsDebug) { $debugFlags += '-DWC3_DEBUG_GRAPHICS=1' }
+if ($dxvkDebug) { $debugFlags += '-DWC3_DEBUG_DXVK_DEBUG=1' }
 
 Write-Host "[dxvk] variant $Variant api $Api -> $outDir"
 Write-Host "[dxvk] ndk $($ndkInfo.Root)"

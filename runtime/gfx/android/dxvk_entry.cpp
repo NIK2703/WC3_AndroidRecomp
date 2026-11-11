@@ -9,6 +9,7 @@
 #include "platform.h"
 #include "wc3_debug.h"
 #include "dxvk3_gate.h"
+#include "dxvk_trace.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -96,6 +97,16 @@ extern "C" void wc3_dxvk_prepare(void)
     DX_LOG("prepare selected gipa=%p", gipa);
     if (!gipa)
         return; /* no Vulkan loader at all; DXVK will report its own error */
+#if WC3_DEBUG && WC3_DEBUG_DXVK_DEBUG
+    /* The boundary trace is the reliable channel: DXVK's own logger may not
+     * find a writable path on Android.  Keep an explicit env value if the
+     * developer already set one. */
+    setenv("DXVK_LOG_LEVEL", "debug", 0);
+    gipa = (void *)wc3_dxvk_trace_wrap_gipa(
+        (PFN_vkGetInstanceProcAddr)gipa);
+    wc3_dxvk_trace_mark("prepare: traced gipa installed");
+    DX_LOG("prepare wrapped gipa=%p", gipa);
+#endif
     wc3_dxvk1_dxvk_set_vulkan_get_instance_proc_addr(gipa);
     wc3_dxvk3_dxvk_set_vulkan_get_instance_proc_addr(gipa);
     DX_LOG("prepare set dxvk1/dxvk3 gipa=%p", gipa);
@@ -279,6 +290,10 @@ extern "C" IDirect3D9 *__wrap_wc3_dxvk1_Direct3DCreate9(unsigned int sdk)
         DX_LOG("DXVK 1.10.3 entry suppressed: DXVK 3.1.1 is forced");
         return nullptr;
     }
+#if WC3_DEBUG && WC3_DEBUG_DXVK_DEBUG
+    wc3_dxvk_trace_set_version("1.10.3");
+    wc3_dxvk_trace_mark("Direct3DCreate9 1.10.3");
+#endif
     DX_LOG("DXVK 1.10.3 entry sdk=%u", sdk);
     IDirect3D9 *d3d = __real_wc3_dxvk1_Direct3DCreate9(sdk);
     DX_LOG("DXVK 1.10.3 result=%p", (void *)d3d);
@@ -287,6 +302,14 @@ extern "C" IDirect3D9 *__wrap_wc3_dxvk1_Direct3DCreate9(unsigned int sdk)
 
 extern "C" IDirect3D9 *__wrap_wc3_dxvk3_Direct3DCreate9(unsigned int sdk)
 {
+#if WC3_DEBUG && WC3_DEBUG_DXVK_DEBUG
+    /* DXVK 3.1.1 uses this to create the debug-utils messenger and its
+     * validation path.  1.10.3 does not understand the value, so it is set
+     * only for the archive that is about to run. */
+    setenv("DXVK_DEBUG", "validation", 0);
+    wc3_dxvk_trace_set_version("3.1.1");
+    wc3_dxvk_trace_mark("Direct3DCreate9 3.1.1");
+#endif
     DX_LOG("DXVK 3.1.1 entry sdk=%u", sdk);
     try {
         IDirect3D9 *d3d = __real_wc3_dxvk3_Direct3DCreate9(sdk);

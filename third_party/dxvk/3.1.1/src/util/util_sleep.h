@@ -48,7 +48,7 @@ namespace dxvk {
     dxvk::mutex       m_mutex;
     std::atomic<bool> m_initialized = { false };
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(__ANDROID__)
     // On Windows, we use NtDelayExecution which has units of 100ns.
     using TimerDuration = std::chrono::duration<int64_t, std::ratio<1, 10000000>>;
     using NtQueryTimerResolutionProc = LONG (NTAPI *) (ULONG*, ULONG*, ULONG*);
@@ -56,7 +56,9 @@ namespace dxvk {
     using NtDelayExecutionProc = LONG (NTAPI *) (BOOLEAN, LARGE_INTEGER*);
     NtDelayExecutionProc NtDelayExecution = nullptr;
 #else
-    // On other platforms, we use the std library, which calls through to nanosleep -- which is ns.
+    // Android's DXVK shim defines _WIN32 so that the Win32 source path is
+    // used, but the timers are bionic.  Treat Android as POSIX here; the
+    // Windows timer branch must not leak into the target build.
     using TimerDuration = std::chrono::nanoseconds;
 #endif
 

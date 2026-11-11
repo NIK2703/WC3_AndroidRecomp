@@ -109,15 +109,18 @@ namespace dxvk {
         sync.acquire, VK_NULL_HANDLE, &m_imageIndex);
     }
 
-    // This is a normal occurence, but may be useful for
-    // debugging purposes in case WSI goes wrong somehow.
-    if (m_acquireStatus != VK_SUCCESS && m_swapchain)
+    // VK_SUBOPTIMAL_KHR is a success code: the image was acquired and can be
+    // presented.  Only negative results (OUT_OF_DATE, SURFACE_LOST, ...) need
+    // a new swap chain.  Keeping a non-negative result also preserves the
+    // image acquired after a suboptimal present, so the next frame does not
+    // rebuild the whole swap chain.
+    if (m_acquireStatus < 0 && m_swapchain)
       Logger::info(str::format("Presenter: Got ", m_acquireStatus, ", recreating swapchain"));
 
     // If the swap chain is out of date, recreate it and retry. It
     // is possible that we do not get a new swap chain here, e.g.
     // because the window is minimized.
-    if (m_acquireStatus != VK_SUCCESS || !m_swapchain) {
+    if (m_acquireStatus < 0 || !m_swapchain) {
       VkResult vr = recreateSwapChain();
 
       if (vr == VK_NOT_READY && hasSwapchain)
@@ -332,8 +335,10 @@ namespace dxvk {
     pushFrame(frame);
 
     // On a successful present, try to acquire next image already, in
-    // order to hide potential delays from the application thread.
-    if (status == VK_SUCCESS) {
+    // order to hide potential delays from the application thread.  A
+    // suboptimal present still displayed the frame, so it is successful
+    // for this purpose too.
+    if (status >= 0) {
       PresenterSync& nextSync = m_semaphores.at(m_frameIndex);
       waitForSwapchainFence(nextSync);
 
@@ -342,14 +347,22 @@ namespace dxvk {
         nextSync.acquire, VK_NULL_HANDLE, &m_imageIndex);
     }
 
-    // Recreate the swapchain on the next acquire, even if we get suboptimal.
-    // There is no guarantee that suboptimal state is returned by both functions.
+    // Recreate the swapchain on the next acquire only for real errors.
+    // Android's WSI returns VK_SUBOPTIMAL_KHR from vkQueuePresentKHR while
+    // the swap chain is not pre-rotated (the window transform hint differs
+    // from VkSwapchainCreateInfoKHR::preTransform).  The frame was presented;
+    // destroying and recreating all swap chain images for it burns CPU and
+    // GPU time without changing the output.
     std::lock_guard lock(m_surfaceMutex);
 
-    if (status != VK_SUCCESS) {
+    if (status < 0) {
       Logger::info(str::format("Presenter: Got ", status, ", recreating swapchain"));
 
       m_dirtySwapchain = true;
+    } else if (status == VK_SUBOPTIMAL_KHR && !m_suboptimalLogged) {
+      m_suboptimalLogged = true;
+
+      Logger::debug("Presenter: VK_SUBOPTIMAL_KHR (surface is not pre-rotated), keeping swapchain");
     }
 
     m_presentPending = false;

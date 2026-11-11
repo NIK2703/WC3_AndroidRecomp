@@ -1,0 +1,96 @@
+diff --git a/src/util/util_sleep.cpp b/src/util/util_sleep.cpp
+index bf28980..a8820f9 100644
+--- a/src/util/util_sleep.cpp
++++ b/src/util/util_sleep.cpp
+@@ -3,6 +3,11 @@
+ 
+ #include "./log/log.h"
+ 
++#if defined(__ANDROID__)
++#include <cerrno>
++#include <time.h>
++#endif
++
+ using namespace std::chrono_literals;
+ 
+ namespace dxvk {
+@@ -34,7 +39,12 @@ namespace dxvk {
+ 
+ 
+   void Sleep::initializePlatformSpecifics() {
+-#ifdef _WIN32
++#if defined(__ANDROID__)
++    // Bionic's nanosleep is high-resolution.  The Windows code below assumes
++    // a 1 ms timer and spins out four granularities plus a sixth of the wait;
++    // at 60 FPS that burned ~6.8 ms of CPU per frame for no accuracy gain.
++    m_sleepGranularity = TimerDuration::zero();
++#elif defined(_WIN32)
+     HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+ 
+     if (ntdll) {
+@@ -72,6 +82,27 @@ namespace dxvk {
+     if (duration <= TimerDuration::zero())
+       return t0;
+ 
++#if defined(__ANDROID__)
++    // dxvk::high_resolution_clock is the shim's QueryPerformanceCounter,
++    // which is CLOCK_MONOTONIC in nanoseconds.  Sleep on an absolute
++    // monotonic deadline so a late wake-up cannot accumulate, and never
++    // busy-wait: bionic returns from clock_nanosleep with scheduler
++    // accuracy, unlike the Windows timer this code was written for.
++    auto deadlineNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
++      t0.time_since_epoch() + duration);
++
++    timespec deadline = { };
++    deadline.tv_sec  = time_t(deadlineNs.count() / 1000000000ll);
++    deadline.tv_nsec = long(deadlineNs.count() % 1000000000ll);
++
++    int rc = 0;
++
++    do {
++      rc = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
++    } while (rc == EINTR);
++
++    return dxvk::high_resolution_clock::now();
++#else
+     // If necessary, initialize function pointers and some values
+     if (!m_initialized.load())
+       initialize();
+@@ -104,11 +135,12 @@ namespace dxvk {
+     }
+ 
+     return t1;
++#endif
+   }
+ 
+ 
+   void Sleep::systemSleep(TimerDuration duration) {
+-#ifdef _WIN32
++#if defined(_WIN32) && !defined(__ANDROID__)
+     if (NtDelayExecution) {
+       LARGE_INTEGER ticks;
+       ticks.QuadPart = -duration.count();
+diff --git a/src/util/util_sleep.h b/src/util/util_sleep.h
+index 59d4d00..f74acce 100644
+--- a/src/util/util_sleep.h
++++ b/src/util/util_sleep.h
+@@ -48,7 +48,7 @@ namespace dxvk {
+     dxvk::mutex       m_mutex;
+     std::atomic<bool> m_initialized = { false };
+ 
+-#ifdef _WIN32
++#if defined(_WIN32) && !defined(__ANDROID__)
+     // On Windows, we use NtDelayExecution which has units of 100ns.
+     using TimerDuration = std::chrono::duration<int64_t, std::ratio<1, 10000000>>;
+     using NtQueryTimerResolutionProc = LONG (NTAPI *) (ULONG*, ULONG*, ULONG*);
+@@ -56,7 +56,9 @@ namespace dxvk {
+     using NtDelayExecutionProc = LONG (NTAPI *) (BOOLEAN, LARGE_INTEGER*);
+     NtDelayExecutionProc NtDelayExecution = nullptr;
+ #else
+-    // On other platforms, we use the std library, which calls through to nanosleep -- which is ns.
++    // Android's DXVK shim defines _WIN32 so that the Win32 source path is
++    // used, but the timers are bionic.  Treat Android as POSIX here; the
++    // Windows timer branch must not leak into the target build.
+     using TimerDuration = std::chrono::nanoseconds;
+ #endif
+ 

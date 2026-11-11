@@ -11,5 +11,10 @@ MEMORY
 CRASH
 BATTLE_NET
 GPU_DRIVERS
+# DXVK 3.1.1 black-screen trace: Vulkan instance/device/swapchain/present,
+# render passes, clears and the Android window shim.  Also turns on DXVK's own
+# debug log and validation/debug-utils messenger.  Prefix in run.txt/logcat:
+# [DXVK_DEBUG].
+DXVK_DEBUG
 # ATrace slices for simpleperf/Perfetto captures (runtime/diag/wc3_trace.h).
 PERF

@@ -1,5 +1,10 @@
 #include <thread>
 
+#if defined(__ANDROID__)
+#include <cerrno>
+#include <time.h>
+#endif
+
 #include "thread.h"
 #include "util_env.h"
 #include "util_fps_limiter.h"
@@ -95,6 +100,27 @@ namespace dxvk {
     if (duration <= NtTimerDuration::zero())
       return t0;
 
+#if defined(__ANDROID__)
+    // The Android build defines _WIN32 for the DXVK shim, but the clock and
+    // the timer underneath are bionic.  Sleep on an absolute CLOCK_MONOTONIC
+    // deadline and do not busy-wait: the old Windows path assumed a 1 ms
+    // timer and spun for 4 ms plus one sixth of the frame, i.e. about 6.8 ms
+    // of every 16.7 ms frame at 60 FPS.
+    auto deadlineNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      t0.time_since_epoch() + duration);
+
+    timespec deadline = { };
+    deadline.tv_sec  = time_t(deadlineNs.count() / 1000000000ll);
+    deadline.tv_nsec = long(deadlineNs.count() % 1000000000ll);
+
+    int rc = 0;
+
+    do {
+      rc = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
+    } while (rc == EINTR);
+
+    return dxvk::high_resolution_clock::now();
+#else
     // On wine, we can rely on NtDelayExecution waiting for more or
     // less exactly the desired amount of time, and we want to avoid
     // spamming QueryPerformanceCounter for performance reasons.
@@ -133,10 +159,22 @@ namespace dxvk {
     }
 
     return t1;
+#endif
   }
 
 
   void FpsLimiter::initialize() {
+#if defined(__ANDROID__)
+    // Bionic nanosleep does not need the Windows timer-resolution probing
+    // or the busy-wait threshold derived from it.  Keep the state valid for
+    // the platform-independent delay() bookkeeping and stop here.
+    m_sleepGranularity = NtTimerDuration::zero();
+    m_sleepThreshold = NtTimerDuration::zero();
+    m_lastFrame = dxvk::high_resolution_clock::now();
+    m_initialized = true;
+    return;
+#endif
+
     HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
 
     if (ntdll) {
