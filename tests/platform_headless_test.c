@@ -1031,6 +1031,15 @@ int main(void)
           "vulkan absent");
     check(p.vulkan_driver.device_caps(p.vulkan_driver.ctx, 0, NULL) == -1,
           "vulkan caps absent");
+    check(p.vulkan_driver.select_id(p.vulkan_driver.ctx, "") == 0,
+          "headless accepts the system choice");
+    check(p.vulkan_driver.select_id(p.vulkan_driver.ctx,
+                                    "0123456789abcdef") == -1,
+          "headless rejects an installed package");
+    check(p.vulkan_driver.instance_proc_addr(p.vulkan_driver.ctx) == NULL,
+          "headless has no custom loader");
+    check(p.vulkan_driver.last_error(p.vulkan_driver.ctx) == 0,
+          "headless has no driver error");
     test_guest_memory(&p);
 
     wc3_headless_platform_shutdown(&p);

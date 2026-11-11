@@ -422,8 +422,10 @@ typedef struct Wc3AssetApi {
 
 enum {
     WC3_VULKAN_DRIVER_SYSTEM = 0,
-    WC3_VULKAN_DRIVER_TURNIP = 1
+    WC3_VULKAN_DRIVER_TURNIP = 1 /* retired: arbitrary packages use ids */
 };
+
+#define WC3_VULKAN_DRIVER_ID_MAX 32
 
 typedef struct Wc3VulkanCaps {
     uint32_t api_version;
@@ -436,10 +438,27 @@ typedef struct Wc3VulkanCaps {
 typedef struct Wc3VulkanDriverApi {
     void *ctx;
     /* Explicit ICD selection (system | turnip), not a hidden DLL substitution.
-     * The DXVK selector uses device capabilities, not just loader version. */
+     * The DXVK selector uses device capabilities, not just loader version.
+     * This legacy enum entry remains for the headless contract; the product
+     * path is select_id(), because an installed package has no enum value. */
     int (*select)(void *ctx, int driver);
     int (*instance_version)(void *ctx, uint32_t *version);
     int (*device_caps)(void *ctx, uint32_t device_index, Wc3VulkanCaps *caps);
+
+    /* ADR-036, appended in this order and never reordered.
+     *
+     * select_id(NULL or "") selects the system loader.  It only latches the
+     * choice; the ICD is opened by instance_proc_addr() before the first
+     * DXVK instance.  instance_proc_addr() returns the selected loader's
+     * vkGetInstanceProcAddr, or the system loader's pointer after a
+     * package/load/probe fallback (NULL only when no Vulkan loader exists).
+     * Both DXVK copies must receive it before Direct3DCreate9.  active_id()
+     * reports what actually runs after an ICD-level fallback.  last_error()
+     * returns a 4xxx code from vulkan_driver_package.h. */
+    int (*select_id)(void *ctx, const char *id);
+    void *(*instance_proc_addr)(void *ctx);
+    int (*active_id)(void *ctx, char *dst, size_t cap);
+    int (*last_error)(void *ctx);
 } Wc3VulkanDriverApi;
 
 typedef uintptr_t Wc3ThreadHandle;

@@ -45,9 +45,17 @@
 #include "hle_android.h"
 #include "hle_input_state.h"
 #include "hle_registry.h"
+#include "dyn_x86.h"
+#include "wc3_trace.h"
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
 #include "wc3_watch_state.h"
+#endif
+
+/* Product profile: rubattle.net is the default gateway.  The war3.exe
+ * timestamp pin belongs to that profile only; pvpgn/off keep the host time. */
+#ifndef WC3_W3L_GATEWAY_RUBATTLE
+#define WC3_W3L_GATEWAY_RUBATTLE 0
 #endif
 
 #if WC3_DEBUG && WC3_DEBUG_RESOLUTION
@@ -106,10 +114,12 @@ static int      g_miss_count;
 static struct { uint32_t ra; const char *name; uint32_t esp; } g_ring[HLE_RING];
 static unsigned g_ring_pos, g_ring_len;
 
-/* The CPU that last entered an import.  A SIGSEGV can land anywhere in lifted
- * code, and the signal context is host state, so this is the only handle the
- * crash handler has on the guest frame that faulted. */
-static CPU *g_last_cpu;
+/* The CPU that last entered a dispatch or an import on this thread.  A SIGSEGV
+ * can land anywhere in lifted code, and the signal context is host state, so
+ * this is the only handle the crash handler has on the guest frame that
+ * faulted.  It is thread-local: a guest thread that only runs lifted code must
+ * not lose its frame to a dispatch on another thread. */
+static _Thread_local CPU *g_last_cpu;
 
 /* One-shot post-renderer initialiser, registered by the boot probe.  Running
  * Mss32's DllMain before D3D9 CreateDevice wedges DXVK on this device; the
@@ -209,11 +219,13 @@ static uint32_t g_mss_ret_watch;
 static const char *g_mss_ret_name;
 #endif
 
-/* Guest thread state is defined later; the dispatcher and the hang watchdog
- * need the current thread before that definition is visible. */
+/* Guest thread state is defined later; the hang watchdog needs the current
+ * thread before that definition is visible.  Release has no reader: Win32
+ * last-error and TLS values live in CPU.hle_* instead of host emutls. */
 struct GThread;
+#if WC3_DEBUG
 static __thread struct GThread *g_self_thread;
-static uint32_t hle_current_guest_id(void);
+#endif
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
 /* Hang watchdog: the last guest target and HLE wait state per thread.  This is
@@ -357,7 +369,6 @@ static int         g_reached_game_dll;
 /* Win32 keeps the last error per thread, and the engine's TLS wrapper reads it
  * immediately after TlsGetValue - a global here would let a worker thread's
  * error fail a lookup on the main thread. */
-static THREAD_LOCAL uint32_t g_last_error;
 static uint32_t    g_tls[64];
 
 /* The generated dispatcher references these even in a graphics-only debug
@@ -435,6 +446,7 @@ static const struct { uint32_t lo, hi; } g_arenas[] = {
     { GUEST_IMAGE_MSS,   GUEST_IMAGE_MSS + 0x00100000u },            /* Mss32.dll */
     { GUEST_IMAGE_MSSFAST, GUEST_IMAGE_MSSFAST + 0x00020000u },      /* Mssfast.m3d */
     { GUEST_IMAGE_MP3DEC, GUEST_IMAGE_MP3DEC + 0x00040000u },        /* Mp3dec.asi */
+    { GUEST_IMAGE_VER,    GUEST_IMAGE_VER + 0x00010000u },           /* ver-IX86-3.dll */
     { GUEST_STACK_BASE,  GUEST_STACK_BASE + GUEST_STACK_SIZE },      /* main guest stack */
     { GUEST_THREAD_STACK_BASE, GUEST_THREAD_STACK_BASE +
       GUEST_THREAD_MAX * GUEST_THREAD_STACK_SIZE },                  /* worker stacks */
@@ -1085,6 +1097,25 @@ static uint32_t st_attrs(const struct stat *st)
     return a;
 }
 
+/* Original 1.27.1.7085 war3.exe FILETIME (2016-12-09T06:05:09.9369520Z).
+ * rubattle's version string is "war3.exe <date> <time> <size>"; the Android
+ * copy carries its install mtime, so pin the value the server expects. */
+#define WAR3_EXE_PIN_FILETIME 0x01D251E232879030ull
+
+static void pin_war3_exe_time(uint32_t dst, const char *name)
+{
+#if WC3_W3L_GATEWAY_RUBATTLE
+    if (name && strcasecmp(name, "war3.exe") == 0) {
+        wr_filetime(dst + 4, WAR3_EXE_PIN_FILETIME);
+        wr_filetime(dst + 12, WAR3_EXE_PIN_FILETIME);
+        wr_filetime(dst + 20, WAR3_EXE_PIN_FILETIME);
+    }
+#else
+    (void)dst;
+    (void)name;
+#endif
+}
+
 static void fill_find_data(uint32_t dst, const char *name, const struct stat *st)
 {
     memset((void *)(uintptr_t)dst, 0, 318);
@@ -1152,8 +1183,8 @@ static void h_is_processor_feature(CPU *c)
      * takes the slow path through every float comparison. */
     c->eax = arg32(c, 0) == 0 ? 0 : 1;
 }
-static void h_get_last_error(CPU *c) { c->eax = g_last_error; }
-static void h_set_last_error(CPU *c) { g_last_error = arg32(c, 0); }
+static void h_get_last_error(CPU *c) { c->eax = c->hle_last_error; }
+static void h_set_last_error(CPU *c) { c->hle_last_error = arg32(c, 0); }
 static void h_identity(CPU *c) { c->eax = arg32(c, 0); }
 static void h_zero(CPU *c) { c->eax = 0; }
 static void h_one(CPU *c) { c->eax = 1; }
@@ -1385,6 +1416,294 @@ static int ci_resolve(const char *path, char *out, size_t cap)
     return rc;
 }
 
+/* ------------------------------------------------------------------ */
+/* VERSION.dll: VS_VERSIONINFO from the PE resource section            */
+/* ------------------------------------------------------------------ */
+/*
+ * ver-IX86-3.dll and Storm.dll both import VERSION.dll.  The version DLL's
+ * CheckRevision reads the fixed file info of the file it checks, so returning
+ * a fabricated block would change the value the client sends in the version
+ * check.  Read the real RT_VERSION resource instead; the file is the licensed
+ * game image already present in the data directory.
+ */
+
+typedef struct {
+    uint32_t rva, vsize, raw, rawsize;
+} VerSec;
+
+typedef struct {
+    VerSec   sec[32];
+    int      nsec;
+    uint32_t res_rva, res_size, res_off;
+} VerPe;
+
+static uint16_t ver16(const uint8_t *p)
+{
+    uint16_t v;
+    memcpy(&v, p, sizeof v);
+    return v;
+}
+
+static uint32_t ver32(const uint8_t *p)
+{
+    uint32_t v;
+    memcpy(&v, p, sizeof v);
+    return v;
+}
+
+static uint32_t ver_align4(uint32_t v) { return (v + 3u) & ~3u; }
+
+static int ver_rva_to_off(const VerPe *pe, size_t n, uint32_t rva,
+                          uint32_t need, uint32_t *out)
+{
+    for (int i = 0; i < pe->nsec; i++) {
+        const VerSec *s = &pe->sec[i];
+        uint32_t span = s->vsize > s->rawsize ? s->vsize : s->rawsize;
+        if (rva < s->rva || rva - s->rva >= span) continue;
+        uint32_t delta = rva - s->rva;
+        if (delta + need > s->rawsize) return -1;
+        uint64_t off = (uint64_t)s->raw + delta;
+        if (off + need > n) return -1;
+        *out = (uint32_t)off;
+        return 0;
+    }
+    return -1;
+}
+
+static int ver_parse_pe(const uint8_t *d, size_t n, VerPe *pe)
+{
+    memset(pe, 0, sizeof *pe);
+    if (n < 0x40) return -1;
+    uint32_t nt = ver32(d + 0x3c);
+    if ((uint64_t)nt + 24 > n || ver32(d + nt) != 0x00004550u) return -1;
+    int nsec = ver16(d + nt + 6);
+    uint16_t optsz = ver16(d + nt + 20);
+    uint32_t opt = nt + 24;
+    if (nsec <= 0 || nsec > (int)(sizeof pe->sec / sizeof pe->sec[0])) return -1;
+    if ((uint64_t)opt + optsz > n || optsz < 96) return -1;
+    uint16_t magic = ver16(d + opt);
+    uint32_t dd = opt + (magic == 0x10b ? 96u : 112u);
+    if (magic != 0x10b && magic != 0x20b) return -1;
+    if (dd + 3u * 8u > opt + optsz) return -1;
+    pe->res_rva  = ver32(d + dd + 2u * 8u);
+    pe->res_size = ver32(d + dd + 2u * 8u + 4u);
+    uint32_t st = opt + optsz;
+    if ((uint64_t)st + (uint64_t)nsec * 40u > n) return -1;
+    pe->nsec = nsec;
+    for (int i = 0; i < nsec; i++) {
+        const uint8_t *s = d + st + (uint32_t)i * 40u;
+        pe->sec[i].vsize   = ver32(s + 8);
+        pe->sec[i].rva     = ver32(s + 12);
+        pe->sec[i].rawsize = ver32(s + 16);
+        pe->sec[i].raw     = ver32(s + 20);
+    }
+    if (!pe->res_rva || !pe->res_size) return -1;
+    if (ver_rva_to_off(pe, n, pe->res_rva, 16, &pe->res_off) != 0) return -1;
+    if ((uint64_t)pe->res_off + pe->res_size > n) return -1;
+    return 0;
+}
+
+/* Offsets inside a resource directory are relative to the resource section,
+ * not to the image.  `rel' is such an offset; the caller already bounds it by
+ * res_size. */
+static int ver_res_find(const uint8_t *d, const VerPe *pe, uint32_t rel,
+                        uint32_t id, int first, uint32_t *child)
+{
+    if (rel & 0x80000000u || rel + 16u > pe->res_size) return -1;
+    uint64_t base = (uint64_t)pe->res_off + rel;
+    if (base + 16u > pe->res_off + pe->res_size) return -1;
+    const uint8_t *p = d + base;
+    unsigned named = ver16(p + 12), ids = ver16(p + 14);
+    unsigned total = named + ids;
+    if ((uint64_t)rel + 16u + (uint64_t)total * 8u > pe->res_size) return -1;
+    p += 16;
+    for (unsigned i = 0; i < total; i++, p += 8) {
+        uint32_t name = ver32(p);
+        uint32_t off  = ver32(p + 4);
+        if (first || (!(name & 0x80000000u) && name == id)) {
+            *child = off & 0x7fffffffu;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int ver_res_data(const uint8_t *d, size_t n, const VerPe *pe,
+                        uint32_t rel, uint32_t *out_off, uint32_t *out_size)
+{
+    if (rel & 0x80000000u || rel + 16u > pe->res_size) return -1;
+    uint64_t base = (uint64_t)pe->res_off + rel;
+    if (base + 16u > (uint64_t)n) return -1;
+    const uint8_t *p = d + base;
+    uint32_t rva  = ver32(p);
+    uint32_t size = ver32(p + 4);
+    if (!size || ver_rva_to_off(pe, n, rva, size, out_off) != 0) return -1;
+    *out_size = size;
+    return 0;
+}
+
+static int ver_load_resource(const char *guest_path, uint8_t **out_file,
+                             uint32_t *out_off, uint32_t *out_size)
+{
+    char host[512], real[520];
+    win_path(guest_path, host, sizeof host);
+    if (ci_resolve(host, real, sizeof real) != 0)
+        snprintf(real, sizeof real, "%s", host);
+
+    FILE *f = fopen(real, "rb");
+    if (!f) return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long len = ftell(f);
+    if (len <= 0) { fclose(f); return -1; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return -1; }
+    uint8_t *d = malloc((size_t)len);
+    if (!d) { fclose(f); return -1; }
+    if (fread(d, 1, (size_t)len, f) != (size_t)len) {
+        free(d); fclose(f); return -1;
+    }
+    fclose(f);
+
+    VerPe pe;
+    if (ver_parse_pe(d, (size_t)len, &pe) != 0) { free(d); return -1; }
+    uint32_t type_rel, name_rel, lang_rel;
+    /* type -> name -> language; the language entry is already the
+     * IMAGE_RESOURCE_DATA_ENTRY, not another directory.  Parsing it as a
+     * directory reads OffsetToData as NamedEntries and always fails, which
+     * made GetFileVersionInfoSizeA return 0 for every real executable. */
+    if (ver_res_find(d, &pe, 0, 16, 0, &type_rel) != 0 ||
+        ver_res_find(d, &pe, type_rel, 1, 0, &name_rel) != 0 ||
+        ver_res_find(d, &pe, name_rel, 0, 1, &lang_rel) != 0 ||
+        ver_res_data(d, (size_t)len, &pe, lang_rel, out_off, out_size) != 0) {
+        free(d);
+        return -1;
+    }
+    *out_file = d;
+    return 0;
+}
+
+static int ver_guest_key(const uint8_t *p, uint32_t avail, const char *ascii)
+{
+    for (; *ascii; ascii++, p += 2) {
+        if (avail < 2 || ver16(p) != (uint16_t)(unsigned char)*ascii) return 0;
+        avail -= 2;
+    }
+    return avail >= 2 && ver16(p) == 0;
+}
+
+/* Locate the value of a VS_VERSIONINFO or StringFileInfo child.  `base' and
+ * `len' describe the parent block, `key_off' is the offset of szKey. */
+static int ver_find_child(const uint8_t *base, uint32_t len, uint32_t child_off,
+                          const char *key, uint32_t *value_off, uint32_t *value_len,
+                          uint32_t *block_len)
+{
+    uint32_t off = child_off;
+    while (off + 6u <= len) {
+        uint32_t wlen = ver16(base + off);
+        uint32_t vlen = ver16(base + off + 2);
+        if (wlen < 6u || off + wlen > len) return -1;
+        uint32_t koff = off + 6u;
+        if (ver_guest_key(base + koff, wlen - 6u, key)) {
+            uint32_t n = 0;
+            while (n + 2u <= wlen - 6u && ver16(base + koff + n) != 0) n += 2u;
+            n += 2u;
+            uint32_t voff = off + ver_align4(koff + n - off);
+            if (voff > off + wlen || voff + vlen > off + wlen) return -1;
+            *value_off = voff;
+            *value_len = vlen;
+            if (block_len) *block_len = wlen;
+            return 0;
+        }
+        off += ver_align4(wlen);
+    }
+    return -1;
+}
+
+static void h_get_file_version_info_size_a(CPU *c)
+{
+    const char *name = gstr(arg32(c, 0));
+    uint32_t handle = arg32(c, 1);
+    uint8_t *d = NULL;
+    uint32_t off = 0, size = 0;
+    uint32_t rc = 0;
+    if (ver_load_resource(name, &d, &off, &size) == 0) {
+        rc = size;
+        free(d);
+    }
+    if (handle && guest_ok(handle, 4)) wr32g(handle, 0);
+    c->hle_last_error = rc ? 0 : 1813; /* ERROR_RESOURCE_TYPE_NOT_FOUND */
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    fprintf(stderr, "[bnet] GetFileVersionInfoSizeA \"%s\" -> %u err=%u\n",
+            name ? name : "(null)", (unsigned)rc, (unsigned)c->hle_last_error);
+#endif
+    c->eax = rc;
+}
+
+static void h_get_file_version_info_a(CPU *c)
+{
+    const char *name = gstr(arg32(c, 0));
+    uint32_t handle = arg32(c, 1), len = arg32(c, 2), buf = arg32(c, 3);
+    (void)handle;
+    uint8_t *d = NULL;
+    uint32_t off = 0, size = 0;
+    int ok = 0;
+    if (ver_load_resource(name, &d, &off, &size) == 0 && buf && len >= size &&
+        guest_ok(buf, len)) {
+        memcpy((void *)(uintptr_t)buf, d + off, size);
+        ok = 1;
+    }
+    free(d);
+    c->hle_last_error = ok ? 0 : 1812; /* ERROR_RESOURCE_DATA_NOT_FOUND */
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    fprintf(stderr, "[bnet] GetFileVersionInfoA \"%s\" len=%u buf=%08X -> %d err=%u\n",
+            name ? name : "(null)", (unsigned)len, (unsigned)buf, ok,
+            (unsigned)c->hle_last_error);
+#endif
+    c->eax = (uint32_t)ok;
+}
+
+static void h_ver_query_value_a(CPU *c)
+{
+    uint32_t block = arg32(c, 0), subp = arg32(c, 1);
+    uint32_t outp = arg32(c, 2), lenp = arg32(c, 3);
+    const char *sub = gstr(subp);
+    uint32_t value = 0, vlen = 0, rc = 0;
+
+    if (block && guest_ok(block, 6)) {
+        const uint8_t *b = (const uint8_t *)(uintptr_t)block;
+        uint32_t wlen = ver16(b);
+        uint32_t vlen_root = ver16(b + 2);
+        if (wlen >= 6 && wlen <= 0x100000u && guest_ok(block, wlen) &&
+            ver_guest_key(b + 6, wlen - 6, "VS_VERSION_INFO")) {
+            uint32_t root_val = ver_align4(6u + 32u); /* 16 UTF-16 chars */
+            if (root_val + vlen_root <= wlen) {
+                if (!strcmp(sub, "\\")) {
+                    value = block + root_val;
+                    vlen = vlen_root;
+                    rc = 1;
+                } else if (!strncmp(sub, "\\VarFileInfo\\", 13)) {
+                    uint32_t vo, vl, bl;
+                    if (ver_find_child(b, wlen, ver_align4(root_val + vlen_root),
+                                       "VarFileInfo", &vo, &vl, &bl) == 0 &&
+                        vo + vl <= wlen) {
+                        const char *key = sub + 13;
+                        if (!strcmp(key, "Translation") &&
+                            ver_find_child(b, wlen, vo, "Translation", &vo, &vl, NULL) == 0 &&
+                            vo + vl <= wlen) {
+                            value = block + vo;
+                            vlen = vl;
+                            rc = 1;
+                        }
+                    }
+                    (void)bl;
+                }
+            }
+        }
+    }
+    if (outp && guest_ok(outp, 4)) wr32g(outp, rc ? value : 0);
+    if (lenp && guest_ok(lenp, 4)) wr32g(lenp, rc ? vlen : 0);
+    c->eax = rc;
+}
+
 /* Save files live under .../Save or carry the .w3z/.w3v suffix.  They are
  * always logged: the normal open/read trace has a fixed budget that is long
  * exhausted by the time a player saves, which is exactly the interval this
@@ -1420,7 +1739,7 @@ static void h_create_file(CPU *c)
     }
     int fd = open(real, oflags, 0666);
     if (fd < 0) {
-        g_last_error = (errno == ENOENT) ? 2u : (errno == EACCES ? 5u : 3u);
+        c->hle_last_error = (errno == ENOENT) ? 2u : (errno == EACCES ? 5u : 3u);
 #if WC3_DEBUG && WC3_DEBUG_HLE
         if (is_save)
             fprintf(stderr, "[save] create failed \"%s\" access=%08X disp=%u "
@@ -1439,7 +1758,7 @@ static void h_create_file(CPU *c)
     g->fd = fd;
     g->save_trace = is_save;
     g->overlapped = (flags & 0x40000000u) != 0;   /* FILE_FLAG_OVERLAPPED */
-    g_last_error = 0;
+    c->hle_last_error = 0;
 #if WC3_DEBUG && WC3_DEBUG_HLE
     if (is_save)
         fprintf(stderr, "[save] create \"%s\" access=%08X disp=%u flags=%08X "
@@ -1520,7 +1839,7 @@ static void h_read_file(CPU *c)
     uint32_t ov = arg32(c, 4);
     GHandle *g = gh_get(h);
     if (got && guest_ok(got, 4)) wr32g(got, 0);
-    if (!g || g->fd < 0 || !guest_ok(buf, n)) { g_last_error = 6; c->eax = 0; return; }
+    if (!g || g->fd < 0 || !guest_ok(buf, n)) { c->hle_last_error = 6; c->eax = 0; return; }
     off_t off = -1;
     ssize_t r;
     if (g->overlapped && h_ov_offset(ov, &off))
@@ -1533,7 +1852,7 @@ static void h_read_file(CPU *c)
         fprintf(stderr, "[save] read h=%08X n=%u off=%lld -> %d errno=%d\n",
                 h, n, (long long)off, (int)r, r < 0 ? errno : 0);
 #endif
-    if (r < 0) { g_last_error = 3; c->eax = 0; return; }
+    if (r < 0) { c->hle_last_error = 3; c->eax = 0; return; }
     if (got && guest_ok(got, 4)) wr32g(got, (uint32_t)r);
 #if WC3_DEBUG
     if (g_io_trace < 400) { g_io_trace++; fprintf(stderr, "[file] read h=%08X n=%u -> %d\n", h, n, (int)r); }
@@ -1669,7 +1988,7 @@ static void h_get_file_attributes(CPU *c)
         fprintf(stderr, "[file] attributes \"%s\" -> \"%s\": not found ra=%08X cwd=%s\n",
                 guest, real, rd32g(c->esp), cwd);
 #endif
-        g_last_error = 2;
+        c->hle_last_error = 2;
         c->eax = GH_INVALID;
         return;
     }
@@ -1771,7 +2090,7 @@ static void h_find_first_file(CPU *c)
     DIR *d = opendir(dirpath);
     if (!d) {
         fprintf(stderr, "[find]   opendir failed: %s\n", strerror(errno));
-        g_last_error = 2;
+        c->hle_last_error = 2;
         c->eax = GH_INVALID;
         return;
     }
@@ -1790,7 +2109,10 @@ static void h_find_first_file(CPU *c)
         snprintf(full, sizeof full, "%s/%s", dirpath, de->d_name);
         struct stat st;
         if (stat(full, &st) != 0) continue;
-        if (dst && guest_ok(dst, 318)) fill_find_data(dst, de->d_name, &st);
+        if (dst && guest_ok(dst, 318)) {
+            fill_find_data(dst, de->d_name, &st);
+            pin_war3_exe_time(dst, de->d_name);
+        }
 #if WC3_DEBUG
         fprintf(stderr, "[find]   match \"%s\"\n", de->d_name);
 #endif
@@ -1802,7 +2124,7 @@ static void h_find_first_file(CPU *c)
 #if WC3_DEBUG
     fprintf(stderr, "[find]   no match\n");
 #endif
-    g_last_error = 2;
+    c->hle_last_error = 2;
     c->eax = GH_INVALID;
 }
 
@@ -1830,7 +2152,10 @@ static void h_find_next_file(CPU *c)
         fprintf(stderr, "[find] next pattern=\"%s\" match \"%s\"\n",
                 g->pattern, de->d_name);
 #endif
-        if (dst && guest_ok(dst, 318)) fill_find_data(dst, de->d_name, &st);
+        if (dst && guest_ok(dst, 318)) {
+            fill_find_data(dst, de->d_name, &st);
+            pin_war3_exe_time(dst, de->d_name);
+        }
         c->eax = 1;
         return;
     }
@@ -1961,6 +2286,7 @@ static const char *va_module_name(uint32_t v)
     if (v >= GUEST_IMAGE_MSS && v < GUEST_IMAGE_MSSFAST) return "mss32";
     if (v >= GUEST_IMAGE_MSSFAST && v < GUEST_IMAGE_MSSFAST + 0x00100000u) return "mssfast";
     if (v >= GUEST_IMAGE_MP3DEC && v < GUEST_IMAGE_MP3DEC + 0x00040000u) return "mp3dec";
+    if (v >= GUEST_IMAGE_VER && v < GUEST_IMAGE_VER + 0x00010000u) return "ver-IX86-3";
     if (v >= GUEST_IMAGE_GAME && v < GUEST_IMAGE_GAME + 0x01000000u) return "game";
     return NULL;
 }
@@ -1993,10 +2319,19 @@ static void va_log_callers(CPU *c)
 }
 #endif
 
+/* ver-IX86-3 compiles the CheckRevision equation into a guest page and jumps
+ * to it.  Only allocations with an execute protection can contain such code;
+ * register those with the interpreter so the dispatcher can route them without
+ * treating every unknown VA as executable memory. */
+static void dyn_register_exec(uint32_t base, uint32_t size, uint32_t prot)
+{
+    if (base && size && (prot & 0x00F0u))
+        wc3_dyn_x86_register(base, size);
+}
+
 static void h_virtual_alloc(CPU *c)
 {
     uint32_t addr = arg32(c, 0), size = arg32(c, 1), type = arg32(c, 2), prot = arg32(c, 3);
-    (void)prot;
 #if WC3_DEBUG
     if (size >= 0x01000000u) {
         fprintf(stderr, "[va] BIG alloc ra=%08X addr=%08X size=%u type=%08X\n",
@@ -2012,7 +2347,7 @@ static void h_virtual_alloc(CPU *c)
     if (!size || (uint64_t)addr + size > 0x100000000ull) {
         fprintf(stderr, "[va] VirtualAlloc bad range addr=%08X size=%u type=%08X ra=%08X\n",
                 addr, size, type, guest_ok(c->esp, 4) ? rd32g(c->esp) : 0);
-        g_last_error = 87;                 /* ERROR_INVALID_PARAMETER */
+        c->hle_last_error = 87;                 /* ERROR_INVALID_PARAMETER */
         c->eax = 0;
         return;
     }
@@ -2024,6 +2359,7 @@ static void h_virtual_alloc(CPU *c)
             /* Commit-only: the pages must already be reserved. */
             if (va_live_covers(addr, size) || va_fixed_mapped(addr, size)) {
                 c->eax = addr;
+                dyn_register_exec(addr, size, prot);
             } else {
 #if WC3_DEBUG
                 static int rejected;
@@ -2032,7 +2368,7 @@ static void h_virtual_alloc(CPU *c)
                             addr, size, type,
                             guest_ok(c->esp, 4) ? rd32g(c->esp) : 0);
 #endif
-                g_last_error = 487;        /* ERROR_INVALID_ADDRESS */
+                c->hle_last_error = 487;        /* ERROR_INVALID_ADDRESS */
                 c->eax = 0;
             }
             return;
@@ -2054,6 +2390,7 @@ static void h_virtual_alloc(CPU *c)
                             addr, rounded);
 #endif
                 c->eax = addr;
+                if (want_commit) dyn_register_exec(addr, rounded, prot);
                 return;
             }
             if (!guest_map(addr, rounded)) {
@@ -2071,6 +2408,7 @@ static void h_virtual_alloc(CPU *c)
 #endif
             va_live_add(addr, rounded);
             c->eax = addr;
+            if (want_commit) dyn_register_exec(addr, rounded, prot);
             return;
         }
     } else if (want_commit && !want_reserve) {
@@ -2084,6 +2422,16 @@ static void h_virtual_alloc(CPU *c)
 #endif
     }
     c->eax = va_alloc(size);
+    if (c->eax && (want_commit || !want_reserve))
+        dyn_register_exec(c->eax, size, prot);
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    /* L_6F9AF000 allocates the Warden module image and stores the result in
+     * the connection slot.  This is the exact allocation behind the login
+     * crash: log the caller, the size and the returned base. */
+    if (guest_ok(c->esp, 4) && rd32g(c->esp) == 0x6F9AF05Eu)
+        fprintf(stderr, "[warden] VirtualAlloc size=%08X type=%08X -> %08X\n",
+                size, type, c->eax);
+#endif
     /* Storm's SMemAlloc turns a NULL here into SErrSetLastError(8), so every
      * failure has to be visible: the guest just returns 0 from the open. */
     if (!c->eax) {
@@ -2111,6 +2459,9 @@ static void h_virtual_alloc(CPU *c)
 static void h_virtual_free(CPU *c)
 {
     uint32_t addr = arg32(c, 0), size = arg32(c, 1), type = arg32(c, 2);
+    /* A released/decommitted range must stop being a dispatch fallback even if
+     * the guest later reuses the same base for ordinary data. */
+    wc3_dyn_x86_unregister(addr);
 #if WC3_DEBUG
     if (g_va_trace || size >= 0x01000000u)
         fprintf(stderr, "[va] release req %08X+%X type=%08X ra=%08X\n",
@@ -2692,6 +3043,7 @@ static void h_wait_one(CPU *c)
     uint32_t h = arg32(c, 0);
     int32_t  ms = (int32_t)arg32(c, 1);
     uint32_t ra = guest_ok(c->esp, 4) ? rd32g(c->esp) : 0;
+    WC3_TRACE_SCOPE("wc3.wait.one");
 #if WC3_DEBUG && WC3_DEBUG_HLE
     watch_note_wait(ra, h, 0, 1);
 #endif
@@ -2914,6 +3266,7 @@ static void h_wait_many(CPU *c)
     int wait_all = arg32(c, 2) != 0;
     int32_t ms = (int32_t)arg32(c, 3);
     uint32_t ra = guest_ok(c->esp, 4) ? rd32g(c->esp) : 0;
+    WC3_TRACE_SCOPE("wc3.wait.many");
 
     if (n == 0 || n > 64u || !guest_ok(hp, n * 4u)) {
 #if WC3_DEBUG
@@ -3088,6 +3441,7 @@ static void h_create_semaphore(CPU *c)
 static void h_sleep(CPU *c)
 {
     uint32_t ms = arg32(c, 0);
+    WC3_TRACE_SCOPE("wc3.sleep");
 #if WC3_DEBUG && WC3_DEBUG_HLE_SLEEP
     sleep_trace_state();
     if (g_sleep_trace) {
@@ -3373,10 +3727,7 @@ static void h_suspend_thread(CPU *c) { (void)c; c->eax = 0; }
 static void h_resume_thread(CPU *c) { (void)c; c->eax = 0; }
 static void h_set_thread_priority(CPU *c) { (void)c; c->eax = 1; }
 static void h_get_thread_priority(CPU *c) { (void)c; c->eax = 0; }
-static void h_create_process(CPU *c) { (void)c; g_last_error = 2; c->eax = 0; }
-
-/* Per-thread TLS block; defined with the thread layer below. */
-static uint32_t *tls_slot(void);
+static void h_create_process(CPU *c) { (void)c; c->hle_last_error = 2; c->eax = 0; }
 
 /* The TLS calls carry an error-status contract the game *depends* on.
  * `0x6F096910` is the engine's own TlsGetValue wrapper and it reads:
@@ -3394,37 +3745,37 @@ static void h_tls_alloc(CPU *c)
 {
     for (int i = 0; i < 64; i++)
         if (!g_tls[i]) { g_tls[i] = 1; c->eax = (uint32_t)i; return; }
-    g_last_error = 259;                 /* ERROR_NO_MORE_ITEMS */
+    c->hle_last_error = 259;                 /* ERROR_NO_MORE_ITEMS */
     c->eax = 0xFFFFFFFFu;
 }
 static void h_tls_free(CPU *c)
 {
     uint32_t i = arg32(c, 0);
-    if (i < 64 && g_tls[i]) { g_tls[i] = 0; g_last_error = 0; c->eax = 1; return; }
-    g_last_error = 87;                  /* ERROR_INVALID_PARAMETER */
+    if (i < 64 && g_tls[i]) { g_tls[i] = 0; c->hle_last_error = 0; c->eax = 1; return; }
+    c->hle_last_error = 87;                  /* ERROR_INVALID_PARAMETER */
     c->eax = 0;
 }
 static void h_tls_set(CPU *c)
 {
     uint32_t idx = arg32(c, 0);
     if (idx < 64 && g_tls[idx]) {
-        tls_slot()[idx] = arg32(c, 1);
-        g_last_error = 0;
+        c->hle_tls[idx] = arg32(c, 1);
+        c->hle_last_error = 0;
         c->eax = 1;
         return;
     }
-    g_last_error = 87;
+    c->hle_last_error = 87;
     c->eax = 0;
 }
 static void h_tls_get(CPU *c)
 {
     uint32_t idx = arg32(c, 0);
     if (idx < 64 && g_tls[idx]) {
-        c->eax = tls_slot()[idx];
-        g_last_error = 0;
+        c->eax = c->hle_tls[idx];
+        c->hle_last_error = 0;
         return;
     }
-    g_last_error = 87;
+    c->hle_last_error = 87;
     c->eax = 0;
 }
 
@@ -3438,7 +3789,7 @@ static const char *const g_sys_modules[] = {
     "kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll",
     "msvcrt.dll", "shell32.dll", "winmm.dll", "wsock32.dll",
     "comctl32.dll", "imm32.dll", "comdlg32.dll", "wininet.dll",
-    "msvcr80.dll", "blizzard.ax", "d3d9.dll",
+    "msvcr80.dll", "blizzard.ax", "d3d9.dll", "version.dll",
 };
 #define SYS_MOD_BASE 0x00080000u
 
@@ -3470,7 +3821,7 @@ static uint32_t sys_module_handle(const char *name)
 
 /* Modules the probe mapped for real.  The PE image lives in boot_probe.c, so
  * this table only carries an opaque pointer back to it. */
-#define HLE_MOD_MAX 8
+#define HLE_MOD_MAX 16
 typedef struct {
     char       name[32];
     char       path[512];
@@ -3600,7 +3951,7 @@ static void h_load_library(CPU *c)
     }
 
     fprintf(stderr, "[hle] LoadLibraryA(\"%s\") -> not found\n", n);
-    g_last_error = 126;
+    c->hle_last_error = 126;
     c->eax = 0;
 }
 
@@ -3970,12 +4321,19 @@ static void file_view_release(GHandle *m)
 
 static void h_create_file_mapping(CPU *c)
 {
-    uint32_t size = arg32(c, 3), hfile = arg32(c, 5);
+    /* Win32 order: hFile, lpAttributes, flProtect, sizeHigh, sizeLow, lpName.
+     * The old code read arg5 (lpName, usually NULL) as the file handle and
+     * arg3 (sizeHigh, usually 0) as the length, so every mapping failed. */
+    uint32_t hfile = arg32(c, 0);
+    uint32_t prot = arg32(c, 2);
+    uint32_t size_hi = arg32(c, 3), size_lo = arg32(c, 4);
+    (void)prot;                     /* used by the BATTLE_NET trace only */
     GHandle *g = gh_get(hfile);
-    if (!g || g->fd < 0) { g_last_error = 6; c->eax = 0; return; }
+    if (!g || g->fd < 0) { c->hle_last_error = 6; c->eax = 0; return; }
     struct stat st;
     if (fstat(g->fd, &st) != 0) { c->eax = 0; return; }
-    if (!size) size = (uint32_t)st.st_size;
+    if (size_hi) { c->hle_last_error = 87; c->eax = 0; return; }
+    uint32_t size = size_lo ? size_lo : (uint32_t)st.st_size;
     uint32_t h = gh_new(4);
     GHandle *m = gh_get(h);
     if (!m) { c->eax = 0; return; }
@@ -3983,18 +4341,22 @@ static void h_create_file_mapping(CPU *c)
     m->fd = dup(g->fd);
     if (m->fd < 0) { memset(m, 0, sizeof *m); c->eax = 0; return; }
     m->state = size;                /* mapping length, in bytes */
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    fprintf(stderr, "[file] CreateFileMapping h=%08X size=%u prot=%08X -> %08X\n",
+            hfile, size, prot, h);
+#endif
     c->eax = h;
 }
 
 static void h_map_view_of_file(CPU *c)
 {
     GHandle *m = gh_get(arg32(c, 0));
-    if (!m || m->kind != 4 || m->fd < 0) { g_last_error = 6; c->eax = 0; return; }
+    if (!m || m->kind != 4 || m->fd < 0) { c->hle_last_error = 6; c->eax = 0; return; }
     if (m->file_map_base) { c->eax = m->file_map_base; return; }   /* one view */
     uint32_t off_hi = arg32(c, 2), off_lo = arg32(c, 3), want = arg32(c, 4);
-    if (off_hi) { g_last_error = 87; c->eax = 0; return; }
+    if (off_hi) { c->hle_last_error = 87; c->eax = 0; return; }
     if (!want) {
-        if (off_lo >= m->state) { g_last_error = 87; c->eax = 0; return; }
+        if (off_lo >= m->state) { c->hle_last_error = 87; c->eax = 0; return; }
         want = m->state - off_lo;
     }
     uint32_t base = va_alloc(want);
@@ -4184,13 +4546,13 @@ static void h_create_iocp(CPU *c)
     if (file && port) {                     /* associate a file with a port */
         GHandle *g = gh_get(file);
         if (!g || g->kind != 1) {
-            g_last_error = 6;               /* ERROR_INVALID_HANDLE */
+            c->hle_last_error = 6;               /* ERROR_INVALID_HANDLE */
             c->eax = 0;
             return;
         }
         g->iocp_port = port;
         g->iocp_key = key;
-        g_last_error = 0;
+        c->hle_last_error = 0;
         c->eax = port;
 #if WC3_DEBUG && WC3_DEBUG_HLE
         static unsigned assoc_trace;
@@ -4209,7 +4571,7 @@ static void h_create_iocp(CPU *c)
     }
     if (!p) {
         pthread_mutex_unlock(&g_iocp_lock);
-        g_last_error = 6;
+        c->hle_last_error = 6;
         c->eax = 0;
         return;
     }
@@ -4226,7 +4588,7 @@ static void h_create_iocp(CPU *c)
     p->refs = 0;
     p->handle = gh_new_sync();
     pthread_mutex_unlock(&g_iocp_lock);
-    g_last_error = 0;
+    c->hle_last_error = 0;
     c->eax = p->handle;
 #if WC3_DEBUG && WC3_DEBUG_HLE
     static unsigned create_trace;
@@ -4271,7 +4633,7 @@ static void h_get_queued(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_HLE
         iocp_trace_false(h, ms, "invalid");
 #endif
-        g_last_error = 6;
+        c->hle_last_error = 6;
         c->eax = 0;
         return;
     }
@@ -4284,7 +4646,7 @@ static void h_get_queued(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_HLE
             iocp_trace_false(h, ms, "timeout");
 #endif
-            g_last_error = 258;             /* WAIT_TIMEOUT */
+            c->hle_last_error = 258;             /* WAIT_TIMEOUT */
             c->eax = 0;
             return;
         }
@@ -4302,7 +4664,7 @@ static void h_get_queued(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_HLE
                 iocp_trace_false(h, ms, "timeout");
 #endif
-                g_last_error = 258;
+                c->hle_last_error = 258;
                 c->eax = 0;
                 return;
             }
@@ -4314,7 +4676,7 @@ static void h_get_queued(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_HLE
         iocp_trace_false(h, ms, "closing");
 #endif
-        g_last_error = 6;
+        c->hle_last_error = 6;
         c->eax = 0;
         return;
     }
@@ -4335,21 +4697,21 @@ static void h_get_queued(CPU *c)
     if (pb && guest_ok(pb, 4)) wr32g(pb, it.bytes);
     if (pk && guest_ok(pk, 4)) wr32g(pk, it.key);
     if (pov && guest_ok(pov, 4)) wr32g(pov, it.ov);
-    g_last_error = 0;
+    c->hle_last_error = 0;
     c->eax = 1;
 }
 
 static void h_post_queued(CPU *c)
 {
     Iocp *p = iocp_get(arg32(c, 0));
-    if (!p) { g_last_error = 6; c->eax = 0; return; }
+    if (!p) { c->hle_last_error = 6; c->eax = 0; return; }
     int rc = iocp_push(p, arg32(c, 1), arg32(c, 2), arg32(c, 3));
     iocp_put(p);
     if (rc == 1) {
-        g_last_error = 0;
+        c->hle_last_error = 0;
         c->eax = 1;
     } else {
-        g_last_error = rc == 0 ? 6 : 8;     /* invalid handle / no memory */
+        c->hle_last_error = rc == 0 ? 6 : 8;     /* invalid handle / no memory */
         c->eax = 0;
     }
 }
@@ -4925,10 +5287,14 @@ static void cr_qsort(CPU *c)
     /* The comparator is lifted guest code, so every pointer handed to it has to
      * be a *guest* address.  `tmp` used to be a host stack array and the low 32
      * bits of its host address are not mapped in the guest: the comparator read
-     * `[arg1]` and died at 0xdd482870.  One 256-byte guest scratch per thread. */
-    static THREAD_LOCAL uint32_t tmp_guest;
-    if (!tmp_guest) tmp_guest = hle_alloc0(256);
-    if (!tmp_guest) { c->eax = 0; return; }
+     * `[arg1]` and died at 0xdd482870.  One 256-byte guest scratch per thread,
+     * owned by the CPU struct rather than a host TLS slot. */
+    uint32_t tmp_guest = c->hle_tmp_guest;
+    if (!tmp_guest) {
+        tmp_guest = hle_alloc0(256);
+        if (!tmp_guest) { c->eax = 0; return; }
+        c->hle_tmp_guest = tmp_guest;
+    }
     uint8_t *a = (uint8_t *)(uintptr_t)base;
     uint8_t *tmp = (uint8_t *)(uintptr_t)tmp_guest;
     for (uint32_t i = 1; i < n; i++) {
@@ -5118,7 +5484,6 @@ typedef struct GThread {
     pthread_t    host;
     volatile int running;
     uint32_t     exit_code;
-    uint32_t     tls[64];
 #if WC3_DEBUG && WC3_DEBUG_HLE
     CPU             *cpu;
     volatile uint32_t last_target, last_eip, last_esp, last_ebp;
@@ -5172,19 +5537,6 @@ static int guest_thread_wait(struct GThread *t, int32_t ms)
         if ((uint32_t)(hle_now_ms() - start) >= (uint32_t)ms) return 0;
         usleep(1000);
     }
-}
-
-static uint32_t hle_current_guest_id(void)
-{
-    return g_self_thread ? g_self_thread->guest_id : 0;
-}
-
-/* The main thread has no GThread slot; its TLS lives here. */
-static __thread uint32_t  g_main_tls[64];
-
-static uint32_t *tls_slot(void)
-{
-    return g_self_thread ? g_self_thread->tls : g_main_tls;
 }
 
 static void teb_init_local(CPU *c, uint32_t teb, uint32_t stack_base,
@@ -5384,7 +5736,18 @@ static void hang_watch_start(void)
 static void *guest_thread_proc(void *p)
 {
     GThread *t = (GThread *)p;
+#if WC3_DEBUG
     g_self_thread = t;
+#endif
+#if WC3_DEBUG && WC3_DEBUG_PERF
+    /* Guest threads have no Win32 name, so the profiler would otherwise show
+     * every one of them as Thread-8.  Keep the numeric guest id in the name:
+     * it survives the 15-byte kernel limit and can be matched with the
+     * CreateThread diagnostics when an address alone is ambiguous. */
+    char trace_name[16];
+    snprintf(trace_name, sizeof trace_name, "wc3-guest-%u", t->guest_id);
+    WC3_TRACE_THREAD_NAME(trace_name);
+#endif
 
     CPU c;
     memset(&c, 0, sizeof c);
@@ -5404,7 +5767,9 @@ static void *guest_thread_proc(void *p)
 #if WC3_DEBUG && WC3_DEBUG_HLE
     t->cpu = NULL;
 #endif
+#if WC3_DEBUG
     g_self_thread = NULL;
+#endif
     return NULL;
 }
 
@@ -5612,7 +5977,7 @@ static void cr_clearfp(CPU *c) { c->eax = 0; }
  * struct, so the conversion is a memcpy of the payload. */
 static double fpop_f64(CPU *c)
 {
-    float64_t f = extF80_to_f64(fpop(c));
+    float64_t f = X87_EXTF80_TO_F64(c, fpop(c));
     double d;
     memcpy(&d, &f.v, sizeof d);
     return d;
@@ -5621,18 +5986,18 @@ static double fpop_f64(CPU *c)
 static void cr_cisqrt(CPU *c)
 {
     double x = fpop_f64(c);
-    fpush(c, x87_from_f64(sqrt(x)));
+    fpush(c, x87_from_f64(c, sqrt(x)));
 }
 static void cr_cilog10(CPU *c)
 {
     double x = fpop_f64(c);
-    fpush(c, x87_from_f64(log10(x)));
+    fpush(c, x87_from_f64(c, log10(x)));
 }
 static void cr_cipow(CPU *c)
 {
     double y = fpop_f64(c);
     double x = fpop_f64(c);
-    fpush(c, x87_from_f64(pow(x, y)));
+    fpush(c, x87_from_f64(c, pow(x, y)));
 }
 /* _CIfmod is the compiler's internal fmod: both operands come off the x87
  * stack and the result goes back onto it, so a stub that only sets eax leaves
@@ -5642,7 +6007,7 @@ static void cr_cifmod(CPU *c)
 {
     double y = fpop_f64(c);
     double x = fpop_f64(c);
-    fpush(c, x87_from_f64(fmod(x, y)));
+    fpush(c, x87_from_f64(c, fmod(x, y)));
 }
 /* _CIatan2 is the compiler's x87 atan2, not a cdecl function: the caller
  * leaves y in ST(1) and x in ST(0), and fpatan replaces them with
@@ -5653,7 +6018,7 @@ static void cr_ciatan2(CPU *c)
 {
     double x = fpop_f64(c);
     double y = fpop_f64(c);
-    fpush(c, x87_from_f64(atan2(y, x)));
+    fpush(c, x87_from_f64(c, atan2(y, x)));
 }
 
 /* MSVCR80's ordinary math functions take their arguments on the *stack*
@@ -5675,13 +6040,13 @@ static double cr_arg_f64(CPU *c, unsigned n)
     static void cr_f64_##fn(CPU *c)                                     \
     {                                                                   \
         double x = cr_arg_f64(c, 0);                                    \
-        fpush(c, x87_from_f64(expr));                                   \
+        fpush(c, x87_from_f64(c, expr));                                \
     }
 #define CR_MATH2(fn, expr)                                              \
     static void cr_f64_##fn(CPU *c)                                     \
     {                                                                   \
         double x = cr_arg_f64(c, 0), y = cr_arg_f64(c, 1);              \
-        fpush(c, x87_from_f64(expr));                                   \
+        fpush(c, x87_from_f64(c, expr));                                \
     }
 
 CR_MATH1(ceil,  ceil(x))
@@ -6436,6 +6801,7 @@ static void u_get_message(CPU *c)
 {
     uint32_t out = arg32(c, 0);
     uint32_t hwnd = arg32(c, 1), lo = arg32(c, 2), hi = arg32(c, 3);
+    WC3_TRACE_SCOPE("wc3.msg.get");
     if (!out) { c->eax = 0xFFFFFFFFu; return; }
 
     service_settings_save(c);
@@ -6470,6 +6836,7 @@ static void u_peek_message(CPU *c)
     uint32_t out = arg32(c, 0);
     uint32_t hwnd = arg32(c, 1), lo = arg32(c, 2), hi = arg32(c, 3);
     int remove = (arg32(c, 4) & 1) != 0;             /* PM_REMOVE */
+    WC3_TRACE_SCOPE("wc3.msg.peek");
     service_settings_save(c);
     keyboard_service();
     c->eax = (uint32_t)u_msg_take(out, hwnd, lo, hi, remove);
@@ -6491,6 +6858,7 @@ static void u_peek_message(CPU *c)
 static void u_dispatch_message(CPU *c)
 {
     uint32_t p = arg32(c, 0);
+    WC3_TRACE_SCOPE("wc3.msg.dispatch");
     if (!p || !guest_ok(p, 28) || !g_wndproc) { c->eax = 0; return; }
 
     uint32_t hwnd = rd32g(p), msg = rd32g(p + 4);
@@ -7498,7 +7866,7 @@ static void u_enum_display_settings(CPU *c)
 {
     uint32_t num = arg32(c, 1), dm = arg32(c, 2);
     uint32_t w = 0, h = 0, hz = hle_android_display_refresh_rate();
-    if (!dm || !guest_ok(dm, 156)) { g_last_error = 0; c->eax = 0; return; }
+    if (!dm || !guest_ok(dm, 156)) { c->hle_last_error = 0; c->eax = 0; return; }
     if (num == 0xFFFFFFFFu || num == 0xFFFFFFFEu) {
         /* ENUM_CURRENT_SETTINGS and ENUM_REGISTRY_SETTINGS.  The game reads
          * ENUM_CURRENT_SETTINGS before its hardcoded fallback table; returning
@@ -7507,7 +7875,7 @@ static void u_enum_display_settings(CPU *c)
             hle_android_default_display_mode(&w, &h);
         }
     } else if (!hle_android_display_mode(num, &w, &h)) {
-        g_last_error = 0;
+        c->hle_last_error = 0;
         c->eax = 0;
         RES_LOG("EnumDisplaySettingsA(%u) -> none", num);
         return;
@@ -7653,7 +8021,7 @@ static void a_reg_open_key(CPU *c)
 #if WC3_DEBUG
         fprintf(stderr, "[reg] RegOpenKeyExA(\"%s\") -> not ours\n", sub);
 #endif
-        g_last_error = 2;
+        c->hle_last_error = 2;
         c->eax = 2;
         return;
     }
@@ -7662,7 +8030,7 @@ static void a_reg_open_key(CPU *c)
     fprintf(stderr, "[reg] RegOpenKeyExA(\"%s\")\n", g_reg_key);
 #endif
     if (out && guest_ok(out, 4)) wr32g(out, REG_HKEY_BASE);
-    g_last_error = 0;
+    c->hle_last_error = 0;
     c->eax = 0;
 }
 
@@ -7674,14 +8042,14 @@ static void a_reg_query_value(CPU *c)
 #if WC3_DEBUG
     fprintf(stderr, "[reg] RegQueryValueExA(\"%s\") -> %s\n", name, v ? "found" : "missing");
 #endif
-    if (!v) { g_last_error = 2; c->eax = 2; return; }
+    if (!v) { c->hle_last_error = 2; c->eax = 2; return; }
     if (ptype && guest_ok(ptype, 4)) wr32g(ptype, v->type);
     if (!buf || !plen || !guest_ok(plen, 4)) { c->eax = 0; return; }
     uint32_t cap = rd32g(plen);
     uint32_t n = v->len < cap ? v->len : cap;
     if (guest_ok(buf, n)) memcpy((void *)(uintptr_t)buf, v->data, n);
     wr32g(plen, v->len);
-    g_last_error = 0;
+    c->hle_last_error = 0;
     c->eax = 0;
 }
 
@@ -7690,14 +8058,14 @@ static void a_reg_set_value(CPU *c)
     const char *name = gstr(arg32(c, 1));
     uint32_t type = arg32(c, 2), data = arg32(c, 4), len = arg32(c, 5);
     RegVal *v = reg_slot(g_reg_key, name);
-    if (!v) { g_last_error = 8; c->eax = 8; return; }
+    if (!v) { c->hle_last_error = 8; c->eax = 8; return; }
     v->type = type;
     v->len = len > sizeof v->data ? (uint32_t)sizeof v->data : len;
     if (data && guest_ok(data, v->len)) memcpy(v->data, (void *)(uintptr_t)data, v->len);
 #if WC3_DEBUG
     fprintf(stderr, "[reg] RegSetValueExA(\"%s\") len=%u\n", name, len);
 #endif
-    g_last_error = 0;
+    c->hle_last_error = 0;
     c->eax = 0;
 }
 
@@ -7711,11 +8079,11 @@ static void a_reg_create_key(CPU *c)
 #if WC3_DEBUG
     fprintf(stderr, "[reg] RegCreateKeyExA(\"%s\")\n", g_reg_key);
 #endif
-    g_last_error = 0;
+    c->hle_last_error = 0;
     c->eax = 0;
 }
 
-static void a_reg_close_key(CPU *c) { (void)c; g_last_error = 0; c->eax = 0; }
+static void a_reg_close_key(CPU *c) { (void)c; c->hle_last_error = 0; c->eax = 0; }
 
 /* A fresh Windows install has the game's Sound key populated by the
  * installer/first run.  The Android registry starts empty, so every setting
@@ -8289,7 +8657,7 @@ static void h_get_environment_variable_a(CPU *c)
      * is what the CRT checks for; a 0 return with a stale last-error would
      * make it treat the variable as present-but-empty. */
     (void)c;
-    g_last_error = 203;
+    c->hle_last_error = 203;
     c->eax = 0;
 }
 /* win.ini profile queries: Miles asks for MSS/MSSDebug and uses the default
@@ -8393,6 +8761,7 @@ typedef struct {
 #define CR(n, fn, argc) { "MSVCR80.dll", n, fn, argc, 1 }
 #define U(n, fn, argc)  { "USER32.dll", n, fn, argc, 0 }
 #define UC(n, fn, argc) { "USER32.dll", n, fn, argc, 1 }
+#define V(n, fn, argc)  { "VERSION.dll", n, fn, argc, 0 }
 #define G(n, fn, argc)  { "GDI32.dll", n, fn, argc, 0 }
 #define A(n, fn, argc)  { "ADVAPI32.dll", n, fn, argc, 0 }
 #define S(n, fn, argc)  { "SHELL32.dll", n, fn, argc, 0 }
@@ -8834,6 +9203,14 @@ static const HleDef g_defs[] = {
     U("SetCursor", u_set_cursor, 1),
     U("SetCursorPos", u_set_cursor_pos, 2),
 
+    /* ---- VERSION.dll: real RT_VERSION resource reads ----
+     * ver-IX86-3!CheckRevision obtains the checked file's version through
+     * these three.  All are stdcall and all write only through their out
+     * pointers, so the arities are the whole ABI. */
+    V("GetFileVersionInfoSizeA", h_get_file_version_info_size_a, 2),
+    V("GetFileVersionInfoA", h_get_file_version_info_a, 4),
+    V("VerQueryValueA", h_ver_query_value_a, 4),
+
     /* ---- GDI32 ---- */
     G("CreateSolidBrush", g_create_solid_brush, 1),
     G("GetStockObject", g_get_stock_object, 1),
@@ -8860,6 +9237,24 @@ static const HleDef g_defs[] = {
     A("RegCreateKeyExA", a_reg_create_key, 9),
     A("RegCloseKey", a_reg_close_key, 1),
     A("GetUserNameA", a_get_user_name, 2),
+    /* Storm's SFileAuthenticateArchive resolves these CryptoAPI entry points
+     * dynamically through LoadLibraryA("advapi32.dll") + GetProcAddress.  A
+     * name that is absent from this table becomes a zero-argument stub in
+     * hle_thunk(), and the HLE bridge then removes only the return address.
+     * The guest frame drifts by the real argument bytes, so the caller's
+     * epilogue later pops an argument instead of its saved register; the
+     * observed symptom was ebx = "Microsoft Base Cryptographic Provider v1.0"
+     * after SFileAuthenticateArchive.  The platform has no CryptoAPI store, so
+     * these are exact-arity, honest failures rather than invented success. */
+    A("CryptAcquireContextA", h_zero, 5),
+    A("CryptCreateHash", h_zero, 5),
+    A("CryptDestroyHash", h_zero, 1),
+    A("CryptDestroyKey", h_zero, 1),
+    A("CryptHashData", h_zero, 4),
+    A("CryptImportKey", h_zero, 6),
+    A("CryptReleaseContext", h_zero, 2),
+    A("CryptSignHashA", h_zero, 6),
+    A("CryptVerifySignatureA", h_zero, 6),
     S("ShellExecuteA", s_shell_execute, 6),
     /* Code-signing surface, answered exactly as the Windows host answers it:
      * game.dll statically imports WINTRUST/CRYPT32 for its "is this binary
@@ -9155,6 +9550,13 @@ uint32_t hle_thunk(const char *dll, const char *name, uint16_t ordinal)
     return GUEST_HLE_BASE + (uint32_t)(e - g_hle) * HLE_STRIDE;
 }
 
+/* The fast HLE path bypasses hle_call(), so the crash handler would otherwise
+ * lose the guest register file on a fault that follows an import. */
+void hle_android_note_cpu(CPU *c)
+{
+    g_last_cpu = c;
+}
+
 void hle_call(uint32_t thunk, CPU *c)
 {
     unsigned idx = (unsigned)((thunk - GUEST_HLE_BASE) / HLE_STRIDE);
@@ -9314,6 +9716,36 @@ void hle_android_report(void)
     report_end();
 }
 
+/* guest_ok() validates a pointer against the layout, but the VirtualAlloc
+ * arenas are mapped on demand: a range inside arena 2 is not readable until a
+ * live block covers it.  Dereferencing an unmapped arena address inside the
+ * crash handler killed the handler itself and truncated the report, so every
+ * diagnostic read asks the live-block table first. */
+static int crash_readable(uint32_t a, uint32_t n)
+{
+    uint64_t lo = a, hi = (uint64_t)a + n;
+    if (hi > 0x100000000ull || !guest_ok(a, n)) return 0;
+    static const struct { uint32_t lo, hi; } va[] = {
+        { GUEST_VA_BASE,  GUEST_VA_BASE  + GUEST_VA_SIZE  },
+        { GUEST_VA2_BASE, GUEST_VA2_BASE + GUEST_VA2_SIZE },
+        { GUEST_VA3_BASE, GUEST_VA3_BASE + GUEST_VA3_SIZE },
+        { GUEST_VA4_BASE, GUEST_VA4_BASE + GUEST_VA4_SIZE },
+        { GUEST_VA5_BASE, GUEST_VA5_BASE + GUEST_VA5_SIZE },
+        { GUEST_VA6_BASE, GUEST_VA6_BASE + GUEST_VA6_SIZE },
+        { GUEST_VA7_BASE, GUEST_VA7_BASE + GUEST_VA7_SIZE },
+    };
+    for (unsigned i = 0; i < sizeof va / sizeof va[0]; i++) {
+        if (lo < va[i].lo || hi > va[i].hi) continue;
+        for (unsigned j = 0; j < g_va_live_n; j++) {
+            uint64_t elo = g_va_live[j].addr;
+            uint64_t ehi = elo + g_va_live[j].size;
+            if (elo && lo >= elo && hi <= ehi) return 1;
+        }
+        return 0;
+    }
+    return 1;
+}
+
 /* A guest object whose [0] is zero is this port's dominant failure: the guest
  * either stored an HLE return value where it expected a vtable, or a
  * constructor never ran.  Eight dwords are enough to tell those apart, and the
@@ -9321,7 +9753,7 @@ void hle_android_report(void)
 static void crash_dump(const char *tag, uint32_t a, int ndw)
 {
     char buf[256];
-    if (!a || !guest_ok(a, (uint32_t)ndw * 4)) return;
+    if (!a || !crash_readable(a, (uint32_t)ndw * 4)) return;
     int n = snprintf(buf, sizeof buf, "[crash] %s %08X:", tag, a);
     ssize_t ig = write(2, buf, (size_t)n);
     (void)ig;
@@ -9421,6 +9853,78 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
 #endif
         crash_sym("host pc", pc);
         if (lr) crash_sym("host lr", lr);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+        /* wc3_watch_dispatch() saves the CPU state at every dispatch entry,
+         * including the pending VA target that dispatch_jmp() chains into.
+         * Unlike the CPU struct itself these fields are not touched while the
+         * lifted body runs, so they name the exact entry frame. */
+        if (g_self_thread) {
+            n = snprintf(buf, sizeof buf,
+                         "[crash] dispatch entry target=%08X eip=%08X esp=%08X ebp=%08X\n",
+                         g_self_thread->last_target, g_self_thread->last_eip,
+                         g_self_thread->last_esp, g_self_thread->last_ebp);
+            ignored = write(2, buf, (size_t)n);
+        }
+#endif
+#if WC3_DEBUG
+#if defined(__aarch64__)
+        /* A lifted function keeps the per-thread CPU pointer in x0 while it
+         * executes an inlined wr32/wrss: the helper reads its base from x0.
+         * g_last_cpu is refreshed only at dispatch/import entry, so after a
+         * long lifted body its fields are stale.  x0 is safe to dereference
+         * exactly when it still names the same CPU struct as g_last_cpu. */
+        {
+            uintptr_t x0 = (uintptr_t)uc->uc_mcontext.regs[0];
+            if (x0 && x0 == (uintptr_t)g_last_cpu) {
+                CPU *exact = (CPU *)x0;
+                n = snprintf(buf, sizeof buf,
+                             "[crash] exact eip=%08X esp=%08X ebp=%08X eax=%08X "
+                             "ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X\n",
+                             exact->eip, exact->esp, exact->ebp, exact->eax,
+                             exact->ebx, exact->ecx, exact->edx, exact->esi,
+                             exact->edi);
+                ignored = write(2, buf, (size_t)n);
+                uint32_t fp = exact->ebp;
+                if (fp && crash_readable(fp, 0x20)) {
+                    n = snprintf(buf, sizeof buf,
+                                 "[crash] exact frame [%08X..]:", fp);
+                    ignored = write(2, buf, (size_t)n);
+                    for (int i = 0; i < 8; i++) {
+                        n = snprintf(buf, sizeof buf, " %08X", rd32g(fp + (uint32_t)i * 4));
+                        ignored = write(2, buf, (size_t)n);
+                    }
+                    ignored = write(2, "\n", 1);
+                }
+            }
+        }
+#endif
+        /* g_last_cpu is a pointer to the live per-thread CPU and is refreshed
+         * on every dispatch and import, so its general registers are the ones
+         * at the fault.  arm64 x0 is *not* a reliable CPU pointer here: at an
+         * arbitrary instruction inside a lifted function the compiler may
+         * have reused it.  Reading the thread-local pointer avoids a second
+         * fault inside the handler. */
+        CPU *live = g_last_cpu;
+        Dl_info di;
+        if (live && dladdr((void *)pc, &di) && di.dli_sname &&
+            di.dli_sname[0] == 'L') {
+            n = snprintf(buf, sizeof buf,
+                         "[crash] live eip=%08X esp=%08X ebp=%08X eax=%08X "
+                         "ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X\n",
+                         live->eip, live->esp, live->ebp, live->eax,
+                         live->ebx, live->ecx, live->edx, live->esi, live->edi);
+            ignored = write(2, buf, (size_t)n);
+            if (live->ebx && crash_readable(live->ebx, 24)) {
+                n = snprintf(buf, sizeof buf, "[crash] live slot %08X:", live->ebx);
+                ignored = write(2, buf, (size_t)n);
+                for (int i = 0; i < 6; i++) {
+                    n = snprintf(buf, sizeof buf, " %08X", rd32g(live->ebx + (uint32_t)i * 4));
+                    ignored = write(2, buf, (size_t)n);
+                }
+                ignored = write(2, "\n", 1);
+            }
+        }
+#endif
     }
 
     /* The fault address alone is not actionable: a guest read at base-0x1C can
@@ -9436,7 +9940,7 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
         ignored = write(2, buf, (size_t)n);
 
         uint32_t sp = c->esp & ~3u;
-        if (guest_ok(sp, 4 * 20)) {
+        if (crash_readable(sp, 4 * 20)) {
             n = snprintf(buf, sizeof buf, "[crash] stack:");
             ignored = write(2, buf, (size_t)n);
             for (int i = 0; i < 20; i++) {
@@ -9892,6 +10396,75 @@ static unsigned g_bnet_prepatch_n;
 static uint32_t g_bnet_last_conn;
 static uint32_t g_bnet_last_state = 0xFFFFFFFFu;
 
+/* Warden module-cache probes.  The login crash reads a module pointer from
+ * `connection + 0x10 + 0x20` (the two-slot cache) and dereferences it.  Print
+ * the connection, the index and both slot pointers at the three points where
+ * that cache is entered, so a garbage index and a garbage slot value can be
+ * told apart without guessing from the fault address. */
+static unsigned g_warden_probe_n;
+
+static void warden_dispatch_probe(CPU *c, uint32_t target)
+{
+    if (g_warden_probe_n >= 200u) return;
+
+    switch (target) {
+    case 0x6F9AEA60u:
+        fprintf(stderr,
+                "[warden] enqueue this=%08X a1=%08X a2=%08X a3=%08X\n",
+                c->ecx,
+                crash_readable(c->esp + 4u, 4) ? rd32g(c->esp + 4u) : 0,
+                crash_readable(c->esp + 8u, 4) ? rd32g(c->esp + 8u) : 0,
+                crash_readable(c->esp + 12u, 4) ? rd32g(c->esp + 12u) : 0);
+        g_warden_probe_n++;
+        break;
+    case 0x6F8E3FA0u: {
+        uint32_t conn = c->ecx;
+        uint32_t idx = crash_readable(conn + 0x30u, 4) ? rd32g(conn + 0x30u)
+                                                 : 0xFFFFFFFFu;
+        fprintf(stderr, "[warden] send conn=%08X idx=%08X s0=%08X s1=%08X\n",
+                conn, idx,
+                crash_readable(conn + 0x18u, 4) ? rd32g(conn + 0x18u) : 0,
+                crash_readable(conn + 0x24u, 4) ? rd32g(conn + 0x24u) : 0);
+        g_warden_probe_n++;
+        break;
+    }
+    case 0x6F9AEAFEu: {
+        uint32_t thisp = crash_readable(c->ebp - 0x114u, 4)
+                       ? rd32g(c->ebp - 0x114u) : 0;
+        uint32_t idx = (thisp && crash_readable(thisp + 0x20u, 4))
+                     ? rd32g(thisp + 0x20u) : 0xFFFFFFFFu;
+        fprintf(stderr,
+                "[warden] build this=%08X idx=%08X s0=%08X s1=%08X ebp=%08X\n",
+                thisp, idx,
+                (thisp && crash_readable(thisp + 0x8u, 4))
+                    ? rd32g(thisp + 0x8u) : 0,
+                (thisp && crash_readable(thisp + 0x14u, 4))
+                    ? rd32g(thisp + 0x14u) : 0,
+                c->ebp);
+        g_warden_probe_n++;
+        break;
+    }
+    case 0x6F9AEFD0u: {
+        uint32_t thisp = crash_readable(c->ebp - 0x114u, 4)
+                       ? rd32g(c->ebp - 0x114u) : 0;
+        uint32_t idx = (thisp && crash_readable(thisp + 0x20u, 4))
+                     ? rd32g(thisp + 0x20u) : 0xFFFFFFFFu;
+        fprintf(stderr,
+                "[warden] lookup this=%08X idx=%08X ebx=%08X "
+                "s0=%08X s1=%08X\n",
+                thisp, idx, c->ebx,
+                (thisp && crash_readable(thisp + 0x8u, 4))
+                    ? rd32g(thisp + 0x8u) : 0,
+                (thisp && crash_readable(thisp + 0x14u, 4))
+                    ? rd32g(thisp + 0x14u) : 0);
+        g_warden_probe_n++;
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 static uint32_t bnet_login_conn(CPU *c)
 {
     if (!guest_ok(c->edi + 0x5F8u, 4)) return 0;
@@ -9906,6 +10479,7 @@ static uint32_t bnet_login_state(uint32_t conn)
 
 static void battle_net_dispatch_probe(CPU *c, uint32_t target)
 {
+    warden_dispatch_probe(c, target);
     if (g_bnet_probe_n >= 400u) return;
 
     switch (target) {
@@ -9924,33 +10498,86 @@ static void battle_net_dispatch_probe(CPU *c, uint32_t target)
             fprintf(stderr, "[bnet] patch-check archive-open path=\"%s\"\n",
                     gstr(c->ebx));
         break;
-    case 0x6F07C6A2u:
-        if (rd32g(c->esp) != 0x6F094375u) break;
+    case 0x6F094780u:
+        if (++g_bnet_probe_n <= 400u)
+            fprintf(stderr, "[bnet] checkrev entry path=\"%s\"\n",
+                    gstr(c->ecx));
+        break;
+    case 0x6F094807u: {
+        uint32_t status = guest_ok(c->ebp - 0x12Cu, 4)
+                        ? rd32g(c->ebp - 0x12Cu) : 0xFFFFFFFFu;
+        uint32_t archive = guest_ok(c->ebp - 0x10Cu, 4)
+                        ? rd32g(c->ebp - 0x10Cu) : 0;
+        if (++g_bnet_probe_n <= 400u)
+            fprintf(stderr,
+                    "[bnet] checkrev auth status=%08X archive=%08X "
+                    "path=\"%s\"\n", status, archive, gstr(c->ebx));
+        break;
+    }
+    case 0x6F09483Bu:
+        if (++g_bnet_probe_n <= 400u)
+            fprintf(stderr, "[bnet] checkrev extract path=\"%s\"\n",
+                    gstr(c->ebx));
+        break;
+    case 0x6F0948ECu:
+        if (++g_bnet_probe_n <= 400u)
+            fprintf(stderr, "[bnet] checkrev cleanup result=%u\n", c->esi);
+        break;
+    case 0x6F094930u:
+        if (++g_bnet_probe_n <= 400u)
+            fprintf(stderr, "[bnet] extrawork entry path=\"%s\"\n",
+                    gstr(c->ecx));
+        break;
+    case 0x6F09497Fu: {
+        uint32_t status = guest_ok(c->ebp - 0x114u, 4)
+                        ? rd32g(c->ebp - 0x114u) : 0xFFFFFFFFu;
+        uint32_t archive = guest_ok(c->ebp - 0x10Cu, 4)
+                        ? rd32g(c->ebp - 0x10Cu) : 0;
+        if (++g_bnet_probe_n <= 400u)
+            fprintf(stderr,
+                    "[bnet] extrawork auth status=%08X archive=%08X "
+                    "path=\"%s\"\n", status, archive, gstr(c->ebx));
+        break;
+    }
+    case 0x6F0949B3u:
+        if (++g_bnet_probe_n <= 400u)
+            fprintf(stderr, "[bnet] extrawork extract path=\"%s\"\n",
+                    gstr(c->ebx));
+        break;
+    case 0x6F094A50u:
+        if (++g_bnet_probe_n <= 400u)
+            fprintf(stderr, "[bnet] extrawork cleanup result=%u\n", c->esi);
+        break;
+    case 0x6F07C6A2u: {
+        uint32_t ra = rd32g(c->esp);
+        if (ra != 0x6F094375u && ra != 0x6F0947EDu &&
+            ra != 0x6F094967u) break;
         if (++g_bnet_probe_n <= 400u)
             fprintf(stderr,
                     "[bnet] call SFileOpenArchive path=\"%s\" ra=%08X\n",
-                    gstr(rd32g(c->esp + 4u)), rd32g(c->esp));
+                    gstr(rd32g(c->esp + 4u)), ra);
         break;
-    case 0x6F8B5DAEu:
-        if (rd32g(c->esp) != 0x6F09438Fu) break;
+    }
+    case 0x6F8B5DAEu: {
+        uint32_t ra = rd32g(c->esp);
+        if (ra != 0x6F09438Fu && ra != 0x6F094822u &&
+            ra != 0x6F09499Au) break;
         if (++g_bnet_probe_n <= 400u)
             fprintf(stderr,
                     "[bnet] call SFileAuthenticateArchive archive=%08X "
                     "status_out=%08X ra=%08X\n",
-                    rd32g(c->esp + 4u), rd32g(c->esp + 8u),
-                    rd32g(c->esp));
+                    rd32g(c->esp + 4u), rd32g(c->esp + 8u), ra);
         break;
+    }
     case 0x6F07C6BAu: {
-        if (rd32g(c->esp) != 0x6F0943BBu) break;
-        if (g_bnet_prepatch_n++ >= 12u) break;
-        uint32_t status = guest_ok(c->ebp - 0x72Cu, 4)
-                        ? rd32g(c->ebp - 0x72Cu) : 0xFFFFFFFFu;
+        uint32_t ra = rd32g(c->esp);
+        if ((ra & 0xFFFFF000u) != 0x6F094000u) break;
+        if (g_bnet_prepatch_n++ >= 24u) break;
         if (++g_bnet_probe_n <= 400u)
             fprintf(stderr,
                     "[bnet] call SFileOpenFileEx archive=%08X name=\"%s\" "
-                    "auth_status=%08X ra=%08X\n",
-                    rd32g(c->esp + 4u), gstr(rd32g(c->esp + 8u)),
-                    status, rd32g(c->esp));
+                    "ra=%08X\n",
+                    rd32g(c->esp + 4u), gstr(rd32g(c->esp + 8u)), ra);
         break;
     }
     case 0x6F07C684u:

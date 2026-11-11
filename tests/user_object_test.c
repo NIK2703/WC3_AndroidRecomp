@@ -43,13 +43,15 @@ int wc3_legacy_hle_add(const char *dll, const char *name, int argc,
     return 0;
 }
 
-void wc3_legacy_set_last_error(uint32_t code)
+void wc3_legacy_set_last_error(CPU *c, uint32_t code)
 {
+    (void)c;
     fail_with_error(code);
 }
 
-uint32_t wc3_legacy_get_last_error(void)
+uint32_t wc3_legacy_get_last_error(CPU *c)
 {
+    (void)c;
     return g_last_error;
 }
 

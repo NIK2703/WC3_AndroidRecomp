@@ -8,6 +8,7 @@ extern TouchProcessorState g_state;
 void touch_processor_update_config(const TouchProcessorConfig* config) {
     if (!config) { return; }
     TP_STATE_LOCK();
+    wc3_timer_registry_invalidate();
     ELEMENTS_LOCK();
     uint32_t old_gen = g_state.cfg.bindings_generation;
     memcpy(&g_state.cfg, config, sizeof(TouchProcessorConfig));

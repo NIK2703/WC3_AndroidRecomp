@@ -82,6 +82,7 @@ void touch_processor_init(const TouchProcessorConfig* config) {
         return;
     }
     TP_STATE_LOCK();
+    wc3_timer_registry_invalidate();
     pthread_mutex_destroy(&g_state.elements_mutex);
     size_t pre_mutex = offsetof(TouchProcessorState, elements_mutex);
     memset(&g_state, 0, pre_mutex);

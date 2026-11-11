@@ -33,6 +33,12 @@
 #define GUEST_IMAGE_MSS    0x35100000u
 #define GUEST_IMAGE_MSSFAST 0x35200000u
 #define GUEST_IMAGE_MP3DEC 0x35300000u
+/* ver-IX86-3.dll is downloaded by the 1.27 client at Battle.net login and
+ * then LoadLibrary'd.  The static recompiler has no interpreter, so the image
+ * is only data here: its CheckRevision export is lifted from the same rebased
+ * base and linked into the corpus.  0x35400000 is clear on Android (below the
+ * ART region) and on the reference layout. */
+#define GUEST_IMAGE_VER    0x35400000u
 #define GUEST_IMAGE_IJL    0x60000000u
 #define GUEST_STACK_BASE   0x31000000u
 #define GUEST_STACK_SIZE   0x00800000u
@@ -86,6 +92,7 @@
 #define GUEST_IMAGE_MSS    0x21100000u
 #define GUEST_IMAGE_MSSFAST 0x22600000u
 #define GUEST_IMAGE_MP3DEC 0x26F00000u
+#define GUEST_IMAGE_VER    0x35400000u
 #define GUEST_IMAGE_IJL    0x60000000u
 #define GUEST_STACK_BASE   0x30000000u
 #define GUEST_STACK_SIZE   0x00800000u

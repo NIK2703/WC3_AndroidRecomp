@@ -92,6 +92,19 @@ $targets = @(
     @{ out = 'corpus.exe';   src = @('corpus.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'liftpass.exe'; src = @('liftpass.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'atomiccheck.exe'; src = @('atomiccheck.c', 'dirwalk.c'); dir = $csrcLocal },
+    @{ out = 'devirtualize.exe'; src = @('devirtualize.c'); dir = $csrcLocal },
+    @{ out = 'softfloat_context_fnclex.exe'; src = @('softfloat_context_fnclex.c'); dir = $csrcLocal },
+    @{ out = 'gen_boot_dispatch.exe'; src = @('gen_boot_dispatch.c'); dir = $csrcLocal },
+    @{ out = 'save_list_display.exe'; src = @('save_list_display.c', 'sha256.c'); dir = $csrcLocal },
+    @{ out = 'dead_flags.exe'; src = @('dead_flags.c', 'sha256.c'); dir = $csrcLocal },
+    @{ out = 'return_address_elide.exe'; src = @('return_address_elide.c', 'sha256.c'); dir = $csrcLocal },
+    @{ out = 'w3l_compat.exe'; src = @('w3l_compat.c', 'sha256.c'); dir = $csrcLocal },
+    @{ out = 'ccache_wrapper.exe'; src = @('ccache_wrapper.c'); dir = $csrcLocal },
+    @{ out = 'dxvk_isolate_archive_elf.exe'; src = @('dxvk_isolate_archive_elf.c'); dir = $csrcLocal },
+    @{ out = 'flag_read_audit.exe'; src = @('flag_read_audit.c'); dir = $csrcLocal },
+    @{ out = 'audit_tls.exe'; src = @('audit_tls.c', 'sha256.c'); dir = $csrcLocal },
+    @{ out = 'softfloat_context_gen.exe'; src = @('softfloat_context_gen.c'); dir = $csrcLocal },
+    @{ out = 'dxvk_android_probe.exe'; src = @('dxvk_android_probe.c'); dir = $csrcLocal },
     @{ out = 'closure_pipeline.exe'; src = @('closure_pipeline.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'thunkseeds.exe'; srcfull = @((Join-Path $csrcLocal 'thunkseeds.c'), (Join-Path $csrc 'csglue.c')) },
     @{ out = 'corpusinput.exe'; src = @('corpusinput.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
@@ -297,6 +310,90 @@ void L_00401000(CPU *c)
         throw 'atomiccheck did not report both plain xchg and lock-inc sites'
     }
     Write-Host 'smoke: atomic lowering gate OK (clean pass, plain xchg/lock inc fail)'
+
+    # The compiled LiftPasses are self-checking.  Their Python counterparts
+    # remain the reference implementation until the full-corpus equivalence
+    # reports are archived, but the build uses these C tools.
+    $dv = Join-Path $bin 'devirtualize.exe'
+    $dvOut = & $dv --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($dvOut -match 'self-test.*OK')) {
+        $dvOut | ForEach-Object { Write-Host $_ }
+        throw 'devirtualize self-test failed'
+    }
+    $sf = Join-Path $bin 'softfloat_context_fnclex.exe'
+    $sfOut = & $sf --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($sfOut -match 'self-test OK')) {
+        $sfOut | ForEach-Object { Write-Host $_ }
+        throw 'softfloat_context_fnclex self-test failed'
+    }
+    $bg = Join-Path $bin 'gen_boot_dispatch.exe'
+    $bgOut = & $bg --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($bgOut -match 'self-test: OK')) {
+        $bgOut | ForEach-Object { Write-Host $_ }
+        throw 'gen_boot_dispatch self-test failed'
+    }
+    $sl = Join-Path $bin 'save_list_display.exe'
+    $slOut = & $sl --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($slOut -match 'self-test: ok')) {
+        $slOut | ForEach-Object { Write-Host $_ }
+        throw 'save_list_display self-test failed'
+    }
+    $df = Join-Path $bin 'dead_flags.exe'
+    $dfOut = & $df --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($dfOut -match 'self-test: OK')) {
+        $dfOut | ForEach-Object { Write-Host $_ }
+        throw 'dead_flags self-test failed'
+    }
+    $ra = Join-Path $bin 'return_address_elide.exe'
+    $raOut = & $ra --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($raOut -match 'self-test: OK')) {
+        $raOut | ForEach-Object { Write-Host $_ }
+        throw 'return_address_elide self-test failed'
+    }
+    $wc = Join-Path $bin 'w3l_compat.exe'
+    $wcOut = & $wc --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($wcOut -match 'self-test: ok')) {
+        $wcOut | ForEach-Object { Write-Host $_ }
+        throw 'w3l_compat self-test failed'
+    }
+    $cw = Join-Path $bin 'ccache_wrapper.exe'
+    $cwSelf = & $cw --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($cwSelf -match 'self-test: OK')) {
+        $cwSelf | ForEach-Object { Write-Host $_ }
+        throw 'ccache_wrapper self-test failed'
+    }
+    if ($ccache) {
+        $cwOut = & $cw $ccache $Gcc --version 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not ($cwOut -match 'gcc|clang')) {
+            $cwOut | ForEach-Object { Write-Host $_ }
+            throw 'ccache_wrapper smoke failed'
+        }
+    }
+    $dx = Join-Path $bin 'dxvk_isolate_archive_elf.exe'
+    $dxOut = & $dx --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($dxOut -match 'self-test: OK')) {
+        $dxOut | ForEach-Object { Write-Host $_ }
+        throw 'dxvk_isolate_archive_elf self-test failed'
+    }
+    $fr = Join-Path $bin 'flag_read_audit.exe'
+    $frOut = & $fr --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($frOut -match 'self-test: OK')) {
+        $frOut | ForEach-Object { Write-Host $_ }
+        throw 'flag_read_audit self-test failed'
+    }
+    $tls = Join-Path $bin 'audit_tls.exe'
+    $tlsOut = & $tls --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($tlsOut -match 'self-test: OK')) {
+        $tlsOut | ForEach-Object { Write-Host $_ }
+        throw 'audit_tls self-test failed'
+    }
+    $probe = Join-Path $bin 'dxvk_android_probe.exe'
+    $probeOut = & $probe --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($probeOut -match 'self-test: OK')) {
+        $probeOut | ForEach-Object { Write-Host $_ }
+        throw 'dxvk_android_probe self-test failed'
+    }
+    Write-Host 'smoke: compiled LiftPass/generator self-tests OK'
 }
 
 # BP-8.3: the pinned upstream sources are byte-frozen, so POSIX portability

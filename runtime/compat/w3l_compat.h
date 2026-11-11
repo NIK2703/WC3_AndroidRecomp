@@ -3,7 +3,7 @@
  *
  * This module is a build-profile compat shim, not part of the exact baseline
  * and not HLE: it reproduces effects that wl27.dll applies to Game.dll.
- * The generated corpus is changed only by tools/lift/passes/w3l_compat.py;
+ * The generated corpus is changed only by tools/lift/csrc_local/w3l_compat.c;
  * this header is force-included in compat builds so the pass can emit direct
  * calls to the native helpers below.
  *

@@ -71,7 +71,7 @@ static int is_user_object(uint32_t handle)
 
 static void fail_with(CPU *c, uint32_t error)
 {
-    wc3_legacy_set_last_error(error);
+    wc3_legacy_set_last_error(c, error);
     c->eax = 0u;
 }
 

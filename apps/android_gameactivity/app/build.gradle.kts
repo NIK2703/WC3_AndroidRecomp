@@ -13,6 +13,14 @@ if (hostBuildDir != null) {
 val legacyJniLibsDir = providers.gradleProperty("wc3JniLibs").orNull
 val hostJniLibsRelease = providers.gradleProperty("wc3JniLibsRelease").orNull ?: legacyJniLibsDir
 val hostJniLibsDebug = providers.gradleProperty("wc3JniLibsDebug").orNull ?: legacyJniLibsDir
+if (hostJniLibsRelease == null && hostJniLibsDebug == null) {
+    throw GradleException(
+        "No WC3 native library directory was supplied. " +
+        "Run tools/android/build_apk.ps1 (canonical) or pass " +
+        "-Pwc3JniLibsRelease=<dir> / -Pwc3JniLibsDebug=<dir>. " +
+        "A direct Gradle build must not package src/main/jniLibs."
+    )
+}
 // BV-11: release signing is supplied from outside the tree.  When no keystore
 // is configured the build remains a local release-hygiene artifact, explicitly
 // not a distribution artifact.
@@ -43,15 +51,20 @@ android {
         }
     }
 
+    // BV-3.2: never let AGP fall back to src/main/jniLibs.  That ignored
+    // directory can contain a stale .so from an older native build; only the
+    // per-variant directory produced by build_app.ps1 may be packaged.
+    sourceSets.getByName("main").jniLibs.setSrcDirs(emptyList<String>())
     hostJniLibsRelease?.let { sourceSets.maybeCreate("release").jniLibs.srcDir(it) }
     hostJniLibsDebug?.let { sourceSets.maybeCreate("debug").jniLibs.srcDir(it) }
 
     packaging {
         jniLibs {
-            // O-12: keep the .so page-aligned and uncompressed inside the APK
-            // so the loader mmaps it from the archive instead of extracting a
-            // second copy on install.  The manifest sets extractNativeLibs
-            // false; build_apk.ps1 verifies both properties on the artifact.
+            // Modern packaging: native libraries stay uncompressed in the APK
+            // and are loaded from it, so the product .so is never extracted on
+            // install (O-12 stays closed).  libadrenotools still needs real
+            // hook files; VulkanDriverStore extracts only the small hook DSOs
+            // into filesDir and passes that directory to the loader.
             useLegacyPackaging = false
         }
     }

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Release always ignores the debug overlay experiment preference. -->
+    <bool name="overlay_experiment_supported">false</bool>
+</resources>

@@ -75,6 +75,67 @@ static void (*g_previous_create_file)(CPU *c);
 static void (*g_previous_get_attributes)(CPU *c);
 static void (*g_previous_set_cwd)(CPU *c);
 
+#if defined(WC3_W3L_GATEWAY_RUBATTLE)
+/* 1.27.1.7085 war3.exe last-write time: 2016-12-09T06:05:09.9369520Z.
+ * Android copies created through MTP/SAF do not preserve the Windows file
+ * time, so CheckRevision would build a version string with the copy time and
+ * the rubattle server would treat the client as an unknown build.  This is a
+ * W3L-profile compatibility value, not a baseline change. */
+#define W3L_WAR3_FILETIME 0x01D251E232879030ull
+static void (*g_previous_find_first_file)(CPU *c);
+static void (*g_previous_find_next_file)(CPU *c);
+
+static int w3l_war3_exe_name(const char *name)
+{
+    const char *base = name;
+    if (!name) return 0;
+    for (const char *p = name; *p; p++) {
+        if (*p == '\\' || *p == '/') base = p + 1;
+    }
+    return strcasecmp(base, "war3.exe") == 0;
+}
+
+static void w3l_patch_find_data(uint32_t dst)
+{
+    char name[260];
+    if (!dst || !wc3_legacy_guest_ok(dst, 318u)) return;
+    size_t i = 0;
+    for (; i + 1u < sizeof name; i++) {
+        char ch = (char)wc3_legacy_rd8g(dst + 44u + (uint32_t)i);
+        name[i] = ch;
+        if (!ch) break;
+    }
+    name[sizeof name - 1u] = '\0';
+    if (!w3l_war3_exe_name(name)) return;
+
+    const uint64_t ft = W3L_WAR3_FILETIME;
+    static const uint32_t offsets[] = { 4u, 12u, 20u };
+    for (unsigned k = 0; k < sizeof offsets / sizeof offsets[0]; k++) {
+        uint32_t at = dst + offsets[k];
+        wc3_legacy_wr32g(at, (uint32_t)ft);
+        wc3_legacy_wr32g(at + 4u, (uint32_t)(ft >> 32));
+    }
+}
+
+static void w3l_find_first_file(CPU *c)
+{
+    void (*previous)(CPU *) = g_previous_find_first_file;
+    uint32_t dst = wc3_legacy_arg32(c, 1);
+    if (!previous) { c->eax = INVALID_HANDLE; return; }
+    previous(c);
+    if (c->eax != INVALID_HANDLE) w3l_patch_find_data(dst);
+}
+
+static void w3l_find_next_file(CPU *c)
+{
+    void (*previous)(CPU *) = g_previous_find_next_file;
+    uint32_t dst = wc3_legacy_arg32(c, 1);
+    if (!previous) { c->eax = 0; return; }
+    previous(c);
+    if (c->eax) w3l_patch_find_data(dst);
+}
+#endif
+
 #if WC3_DEBUG && WC3_DEBUG_HLE
 static unsigned g_cache_debug_logs;
 #define CACHE_LOG(...) do { \
@@ -580,7 +641,7 @@ static void chained_create_file(CPU *c)
         VERIFY_LOG("CreateFileA \"%s\" access=%08X share=%u disp=%u flags=%08X "
                    "-> h=%08X last=%u ra=%08X\n",
                    opened, access, share, disposition, flags, c->eax,
-                   wc3_legacy_get_last_error(), wc3_legacy_rd32g(c->esp));
+                   wc3_legacy_get_last_error(c), wc3_legacy_rd32g(c->esp));
     }
 #endif
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
@@ -588,7 +649,7 @@ static void chained_create_file(CPU *c)
         BNET_FILE_LOG("CreateFileA \"%s\" access=%08X share=%u disp=%u "
                       "flags=%08X -> h=%08X last=%u ra=%08X\n",
                       opened, access, share, disposition, flags, c->eax,
-                      wc3_legacy_get_last_error(),
+                      wc3_legacy_get_last_error(c),
                       wc3_legacy_rd32g(c->esp));
     }
 #endif
@@ -644,14 +705,14 @@ static void chained_get_attributes(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_HLE
     if (trace && verify_path(host)) {
         VERIFY_LOG("GetFileAttributesA \"%s\" -> attr=%08X last=%u ra=%08X\n",
-                   host, c->eax, wc3_legacy_get_last_error(),
+                   host, c->eax, wc3_legacy_get_last_error(c),
                    wc3_legacy_rd32g(c->esp));
     }
 #endif
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
     if (trace && battle_net_path(host)) {
         BNET_FILE_LOG("GetFileAttributesA \"%s\" -> attr=%08X last=%u ra=%08X\n",
-                      host, c->eax, wc3_legacy_get_last_error(),
+                      host, c->eax, wc3_legacy_get_last_error(c),
                       wc3_legacy_rd32g(c->esp));
     }
 #endif
@@ -713,12 +774,12 @@ static void chained_read_file(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_HLE
         if (verify_path(path))
             VERIFY_LOG("ReadFile h=%08X -> ret=%u bytes=%u last=%u\n",
-                       handle, c->eax, bytes, wc3_legacy_get_last_error());
+                       handle, c->eax, bytes, wc3_legacy_get_last_error(c));
 #endif
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
         if (battle_net_path(path))
             BNET_FILE_LOG("ReadFile h=%08X -> ret=%u bytes=%u last=%u\n",
-                          handle, c->eax, bytes, wc3_legacy_get_last_error());
+                          handle, c->eax, bytes, wc3_legacy_get_last_error(c));
 #endif
     }
 }
@@ -749,12 +810,12 @@ static void chained_get_file_time(CPU *c)
                        (unsigned long long)verify_read_filetime(creation),
                        (unsigned long long)verify_read_filetime(access),
                        (unsigned long long)verify_read_filetime(write),
-                       wc3_legacy_get_last_error(), path);
+                       wc3_legacy_get_last_error(c), path);
 #endif
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
         if (battle_net_path(path))
             BNET_FILE_LOG("GetFileTime h=%08X -> ret=%u last=%u path=\"%s\"\n",
-                          handle, c->eax, wc3_legacy_get_last_error(), path);
+                          handle, c->eax, wc3_legacy_get_last_error(c), path);
 #endif
     }
 }
@@ -779,12 +840,12 @@ static void chained_get_file_size(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_HLE
         if (verify_path(path))
             VERIFY_LOG("GetFileSize h=%08X -> lo=%u hi=%u last=%u path=\"%s\"\n",
-                       handle, c->eax, high, wc3_legacy_get_last_error(), path);
+                       handle, c->eax, high, wc3_legacy_get_last_error(c), path);
 #endif
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
         if (battle_net_path(path))
             BNET_FILE_LOG("GetFileSize h=%08X -> lo=%u hi=%u last=%u path=\"%s\"\n",
-                          handle, c->eax, high, wc3_legacy_get_last_error(), path);
+                          handle, c->eax, high, wc3_legacy_get_last_error(c), path);
 #endif
     }
 }
@@ -813,14 +874,14 @@ static void chained_set_file_pointer(CPU *c)
             VERIFY_LOG("SetFilePointer h=%08X lo=%u hi=%08X method=%u -> "
                        "low=%u high=%u last=%u path=\"%s\"\n",
                        handle, low, high_ptr, method, c->eax, high,
-                       wc3_legacy_get_last_error(), path);
+                       wc3_legacy_get_last_error(c), path);
 #endif
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
         if (battle_net_path(path))
             BNET_FILE_LOG("SetFilePointer h=%08X lo=%u hi=%08X method=%u -> "
                           "low=%u high=%u last=%u path=\"%s\"\n",
                           handle, low, high_ptr, method, c->eax, high,
-                          wc3_legacy_get_last_error(), path);
+                          wc3_legacy_get_last_error(c), path);
 #endif
     }
 }
@@ -841,12 +902,12 @@ static void chained_close_handle(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_HLE
         if (verify_path(path))
             VERIFY_LOG("CloseHandle h=%08X -> %u last=%u path=\"%s\"\n",
-                       handle, c->eax, wc3_legacy_get_last_error(), path);
+                       handle, c->eax, wc3_legacy_get_last_error(c), path);
 #endif
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
         if (battle_net_path(path))
             BNET_FILE_LOG("CloseHandle h=%08X -> %u last=%u path=\"%s\"\n",
-                          handle, c->eax, wc3_legacy_get_last_error(), path);
+                          handle, c->eax, wc3_legacy_get_last_error(c), path);
 #endif
         file_trace_forget(handle);
     }
@@ -887,6 +948,16 @@ int wc3_hle_kernel32_file_install(void)
     if (wc3_legacy_hle_chain("KERNEL32.dll", "CloseHandle",
                              chained_close_handle,
                              &g_previous_close_handle) != 0)
+        return -1;
+#endif
+#if defined(WC3_W3L_GATEWAY_RUBATTLE)
+    if (wc3_legacy_hle_chain("KERNEL32.dll", "FindFirstFileA",
+                             w3l_find_first_file,
+                             &g_previous_find_first_file) != 0)
+        return -1;
+    if (wc3_legacy_hle_chain("KERNEL32.dll", "FindNextFileA",
+                             w3l_find_next_file,
+                             &g_previous_find_next_file) != 0)
         return -1;
 #endif
     return 3;

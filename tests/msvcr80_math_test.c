@@ -138,7 +138,7 @@ static void clear_args(void)
 
 static double pop_x87(CPU *c)
 {
-    float64_t f = extF80_to_f64(fpop(c));
+    float64_t f = X87_EXTF80_TO_F64(c, fpop(c));
     double d;
     memcpy(&d, &f.v, sizeof d);
     return d;
@@ -154,7 +154,7 @@ static double call_x87_1(const char *name, double x)
     }
     CPU c;
     init_cpu(&c);
-    fpush(&c, x87_from_f64(x));
+    fpush(&c, x87_from_f64(&c, x));
     impl(&c);
     const double result = pop_x87(&c);
     check(c.fpu_top == 0, "x87 stack not balanced after unary call");
@@ -174,8 +174,8 @@ static double call_x87_2(const char *name, double first, double second)
     }
     CPU c;
     init_cpu(&c);
-    fpush(&c, x87_from_f64(first));
-    fpush(&c, x87_from_f64(second));
+    fpush(&c, x87_from_f64(&c, first));
+    fpush(&c, x87_from_f64(&c, second));
     impl(&c);
     const double result = pop_x87(&c);
     check(c.fpu_top == 0, "x87 stack not balanced after binary call");

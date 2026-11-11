@@ -7,8 +7,10 @@ static void record_event(Wc3InputAdapter *adapter, const Wc3TouchEvent *event,
 {
     Wc3InputAdapterStats *stats = &adapter->stats;
     stats->action_mask |= 1u << event->phase;
-    if (event->phase != (uint8_t)WC3_TOUCH_MOVE)
+    if (event->phase != (uint8_t)WC3_TOUCH_MOVE) {
         stats->control_records++;
+        stats->last_control_events++;
+    }
 
     Wc3InputRecord *record = &stats->history[stats->history_head];
     record->time_ms = event_ms;
@@ -36,6 +38,7 @@ int input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms)
 {
     if (!adapter || !adapter->ring) return -1;
 
+    int had_fault = 0;
     Wc3InputRingStats ring_stats;
     input_ring_get_stats(adapter->ring, &ring_stats);
     if (ring_stats.faults != adapter->last_faults) {
@@ -46,11 +49,13 @@ int input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms)
         adapter->last_faults = ring_stats.faults;
         adapter->stats.faults = ring_stats.faults;
         adapter->stats.recovered++;
+        had_fault = 1;
     }
 
     Wc3TouchEvent batch[WC3_INPUT_BATCH_MAX];
     int n = input_ring_pop_batch(adapter->ring, batch, WC3_INPUT_BATCH_MAX);
     int rc = 0;
+    adapter->stats.last_control_events = 0;
 
     for (int i = 0; i < n; i++) {
         uint64_t event_ms = batch[i].event_time_ms;
@@ -70,17 +75,27 @@ int input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms)
         record_event(adapter, &batch[i], event_ms);
     }
 
-    /* Timer deadlines are not delivery polling: one tick after the whole
-     * batch, using the input thread's monotonic clock. */
-    if (controls_tick(now_ms) != 0) rc = -1;
-
+    /* Process one timer tick after the batch, but only when it can change
+     * something now.  A pending timer alone is not enough: the host may wake
+     * once a second while a distant timer is armed, and ticking early would
+     * be pure overhead.  A due deadline is reported as a real millisecond
+     * value, never as the API's 0 sentinel. */
     Wc3InputAdapterStats *stats = &adapter->stats;
+    int need_tick = had_fault || n > 0;
+    if (!need_tick) {
+        uint64_t deadline = controls_next_deadline_ms(now_ms);
+        need_tick = deadline != 0 && deadline <= now_ms;
+    }
+    if (need_tick) {
+        if (controls_tick(now_ms) != 0) rc = -1;
+        stats->ticks++;
+        stats->last_tick_ms = now_ms;
+    }
+
     stats->drains++;
     stats->events += (uint64_t)n;
-    stats->ticks++;
     stats->last_batch = n;
     if (n > stats->max_batch) stats->max_batch = n;
-    stats->last_tick_ms = now_ms;
     return rc;
 }
 

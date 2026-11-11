@@ -22,6 +22,39 @@
 
     <string name="launch_sound_label">Sound</string>
 
+    <string name="launch_driver_label">Vulkan driver</string>
+    <string name="launch_driver_system">System Vulkan driver (recommended)</string>
+    <string name="launch_driver_import">Install ZIP</string>
+    <string name="launch_driver_remove">Delete</string>
+    <string name="launch_driver_installing">Installing driver package…</string>
+    <string name="launch_driver_details">%1$s · %2$s · %3$d MB</string>
+    <string name="launch_driver_picker_missing">No system file picker is available.</string>
+    <string name="launch_driver_installed">%1$s — %2$s</string>
+    <string name="launch_driver_removed">Driver package deleted. The system driver will be used.</string>
+    <string name="launch_driver_remove_confirm">Delete driver package “%1$s”? The APK itself is not affected.</string>
+    <string name="launch_driver_installed_toast">Installed: %1$s</string>
+    <string name="launch_driver_error_open">Could not open the ZIP file.</string>
+    <string name="launch_driver_error_zip">The file is not a valid driver package.</string>
+    <string name="launch_driver_error_meta">The package has no valid meta.json.</string>
+    <string name="launch_driver_error_library">The declared driver library is missing or has an unsafe name.</string>
+    <string name="launch_driver_error_elf">The driver is not an AArch64 shared object.</string>
+    <string name="launch_driver_error_io">Could not write the driver to app storage.</string>
+    <string name="launch_driver_error_api">This driver requires a newer Android version.</string>
+    <string name="launch_driver_error_duplicate">This driver package is already installed.</string>
+
+    <string name="launch_dxvk_label">DXVK version</string>
+    <string name="launch_dxvk_auto">Auto</string>
+    <string name="launch_dxvk_110" translatable="false">DXVK 1.10.3</string>
+    <string name="launch_dxvk_311" translatable="false">DXVK 3.1.1</string>
+    <string name="launch_dxvk_config_label">DXVK configuration</string>
+    <string name="launch_dxvk_config_key">Key</string>
+    <string name="launch_dxvk_config_value">Value</string>
+    <string name="launch_dxvk_config_key_hint" translatable="false">d3d9.maxFrameRate</string>
+    <string name="launch_dxvk_config_value_hint" translatable="false">60</string>
+    <string name="launch_dxvk_config_add">Add variable</string>
+    <string name="launch_dxvk_config_remove">Remove variable</string>
+    <string name="launch_dxvk_config_remove_symbol" translatable="false">×</string>
+
     <string name="launch_args_label">Extra arguments</string>
 
     <string name="launch_play">Play</string>

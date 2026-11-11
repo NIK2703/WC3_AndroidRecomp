@@ -35,6 +35,7 @@
 #define THREAD_LOCAL _Thread_local
 #endif
 #include "softfloat.h"
+#include "softfloat_state.h"
 typedef extFloat80_t x87_ext;
 
 #if defined(_MSC_VER)
@@ -134,6 +135,18 @@ typedef struct {
     uint32_t disp_pending_kind;
     uintptr_t disp_pending_target;
     uint32_t disp_draining;
+    /* Per-thread SoftFloat state (rounding mode, tininess, exception flags,
+     * extF80 precision).  WC3_SOFTFLOAT_CONTEXT passes this object explicitly
+     * to the x87 arithmetic path instead of paying a TLS resolver per access.
+     * Appended after the frozen ABI fields; source-level ABI-safe. */
+    softfloat_state sf_state;
+    /* HLE-owned per-thread state.  A guest thread already owns exactly one CPU,
+     * so Win32 last-error and Tls* values belong here instead of in host
+     * emutls.  This removes the resolver from every kernel32 HLE call without
+     * changing the guest-visible TEB or the frozen ABI above. */
+    uint32_t hle_last_error;
+    uint32_t hle_tmp_guest;      /* guest VA of cr_qsort's 256-byte scratch */
+    uint32_t hle_tls[64];        /* Win32 TLS slots; index allocation is global */
 } CPU;
 
 /* direct_call.h uses this to require the complete CPU definition. */
@@ -703,6 +716,12 @@ static inline void cpu_x87_init(CPU *c) {
     c->fpu_sw  = 0;
     c->fpu_ip = c->fpu_dp = 0;
     c->fpu_cs = c->fpu_ds = 0;
+    c->sf_state.roundingMode = softfloat_round_near_even;
+    c->sf_state.detectTininess = softfloat_tininess_afterRounding;
+    c->sf_state.exceptionFlags = 0;
+    c->sf_state.extF80RoundingPrecision = 80;
+    /* Cold fallback state; in a context build this maps to the TLS wrapper
+     * instance, not to CPU.sf_state.  One write per guest thread is free. */
     softfloat_exceptionFlags = 0;
 }
 

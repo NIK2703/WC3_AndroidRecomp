@@ -166,13 +166,15 @@ int wc3_legacy_default_display_mode(uint32_t *width, uint32_t *height)
     return wc3_legacy_current_display_mode(width, height);
 }
 
-void wc3_legacy_set_last_error(uint32_t code)
+void wc3_legacy_set_last_error(CPU *c, uint32_t code)
 {
+    (void)c;
     g_last_error = code;
 }
 
-uint32_t wc3_legacy_get_last_error(void)
+uint32_t wc3_legacy_get_last_error(CPU *c)
 {
+    (void)c;
     return g_last_error;
 }
 

@@ -182,7 +182,7 @@ static int is_hex8(const char *p)
 }
 
 /* Count X(XXXXXXXX) entries in a list header and collect the distinct 3-hex
- * image prefixes.  This is the same shape gen_boot_dispatch.py consumes, so a
+ * image prefixes.  This is the same shape gen_boot_dispatch.c consumes, so a
  * malformed list is rejected here instead of producing a partial dispatcher. */
 static int scan_list(const char *path, char prefixes[][8], int *nprefix)
 {

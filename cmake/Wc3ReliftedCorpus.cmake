@@ -33,6 +33,36 @@ find_program(WC3_MANIFEST_TOOL
     HINTS "${WC3_ROOT}/build/lift-tools"
     NO_DEFAULT_PATH)
 
+find_program(WC3_DEVIRTUALIZE_EXE
+    NAMES devirtualize devirtualize.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+
+find_program(WC3_SOFTFLOAT_CONTEXT_FNCLEX_EXE
+    NAMES softfloat_context_fnclex softfloat_context_fnclex.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+
+find_program(WC3_SAVE_LIST_DISPLAY_EXE
+    NAMES save_list_display save_list_display.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+
+find_program(WC3_DEAD_FLAGS_EXE
+    NAMES dead_flags dead_flags.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+
+find_program(WC3_RETURN_ADDRESS_ELIDE_EXE
+    NAMES return_address_elide return_address_elide.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+
+find_program(WC3_W3L_COMPAT_EXE
+    NAMES w3l_compat w3l_compat.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+
 find_program(WC3_ATOMICCHECK_EXE
     NAMES atomiccheck atomiccheck.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -54,13 +84,15 @@ set(_wc3_compat_jsons)
 math(EXPR _wc3_last_mod "${_wc3_nmod} - 1")
 
 if(WC3_W3L_COMPAT)
-    set(WC3_W3L_PASS "${WC3_ROOT}/tools/lift/passes/w3l_compat.py")
-    if(NOT EXISTS "${WC3_W3L_PASS}")
+    if(NOT WC3_W3L_COMPAT_EXE)
         message(FATAL_ERROR
-            "W3L compat LiftPass missing: ${WC3_W3L_PASS}")
+            "w3l_compat.exe missing; run tools/lift/build_tools.ps1 "
+            "before configuring")
     endif()
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${WC3_W3L_PASS}")
+    # The compiled pass is byte-identical to the Python reference on the full
+    # corpus; Python stays as the change-set contract, not as a configure-time
+    # dependency.
+    set(WC3_W3L_PASS "${WC3_W3L_COMPAT_EXE}")
 endif()
 
 # V5.9: a stale lift tool used to drop the atomic lowering while the corpus
@@ -101,6 +133,60 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
         if(NOT EXISTS "${_src}")
             message(FATAL_ERROR "relifted corpus source missing: ${_src}")
         endif()
+        if(_name STREQUAL "game" AND _kind STREQUAL "closed")
+            # The save-list display fix is a product invariant, not an
+            # optional experiment.  Apply it to a build-dir copy before the
+            # split so every chunk and every relifted build carries it.  The
+            # pass is idempotent and preserves mtime when the source is
+            # already patched, so an incremental configure does not resplit.
+            if(NOT WC3_SAVE_LIST_DISPLAY_EXE)
+                message(FATAL_ERROR
+                    "save_list_display.exe missing; run "
+                    "tools/lift/build_tools.ps1 before configuring")
+            endif()
+            set(_save_dir
+                "${CMAKE_CURRENT_BINARY_DIR}/save_list_display/${_name}/${_kind}")
+            set(_save_src "${_save_dir}/${_kind}.c")
+            set(_save_json
+                "${WC3_ROOT}/reports/generated/save_list_display_relifted.json")
+            file(MAKE_DIRECTORY "${_save_dir}")
+            set(_save_need 1)
+            if(EXISTS "${_save_src}" AND EXISTS "${_save_json}" AND
+               NOT "${_src}" IS_NEWER_THAN "${_save_src}" AND
+               NOT "${WC3_SAVE_LIST_DISPLAY_EXE}" IS_NEWER_THAN "${_save_src}")
+                set(_save_need 0)
+            endif()
+            if(_save_need)
+                execute_process(
+                    COMMAND "${WC3_SAVE_LIST_DISPLAY_EXE}"
+                            --lift "${_src}"
+                            --out "${_save_src}"
+                            --json "${_save_json}"
+                            --expect-sites 2
+                            --marker
+                    RESULT_VARIABLE _save_rc
+                    OUTPUT_VARIABLE _save_out
+                    ERROR_VARIABLE _save_err)
+                if(NOT _save_rc EQUAL 0)
+                    message(FATAL_ERROR
+                        "save_list_display failed for ${_src} "
+                        "(rc=${_save_rc}):\n"
+                        "${_save_out}\n${_save_err}")
+                endif()
+                string(STRIP "${_save_out}" _save_out)
+                message(STATUS "${_save_out}")
+            endif()
+            file(READ "${_save_src}" _save_text)
+            string(REGEX MATCHALL "WC3_SAVE_LIST_STRIP_W3Z"
+                   _save_markers "${_save_text}")
+            list(LENGTH _save_markers _save_marker_count)
+            if(NOT _save_marker_count EQUAL 4)
+                message(FATAL_ERROR
+                    "relifted game corpus has ${_save_marker_count} save-list "
+                    "markers, expected 4 (2 sites + 2 marker-block lines)")
+            endif()
+            set(_src "${_save_src}")
+        endif()
         set(_chunk_dir "${CMAKE_CURRENT_BINARY_DIR}/relifted/${_name}")
         set(_stamp "${_chunk_dir}/${_kind}.stamp")
         if(NOT EXISTS "${_stamp}" OR
@@ -129,10 +215,15 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
         endif()
         if(WC3_DEVIRTUALIZE_P0_1)
             # P0-1 LiftPass runs after splitcorpus, so every chunk receives the
-            # direct_call.h include and prototypes for cross-TU targets.  This
-            # is gated OFF by default until G-14/G-15 are green (ABI-6).
-            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-                "${WC3_ROOT}/tools/lift/passes/devirtualize.py")
+            # direct_call.h include and prototypes for cross-TU targets.  The
+            # compiled pass is byte-identical to the Python reference on the
+            # full corpus; Python stays as the change-set contract, not as a
+            # configure-time dependency.
+            if(NOT WC3_DEVIRTUALIZE_EXE)
+                message(FATAL_ERROR
+                    "devirtualize.exe missing; run tools/lift/build_tools.ps1 "
+                    "before configuring")
+            endif()
             set(_devirt_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/devirtualized/${_name}/${_kind}")
             file(MAKE_DIRECTORY "${_devirt_dir}")
@@ -140,20 +231,27 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             foreach(_chunk IN LISTS _chunks)
                 get_filename_component(_chunk_name "${_chunk}" NAME)
                 set(_devirt_out "${_devirt_dir}/${_chunk_name}")
-                execute_process(
-                    COMMAND "${Python3_EXECUTABLE}"
-                            "${WC3_ROOT}/tools/lift/passes/devirtualize.py"
-                            --list "${WC3_BOOT_LIST}"
-                            --lift "${_chunk}"
-                            --out "${_devirt_out}"
-                            --json "${_devirt_out}.json"
-                    RESULT_VARIABLE _devirt_rc
-                    OUTPUT_VARIABLE _devirt_stdout
-                    ERROR_VARIABLE _devirt_stderr)
-                if(NOT _devirt_rc EQUAL 0)
-                    message(FATAL_ERROR
-                        "devirtualize failed for ${_chunk} (rc=${_devirt_rc}):\n"
-                        "${_devirt_stdout}\n${_devirt_stderr}")
+                set(_devirt_json "${_devirt_out}.json")
+                if(NOT EXISTS "${_devirt_out}" OR
+                   NOT EXISTS "${_devirt_json}" OR
+                   "${_chunk}" IS_NEWER_THAN "${_devirt_out}" OR
+                   "${WC3_BOOT_LIST}" IS_NEWER_THAN "${_devirt_out}" OR
+                   "${WC3_DEVIRTUALIZE_EXE}" IS_NEWER_THAN "${_devirt_out}")
+                    execute_process(
+                        COMMAND "${WC3_DEVIRTUALIZE_EXE}"
+                                --list "${WC3_BOOT_LIST}"
+                                --lift "${_chunk}"
+                                --out "${_devirt_out}"
+                                --json "${_devirt_json}"
+                        RESULT_VARIABLE _devirt_rc
+                        OUTPUT_VARIABLE _devirt_stdout
+                        ERROR_VARIABLE _devirt_stderr)
+                    if(NOT _devirt_rc EQUAL 0)
+                        message(FATAL_ERROR
+                            "devirtualize failed for ${_chunk} "
+                            "(rc=${_devirt_rc}):\n"
+                            "${_devirt_stdout}\n${_devirt_stderr}")
+                    endif()
                 endif()
                 list(APPEND _transformed_chunks "${_devirt_out}")
             endforeach()
@@ -161,11 +259,16 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
         endif()
         if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
             # P0-6 runs after P0-1, so it sees both dispatch() and the
-            # WC3_DIRECT_CALL form.  It is OFF until G-15 publishes the
-            # function-level change set; the pass keeps the esp slot and skips
-            # every target that may read the return address.
-            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-                "${WC3_ROOT}/tools/lift/passes/return_address_elide.py")
+            # WC3_DIRECT_CALL form.  The pass keeps the esp slot and skips
+            # every target that may read the return address.  The compiled
+            # pass is byte-identical to the Python reference on the full
+            # corpus; Python stays as the change-set contract, not as a
+            # configure-time dependency.
+            if(NOT WC3_RETURN_ADDRESS_ELIDE_EXE)
+                message(FATAL_ERROR
+                    "return_address_elide.exe missing; run "
+                    "tools/lift/build_tools.ps1 before configuring")
+            endif()
             set(_ra_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/return_address_elide/${_name}/${_kind}")
             file(MAKE_DIRECTORY "${_ra_dir}")
@@ -173,19 +276,26 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             foreach(_chunk IN LISTS _chunks)
                 get_filename_component(_chunk_name "${_chunk}" NAME)
                 set(_ra_out "${_ra_dir}/${_chunk_name}")
-                execute_process(
-                    COMMAND "${Python3_EXECUTABLE}"
-                            "${WC3_ROOT}/tools/lift/passes/return_address_elide.py"
-                            --lift "${_chunk}"
-                            --out "${_ra_out}"
-                            --json "${_ra_out}.json"
-                    RESULT_VARIABLE _ra_rc
-                    OUTPUT_VARIABLE _ra_stdout
-                    ERROR_VARIABLE _ra_stderr)
-                if(NOT _ra_rc EQUAL 0)
-                    message(FATAL_ERROR
-                        "return_address_elide failed for ${_chunk} (rc=${_ra_rc}):\n"
-                        "${_ra_stdout}\n${_ra_stderr}")
+                set(_ra_json "${_ra_out}.json")
+                if(NOT EXISTS "${_ra_out}" OR
+                   NOT EXISTS "${_ra_json}" OR
+                   "${_chunk}" IS_NEWER_THAN "${_ra_out}" OR
+                   "${WC3_RETURN_ADDRESS_ELIDE_EXE}" IS_NEWER_THAN "${_ra_out}")
+                    execute_process(
+                        COMMAND "${WC3_RETURN_ADDRESS_ELIDE_EXE}"
+                                --lift "${_chunk}"
+                                --out "${_ra_out}"
+                                --json "${_ra_json}"
+                                --quiet
+                        RESULT_VARIABLE _ra_rc
+                        OUTPUT_VARIABLE _ra_stdout
+                        ERROR_VARIABLE _ra_stderr)
+                    if(NOT _ra_rc EQUAL 0)
+                        message(FATAL_ERROR
+                            "return_address_elide failed for ${_chunk} "
+                            "(rc=${_ra_rc}):\n"
+                            "${_ra_stdout}\n${_ra_stderr}")
+                    endif()
                 endif()
                 list(APPEND _ra_chunks "${_ra_out}")
             endforeach()
@@ -194,10 +304,14 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
         if(WC3_DEAD_FLAGS_P0_2)
             # P0-2 runs after P0-1 when both are enabled, so its input is the
             # direct-call form.  It is a straight-line, per-flag kill analysis;
-            # control flow and calls are barriers (see the pass header).  Gated
-            # OFF until G-15 publishes the per-module golden report.
-            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-                "${WC3_ROOT}/tools/lift/passes/dead_flags.py")
+            # control flow and calls are barriers (see the pass header).  The
+            # compiled pass is byte-identical to the Python reference on the
+            # full corpus; Python stays as the change-set contract.
+            if(NOT WC3_DEAD_FLAGS_EXE)
+                message(FATAL_ERROR
+                    "dead_flags.exe missing; run tools/lift/build_tools.ps1 "
+                    "before configuring")
+            endif()
             set(_dead_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/dead_flags/${_name}/${_kind}")
             file(MAKE_DIRECTORY "${_dead_dir}")
@@ -205,20 +319,26 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             foreach(_chunk IN LISTS _chunks)
                 get_filename_component(_chunk_name "${_chunk}" NAME)
                 set(_dead_out "${_dead_dir}/${_chunk_name}")
-                execute_process(
-                    COMMAND "${Python3_EXECUTABLE}"
-                            "${WC3_ROOT}/tools/lift/passes/dead_flags.py"
-                            --lift "${_chunk}"
-                            --out "${_dead_out}"
-                            --json "${_dead_out}.json"
-                            --quiet
-                    RESULT_VARIABLE _dead_rc
-                    OUTPUT_VARIABLE _dead_stdout
-                    ERROR_VARIABLE _dead_stderr)
-                if(NOT _dead_rc EQUAL 0)
-                    message(FATAL_ERROR
-                        "dead_flags failed for ${_chunk} (rc=${_dead_rc}):\n"
-                        "${_dead_stdout}\n${_dead_stderr}")
+                set(_dead_json "${_dead_out}.json")
+                if(NOT EXISTS "${_dead_out}" OR
+                   NOT EXISTS "${_dead_json}" OR
+                   "${_chunk}" IS_NEWER_THAN "${_dead_out}" OR
+                   "${WC3_DEAD_FLAGS_EXE}" IS_NEWER_THAN "${_dead_out}")
+                    execute_process(
+                        COMMAND "${WC3_DEAD_FLAGS_EXE}"
+                                --lift "${_chunk}"
+                                --out "${_dead_out}"
+                                --json "${_dead_json}"
+                                --quiet
+                        RESULT_VARIABLE _dead_rc
+                        OUTPUT_VARIABLE _dead_stdout
+                        ERROR_VARIABLE _dead_stderr)
+                    if(NOT _dead_rc EQUAL 0)
+                        message(FATAL_ERROR
+                            "dead_flags failed for ${_chunk} "
+                            "(rc=${_dead_rc}):\n"
+                            "${_dead_stdout}\n${_dead_stderr}")
+                    endif()
                 endif()
                 list(APPEND _dead_chunks "${_dead_out}")
             endforeach()
@@ -242,7 +362,7 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                    "${_chunk}" IS_NEWER_THAN "${_compat_out}" OR
                    "${WC3_W3L_PASS}" IS_NEWER_THAN "${_compat_out}")
                     execute_process(
-                        COMMAND "${Python3_EXECUTABLE}" "${WC3_W3L_PASS}"
+                        COMMAND "${WC3_W3L_PASS}"
                                 --profile "${WC3_W3L_PROFILE}"
                                 --latency "${WC3_W3L_LATENCY}"
                                 --lift "${_chunk}"
@@ -284,7 +404,7 @@ if(WC3_W3L_COMPAT)
         file(APPEND "${_wc3_compat_manifest}" "${_json}\n")
     endforeach()
     execute_process(
-        COMMAND "${Python3_EXECUTABLE}" "${WC3_W3L_PASS}"
+        COMMAND "${WC3_W3L_PASS}"
                 --profile "${WC3_W3L_PROFILE}"
                 --latency "${WC3_W3L_LATENCY}"
                 --verify-coverage "@${_wc3_compat_manifest}"
@@ -296,6 +416,74 @@ if(WC3_W3L_COMPAT)
         message(FATAL_ERROR
             "w3l_compat coverage check failed (rc=${_wc3_cov_rc}):\n"
             "${_wc3_cov_stdout}\n${_wc3_cov_stderr}")
+    endif()
+endif()
+
+if(WC3_SOFTFLOAT_CONTEXT)
+    # The old lifter emitted FNCLEX as a direct SoftFloat TLS clear.  In a
+    # context build the live x87 flags are CPU.sf_state, so normalize the
+    # generated statement before compilation.  This is a LiftPass over
+    # generated C, not a hand edit; the report records every changed file and
+    # the pass fails closed if another direct state reference appears.
+    if(NOT WC3_SOFTFLOAT_CONTEXT_FNCLEX_EXE)
+        message(FATAL_ERROR
+            "softfloat_context_fnclex.exe missing; run "
+            "tools/lift/build_tools.ps1 before configuring")
+    endif()
+    set(_sfctx_manifest
+        "${CMAKE_CURRENT_BINARY_DIR}/softfloat_context_chunks.txt")
+    set(_sfctx_out_manifest
+        "${CMAKE_CURRENT_BINARY_DIR}/softfloat_context_chunks.out.txt")
+    set(_sfctx_out_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/softfloat_context")
+    file(MAKE_DIRECTORY "${_sfctx_out_dir}")
+    file(WRITE "${_sfctx_manifest}" "")
+    foreach(_src IN LISTS WC3_RELIFTED_SOURCES)
+        file(APPEND "${_sfctx_manifest}" "${_src}\n")
+    endforeach()
+
+    set(_sfctx_need 0)
+    if(NOT EXISTS "${_sfctx_out_manifest}" OR
+       "${WC3_SOFTFLOAT_CONTEXT_FNCLEX_EXE}" IS_NEWER_THAN
+           "${_sfctx_out_manifest}")
+        set(_sfctx_need 1)
+    else()
+        file(STRINGS "${_sfctx_out_manifest}" _sfctx_outputs)
+        foreach(_out IN LISTS _sfctx_outputs)
+            if(NOT EXISTS "${_out}")
+                set(_sfctx_need 1)
+            endif()
+        endforeach()
+        foreach(_src IN LISTS WC3_RELIFTED_SOURCES)
+            if("${_src}" IS_NEWER_THAN "${_sfctx_out_manifest}")
+                set(_sfctx_need 1)
+            endif()
+        endforeach()
+    endif()
+
+    if(_sfctx_need)
+        execute_process(
+            COMMAND "${WC3_SOFTFLOAT_CONTEXT_FNCLEX_EXE}"
+                    --manifest "${_sfctx_manifest}"
+                    --out-dir "${_sfctx_out_dir}"
+                    --out-manifest "${_sfctx_out_manifest}"
+                    --json
+                    "${WC3_ROOT}/reports/generated/softfloat_context_fnclex.json"
+            RESULT_VARIABLE _sfctx_rc
+            OUTPUT_VARIABLE _sfctx_out
+            ERROR_VARIABLE _sfctx_err)
+        if(NOT _sfctx_rc EQUAL 0)
+            message(FATAL_ERROR
+                "softfloat-context FNCLEX pass failed (rc=${_sfctx_rc}):\n"
+                "${_sfctx_out}\n${_sfctx_err}")
+        endif()
+        string(STRIP "${_sfctx_out}" _sfctx_out)
+        message(STATUS "${_sfctx_out}")
+    endif()
+    file(STRINGS "${_sfctx_out_manifest}" WC3_RELIFTED_SOURCES)
+    list(LENGTH WC3_RELIFTED_SOURCES _wc3_sfctx_nchunks)
+    if(_wc3_sfctx_nchunks EQUAL 0)
+        message(FATAL_ERROR "softfloat-context pass produced no sources")
     endif()
 endif()
 

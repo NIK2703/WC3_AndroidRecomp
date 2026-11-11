@@ -5,41 +5,72 @@
 
 /* Ranges committed after startup.  guest_ok() (runtime/android/hle_android.c)
  * validates a guest pointer against a static table of the *layout*, and the
- * D3D9 staging arena is deliberately placed in the gap above game.dll, i.e.
- * outside every entry of that table.  The consequence was that cr_memcpy()
+ * D3D9 staging arena is deliberately placed in a gap outside every entry of
+ * that table.  The consequence was that cr_memcpy()
  * refused every copy into a locked vertex/index buffer or surface and returned
  * success anyway: the guest filled nothing, and the picture was built from
  * stale bytes.  Recording committed ranges here makes the validator exact -
- * these ranges are RW and mapped, so accepting them is not a loosening. */
-#define GUEST_EXTRA_MAX 96
+ * these ranges are RW and mapped, so accepting them is not a loosening.
+ *
+ * The direct D3D9 path registers each buffer DXVK placed below 4 GB, so the
+ * table also holds one entry per distinct dynamic buffer.  The buffer ranges
+ * coalesce when they are adjacent, but 96 entries was sized for the staging
+ * arena alone; 512 keeps a game with many small buffers from silently falling
+ * back to the shadow copy. */
+#define GUEST_EXTRA_MAX 512
 static struct { uint32_t lo, hi; } g_extra[GUEST_EXTRA_MAX];
-static int g_extra_n;
+static int g_extra_n;   /* claimed slots; may run ahead of the filled ones */
+
+/* The direct D3D9 path appends entries from a guest (render) thread while
+ * cr_memcpy() reads the table on other guest threads, and a lazy guest arena
+ * can be committed from another thread at the same time.  Two rules keep the
+ * lock-free append exact:
+ *
+ *   - a slot is claimed with one atomic fetch_add, so two writers never fill
+ *     the same slot with different bounds;
+ *   - a reader treats lo == 0 or hi == 0 as "not filled yet" and skips it.
+ *     guest_range_add() rejects such bounds, so a real entry never has them.
+ *     That also covers the compiler publishing the claimed slot before the two
+ *     field stores: the reader sees a zero, not a half-range.
+ *
+ * Coalescing only widens an existing entry, and two ranges that both overlap
+ * the same entry are connected through it; any intermediate pair of old/new
+ * bounds is a subset of their contiguous union.  A torn coalesced pair can
+ * therefore only cause a false reject, never validate unmapped memory. */
+static int guest_extra_count(void)
+{
+    int n = __atomic_load_n(&g_extra_n, __ATOMIC_RELAXED);
+    return n < GUEST_EXTRA_MAX ? n : GUEST_EXTRA_MAX;
+}
 
 void guest_range_add(uint32_t base, uint32_t size)
 {
     if (!base || !size) return;
     uint32_t hi = base + size;
     if (hi < base) return;                    /* wrapped: not a range */
+    int n = guest_extra_count();
     /* Coalesce with an adjacent or overlapping entry: the staging arena is
      * committed one page-run at a time as locks come in, so consecutive calls
      * extend the previous range rather than adding a new one. */
-    for (int i = 0; i < g_extra_n; i++) {
+    for (int i = 0; i < n; i++) {
+        if (!g_extra[i].lo || !g_extra[i].hi) continue;
         if (hi >= g_extra[i].lo && base <= g_extra[i].hi) {
             if (base < g_extra[i].lo) g_extra[i].lo = base;
             if (hi > g_extra[i].hi) g_extra[i].hi = hi;
             return;
         }
     }
-    if (g_extra_n < GUEST_EXTRA_MAX) {
-        g_extra[g_extra_n].lo = base;
-        g_extra[g_extra_n].hi = hi;
-        g_extra_n++;
+    int slot = __atomic_fetch_add(&g_extra_n, 1, __ATOMIC_RELAXED);
+    if (slot < GUEST_EXTRA_MAX) {
+        g_extra[slot].lo = base;
+        g_extra[slot].hi = hi;
     } else {
         /* Dropping a range here makes guest_ok() refuse real, mapped memory,
          * and the caller is told the copy succeeded - the exact failure mode
-         * that made the staging arena unusable in the first place.  It cannot
-         * happen while the only caller is a monotonic bump allocator, but it
-         * must never happen quietly. */
+         * that made the staging arena unusable in the first place.  The
+         * staging arena is a monotonic bump allocator, but the direct buffer
+         * path can fill the table with many distinct ranges; either way a
+         * drop must never be quiet. */
         static int warned;
         if (!warned) {
             warned = 1;
@@ -54,18 +85,40 @@ int guest_range_ok(uint32_t base, uint32_t size)
 {
     uint64_t lo = base, hi = (uint64_t)base + size;
     if (hi > 0x100000000ull) return 0;
-    for (int i = 0; i < g_extra_n; i++)
-        if (lo >= g_extra[i].lo && hi <= g_extra[i].hi) return 1;
+    int n = guest_extra_count();
+    for (int i = 0; i < n; i++) {
+        uint32_t elo = g_extra[i].lo, ehi = g_extra[i].hi;
+        if (!elo || !ehi) continue;
+        if (lo >= elo && hi <= ehi) return 1;
+    }
     return 0;
+}
+
+/* Register a range that is already mapped RW by a host allocator: the thin
+ * D3D9 bridge hands the guest DXVK device memory directly when the driver
+ * placed it below 4 GB.  Unlike guest_commit() this must not mprotect - the
+ * pages belong to the Vulkan driver's mapping, and the mapping already has
+ * the access the guest needs.  The return value says whether the validator
+ * accepted the range, so a full table falls back to the shadow copy instead
+ * of silently letting guest writes be dropped. */
+int guest_range_register(uint32_t base, uint32_t size)
+{
+    if (!base || !size) return 0;
+    if ((uint64_t)base + size > 0x100000000ull) return 0;
+    guest_range_add(base, size);
+    return guest_range_ok(base, size);
 }
 
 /* How much of [base, base+n) one recorded range can vouch for.  Same contract
  * as the layout-table clamp in hle_android.c. */
 uint32_t guest_range_clamp(uint32_t base, uint32_t n)
 {
-    for (int i = 0; i < g_extra_n; i++) {
-        if (base < g_extra[i].lo || base >= g_extra[i].hi) continue;
-        uint32_t avail = g_extra[i].hi - base;
+    int count = guest_extra_count();
+    for (int i = 0; i < count; i++) {
+        uint32_t lo = g_extra[i].lo, hi = g_extra[i].hi;
+        if (!lo || !hi) continue;
+        if (base < lo || base >= hi) continue;
+        uint32_t avail = hi - base;
         return n < avail ? n : avail;
     }
     return 0;

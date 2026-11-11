@@ -1,0 +1,669 @@
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index 4ec9313..dc3776d 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -5,8 +5,25 @@
+ #include "d3d9_hud.h"
+ #include "d3d9_window.h"
+ 
++#ifdef __ANDROID__
++#include <android/native_window.h>
++#include <mutex>
++#include <unordered_map>
++
++/* Android can destroy and recreate the activity's ANativeWindow without the
++ * fake guest HWND changing.  The platform layer publishes a generation with
++ * the window so Present can invalidate the old presenter/surface. */
++extern "C" ANativeWindow* wc3_android_window_state(uint32_t* generation);
++#endif
++
+ namespace dxvk {
+ 
++#ifdef __ANDROID__
++  static std::mutex g_androidSwapchainMutex;
++  static std::unordered_map<const D3D9SwapChainEx*, uint32_t>
++      g_androidSwapchainGenerations;
++#endif
++
+   static uint16_t MapGammaControlPoint(float x) {
+     if (x < 0.0f) x = 0.0f;
+     if (x > 1.0f) x = 1.0f;
+@@ -41,10 +58,25 @@ namespace dxvk {
+     // Apply initial window mode and fullscreen state
+     if (!m_presentParams.Windowed && FAILED(EnterFullscreenMode(pPresentParams, pFullscreenDisplayMode)))
+       throw DxvkError("D3D9: Failed to set initial fullscreen state");
++
++#ifdef __ANDROID__
++    uint32_t windowGeneration = 0;
++    if (wc3_android_window_state(&windowGeneration)) {
++      std::lock_guard<std::mutex> lock(g_androidSwapchainMutex);
++      g_androidSwapchainGenerations[this] = windowGeneration;
++    }
++#endif
+   }
+ 
+ 
+   D3D9SwapChainEx::~D3D9SwapChainEx() {
++#ifdef __ANDROID__
++    {
++      std::lock_guard<std::mutex> lock(g_androidSwapchainMutex);
++      g_androidSwapchainGenerations.erase(this);
++    }
++#endif
++
+     // Avoids hanging when in this state, see comment
+     // in DxvkDevice::~DxvkDevice.
+     if (this_thread::isInModuleDetachment())
+@@ -112,6 +144,36 @@ namespace dxvk {
+           DWORD    dwFlags) {
+     D3D9DeviceLock lock = m_parent->LockDevice();
+ 
++#ifdef __ANDROID__
++    uint32_t windowGeneration = 0;
++    if (!wc3_android_window_state(&windowGeneration)) {
++      /* The activity has no surface while it is backgrounded.  Keep the guest
++       * running; the first present after resume rebuilds the presenter from
++       * the replacement window. */
++      return D3D_OK;
++    }
++
++    bool windowChanged = false;
++    {
++      std::lock_guard<std::mutex> lock(g_androidSwapchainMutex);
++      auto entry = g_androidSwapchainGenerations.find(this);
++      if (entry == g_androidSwapchainGenerations.end()) {
++        g_androidSwapchainGenerations.emplace(this, windowGeneration);
++        /* The constructor created the presenter before this map existed.
++         * Rebuild it once with the window we just observed. */
++        windowChanged = true;
++      } else if (entry->second != windowGeneration) {
++        entry->second = windowGeneration;
++        windowChanged = true;
++      }
++    }
++
++    if (windowChanged) {
++      m_device->waitForIdle();
++      Invalidate(m_window);
++    }
++#endif
++
+     m_parent->SetMostRecentlyUsedSwapchain(this);
+ 
+     if (unlikely(m_parent->IsDeviceLost()))
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 53d23a6..3a28d10 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -1,5 +1,3 @@
+-d3d9_res = wrc_generator.process('version.rc')
+-
+ d3d9_shaders = files([
+   'shaders/d3d9_convert_yuy2_uyvy.comp',
+   'shaders/d3d9_convert_l6v5u5.comp',
+@@ -52,32 +50,17 @@ d3d9_src = [
+   'd3d9_shader_analysis.cpp',
+ ]
+ 
+-d3d9_ld_args      = []
+-d3d9_link_depends = []
+-
+-if platform != 'windows'
+-  d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
+-  d3d9_link_depends += files('d3d9.sym')
+-endif
+-
+-d3d9_dll = shared_library(dxvk_name_prefix+'d3d9', d3d9_src, glsl_generator.process(d3d9_shaders), d3d9_res,
++# WC3 recompilation: build d3d9 as a static archive.  The host links this
++# archive and the DXVK core archives directly into wc3_host27.exe, so no
++# d3d9.dll / DXVK DLL is loaded at run time.
++d3d9_lib = static_library(dxvk_name_prefix+'d3d9', d3d9_src,
++  glsl_generator.process(d3d9_shaders),
+   dependencies        : [ dxbc_spirv_dep, dxvk_dep ],
+   include_directories : dxvk_include_path,
+-  install             : true,
+-  vs_module_defs      : 'd3d9'+def_spec_ext,
+-  link_args           : d3d9_ld_args,
+-  link_depends        : [ d3d9_link_depends ],
+-  kwargs              : dxvk_so_version,
++  install             : false,
+ )
+ 
+ d3d9_dep = declare_dependency(
+-  link_with           : [ d3d9_dll ],
++  link_with           : [ d3d9_lib ],
+   include_directories : [ dxvk_include_path ],
+ )
+-
+-if platform != 'windows'
+-  pkg.generate(d3d9_dll,
+-    filebase: dxvk_pkg_prefix + 'd3d9',
+-    subdirs:  'dxvk',
+-  )
+-endif
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+index 1ee9d58..8fb2f9f 100644
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -1,4 +1,6 @@
+ #include <algorithm>
++#include <cstdio>
++#include <cstdlib>
+ #include <iomanip>
+ #include <optional>
+ #include <sstream>
+@@ -790,6 +792,30 @@ namespace dxvk {
+     determineBufferUsageFlagsPerMemoryType();
+ 
+     updateMemoryHeapBudgets();
++
++#ifdef WC3_DEBUG_DXVK
++    {
++      auto info = m_device->adapter()->info();
++      fprintf(stderr, "[dxvk3] mem: types=%u heaps=%u device=%s this=%p "
++              "typesArray=%p typeSize=%zu poolSize=%zu devOff=%td mapOff=%td\n",
++              m_memTypeCount, m_memHeapCount, info.deviceName,
++              (void *)this, (void *)m_memTypes.data(), sizeof(DxvkMemoryType),
++              sizeof(DxvkMemoryPool),
++              (const char *)&m_memTypes[0].devicePool - (const char *)&m_memTypes[0],
++              (const char *)&m_memTypes[0].mappedPool - (const char *)&m_memTypes[0]);
++      for (uint32_t i = 0; i < m_memTypeCount; i++) {
++        const auto& t = m_memTypes[i];
++        fprintf(stderr, "[dxvk3] mem type %u heap=%p heapIndex=%u flags=%x "
++                "devicePool=%p data=%p size=%zu mappedPool=%p data=%p size=%zu\n",
++                i, (void *)t.heap, t.properties.heapIndex,
++                t.properties.propertyFlags,
++                (void *)&t.devicePool, (void *)t.devicePool.chunks.data(),
++                t.devicePool.chunks.size(),
++                (void *)&t.mappedPool, (void *)t.mappedPool.chunks.data(),
++                t.mappedPool.chunks.size());
++      }
++    }
++#endif
+   }
+   
+   
+@@ -1537,6 +1563,14 @@ namespace dxvk {
+     uint32_t chunkIndex = pool.pageAllocator.addChunk(chunk.size);
+ 
+     pool.chunks.resize(std::max<size_t>(pool.chunks.size(), chunkIndex + 1u));
++
++#ifdef WC3_DEBUG_DXVK
++    fprintf(stderr, "[dxvk3] chunk add type=%u chunkIndex=%u size=%zu "
++            "data=%p capacity=%zu\n", type.index, chunkIndex,
++            pool.chunks.size(), (void *)pool.chunks.data(),
++            pool.chunks.capacity());
++#endif
++
+     pool.chunks[chunkIndex].memory = chunk;
+     pool.chunks[chunkIndex].unusedTime = high_resolution_clock::time_point();
+     pool.chunks[chunkIndex].canMove = true;
+@@ -1789,6 +1823,16 @@ namespace dxvk {
+           DxvkMemoryPool&       pool,
+           VkDeviceSize          allocationSize,
+           high_resolution_clock::time_point time) {
++#ifdef WC3_DEBUG_DXVK
++    fprintf(stderr, "[dxvk3] freepool this=%p type=%p index=%u pool=%p "
++            "data=%p size=%zu cap=%zu maxChunk=%llu next=%llu\n",
++            (void *)this, (void *)&type, type.index, (void *)&pool,
++            (void *)pool.chunks.data(), pool.chunks.size(),
++            pool.chunks.capacity(),
++            (unsigned long long)pool.maxChunkSize,
++            (unsigned long long)pool.nextChunkSize);
++#endif
++
+     // Allow for one unused max-size chunk on device-local memory types.
+     // For mapped memory allocations, we need to be more lenient since
+     // applications will frequently allocate staging buffers or dynamic
+diff --git a/src/dxvk/dxvk_platform_exts.cpp b/src/dxvk/dxvk_platform_exts.cpp
+index 9f1ebbb..e0b9bcf 100644
+--- a/src/dxvk/dxvk_platform_exts.cpp
++++ b/src/dxvk/dxvk_platform_exts.cpp
+@@ -6,7 +6,11 @@ namespace dxvk {
+   DxvkPlatformExts DxvkPlatformExts::s_instance;
+ 
+   std::string_view DxvkPlatformExts::getName() {
++#ifdef __ANDROID__
++    return "Android WSI";
++#else
+     return "Platform WSI";
++#endif
+   }
+ 
+ 
+diff --git a/src/util/util_gdi.cpp b/src/util/util_gdi.cpp
+index 988d9d7..4500099 100644
+--- a/src/util/util_gdi.cpp
++++ b/src/util/util_gdi.cpp
+@@ -3,7 +3,10 @@
+ 
+ namespace dxvk {
+ 
+-#ifndef _WIN32
++/* Android defines _WIN32 for source compatibility with the shim header, but
++ * it has neither the kernel-mode thunk layer nor a GDI, so the portable
++ * fallbacks below are the correct ones there. */
++#if !defined(_WIN32) || defined(__ANDROID__)
+   NTSTATUS WINAPI D3DKMTAcquireKeyedMutex(D3DKMT_ACQUIREKEYEDMUTEX *desc) {
+     Logger::warn("D3DKMTAcquireKeyedMutex: Not available on this platform.");
+     return -1;
+diff --git a/src/util/util_gdi.h b/src/util/util_gdi.h
+index b715e34..5c383de 100644
+--- a/src/util/util_gdi.h
++++ b/src/util/util_gdi.h
+@@ -5,7 +5,10 @@
+ #include <d3d11_4.h>
+ #include <d3d12.h>
+ 
+-#ifndef _WIN32
++/* Android defines _WIN32 for source compatibility with the shim header, but
++ * it has neither the kernel-mode thunk layer nor a GDI, so the portable
++ * fallbacks below are the correct ones there. */
++#if !defined(_WIN32) || defined(__ANDROID__)
+ #define EXTERN_C
+ #define WINBASEAPI
+ #endif
+diff --git a/src/util/util_luid.cpp b/src/util/util_luid.cpp
+index 11697d8..02c8987 100644
+--- a/src/util/util_luid.cpp
++++ b/src/util/util_luid.cpp
+@@ -9,7 +9,10 @@
+ 
+ namespace dxvk {
+ 
+-#ifndef _WIN32
++/* Android defines _WIN32 for source compatibility with the shim header, but
++ * it has neither the kernel-mode thunk layer nor a GDI, so the portable
++ * fallbacks below are the correct ones there. */
++#if !defined(_WIN32) || defined(__ANDROID__)
+   static BOOL AllocateLocallyUniqueId(LUID* luid) {
+     static std::atomic<uint32_t> counter = { 0u };
+     // Unsigned bottom part is actually the first
+diff --git a/src/util/util_string.h b/src/util/util_string.h
+index ffae983..7654760 100644
+--- a/src/util/util_string.h
++++ b/src/util/util_string.h
+@@ -177,7 +177,10 @@ namespace dxvk::str {
+    */
+   std::wstring tows(const char* mbs);
+ 
+-#ifdef _WIN32
++// The wide overloads of the file streams only exist in MSVC's library, so a
++// Windows *target* is not the right test - a Windows-hosted build for another
++// platform (the Android port) must use the narrow path too.
++#if defined(_WIN32) && !defined(__ANDROID__)
+   using path_string = std::wstring;
+   inline path_string topath(const char* mbs) { return tows(mbs); }
+ #else
+diff --git a/src/util/util_time.h b/src/util/util_time.h
+index bcc311b..ce2c22a 100644
+--- a/src/util/util_time.h
++++ b/src/util/util_time.h
+@@ -3,6 +3,15 @@
+ #include <chrono>
+ #include <cstdint>
+ 
++#if defined(__ANDROID__)
++/* The Android shim is <windows.h>.  It is included here, before the branch
++ * below, because _WIN32 decides which clock this file defines and a TU that
++ * reached <windows.h> late would otherwise define a different
++ * dxvk::high_resolution_clock than its neighbours - an ODR violation that
++ * surfaces only as a mismatched mangled name at link time. */
++#include <windows.h>
++#endif
++
+ #if defined(_WIN32) && !defined(__WINE__)
+ #include <windows.h>
+ #endif
+diff --git a/src/util/util_win32_compat.h b/src/util/util_win32_compat.h
+index b706dca..a18a28b 100644
+--- a/src/util/util_win32_compat.h
++++ b/src/util/util_win32_compat.h
+@@ -1,6 +1,9 @@
+ #pragma once
+ 
+-#if defined(__unix__)
++/* Android also defines __unix__, but it is not one of the targets this
++ * header's stubs were written for: the Android port has real POSIX
++ * implementations of all of these in runtime/android/dxvk_win32.c. */
++#if defined(__unix__) && !defined(__ANDROID__)
+ 
+ #include <windows.h>
+ #include <dlfcn.h>
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index a9d8ffb..9298760 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -9,7 +9,24 @@
+ 
+ namespace dxvk::vk {
+ 
++  /*
++   * Android can replace the loader entry point at runtime: libadrenotools
++   * opens the system loader inside a private namespace and redirects its ICD
++   * to a custom driver (Turnip).  This pointer is the single source for every
++   * Vulkan symbol DXVK resolves, so setting it before Direct3DCreate9 moves
++   * the whole device to that ICD.  On Windows the setter is never called.
++   */
++  static PFN_vkGetInstanceProcAddr GetInstanceProcAddr = nullptr;
++
++  extern "C" void dxvk_set_vulkan_get_instance_proc_addr(PFN_vkGetInstanceProcAddr fn) {
++    if (fn)
++      GetInstanceProcAddr = fn;
++  }
++
+   static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadVulkanLibrary() {
++    if (GetInstanceProcAddr)
++      return std::make_pair(nullptr, GetInstanceProcAddr);
++
+     static const std::array dllNames = {
+ #ifdef _WIN32
+       "winevulkan.dll",
+diff --git a/src/vulkan/vulkan_loader.h b/src/vulkan/vulkan_loader.h
+index c24698c..edec749 100644
+--- a/src/vulkan/vulkan_loader.h
++++ b/src/vulkan/vulkan_loader.h
+@@ -4,6 +4,11 @@
+ #include "../util/rc/util_rc_ptr.h"
+ 
+ #define VK_USE_PLATFORM_WIN32_KHR 1
++#ifdef __ANDROID__
++/* The Android surface comes from an ANativeWindow; the Win32 entry points
++ * above remain declared because the shared WSI/HWND types are still used. */
++#define VK_USE_PLATFORM_ANDROID_KHR 1
++#endif
+ #include <vulkan/vulkan.h>
+ 
+ #define VULKAN_FN(name) \
+@@ -147,6 +152,10 @@ namespace dxvk::vk {
+     VULKAN_FN(vkGetPhysicalDeviceWin32PresentationSupportKHR);
+     #endif
+     
++    #ifdef VK_USE_PLATFORM_ANDROID_KHR
++    VULKAN_FN(vkCreateAndroidSurfaceKHR);
++    #endif
++    
+     VULKAN_FN(vkDestroySurfaceKHR);
+     
+     VULKAN_FN(vkGetPhysicalDeviceSurfaceSupportKHR);
+diff --git a/src/wsi/win32/wsi_monitor_win32.cpp b/src/wsi/win32/wsi_monitor_win32.cpp
+index d791bf2..3a0a99e 100644
+--- a/src/wsi/win32/wsi_monitor_win32.cpp
++++ b/src/wsi/win32/wsi_monitor_win32.cpp
+@@ -2,6 +2,93 @@
+ 
+ #include "wsi_platform_win32.h"
+ 
++#ifdef __ANDROID__
++
++#include <android/native_window.h>
++#include <cstdint>
++#include <cstring>
++
++extern "C" ANativeWindow* wc3_android_window();
++
++namespace dxvk::wsi {
++
++  static HMONITOR androidMonitor() {
++    return reinterpret_cast<HMONITOR>(static_cast<uintptr_t>(1));
++  }
++
++  static void androidWindowSize(uint32_t* pWidth, uint32_t* pHeight) {
++    ANativeWindow* window = wc3_android_window();
++    if (pWidth)
++      *pWidth = window ? uint32_t(ANativeWindow_getWidth(window)) : 1280u;
++    if (pHeight)
++      *pHeight = window ? uint32_t(ANativeWindow_getHeight(window)) : 720u;
++  }
++
++  HMONITOR Win32WsiDriver::getDefaultMonitor() {
++    return androidMonitor();
++  }
++
++  HMONITOR Win32WsiDriver::enumMonitors(uint32_t index) {
++    return index == 0 ? androidMonitor() : nullptr;
++  }
++
++  HMONITOR Win32WsiDriver::enumMonitors(const LUID *[], uint32_t, uint32_t index) {
++    return enumMonitors(index);
++  }
++
++  bool Win32WsiDriver::getDisplayName(HMONITOR, WCHAR (&Name)[32]) {
++    static const WCHAR name[] = L"Android";
++    for (size_t i = 0; i < 31 && name[i]; i++)
++      Name[i] = name[i];
++    Name[31] = 0;
++    return true;
++  }
++
++  bool Win32WsiDriver::getDesktopCoordinates(HMONITOR, RECT* pRect) {
++    if (!pRect)
++      return false;
++    uint32_t width = 0, height = 0;
++    androidWindowSize(&width, &height);
++    pRect->left = 0;
++    pRect->top = 0;
++    pRect->right = LONG(width);
++    pRect->bottom = LONG(height);
++    return true;
++  }
++
++  static bool androidDisplayMode(WsiMode* pMode) {
++    if (!pMode)
++      return false;
++    uint32_t width = 0, height = 0;
++    androidWindowSize(&width, &height);
++    pMode->width = width;
++    pMode->height = height;
++    pMode->refreshRate = WsiRational{ 60000u, 1000u };
++    pMode->bitsPerPixel = 32;
++    pMode->interlaced = false;
++    return true;
++  }
++
++  bool Win32WsiDriver::getDisplayMode(HMONITOR, uint32_t modeNumber, WsiMode* pMode) {
++    return modeNumber == 0 ? androidDisplayMode(pMode) : false;
++  }
++
++  bool Win32WsiDriver::getCurrentDisplayMode(HMONITOR, WsiMode* pMode) {
++    return androidDisplayMode(pMode);
++  }
++
++  bool Win32WsiDriver::getDesktopDisplayMode(HMONITOR, WsiMode* pMode) {
++    return androidDisplayMode(pMode);
++  }
++
++  WsiEdidData Win32WsiDriver::getMonitorEdid(HMONITOR) {
++    return {};
++  }
++
++}
++
++#else
++
+ #include "../../util/util_string.h"
+ #include "../../util/log/log.h"
+ #include "../../util/util_string.h"
+@@ -365,3 +452,5 @@ namespace dxvk::wsi {
+ }
+ 
+ #endif
++
++#endif
+diff --git a/src/wsi/win32/wsi_platform_win32.cpp b/src/wsi/win32/wsi_platform_win32.cpp
+index 03bf40a..06a5344 100644
+--- a/src/wsi/win32/wsi_platform_win32.cpp
++++ b/src/wsi/win32/wsi_platform_win32.cpp
+@@ -5,7 +5,13 @@
+ namespace dxvk::wsi {
+ 
+   std::vector<const char *> Win32WsiDriver::getInstanceExtensions() {
++#ifdef __ANDROID__
++    /* The guest's HWND is only a token; the presenter creates the surface
++     * from the activity's ANativeWindow, so request the Android extension. */
++    return { VK_KHR_ANDROID_SURFACE_EXTENSION_NAME };
++#else
+     return { VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
++#endif
+   }
+ 
+   static bool createWin32WsiDriver(WsiDriver **driver) {
+diff --git a/src/wsi/win32/wsi_window_win32.cpp b/src/wsi/win32/wsi_window_win32.cpp
+index 9b7fa4f..baf2007 100644
+--- a/src/wsi/win32/wsi_window_win32.cpp
++++ b/src/wsi/win32/wsi_window_win32.cpp
+@@ -2,6 +2,148 @@
+ 
+ #include "wsi_platform_win32.h"
+ 
++#ifdef __ANDROID__
++
++#include <android/native_window.h>
++#include <cstdint>
++#include <cstring>
++
++extern "C" ANativeWindow* wc3_android_window();
++
++namespace dxvk::wsi {
++
++  static HMONITOR androidMonitor() {
++    return reinterpret_cast<HMONITOR>(static_cast<uintptr_t>(1));
++  }
++
++  static void androidWindowSize(uint32_t* pWidth, uint32_t* pHeight) {
++    ANativeWindow* window = wc3_android_window();
++    if (pWidth)
++      *pWidth = window ? uint32_t(ANativeWindow_getWidth(window)) : 1280u;
++    if (pHeight)
++      *pHeight = window ? uint32_t(ANativeWindow_getHeight(window)) : 720u;
++  }
++
++  void Win32WsiDriver::getWindowSize(
++          HWND      hWindow,
++          uint32_t* pWidth,
++          uint32_t* pHeight) {
++    RECT rect = { };
++    if (hWindow && ::GetClientRect(hWindow, &rect) &&
++        rect.right > rect.left && rect.bottom > rect.top) {
++      if (pWidth)
++        *pWidth = uint32_t(rect.right - rect.left);
++      if (pHeight)
++        *pHeight = uint32_t(rect.bottom - rect.top);
++      return;
++    }
++    androidWindowSize(pWidth, pHeight);
++  }
++
++  void Win32WsiDriver::resizeWindow(
++          HWND,
++          DxvkWindowState*,
++          uint32_t,
++          uint32_t) {
++    /* The Android window is owned by the activity and its buffers are sized
++     * through ANativeWindow_setBuffersGeometry; there is no window manager
++     * resize to perform here. */
++  }
++
++  void Win32WsiDriver::saveWindowState(
++          HWND             hWindow,
++          DxvkWindowState* pState,
++          bool             saveStyle) {
++    if (!pState)
++      return;
++    if (saveStyle) {
++      pState->win.style = ::GetWindowLongW(hWindow, GWL_STYLE);
++      pState->win.exstyle = ::GetWindowLongW(hWindow, GWL_EXSTYLE);
++    }
++    ::GetWindowRect(hWindow, &pState->win.rect);
++  }
++
++  void Win32WsiDriver::restoreWindowState(
++          HWND,
++          DxvkWindowState*,
++          bool) {
++  }
++
++  bool Win32WsiDriver::setWindowMode(
++          HMONITOR,
++          HWND,
++          DxvkWindowState*,
++          const WsiMode&) {
++    return true;
++  }
++
++  bool Win32WsiDriver::enterFullscreenMode(
++          HMONITOR,
++          HWND             hWindow,
++          DxvkWindowState* pState,
++          bool) {
++    if (pState)
++      ::GetWindowRect(hWindow, &pState->win.rect);
++    return true;
++  }
++
++  bool Win32WsiDriver::leaveFullscreenMode(
++          HWND,
++          DxvkWindowState*) {
++    return true;
++  }
++
++  bool Win32WsiDriver::restoreDisplayMode() {
++    return true;
++  }
++
++  HMONITOR Win32WsiDriver::getWindowMonitor(HWND) {
++    return androidMonitor();
++  }
++
++  bool Win32WsiDriver::isWindow(HWND) {
++    return true;
++  }
++
++  bool Win32WsiDriver::isMinimized(HWND) {
++    return false;
++  }
++
++  bool Win32WsiDriver::isOccluded(HWND) {
++    return false;
++  }
++
++  void Win32WsiDriver::updateFullscreenWindow(
++          HMONITOR,
++          HWND,
++          bool) {
++  }
++
++  VkResult Win32WsiDriver::createSurface(
++          HWND,
++          PFN_vkGetInstanceProcAddr pfnVkGetInstanceProcAddr,
++          VkInstance          instance,
++          VkSurfaceKHR*       pSurface) {
++    ANativeWindow* window = wc3_android_window();
++    if (!window)
++      return VK_ERROR_SURFACE_LOST_KHR;
++
++    auto pfnVkCreateAndroidSurfaceKHR =
++      reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(
++        pfnVkGetInstanceProcAddr(instance, "vkCreateAndroidSurfaceKHR"));
++    if (!pfnVkCreateAndroidSurfaceKHR)
++      return VK_ERROR_FEATURE_NOT_PRESENT;
++
++    VkAndroidSurfaceCreateInfoKHR info = { };
++    info.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
++    info.window = window;
++    return pfnVkCreateAndroidSurfaceKHR(instance, &info, nullptr, pSurface);
++  }
++
++}
++
++#else
++
+ #include "../../util/util_string.h"
+ #include "../../util/util_gdi.h"
+ #include "../../util/log/log.h"
+@@ -362,3 +504,5 @@ namespace dxvk::wsi {
+ }
+ 
+ #endif
++
++#endif

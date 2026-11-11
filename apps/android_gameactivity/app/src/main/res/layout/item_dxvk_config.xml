@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="8dp"
+    android:baselineAligned="false"
+    android:gravity="center_vertical"
+    android:orientation="horizontal">
+
+    <EditText
+        android:id="@+id/dxvk_config_key"
+        style="@style/Wc3Field"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:hint="@string/launch_dxvk_config_key_hint"
+        android:importantForAutofill="no"
+        android:imeOptions="actionNext"
+        android:inputType="textNoSuggestions"
+        android:maxLength="80"
+        android:saveEnabled="false" />
+
+    <EditText
+        android:id="@+id/dxvk_config_value"
+        style="@style/Wc3Field"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:layout_weight="1"
+        android:hint="@string/launch_dxvk_config_value_hint"
+        android:importantForAutofill="no"
+        android:inputType="textNoSuggestions"
+        android:maxLength="200"
+        android:saveEnabled="false" />
+
+    <Button
+        android:id="@+id/dxvk_config_remove"
+        style="@style/Wc3ButtonGhost"
+        android:layout_width="44dp"
+        android:layout_height="48dp"
+        android:layout_marginStart="8dp"
+        android:contentDescription="@string/launch_dxvk_config_remove"
+        android:minHeight="48dp"
+        android:minWidth="0dp"
+        android:padding="0dp"
+        android:text="@string/launch_dxvk_config_remove_symbol"
+        android:textSize="18sp" />
+</LinearLayout>

@@ -54,10 +54,42 @@ option(WC3_WITH_ASBUILT_HLE "Link the transitional lifted corpus and as-built HL
 # __emutls_get_address.  Native ELF TLS is supported by bionic on this
 # product's minSdk 26, but the legacy libsoftfloat.a is an emulated-TLS input:
 # enabling this option also rebuilds the same 302-object SoftFloat surface from
-# third_party/softfloat/android_sources.txt.  It is opt-in because T2 has not
-# yet proved the dlopen/TLS path; OFF reproduces the product baseline.
+# third_party/softfloat/android_sources.txt.  Product builds with the relifted
+# corpus use native TLS by default; the corpus-less legacy exact-baseline build
+# keeps the old emulated-TLS archive.
+set(_wc3_native_tls_default OFF)
+if(ANDROID AND WC3_RELIFTED_CORPUS_ROOT)
+    set(_wc3_native_tls_default ON)
+endif()
 option(WC3_NATIVE_TLS
-       "Use native ELF TLS and rebuild SoftFloat from the pinned source list" OFF)
+       "Use native ELF TLS and rebuild SoftFloat from the pinned source list"
+       ${_wc3_native_tls_default})
+# O-52: initial-exec is not deployable for a dlopen'ed Android app library.
+# Bionic only allocates a static TLS offset before the process starts; after
+# that, an IE relocation in a dlopen'ed module fails at load with
+# "using IE access model".  Keep the evidence in the audit, but never let a
+# build select the dead end.
+#
+# O-52: CPU-owned SoftFloat state is the product default whenever the relifted
+# corpus is present.  It is not an opt-in performance switch: a plain product
+# configure must not silently fall back to the older TLS path.  A corpus-less
+# legacy exact-baseline build is the only supported reason to leave it OFF.
+set(_wc3_softfloat_context_default OFF)
+if(ANDROID AND WC3_RELIFTED_CORPUS_ROOT)
+    set(_wc3_softfloat_context_default ON)
+endif()
+option(WC3_SOFTFLOAT_CONTEXT
+       "Pass CPU-owned SoftFloat state explicitly through the x87 hot path"
+       ${_wc3_softfloat_context_default})
+set(WC3_TLS_MODEL "global-dynamic" CACHE STRING
+    "TLS model for native-TLS product code (only global-dynamic is valid)")
+set_property(CACHE WC3_TLS_MODEL PROPERTY STRINGS global-dynamic)
+if(NOT WC3_TLS_MODEL STREQUAL "global-dynamic")
+    message(FATAL_ERROR
+        "WC3_TLS_MODEL='${WC3_TLS_MODEL}' is not supported: bionic rejects "
+        "initial-exec TLS in a dlopen'ed Android app library (static_offset "
+        "== SIZE_MAX).  Use global-dynamic or WC3_SOFTFLOAT_CONTEXT=ON.")
+endif()
 # O-55: hardening is the product default; this switch only makes the
 # unmeasured A/B possible without editing the build.  Turning it off removes
 # the stack canary and Fortify from non-corpus targets (the corpus already
@@ -65,36 +97,61 @@ option(WC3_NATIVE_TLS
 option(WC3_HOST_HARDENING
        "Keep NDK stack-protector and Fortify on non-corpus targets" ON)
 option(WC3_DEBUG "Build with debug-only diagnostics" OFF)
-# P0-1 stays OFF until G-14/G-15 are green (GUEST_ABI ABI-6).  The pass is
-# implemented and self-tested, but enabling it here is a build decision that
-# must be paired with the golden equivalence report.
+# Phase 2 of docs/THIN_D3D9_COPY_PLAN.md.  D3DUSAGE_WRITEONLY promises the
+# application will not read the resource, so the copy-in from DXVK's mapping
+# into the low shadow is not observable.  This is part of the normal Android
+# graphics path; a debug build can still force the old copy-in with
+# WC3_THIN_WO_SKIP for a no-rebuild A/B.
+set(_wc3_thin_skip_writeonly_default OFF)
+if(ANDROID)
+    set(_wc3_thin_skip_writeonly_default ON)
+endif()
+option(WC3_THIN_SKIP_WRITEONLY_COPYIN
+       "Skip the thin D3D9 buffer copy-in for D3DUSAGE_WRITEONLY resources"
+       ${_wc3_thin_skip_writeonly_default})
+if(WC3_THIN_SKIP_WRITEONLY_COPYIN)
+    set(WC3_THIN_SKIP_WRITEONLY_COPYIN_DEFINE 1)
+else()
+    set(WC3_THIN_SKIP_WRITEONLY_COPYIN_DEFINE 0)
+endif()
+# P0-1/P0-2/P0-6 are part of the normal relifted-corpus build.  They require
+# the generated corpus; the legacy prebuilt chunks cannot be rewritten.  The
+# passes stay individually addressable for an exactness A/B, but a product
+# configure must not silently produce the older, slower form.
+set(_wc3_lift_opt_default OFF)
+if(ANDROID AND WC3_RELIFTED_CORPUS_ROOT)
+    set(_wc3_lift_opt_default ON)
+endif()
+# P0-1: replace dispatch(c, VA) with the direct lifted entry point where the
+# callee is known to the same corpus.  The pass is self-tested and keeps the
+# HLE/hash path for every unresolved target.
 option(WC3_DEVIRTUALIZE_P0_1
-       "Apply the P0-1 direct-call LiftPass to relifted corpus chunks" OFF)
-# P0-2 is the conservative, straight-line subset of dead-flag elimination.  It
-# is OFF until the G-15 golden report covers this pass as well; a pass that is
-# not applied to the corpus cannot be mistaken for a measured speedup.
+       "Apply the P0-1 direct-call LiftPass to relifted corpus chunks"
+       ${_wc3_lift_opt_default})
+# P0-2: conservative, straight-line dead-flag elimination.  Control flow and
+# calls are barriers; the pass never removes a flag across either.
 option(WC3_DEAD_FLAGS_P0_2
-       "Apply the P0-2 dead-flag LiftPass to relifted corpus chunks" OFF)
-# P0-6 removes only the return-address store before a direct call whose callee
-# proves it never reads the entry [esp] slot.  The pass keeps the esp slot, so
-# the callee's return sequence is unchanged.  OFF until G-15 carries the
-# function-level change set and a whole-corpus run is clean (ABI-6/ABI-11).
+       "Apply the P0-2 dead-flag LiftPass to relifted corpus chunks"
+       ${_wc3_lift_opt_default})
+# P0-6: elide only the return-address store before a direct call whose callee
+# proves it never reads the entry [esp] slot.  The callee's return sequence and
+# the esp slot are unchanged.
 option(WC3_RETURN_ADDRESS_ELIDE_P0_6
        "Apply the P0-6 return-address-store LiftPass to relifted corpus chunks"
-       OFF)
+       ${_wc3_lift_opt_default})
 # P0-10 stays OFF until a corpus audit proves no live PF/AF read; it is a
 # semantic variant, not a free compiler flag.
 option(WC3_FLAGS_FAST_PF_AF
        "P0-10: skip PF/AF computation in flag helpers" OFF)
 set(WC3_FLAGS_FAST_PF_AF_AUDIT "" CACHE FILEPATH
-    "flag_read_audit.py JSON for the active corpus (required by P0-10)")
+    "flag_read_audit JSON for the active corpus (required by P0-10)")
 if(WC3_FLAGS_FAST_PF_AF)
     if(NOT WC3_FLAGS_FAST_PF_AF_AUDIT OR
        NOT EXISTS "${WC3_FLAGS_FAST_PF_AF_AUDIT}")
         message(FATAL_ERROR
             "P0-10 requires WC3_FLAGS_FAST_PF_AF_AUDIT=<report.json> from "
-            "tools/flag_read_audit.py; an unaudited build must keep the "
-            "option OFF.")
+            "build/lift-tools/flag_read_audit.exe; an unaudited build must "
+            "keep the option OFF.")
     endif()
     file(READ "${WC3_FLAGS_FAST_PF_AF_AUDIT}" _wc3_pf_af_audit)
     if(NOT "${_wc3_pf_af_audit}" MATCHES "\"status\": \"pass\"" OR
@@ -110,11 +167,16 @@ if(WC3_FLAGS_FAST_PF_AF)
 else()
     set(WC3_FLAGS_FAST_PF_AF_DEFINE 0)
 endif()
-# O-43 experiment.  Packed dynamic relocations are supported by bionic on the
-# product's minSdk 26, but the size/startup effect is unmeasured (PM-19/GB-5.2),
-# so the product link keeps the unpacked table unless this option is enabled.
+# O-43: packed dynamic relocations are supported by bionic on the product's
+# minSdk 26.  They are part of every Android product build: the smaller load
+# image is the default, not an opt-in experiment.
+set(_wc3_pack_dyn_relocs_default OFF)
+if(ANDROID)
+    set(_wc3_pack_dyn_relocs_default ON)
+endif()
 option(WC3_PACK_DYN_RELOCS
-       "Experimental: pack dynamic relocations with lld (Android only)" OFF)
+       "Pack dynamic relocations with lld (Android only)"
+       ${_wc3_pack_dyn_relocs_default})
 # O-70: lld supports RELR and APS2 either separately or together.  Keep the
 # mode explicit so the A/B run can compare `android`, `relr` and
 # `android+relr` without changing the product default (the option above stays
@@ -130,24 +192,33 @@ set_property(CACHE WC3_PACK_DYN_RELOCS_MODE PROPERTY STRINGS
 # verified.
 option(WC3_HIDE_DYNSYM
        "Hide every defined dynamic symbol except the JNI surface" OFF)
-# O-64: lld can fold byte-identical function bodies (safe mode refuses bodies
-# whose address is significant).  The option is OFF by default: ICF changes
-# artifact identity, makes dladdr-based crash symbolization ambiguous and can
-# give one address several guest VAs in the generated dispatch map.  Enable
-# it only for an A/B
-# run that also records --print-icf-sections, RELACOUNT and cold-start data,
-# and keep the resulting artifact out of the product until T1/G-15 pass.
+# O-64: lld can fold byte-identical function bodies.  Safe mode is the product
+# default: it refuses bodies whose address is significant and is the only mode
+# that may be reached through the guest dispatcher.  ICF changes artifact
+# identity and makes dladdr-based crash symbolization ambiguous; keep
+# --print-icf-sections, RELACOUNT and cold-start data tied to the artifact.
+set(_wc3_icf_default OFF)
+if(ANDROID)
+    set(_wc3_icf_default ON)
+endif()
 option(WC3_ICF
-       "Experimental: fold identical function bodies with lld (Android only)" OFF)
+       "Fold identical function bodies with lld (Android only)"
+       ${_wc3_icf_default})
 set(WC3_ICF_MODE "safe" CACHE STRING
     "Identical code folding mode: safe or all")
 set_property(CACHE WC3_ICF_MODE PROPERTY STRINGS safe all)
 option(WC3_ICF_PRINT_SECTIONS
        "Pass --print-icf-sections when ICF is enabled" ON)
-# O-65: replace external PLT calls with GOT loads.  The effect is unmeasured and
-# can be negative, so this is an explicit experiment, not a product default.
+# O-65: replace external PLT calls with GOT loads.  This is part of the normal
+# Android product build; keep the option only so an explicit exactness/baseline
+# A/B can turn it off without editing CMake.
+set(_wc3_fno_plt_default OFF)
+if(ANDROID)
+    set(_wc3_fno_plt_default ON)
+endif()
 option(WC3_FNO_PLT
-       "Experimental: compile with -fno-plt (Android only)" OFF)
+       "Compile with -fno-plt (Android only)"
+       ${_wc3_fno_plt_default})
 if(WC3_ICF)
     if(NOT ANDROID)
         message(FATAL_ERROR "WC3_ICF requires the Android toolchain")
@@ -155,10 +226,9 @@ if(WC3_ICF)
     if(NOT WC3_ICF_MODE MATCHES "^(safe|all)$")
         message(FATAL_ERROR "WC3_ICF_MODE must be safe or all")
     endif()
-    message(WARNING
-        "O-64 ICF is enabled (${WC3_ICF_MODE}).  It changes artifact identity; "
-        "record --print-icf-sections, RELACOUNT and T1/G-15 evidence, and do "
-        "not treat the result as a measured speedup.")
+    message(STATUS
+        "O-64 ICF is enabled (${WC3_ICF_MODE}); record "
+        "--print-icf-sections and RELACOUNT with the artifact.")
 endif()
 if(WC3_FNO_PLT AND NOT ANDROID)
     message(FATAL_ERROR "WC3_FNO_PLT requires the Android toolchain")
@@ -192,7 +262,7 @@ set(WC3_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 # W3L / PvPGN / rubattle compatibility profile.  This is a build profile, not
 # a third applicationId: the exact baseline is WC3_W3L_COMPAT=OFF, and the
 # compat code and corpus edits exist only when it is ON.  The profile edits
-# generated C through tools/lift/passes/w3l_compat.py; no source file under
+# generated C through the compiled w3l_compat LiftPass; no source file under
 # build/corpus-full is modified in place.  See docs/W3L_COMPAT.md.
 if(WC3_RELIFTED_CORPUS_ROOT AND WC3_BUILD_APP AND WC3_WITH_ASBUILT_HLE)
     set(WC3_W3L_COMPAT_DEFAULT ON)
@@ -238,12 +308,12 @@ if(WC3_W3L_COMPAT)
 endif()
 
 include("${WC3_ROOT}/cmake/Wc3CompilerCache.cmake")
-# O-65: this is a compile-time experiment, so it must be set before the target
-# definitions below.  It is never part of the product default.
+# O-65: this is a compile-time option, so it must be set before the target
+# definitions below.  It is on in the normal Android product build.
 if(WC3_FNO_PLT)
-    message(WARNING
-        "O-65 -fno-plt is enabled.  Record PM-8/PM-19 and cold-start before "
-        "comparing it with the default PLT build.")
+    message(STATUS
+        "O-65 -fno-plt is enabled; record PM-8/PM-19 and cold-start with the "
+        "artifact.")
     add_compile_options(-fno-plt)
 endif()
 # O-51/O-52: this must be a directory-level option, before every target that
@@ -251,10 +321,10 @@ endif()
 # DXVK bridge).  Prebuilt vendor archives are inputs; they are not recompiled
 # here and keep their own TLS model.
 if(ANDROID AND WC3_NATIVE_TLS)
-    add_compile_options(-fno-emulated-tls)
+    add_compile_options(-fno-emulated-tls -ftls-model=global-dynamic)
     message(STATUS
-        "O-52: native ELF TLS enabled; verify T2 and the removed "
-        "__emutls_get_address calls before claiming a speedup.")
+        "O-52: native ELF TLS enabled (global-dynamic); verify T2 and the "
+        "removed __emutls_get_address calls before claiming a speedup.")
 endif()
 # O-55: this is an opt-in baseline, never the product default.  The corpus
 # already sets these flags; this block extends the same release policy to the
@@ -269,6 +339,97 @@ if(ANDROID AND NOT WC3_HOST_HARDENING AND NOT WC3_DEBUG)
         -U_FORTIFY_SOURCE
         -D_FORTIFY_SOURCE=0)
 endif()
+# O-52: no TLS in the x87 hot path.  Generate a SoftFloat source tree whose
+# reachable functions take CPU.sf explicitly.  The generated tree is a build
+# artifact; vendor source stays read-only.  The relifted corpus is required for
+# the same reason as WC3_NATIVE_TLS: prebuilt chunk objects already contain the
+# old inline x87 calls and cannot see the context entry points.
+if(WC3_SOFTFLOAT_CONTEXT)
+    if(NOT ANDROID)
+        message(FATAL_ERROR "WC3_SOFTFLOAT_CONTEXT requires the Android toolchain")
+    endif()
+    if(NOT WC3_RELIFTED_CORPUS_ROOT)
+        message(FATAL_ERROR
+            "WC3_SOFTFLOAT_CONTEXT=ON requires WC3_RELIFTED_CORPUS_ROOT: the "
+            "prebuilt legacy chunk objects keep their old x87/SoftFloat calls. "
+            "Product builds default to build/corpus-full; a corpus-less legacy "
+            "exact-baseline build must leave the option OFF.")
+    endif()
+    find_program(WC3_SOFTFLOAT_CONTEXT_GEN_EXE
+        NAMES softfloat_context_gen softfloat_context_gen.exe
+        HINTS "${WC3_ROOT}/build/lift-tools"
+        NO_DEFAULT_PATH)
+    if(NOT WC3_SOFTFLOAT_CONTEXT_GEN_EXE)
+        message(FATAL_ERROR
+            "softfloat_context_gen.exe missing; run "
+            "tools/lift/build_tools.ps1 before configuring")
+    endif()
+    set(WC3_SOFTFLOAT_CTX_DIR "${CMAKE_BINARY_DIR}/softfloat_ctx")
+    set(_wc3_ctx_manifest
+        "${WC3_ROOT}/third_party/softfloat/android_sources.txt")
+    file(STRINGS "${_wc3_ctx_manifest}" _wc3_ctx_rel)
+    set(_wc3_ctx_deps
+        "${WC3_SOFTFLOAT_CONTEXT_GEN_EXE}"
+        "${_wc3_ctx_manifest}")
+    foreach(_rel IN LISTS _wc3_ctx_rel)
+        string(STRIP "${_rel}" _rel)
+        if(_rel STREQUAL "" OR _rel MATCHES "^#")
+            continue()
+        endif()
+        string(REPLACE "\\" "/" _rel "${_rel}")
+        list(APPEND _wc3_ctx_deps
+            "${WC3_ROOT}/third_party/softfloat/${_rel}")
+    endforeach()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        ${_wc3_ctx_deps})
+    set(_wc3_ctx_target "${CMAKE_C_COMPILER_TARGET}")
+    if(NOT _wc3_ctx_target)
+        set(_wc3_ctx_target "aarch64-linux-android26")
+    endif()
+    set(_wc3_ctx_stamp "${WC3_SOFTFLOAT_CTX_DIR}/.generated")
+    set(_wc3_ctx_stale FALSE)
+    if(NOT EXISTS "${WC3_SOFTFLOAT_CTX_DIR}/sources.cmake" OR
+       NOT EXISTS "${_wc3_ctx_stamp}")
+        set(_wc3_ctx_stale TRUE)
+    else()
+        foreach(_wc3_ctx_dep IN LISTS _wc3_ctx_deps)
+            if("${_wc3_ctx_dep}" IS_NEWER_THAN "${_wc3_ctx_stamp}")
+                set(_wc3_ctx_stale TRUE)
+                break()
+            endif()
+        endforeach()
+        if("${CMAKE_C_COMPILER}" IS_NEWER_THAN "${_wc3_ctx_stamp}")
+            set(_wc3_ctx_stale TRUE)
+        endif()
+    endif()
+    if(_wc3_ctx_stale)
+        execute_process(
+            COMMAND "${WC3_SOFTFLOAT_CONTEXT_GEN_EXE}"
+                --root "${WC3_ROOT}"
+                --out "${WC3_SOFTFLOAT_CTX_DIR}"
+                --clang "${CMAKE_C_COMPILER}"
+                --target "${_wc3_ctx_target}"
+                --jobs 8
+            RESULT_VARIABLE _wc3_ctx_result
+            OUTPUT_VARIABLE _wc3_ctx_stdout
+            ERROR_VARIABLE _wc3_ctx_stderr)
+        if(NOT _wc3_ctx_result EQUAL 0)
+            message(FATAL_ERROR
+                "SoftFloat context generation failed (${_wc3_ctx_result}):\n"
+                "${_wc3_ctx_stdout}\n${_wc3_ctx_stderr}")
+        endif()
+        file(TOUCH "${_wc3_ctx_stamp}")
+    endif()
+    include("${WC3_SOFTFLOAT_CTX_DIR}/sources.cmake")
+    if(NOT WC3_SOFTFLOAT_CTX_SOURCES)
+        message(FATAL_ERROR "SoftFloat context source list is empty")
+    endif()
+    add_compile_definitions(WC3_SOFTFLOAT_CONTEXT=1)
+    include_directories("${WC3_SOFTFLOAT_CTX_DIR}")
+    message(STATUS
+        "O-52: explicit SoftFloat state in CPU; ${_wc3_ctx_stdout}")
+endif()
+
 set(WC3_INCLUDES
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
@@ -427,5 +588,84 @@ if(WC3_BUILD_APP)
     # path needs it; a platform-only build can set WC3_WITH_ASBUILT_HLE=OFF.
     if(WC3_WITH_ASBUILT_HLE)
         include("${WC3_ROOT}/cmake/Wc3LegacyBoot.cmake")
+    endif()
+
+    # O-51/O-52: the TLS A/B is meaningful only if the final .so is audited.
+    # The target checks symbols, the TLS program header and direct emutls call
+    # sites; it runs after the link and fails when WC3_NATIVE_TLS=ON still
+    # leaves product emutls references.  Prebuilt vendor archives (GameActivity,
+    # DXVK, and the toolchain C++ runtime) carry their own emulated-TLS
+    # references; those symbols are classified as vendor by name rather than
+    # being mistaken for lifted-corpus code.  The C++ runtime is a static
+    # toolchain input, not a WC3 source file.
+    if(ANDROID)
+        find_program(WC3_AUDIT_TLS_EXE
+            NAMES audit_tls audit_tls.exe
+            HINTS "${WC3_ROOT}/build/lift-tools"
+            NO_DEFAULT_PATH)
+        if(NOT WC3_AUDIT_TLS_EXE)
+            message(FATAL_ERROR
+                "audit_tls.exe missing; run tools/lift/build_tools.ps1 "
+                "before configuring")
+        endif()
+        set(_wc3_tls_expect "emulated")
+        if(WC3_NATIVE_TLS)
+            set(_wc3_tls_expect "native")
+        endif()
+        set(_wc3_tls_vendor_archives "${GA_ARCHIVE}")
+        if(WC3_WITH_ASBUILT_HLE)
+            list(APPEND _wc3_tls_vendor_archives ${WC3_DXVK_ARCHIVES})
+        endif()
+        if(CMAKE_NM)
+            get_filename_component(_wc3_ndk_bin "${CMAKE_NM}" DIRECTORY)
+            get_filename_component(_wc3_ndk_prebuilt "${_wc3_ndk_bin}" DIRECTORY)
+            if(ANDROID_ABI STREQUAL "arm64-v8a")
+                set(_wc3_android_triple "aarch64-linux-android")
+            elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+                set(_wc3_android_triple "arm-linux-androideabi")
+            elseif(ANDROID_ABI STREQUAL "x86")
+                set(_wc3_android_triple "i686-linux-android")
+            elseif(ANDROID_ABI STREQUAL "x86_64")
+                set(_wc3_android_triple "x86_64-linux-android")
+            else()
+                set(_wc3_android_triple "")
+            endif()
+            if(_wc3_android_triple)
+                foreach(_wc3_cxx_runtime libc++_static.a libc++abi.a)
+                    set(_wc3_archive
+                        "${_wc3_ndk_prebuilt}/sysroot/usr/lib/${_wc3_android_triple}/${_wc3_cxx_runtime}")
+                    if(NOT EXISTS "${_wc3_archive}")
+                        message(FATAL_ERROR
+                            "TLS audit vendor archive missing: ${_wc3_archive}")
+                    endif()
+                    list(APPEND _wc3_tls_vendor_archives "${_wc3_archive}")
+                endforeach()
+            endif()
+        endif()
+        set(_wc3_tls_tool_args)
+        if(CMAKE_NM)
+            list(APPEND _wc3_tls_tool_args --nm "${CMAKE_NM}")
+        endif()
+        if(CMAKE_READELF)
+            list(APPEND _wc3_tls_tool_args --readelf "${CMAKE_READELF}")
+        endif()
+        if(CMAKE_OBJDUMP)
+            list(APPEND _wc3_tls_tool_args --objdump "${CMAKE_OBJDUMP}")
+        endif()
+        set(_wc3_tls_vendor_args)
+        foreach(_wc3_archive IN LISTS _wc3_tls_vendor_archives)
+            list(APPEND _wc3_tls_vendor_args
+                 --vendor-archive "${_wc3_archive}")
+        endforeach()
+        add_custom_target(wc3_tls_audit
+            COMMAND "${WC3_AUDIT_TLS_EXE}"
+                --so "$<TARGET_FILE:wc3gameactivity>"
+                --expect ${_wc3_tls_expect}
+                --json "${CMAKE_CURRENT_BINARY_DIR}/tls_audit.json"
+                ${_wc3_tls_tool_args}
+                ${_wc3_tls_vendor_args}
+            DEPENDS wc3gameactivity
+            COMMENT "Auditing ELF TLS model (${_wc3_tls_expect})"
+            VERBATIM)
     endif()
 endif()

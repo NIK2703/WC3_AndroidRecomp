@@ -8,6 +8,7 @@
 #include "core/helpers.h"
 #include "core/scroll.h"
 #include "core/timer.h"
+#include "core/timer_registry.h"
 #include "gesture/types.h"
 
 // Config helpers

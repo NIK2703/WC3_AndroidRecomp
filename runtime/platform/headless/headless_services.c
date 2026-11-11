@@ -981,6 +981,34 @@ static int headless_vulkan_caps(void *ctx, uint32_t device_index,
     return -1;
 }
 
+/* ADR-036: the DUT has no installed packages and no Vulkan device.  Empty id
+ * is the system choice and is accepted; a non-empty id is explicitly
+ * unsupported rather than silently replaced by system. */
+static int headless_vulkan_select_id(void *ctx, const char *id)
+{
+    (void)ctx;
+    return (id && id[0]) ? -1 : 0;
+}
+
+static void *headless_vulkan_instance_proc_addr(void *ctx)
+{
+    (void)ctx;
+    return NULL;
+}
+
+static int headless_vulkan_active_id(void *ctx, char *dst, size_t cap)
+{
+    (void)ctx;
+    if (dst && cap) dst[0] = '\0';
+    return 0;
+}
+
+static int headless_vulkan_last_error(void *ctx)
+{
+    (void)ctx;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ net */
 
 /* The verification DUT is asset-free and has no network identity.  Keeping
@@ -1235,6 +1263,11 @@ void headless_services_install(Wc3Platform *platform, HeadlessState *st)
     platform->vulkan_driver.select = headless_vulkan_select;
     platform->vulkan_driver.instance_version = headless_vulkan_version;
     platform->vulkan_driver.device_caps = headless_vulkan_caps;
+    platform->vulkan_driver.select_id = headless_vulkan_select_id;
+    platform->vulkan_driver.instance_proc_addr =
+        headless_vulkan_instance_proc_addr;
+    platform->vulkan_driver.active_id = headless_vulkan_active_id;
+    platform->vulkan_driver.last_error = headless_vulkan_last_error;
 }
 
 void headless_services_destroy(HeadlessState *st)

@@ -1,0 +1,84 @@
+From: WC3 Android recomp
+Subject: [PATCH] Android: keep failed singleton construction retryable and log to stderr
+
+The Windows-hosted Android build defines _WIN32, so DXVK 3.1.1's native
+stderr logging branch was compiled out and the app's run.txt stayed silent.
+It also incremented Singleton::m_useCount before constructing the instance,
+so a failed DxvkInstance left a live count and the next Direct3DCreate9 call
+dereferenced a null instance.  Make construction exception-safe, guard the
+D3D9 interface against a null instance, and let the Android build own stderr
+because the app redirects it to run.txt.
+
+diff --git a/src/util/util_singleton.h b/src/util/util_singleton.h
+--- a/src/util/util_singleton.h
++++ b/src/util/util_singleton.h
+@@ -20,9 +20,15 @@
+   Rc<T> acquire(Args... constantArgs) {
+     std::lock_guard lock(m_mutex);
+ 
+-    if (!(m_useCount++))
++    if (m_object == nullptr) {
++      /* A failed constructor must not leave a live use count behind: the next
++       * Direct3DCreate9 call would otherwise skip construction and hand a null
++       * instance to D3D9Options.  Keep the count at zero until new T returns. */
++      m_useCount = 0;
+       m_object = new T(constantArgs...);
++    }
+ 
++    m_useCount += 1;
+     return m_object;
+   }
+ 
+
+diff --git a/src/d3d9/d3d9_interface.cpp b/src/d3d9/d3d9_interface.cpp
+--- a/src/d3d9/d3d9_interface.cpp
++++ b/src/d3d9/d3d9_interface.cpp
+@@ -6,6 +6,7 @@
+ #include "d3d9_bridge.h"
+ #include "d3d9_window.h"
+ 
++#include "../util/util_error.h"
+ #include "../util/util_singleton.h"
+ 
+ #include <algorithm>
+@@ -13,11 +14,21 @@
+ namespace dxvk {
+ 
+   Singleton<DxvkInstance> g_dxvkInstance;
++
++  namespace {
++
++    const Config& instanceConfig(const Rc<DxvkInstance>& instance) {
++      if (instance == nullptr)
++        throw DxvkError("D3D9: failed to create the DXVK instance");
++      return instance->config();
++    }
++
++  }
+ 
+   D3D9InterfaceEx::D3D9InterfaceEx(bool bExtended, const D3D9ON12_ARGS* pOverrideList, uint32_t OverrideCount)
+     : m_instance           ( g_dxvkInstance.acquire(DxvkInstanceFlag::ClientApiIsD3D9) )
+     , m_legacyD3DBridge    ( this )
+-    , m_d3d9Options        ( nullptr, m_instance->config() )
++    , m_d3d9Options        ( nullptr, instanceConfig(m_instance) )
+     , m_d3d9Interop        ( this )
+     , m_d3d9VkExtInterface ( this ) {
+     // D3D9 doesn't enumerate adapters like physical adapters...
+
+diff --git a/src/util/log/log.cpp b/src/util/log/log.cpp
+--- a/src/util/log/log.cpp
++++ b/src/util/log/log.cpp
+@@ -106,8 +106,11 @@
+           // Don't log anything to stderr if we're not on wine. Usually games are
+           // compiled as gui apps anyway, and emitting anything to the standard
+           // output streams can crash certain games.
+-#else
+-          // For native builds, logging to stderr should be fine.
++#endif
++#if !defined(_WIN32) || defined(__ANDROID__)
++          // Native builds, and the Android build that reuses the Windows
++          // compile database, own stderr (the app redirects it to run.txt);
++          // there is no GUI standard handle to break here.
+           std::cerr << adjusted;
+ #endif
+         }

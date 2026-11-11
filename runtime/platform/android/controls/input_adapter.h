@@ -3,7 +3,8 @@
 
 /*
  * Input-thread adapter: drain a batch from the ring, feed the touch engine,
- * then service engine timers once.  It never allocates on the drain path.
+ * then service engine timers only when a deadline is due.  It never allocates
+ * on the drain path and does not poll when the controls are idle.
  */
 
 #include <stdint.h>
@@ -36,6 +37,7 @@ typedef struct {
     uint64_t last_event_ms;
     uint64_t last_tick_ms;
     int last_batch;
+    int last_control_events;    /* non-MOVE records in the last batch */
     int max_batch;
     uint32_t action_mask;       /* bit (1 << Wc3TouchPhase) */
     Wc3InputRecord history[WC3_INPUT_HISTORY];
@@ -52,10 +54,13 @@ typedef struct {
 
 void input_adapter_init(Wc3InputAdapter *adapter, Wc3InputRing *ring);
 
-/* Process one wake batch and tick once after it.  now_ms is CLOCK_MONOTONIC
- * milliseconds at the input thread.  Returns 0 or -1 if a touch/tick failed. */
+/* Process one wake batch and tick after it only when the engine has active
+ * work.  now_ms is CLOCK_MONOTONIC milliseconds at the input thread.  Returns
+ * 0 or -1 if a touch/tick failed. */
 int input_adapter_drain(Wc3InputAdapter *adapter, uint64_t now_ms);
 
+/* 0 when the engine is idle; otherwise the next absolute millisecond
+ * deadline. */
 uint64_t input_adapter_next_deadline_ms(const Wc3InputAdapter *adapter,
                                             uint64_t now_ms);
 

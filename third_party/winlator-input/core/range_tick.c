@@ -6,7 +6,12 @@
 extern TouchProcessorState g_state;
 
 void process_range_button_tick(uint64_t now_tick, TouchActionResult* restrict result) {
-    if (g_state.range_count == 0) return;
+    if (g_state.range_count == 0) {
+        /* No range elements can be active.  Clear the latch so the host does
+         * not keep waking for a state the tick can no longer process. */
+        g_state.has_active_ranges = false;
+        return;
+    }
     if (__builtin_expect(!g_state.has_active_ranges, 0)) return;
 
     bool any_active = false;

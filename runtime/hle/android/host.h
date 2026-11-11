@@ -43,6 +43,10 @@ int   guest_commit(uint32_t base, uint32_t size);
 void  guest_range_add(uint32_t base, uint32_t size);
 int   guest_range_ok(uint32_t base, uint32_t size);
 uint32_t guest_range_clamp(uint32_t base, uint32_t n);
+/* Record a range that a host allocator (the D3D9 bridge's direct low
+ * mapping) already mapped RW.  Unlike guest_commit() this must not mprotect
+ * the pages.  Returns 1 when the validator will accept the range. */
+int   guest_range_register(uint32_t base, uint32_t size);
 
 /* pe32.c */
 int  pe_load(const char *path, uint32_t preferred_base, pe_image *out, int allow_relocate);

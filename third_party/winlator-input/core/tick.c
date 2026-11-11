@@ -17,6 +17,7 @@ static float cached_speed_x10 = 0.0f;
 static float cached_speed = -1.0f;
 
 __attribute__((hot)) void touch_processor_tick(TouchActionResult* restrict result, uint64_t now_tick) {
+    wc3_timer_registry_invalidate();
     result->count = 0;
     g_current_finger_idx = -1;
 

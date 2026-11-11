@@ -48,13 +48,17 @@ if (-not (Test-Path $clang)) { throw "clang not found: $clang" }
 if (-not (Test-Path $sysroot)) { throw "sysroot not found: $sysroot" }
 
 $dispatchList = Join-Path $genDir 'boot_dispatch_list.h'
+$genBootDispatch = Join-Path $root 'build\lift-tools\gen_boot_dispatch.exe'
+if (-not (Test-Path $genBootDispatch)) {
+    throw "gen_boot_dispatch.exe missing; run tools/lift/build_tools.ps1"
+}
 $prefixArgs = if ($War3Only) {
     @('--prefix', '004', '--prefix', '350')
 } else {
     @('--prefix', '004', '--prefix', '350', '--prefix', '351',
       '--prefix', '352', '--prefix', '353', '--prefix', '600', '--prefix', '6F')
 }
-python (Join-Path $PSScriptRoot 'gen_boot_dispatch.py') `
+& $genBootDispatch `
     --list (Join-Path $LegacyRoot 'build\android\boot_probe\probe_list.h') `
     --out $dispatchList @prefixArgs
 if ($LASTEXITCODE -ne 0) { throw 'dispatch list generation failed' }

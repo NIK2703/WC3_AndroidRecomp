@@ -1,0 +1,7 @@
+DXVK 3.1.1 source: 23b07e9be441f87eb46204d78d9265e565cfbc0f
+DXVK 1.10.3 source: e4fd5e9e8d335e8a2c0814829207cbd421f7e40e (tag v1.10.3)
+DXVK 3.1.1 include/native/directx: 9df86f2341616ef1888ae59919feaa6d4fad693d
+DXVK 3.1.1 include/spirv: 04f10f650d514df88b76d25e83db360142c7b174
+DXVK 3.1.1 include/vulkan: 6802bb4733b63ed5efd3adb308a6c885ef180ea1
+DXVK 3.1.1 subprojects/dxbc-spirv: 76236b827e95381aa1b37bccfb31642896c427f8
+DXVK 3.1.1 subprojects/libdisplay-info: 275e6459c7ab1ddd4b125f28d0440716e4888078 (windows)

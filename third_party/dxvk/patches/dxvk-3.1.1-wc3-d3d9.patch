@@ -1,0 +1,476 @@
+From: WC3 Android recomp
+Subject: [PATCH] D3D9: forced 3.1.1 compatibility fallbacks
+
+DXVK 3.1.1's required-feature table asks for VkPhysicalDeviceVulkan12Features
+::storageBuffer8BitAccess, VK_KHR_maintenance6 and several other extension
+features.  The D3D9 frontend never creates 8-bit storage buffers, and its
+descriptor bind / push-constant paths have exact core-Vulkan equivalents.
+Turnip on Adreno 7xx reports storageBuffer8BitAccess false, and Android's
+system Adreno 0.786 driver reports Vulkan 1.3 without maintenance6; either
+condition makes DXVK reject the adapter or crash on a null maintenance6 entry
+point before D3D9 can render.
+
+When the settings host latches WC3_DXVK_VERSION=3, the archive now treats a
+missing extension-provided required feature as a warning and leaves the
+feature disabled instead of rejecting the adapter.  The explicit
+`dxvk.ignoreMissingExtensions` config option enables the same relaxation for
+diagnostic runs; the forced version always wins.  Core Vulkan 1.3 features,
+a graphics queue, the push-constant limit and VK_KHR_swapchain remain hard
+requirements: without them there is no working device or presentation
+surface.  The known command-entry fallbacks are kept: maintenance5 index
+buffer binding, maintenance6 descriptor-set/push-constant calls, depth-clip
+state, and load-store-op-none attachment operations.
+
+Android's Adreno 0.786 driver also advertises VK_KHR_maintenance5.  The
+D3D9 archive keeps explicit VkShaderModule objects as the default path,
+which is the path DXVK 1.10.3 uses successfully on the same device.  This
+removes one variable from the FF failure but did not by itself make the
+SPIR-V 1.6 pipelines compile; the version fix below is the actual cause.
+The low-memory placed mapping and all descriptor paths are unchanged.  Set
+`dxvk.useShaderModules = false` to restore the maintenance5 path for
+diagnostics.
+
+The fixed-function shaders are now generated with `--target-env vulkan1.1`,
+which produces SPIR-V 1.3.  The Adreno 0.786 shader compiler accepts the
+SPIR-V 1.3 shaders shipped by DXVK 1.10.3 but rejects the 3.1.1 SPIR-V 1.6
+variants at pipeline creation with VK_ERROR_UNKNOWN (-13).  The generated
+headers add a `D3D9_FIXED_FUNCTION_*_SPIRV_VERSION` macro, and the
+`d3d9_fixed_function.cpp` translation unit asserts that each macro is
+0x00010300, so a vendor refresh cannot silently restore the 1.6 headers.
+
+Keep the requirements in the D3D11/D3D12 builds; only the WC3 D3D9 archive is
+changed here.  See docs/GRAPHICS_DECISION.md and ADR-036.
+
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -898,7 +898,13 @@
+ 
+       ENABLE_FEATURE(vk12, bufferDeviceAddress, true),
+       ENABLE_FEATURE(vk12, descriptorIndexing, true),
+-      ENABLE_FEATURE(vk12, storageBuffer8BitAccess, true),
++      // WC3 D3D9 compatibility: D3D9 shaders and the D3D9 frontend never
++      // create 8-bit storage buffers.  Turnip's Adreno 7xx driver advertises
++      // every other required feature but reports this one false, which made
++      // DXVK 3.1.1 reject the adapter before D3D9 could initialise.  Keep the
++      // capability required for the D3D11/D3D12 builds; this archive is the
++      // D3D9-only WC3 build.  See third_party/dxvk/patches and ADR-036.
++      ENABLE_FEATURE(vk12, storageBuffer8BitAccess, false),
+       ENABLE_FEATURE(vk12, storagePushConstant8, false),
+       ENABLE_FEATURE(vk12, shaderUniformTexelBufferArrayDynamicIndexing, false),
+       ENABLE_FEATURE(vk12, shaderStorageTexelBufferArrayDynamicIndexing, false),
+@@ -1060,7 +1066,13 @@
+ 
+       /* Maintenance features, relied on in various parts of the code */
+       ENABLE_EXT_FEATURE(khrMaintenance5, maintenance5, true),
+-      ENABLE_EXT_FEATURE(khrMaintenance6, maintenance6, true),
++      /* WC3 D3D9 compatibility: Android's Adreno 0.786 driver reports
++       * Vulkan 1.3 without maintenance6, which otherwise rejects the adapter
++       * before the D3D9 frontend starts.  The guarded
++       * blockTexelViewCompatibleMultipleLayers path already falls back, and
++       * dxvk_cmdlist.h falls back to the core vkCmdBindDescriptorSets and
++       * vkCmdPushConstants entry points when the extension is unavailable. */
++      ENABLE_EXT_FEATURE(khrMaintenance6, maintenance6, false),
+       ENABLE_EXT_FEATURE(khrMaintenance7, maintenance7, false),
+       ENABLE_EXT_FEATURE(khrMaintenance8, maintenance8, false),
+       ENABLE_EXT_FEATURE(khrMaintenance9, maintenance9, false),
+
+diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
+--- a/src/dxvk/dxvk_cmdlist.h
++++ b/src/dxvk/dxvk_cmdlist.h
+@@ -622,7 +622,33 @@
+     void cmdBindDescriptorSets(
+             DxvkCmdBuffer             cmdBuffer,
+       const VkBindDescriptorSetsInfo* info) {
+-      m_vkd->vkCmdBindDescriptorSets2KHR(getCmdBuffer(cmdBuffer), info);
++      // WC3 D3D9 compatibility: VK_KHR_maintenance6 is optional on Android
++      // drivers, so the extension entry point may be a null pointer.  The
++      // core entry point needs an explicit bind point, so split a mask that
++      // covers both graphics and compute into two equivalent calls.
++      if (likely(m_vkd->vkCmdBindDescriptorSets2KHR != nullptr)) {
++        m_vkd->vkCmdBindDescriptorSets2KHR(getCmdBuffer(cmdBuffer), info);
++        return;
++      }
++
++      constexpr VkShaderStageFlags GraphicsStages =
++        VK_SHADER_STAGE_ALL_GRAPHICS |
++        VK_SHADER_STAGE_TASK_BIT_EXT |
++        VK_SHADER_STAGE_MESH_BIT_EXT;
++
++      if (info->stageFlags & GraphicsStages) {
++        m_vkd->vkCmdBindDescriptorSets(getCmdBuffer(cmdBuffer),
++          VK_PIPELINE_BIND_POINT_GRAPHICS, info->layout, info->firstSet,
++          info->descriptorSetCount, info->pDescriptorSets,
++          info->dynamicOffsetCount, info->pDynamicOffsets);
++      }
++
++      if (info->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
++        m_vkd->vkCmdBindDescriptorSets(getCmdBuffer(cmdBuffer),
++          VK_PIPELINE_BIND_POINT_COMPUTE, info->layout, info->firstSet,
++          info->descriptorSetCount, info->pDescriptorSets,
++          info->dynamicOffsetCount, info->pDynamicOffsets);
++      }
+     }
+ 
+ 
+@@ -1027,7 +1053,15 @@
+     void cmdPushConstants(
+             DxvkCmdBuffer           cmdBuffer,
+       const VkPushConstantsInfo*    info) {
+-      m_vkd->vkCmdPushConstants2KHR(getCmdBuffer(cmdBuffer), info);
++      // WC3 D3D9 compatibility: see cmdBindDescriptorSets.  The core
++      // entry point has the same semantics and does not need a bind point.
++      if (likely(m_vkd->vkCmdPushConstants2KHR != nullptr)) {
++        m_vkd->vkCmdPushConstants2KHR(getCmdBuffer(cmdBuffer), info);
++        return;
++      }
++
++      m_vkd->vkCmdPushConstants(getCmdBuffer(cmdBuffer), info->layout,
++        info->stageFlags, info->offset, info->size, info->pValues);
+     }
+
+diff --git a/src/dxvk/dxvk_options.h b/src/dxvk/dxvk_options.h
+--- a/src/dxvk/dxvk_options.h
++++ b/src/dxvk/dxvk_options.h
+@@ -66,6 +66,19 @@
+     /// Maps host-visible memory below 4 GB when the driver and the
+     /// platform window allow it. Falls back to a normal mapping otherwise.
+     bool lowMemoryPlaced = true;
++
++    /// WC3 forced 3.1.1: accept adapters that lack extension-provided
++    /// required features. Core Vulkan features and VK_KHR_swapchain remain
++    /// mandatory; each ignored feature is logged and stays disabled.
++    bool ignoreMissingExtensions = false;
++
++    /// WC3 D3D9 3.1.1: create explicit VkShaderModule objects for
++    /// pipeline creation instead of chaining VkShaderModuleCreateInfo
++    /// through VkPipelineShaderStageCreateInfo. Some Android drivers
++    /// advertise VK_KHR_maintenance5 but fail to compile pipelines that
++    /// use the pNext shader-module path. Enabled by default in the WC3
++    /// D3D9 archive; set dxvk.useShaderModules = false to opt out.
++    bool useShaderModules = true;
+ 
+     /// Allows full-screen exclusive mode on Windows
+     bool allowFse = false;
+diff --git a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -25,6 +25,23 @@
+     zeroMappedMemory      = config.getOption<bool>    ("dxvk.zeroMappedMemory",       false);
+     lowMemoryPlaced       = config.getOption<bool>    ("dxvk.lowMemoryPlaced",        true);
+     zeroShaderScratchMemory = config.getOption<bool>  ("dxvk.zeroShaderScratchMemory", false);
++
++    /* WC3: an explicit 3.1.1 choice is a compatibility override.  The
++     * settings host latches "3" into WC3_DXVK_VERSION, so the archive can
++     * keep accepting the adapter when an optional extension is missing
++     * instead of failing startup.  A config option is also available for
++     * diagnostics; the forced choice always wins. */
++    std::string forcedVersion = env::getEnvVar("WC3_DXVK_VERSION");
++    ignoreMissingExtensions = config.getOption<bool>("dxvk.ignoreMissingExtensions", false)
++      || (!forcedVersion.empty() && forcedVersion[0] == '3');
++
++    /* WC3 D3D9 3.1.1: Adreno 0.786 reports VK_KHR_maintenance5 but the
++     * observed FF pipeline failure is consistent with the pNext shader-
++     * module path.  Use explicit VkShaderModule objects by default; the
++     * low-memory placed mapping and the descriptor paths are unaffected.
++     * Set dxvk.useShaderModules = false to restore the maintenance5 path. */
++    useShaderModules = config.getOption<bool>("dxvk.useShaderModules", true);
++
+     allowFse              = config.getOption<bool>    ("dxvk.allowFse",               false);
+diff --git a/src/dxvk/dxvk_device_info.h b/src/dxvk/dxvk_device_info.h
+--- a/src/dxvk/dxvk_device_info.h
++++ b/src/dxvk/dxvk_device_info.h
+@@ -402,6 +402,12 @@
+     bool                                  m_hasMeshShader = false;
+     bool                                  m_hasFmask = false;
++
++    /* WC3 forced 3.1.1 compatibility: extension-provided required features
++     * are reported as warnings and left disabled instead of rejecting the
++     * adapter.  Core Vulkan features and VK_KHR_swapchain stay mandatory. */
++    bool                                  m_ignoreMissingExtensions = false;
+ 
+     std::vector<const VkExtensionProperties*> m_extensionList;
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -109,6 +109,8 @@
+           bool                        safeMode) {
++    m_ignoreMissingExtensions = instance.options().ignoreMissingExtensions;
++
+     // Can't query anything on a Vulkan 1.0 device
+     auto vk = instance.vki();
+@@ -786,6 +788,27 @@
+     for (const auto& f : getFeatureList()) {
+       if (f.featureRequired && !(*f.featureEnabled)) {
++        /* A forced 3.1.1 run must not abort just because an extension is
++         * missing.  Extension-provided requirements are logged and left
++         * disabled, so the code that already guards on the feature takes its
++         * fallback path.  Core Vulkan features and the swapchain cannot be
++         * emulated: without them there is no working device or presentation
++         * surface, so those stay fatal. */
++        bool isSwapchain = f.extensionEnabled
++          && !std::strcmp(f.extensionEnabled->extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
++
++        if (m_ignoreMissingExtensions && f.extensionEnabled && !isSwapchain) {
++          std::string ignored = str::format("Ignoring missing required extension feature '", f.readableName, "'");
++          ignored += str::format(" (extension: ", f.extensionEnabled->extensionName, ")");
++          Logger::warn(ignored);
++          continue;
++        }
++
+         std::string message = str::format("Device does not support required feature '", f.readableName, "'");
+diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
+--- a/src/dxvk/dxvk_cmdlist.h
++++ b/src/dxvk/dxvk_cmdlist.h
+@@ -662,9 +662,19 @@
+     void cmdBindIndexBuffer2(
+             VkBuffer                buffer,
+             VkDeviceSize            offset,
+             VkDeviceSize            size,
+             VkIndexType             indexType) {
+-      m_vkd->vkCmdBindIndexBuffer2KHR(getCmdBuffer(),
+-        buffer, offset, size, indexType);
++      // WC3 forced 3.1.1 compatibility: VK_KHR_maintenance5 is optional in
++      // the forced mode.  The core entry point binds the same buffer from
++      // the same offset; D3D9 index buffers do not rely on the extra size
++      // bound that the maintenance5 entry point provides.
++      if (likely(m_vkd->vkCmdBindIndexBuffer2KHR != nullptr)) {
++        m_vkd->vkCmdBindIndexBuffer2KHR(getCmdBuffer(),
++          buffer, offset, size, indexType);
++        return;
++      }
++
++      m_vkd->vkCmdBindIndexBuffer(getCmdBuffer(), buffer, offset, indexType);
+     }
+@@ -1125,7 +1135,11 @@
+     void cmdSetDepthClipState(
+             VkBool32                depthClipEnable) {
+-      m_vkd->vkCmdSetDepthClipEnableEXT(getCmdBuffer(), depthClipEnable);
++      // WC3 forced 3.1.1 compatibility: the extension entry point is null
++      // when VK_EXT_depth_clip_enable is unavailable.  The pipeline keeps
++      // the core default (depth clip enabled) in that case.
++      if (likely(m_vkd->vkCmdSetDepthClipEnableEXT != nullptr))
++        m_vkd->vkCmdSetDepthClipEnableEXT(getCmdBuffer(), depthClipEnable);
+     }
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -601,8 +601,14 @@
+     // Set up depth clip state. Require depth clip support,
+     // this is *not* equivalent to disabling depth clamp.
+-    rsDepthClipInfo.pNext = std::exchange(rsInfo.pNext, &rsDepthClipInfo);
+-    rsDepthClipInfo.depthClipEnable = state.rs.depthClipEnable();
++    // WC3 forced 3.1.1 compatibility: when VK_EXT_depth_clip_enable is
++    // missing, leave the core default (depth clip enabled) instead of
++    // chaining a feature struct that the device was not created with.
++    if (device->features().extDepthClipEnable.depthClipEnable) {
++      rsDepthClipInfo.pNext = std::exchange(rsInfo.pNext, &rsDepthClipInfo);
++      rsDepthClipInfo.depthClipEnable = state.rs.depthClipEnable();
++    }
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -2045,7 +2045,8 @@
+-    bool hasLoadOpNone = m_device->properties().khrMaintenance7.separateDepthStencilAttachmentAccess;
++    bool hasLoadOpNone = m_device->features().khrLoadStoreOpNone
++      && m_device->properties().khrMaintenance7.separateDepthStencilAttachmentAccess;
+@@ -2692,9 +2693,17 @@
+     if (access == DxvkAccess::None) {
+       // If the attachment is not accessed at all, we can set both the
+       // load and store op to NONE if supported by the implementation.
+-      attachment.loadOp = VK_ATTACHMENT_LOAD_OP_NONE;
+-      attachment.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
++      // WC3 forced 3.1.1 compatibility: fall back to DONT_CARE when
++      // VK_KHR_load_store_op_none is missing.
++      if (m_device->features().khrLoadStoreOpNone) {
++        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_NONE;
++        attachment.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
++      } else {
++        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++        attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++      }
+     } else if (access == DxvkAccess::Read) {
+@@ -4226,7 +4235,8 @@
+-          if (m_device->properties().khrMaintenance7.separateDepthStencilAttachmentAccess) {
++          if (m_device->features().khrLoadStoreOpNone
++              && m_device->properties().khrMaintenance7.separateDepthStencilAttachmentAccess) {
+@@ -5762,7 +5772,8 @@
+-          if (m_device->properties().khrMaintenance7.separateDepthStencilAttachmentAccess) {
++          if (m_device->features().khrLoadStoreOpNone
++              && m_device->properties().khrMaintenance7.separateDepthStencilAttachmentAccess) {
+@@ -5779,7 +5790,8 @@
+-          if (m_device->properties().khrMaintenance7.separateDepthStencilAttachmentAccess) {
++          if (m_device->features().khrLoadStoreOpNone
++              && m_device->properties().khrMaintenance7.separateDepthStencilAttachmentAccess) {
+
+ 
+ 
+
+diff --git a/src/dxvk/dxvk_shader.h b/src/dxvk/dxvk_shader.h
+--- a/src/dxvk/dxvk_shader.h
++++ b/src/dxvk/dxvk_shader.h
+@@ -446,6 +446,7 @@
+     std::array<SpirvCodeBuffer,                 5>  m_codeBuffers;
+     std::array<ShaderModuleInfo,                5>  m_moduleInfos = { };
++    std::array<VkShaderModule,                  5>  m_modules     = { };
+     std::array<VkPipelineShaderStageCreateInfo, 5>  m_stageInfos  = { };
+     uint32_t                                        m_stageCount  = 0;
+ 
+diff --git a/src/dxvk/dxvk_shader.cpp b/src/dxvk/dxvk_shader.cpp
+--- a/src/dxvk/dxvk_shader.cpp
++++ b/src/dxvk/dxvk_shader.cpp
+@@ -81,8 +81,17 @@
+   DxvkShaderStageInfo::DxvkShaderStageInfo(const DxvkDevice* device, const DxvkPipelineLayout* layout)
+   : m_device(device) {
+     if (m_device->canUseDescriptorHeap()) {
+       m_mapping = layout->getMappingInfo();
+       m_next = &m_mapping;
+     }
++
++    if (m_device->config().useShaderModules) {
++      static std::atomic<bool> s_logged = { false };
++
++      if (!s_logged.exchange(true)) {
++        Logger::warn("DxvkShaderStageInfo: using explicit VkShaderModule objects "
++                     "instead of the maintenance5 pNext shader-module path");
++      }
++    }
+   }
+ 
+@@ -89,21 +98,49 @@
+   void DxvkShaderStageInfo::addStage(
+     const DxvkShaderMetadata&     metadata,
+           SpirvCodeBuffer&&       code,
+     const VkSpecializationInfo*   specInfo) {
+     // Take ownership of the SPIR-V code buffer
+     auto& codeBuffer = m_codeBuffers[m_stageCount];
+     codeBuffer = std::move(code);
+ 
+-    auto& moduleInfo = m_moduleInfos[m_stageCount].moduleInfo;
+-    moduleInfo = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, m_next };
+-    moduleInfo.codeSize = codeBuffer.size();
+-    moduleInfo.pCode = codeBuffer.data();
+-
+     auto& stageInfo = m_stageInfos[m_stageCount];
+-    stageInfo = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, &moduleInfo };
++    stageInfo = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+     stageInfo.stage = metadata.stage;
+     stageInfo.pName = "main";
+     stageInfo.pSpecializationInfo = specInfo;
+ 
++    if (m_device->config().useShaderModules) {
++      // WC3 D3D9 3.1.1 compatibility: Adreno 0.786 advertises
++      // VK_KHR_maintenance5 but the observed FF pipeline failure is
++      // consistent with the pNext shader-module path.  Create a real
++      // VkShaderModule, which is the path DXVK 1.10.3 uses successfully.
++      VkShaderModuleCreateInfo moduleInfo = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, m_next };
++      moduleInfo.codeSize = codeBuffer.size();
++      moduleInfo.pCode = codeBuffer.data();
++
++      auto vk = m_device->vkd();
++      VkShaderModule module = VK_NULL_HANDLE;
++      VkResult vr = vk->vkCreateShaderModule(vk->device(), &moduleInfo, nullptr, &module);
++
++      if (vr == VK_SUCCESS) {
++        m_modules[m_stageCount] = module;
++        stageInfo.module = module;
++      } else {
++        Logger::err(str::format("DxvkShaderStageInfo: vkCreateShaderModule failed: ", vr));
++
++        // Keep the original path as a fallback so a driver that rejects the
++        // module object itself still produces the pre-existing diagnostics.
++        auto& fallbackInfo = m_moduleInfos[m_stageCount].moduleInfo;
++        fallbackInfo = moduleInfo;
++        stageInfo.pNext = &fallbackInfo;
++      }
++    } else {
++      auto& moduleInfo = m_moduleInfos[m_stageCount].moduleInfo;
++      moduleInfo = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, m_next };
++      moduleInfo.codeSize = codeBuffer.size();
++      moduleInfo.pCode = codeBuffer.data();
++      stageInfo.pNext = &moduleInfo;
++    }
++
+     m_stageCount++;
+   }
+ 
+@@ -137,3 +174,9 @@
+   DxvkShaderStageInfo::~DxvkShaderStageInfo() {
++    auto vk = m_device->vkd();
++
++    for (VkShaderModule module : m_modules) {
++      if (module != VK_NULL_HANDLE)
++        vk->vkDestroyShaderModule(vk->device(), module, nullptr);
++    }
+ 
+   }
+
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -6,6 +6,34 @@
+   'shaders/d3d9_convert_w11v11u10.comp',
+   'shaders/d3d9_convert_nv12.comp',
+   'shaders/d3d9_convert_yv12.comp',
++])
++
++# WC3 Android/Adreno: the precompiled fixed-function shaders must be SPIR-V
++# 1.3.  The Adreno 725 driver 0.786.0 rejects the SPIR-V 1.6 variants at
++# pipeline creation, while the 1.10.3 Vulkan 1.1 shaders work on the same
++# device.  Use a dedicated generator so only the fixed-function shaders are
++# lowered to vulkan1.1; the conversion shaders keep the global target env.
++# The WC3 Android build consumes pre-generated headers that add the
++# SPIRV_VERSION macro asserted in d3d9_fixed_function.cpp.  A plain
++# glslangValidator regeneration lacks that macro and fails the assertion on
++# purpose.
++glsl_args_ff = []
++foreach arg : glsl_args
++  if arg == 'vulkan1.3'
++    glsl_args_ff += 'vulkan1.1'
++  else
++    glsl_args_ff += arg
++  endif
++endforeach
++
++glsl_generator_ff = generator(
++  glsl_compiler,
++  output    : [ '@BASENAME@.h' ],
++  depfile   : '@BASENAME@.h.d',
++  arguments : glsl_args_ff,
++)
++
++d3d9_ff_shaders = files([
+   'shaders/d3d9_fixed_function_vert.vert',
+   'shaders/d3d9_fixed_function_frag.frag',
+   'shaders/d3d9_fixed_function_frag_sample.frag',
+@@ -55,6 +83,7 @@
+ # d3d9.dll / DXVK DLL is loaded at run time.
+ d3d9_lib = static_library(dxvk_name_prefix+'d3d9', d3d9_src,
+   glsl_generator.process(d3d9_shaders),
++  glsl_generator_ff.process(d3d9_ff_shaders),
+   dependencies        : [ dxbc_spirv_dep, dxvk_dep ],
+   include_directories : dxvk_include_path,
+   install             : false,
+
+diff --git a/src/d3d9/d3d9_fixed_function.cpp b/src/d3d9/d3d9_fixed_function.cpp
+--- a/src/d3d9/d3d9_fixed_function.cpp
++++ b/src/d3d9/d3d9_fixed_function.cpp
+@@ -15,6 +15,17 @@
+ #include <d3d9_fixed_function_vert.h>
+ #include <d3d9_fixed_function_frag.h>
+ #include <d3d9_fixed_function_frag_sample.h>
++
++// WC3 Android/Adreno: the fixed-function shaders must be SPIR-V 1.3.
++// The Adreno 725 driver 0.786.0 accepts the 1.10.3 SPIR-V 1.3 shaders and
++// rejects the 3.1.1 SPIR-V 1.6 variants at pipeline creation with
++// VK_ERROR_UNKNOWN (-13).  Keep these headers generated with vulkan1.1.
++static_assert(D3D9_FIXED_FUNCTION_VERT_SPIRV_VERSION == 0x00010300u,
++  "d3d9_fixed_function_vert must be SPIR-V 1.3");
++static_assert(D3D9_FIXED_FUNCTION_FRAG_SPIRV_VERSION == 0x00010300u,
++  "d3d9_fixed_function_frag must be SPIR-V 1.3");
++static_assert(D3D9_FIXED_FUNCTION_FRAG_SAMPLE_SPIRV_VERSION == 0x00010300u,
++  "d3d9_fixed_function_frag_sample must be SPIR-V 1.3");
+ 
+ namespace dxvk {
+ 
+

@@ -42,6 +42,11 @@ typedef struct {
 // Gesture handler tick (processes long-press, single-tap-hold, double-tap, second-finger timeouts)
 void gesture_tick(uint64_t now_tick, TouchActionResult* restrict result);
 
+// Earliest gesture timer deadline in engine ticks, or UINT64_MAX.  Mirrors the
+// outer and per-finger gates in gesture_tick()/handle_tick() so the host does
+// not wake for a timer that the tick would ignore.
+uint64_t gesture_next_deadline_tick(void);
+
 // Gesture handler state machine
 void on_drag_start(TouchFinger* f, TouchActionResult* restrict result);
 bool gesture_is_within_tap_distance(float x, float y);

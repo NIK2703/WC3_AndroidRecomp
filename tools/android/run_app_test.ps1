@@ -8,7 +8,6 @@
 
 [CmdletBinding()]
 param(
-    [switch]$Clean,
     [string]$Serial = '',
     [string]$PeDir = 'E:\Games\Warcraft III'
 )
@@ -63,11 +62,8 @@ if (-not (Test-Path $war3) -or -not (Test-Path $game)) {
     exit 2
 }
 
-if ($Clean) {
-    Remove-Item $outDir -Recurse -Force -ErrorAction SilentlyContinue
-}
 $ErrorActionPreference = 'Continue'
-& (Join-Path $PSScriptRoot 'build_apk.ps1') -Clean:$Clean -NativeDebug -Serial $Serial 2>&1 |
+& (Join-Path $PSScriptRoot 'build_apk.ps1') -NativeDebug -Serial $Serial 2>&1 |
     ForEach-Object { Write-Host $_ }
 $buildRc = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'

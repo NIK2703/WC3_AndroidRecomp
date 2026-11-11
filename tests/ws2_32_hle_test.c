@@ -188,8 +188,8 @@ void wc3_legacy_guest_zero(uint32_t addr, uint32_t size)
 
 static uint32_t g_last_error;
 
-void wc3_legacy_set_last_error(uint32_t code) { g_last_error = code; }
-uint32_t wc3_legacy_get_last_error(void) { return g_last_error; }
+void wc3_legacy_set_last_error(CPU *c, uint32_t code) { (void)c; g_last_error = code; }
+uint32_t wc3_legacy_get_last_error(CPU *c) { (void)c; return g_last_error; }
 
 /* ---- fake as-built registry ------------------------------------------- */
 
@@ -743,11 +743,11 @@ static void fake_prev_create_iocp(CPU *c)
     uint32_t file = wc3_legacy_arg32(c, 0);
     uint32_t port = wc3_legacy_arg32(c, 1);
     if (!file && !port) {
-        wc3_legacy_set_last_error(0u);
+        wc3_legacy_set_last_error(NULL, 0u);
         c->eax = FAKE_PORT;
         return;
     }
-    wc3_legacy_set_last_error(6u);
+    wc3_legacy_set_last_error(NULL, 6u);
     c->eax = 0;
 }
 
@@ -763,14 +763,14 @@ static void fake_prev_gqcs(CPU *c)
     wc3_legacy_wr32g(wc3_legacy_arg32(c, 1), 0u);
     wc3_legacy_wr32g(wc3_legacy_arg32(c, 2), 0u);
     wc3_legacy_wr32g(wc3_legacy_arg32(c, 3), 0u);
-    wc3_legacy_set_last_error(258u);
+    wc3_legacy_set_last_error(NULL, 258u);
     c->eax = 0;
 }
 
 static void fake_prev_close(CPU *c)
 {
     (void)c;
-    wc3_legacy_set_last_error(0u);
+    wc3_legacy_set_last_error(NULL, 0u);
     c->eax = 1;
 }
 
@@ -781,7 +781,7 @@ static void fake_prev_read_file(CPU *c)
 {
     (void)c;
     g_prev_read_calls++;
-    wc3_legacy_set_last_error(0u);
+    wc3_legacy_set_last_error(NULL, 0u);
     c->eax = 1;
 }
 
@@ -789,7 +789,7 @@ static void fake_prev_write_file(CPU *c)
 {
     (void)c;
     g_prev_write_calls++;
-    wc3_legacy_set_last_error(0u);
+    wc3_legacy_set_last_error(NULL, 0u);
     c->eax = 1;
 }
 
@@ -1172,7 +1172,7 @@ static int test_acceptex_completion(void)
     c = call_named("KERNEL32.dll", "GetQueuedCompletionStatus", idle_gqcs_args,
                    5u);
     REQUIRE(c.eax == 0u);
-    REQUIRE(wc3_legacy_get_last_error() == 258u);
+    REQUIRE(wc3_legacy_get_last_error(NULL) == 258u);
     REQUIRE(g_gqcs_calls > 1u);
     REQUIRE(g_last_gqcs_timeout < 60u);
 
@@ -1212,7 +1212,7 @@ static int test_acceptex_completion(void)
     REQUIRE(wc3_legacy_rd32g(SCRATCH_LOCAL) == 0u);
     REQUIRE(wc3_legacy_rd32g(SCRATCH_REMOTE) == FAKE_PORT_KEY);
     REQUIRE(wc3_legacy_rd32g(SCRATCH_OUTLEN) == SCRATCH_OVERLAP);
-    REQUIRE(wc3_legacy_get_last_error() == 0u);
+    REQUIRE(wc3_legacy_get_last_error(NULL) == 0u);
 
     /* The address buffer is receive + local + remote, with local at +0 and
      * remote at +local_length (32). */
@@ -1576,7 +1576,7 @@ static int test_socket_readwrite_completion(void)
     };
     c = call_named("KERNEL32.dll", "ReadFile", read_args, 5u);
     REQUIRE(c.eax == 0u);
-    REQUIRE(wc3_legacy_get_last_error() == 997u);
+    REQUIRE(wc3_legacy_get_last_error(NULL) == 997u);
     REQUIRE(wc3_legacy_rd32g(SCRATCH_BYTES2) == 0u);
 
     /* The overlapped caller may reuse its stack slot immediately; the
@@ -1605,7 +1605,7 @@ static int test_socket_readwrite_completion(void)
     };
     c = call_named("KERNEL32.dll", "WriteFile", write_args, 5u);
     REQUIRE(c.eax == 0u);
-    REQUIRE(wc3_legacy_get_last_error() == 997u);
+    REQUIRE(wc3_legacy_get_last_error(NULL) == 997u);
     wc3_legacy_wr32g(SCRATCH_BYTES2, 0xA5A5A5A5u);
 
     bytes = key = ov = 0;
@@ -1629,7 +1629,7 @@ static int test_socket_readwrite_completion(void)
     };
     c = call_named("KERNEL32.dll", "ReadFile", server_read, 5u);
     REQUIRE(c.eax == 0u);
-    REQUIRE(wc3_legacy_get_last_error() == 997u);
+    REQUIRE(wc3_legacy_get_last_error(NULL) == 997u);
     bytes = key = ov = 0;
     REQUIRE(wait_completion(FAKE_PORT, 1000u, &bytes, &key, &ov));
     REQUIRE(bytes == 3u);
@@ -1646,7 +1646,7 @@ static int test_socket_readwrite_completion(void)
     };
     c = call_named("KERNEL32.dll", "WriteFile", server_write, 5u);
     REQUIRE(c.eax == 0u);
-    REQUIRE(wc3_legacy_get_last_error() == 997u);
+    REQUIRE(wc3_legacy_get_last_error(NULL) == 997u);
     bytes = key = ov = 0;
     REQUIRE(wait_completion(FAKE_PORT, 1000u, &bytes, &key, &ov));
     REQUIRE(bytes == 3u);

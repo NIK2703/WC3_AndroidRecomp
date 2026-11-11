@@ -274,7 +274,7 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
         return e;
     }
     if (LST(m, "fnclex", "fclex")) {
-        lf_push(&e, "c->fpu_sw &= ~0x003Fu; softfloat_exceptionFlags = 0;");
+        lf_push(&e, "x87_fnclex(c);");
         return e;
     }
     if (LST(m, "fninit", "finit")) { lf_push(&e, "cpu_x87_init(c);"); return e; }

@@ -13,6 +13,7 @@
  * fabricated return value.
  */
 #include "hle_bridge.h"
+#include "dyn_x86.h"
 #include "direct_call.h"
 #include "convert_hle.h"
 #include "crt_hle.h"
@@ -81,7 +82,7 @@ typedef struct {
 } LiftEnt;
 
 /* O-24/O-53: the dispatch map used to be rebuilt from a separate g_lift[]
- * table on every startup.  tools/gen_boot_dispatch.py now publishes the same
+ * table on every startup.  tools/lift/csrc_local/gen_boot_dispatch.c now publishes the same
  * open-addressing map as a constant, and each slot owns both the guest VA and
  * the lifted function pointer.  find_lifted() therefore makes one probe read
  * instead of reading g_lift_hash[e - 1] after g_lift[e - 1].  The Knuth
@@ -210,6 +211,11 @@ static void dispatch_unknown(CPU *c, uint32_t target, int tail)
 static void dispatch_common(CPU *c, uint32_t target, int tail,
                             wc3_lifted_fn resolved)
 {
+#if WC3_DEBUG
+    /* Keep the guest register file visible to the crash handler even when the
+     * faulting thread has not called an import yet. */
+    wc3_legacy_note_cpu(c);
+#endif
     int chained = 0;
     int have_fn = resolved != NULL;
     void (*pending_fn)(CPU *) = resolved;
@@ -242,7 +248,14 @@ static void dispatch_common(CPU *c, uint32_t target, int tail,
             } else {
                 void (*fn)(CPU *) = find_lifted(target);
                 if (!fn) {
-                    dispatch_unknown(c, target, tail || chained);
+                    /* ver-IX86-3 compiles CheckRevision's equation into a
+                     * guest page that has no lifted C body.  Only ranges
+                     * registered by VirtualAlloc with an execute protection
+                     * reach this path; everything else remains fatal. */
+                    if (wc3_dyn_x86_contains(target))
+                        wc3_dyn_x86_run(c, target);
+                    else
+                        dispatch_unknown(c, target, tail || chained);
                 } else {
                     fn(c);
                 }

@@ -1,0 +1,762 @@
+diff --git a/include/vulkan/vulkan_android.h b/include/vulkan/vulkan_android.h
+new file mode 100644
+index 0000000..4b428be
+--- /dev/null
++++ b/include/vulkan/vulkan_android.h
+@@ -0,0 +1,52 @@
++#ifndef VULKAN_ANDROID_H_
++#define VULKAN_ANDROID_H_ 1
++
++/*
++** Copyright 2015-2021 The Khronos Group Inc.
++**
++** SPDX-License-Identifier: Apache-2.0
++*/
++
++/*
++** This header is generated from the Khronos Vulkan XML API Registry.
++**
++** The tree carries vulkan_win32.h for the Windows host but shipped without
++** this file, so VK_USE_PLATFORM_ANDROID_KHR could not be used.  It is the
++** unmodified Khronos header (spec version 6) so that the Android build uses
++** the same `#ifdef VK_USE_PLATFORM_*` pattern as the Windows one.
++*/
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include <android/native_window.h>
++
++#ifndef VK_KHR_android_surface
++#define VK_KHR_android_surface 1
++#define VK_KHR_ANDROID_SURFACE_SPEC_VERSION 6
++#define VK_KHR_ANDROID_SURFACE_EXTENSION_NAME "VK_KHR_android_surface"
++typedef VkFlags VkAndroidSurfaceCreateFlagsKHR;
++typedef struct VkAndroidSurfaceCreateInfoKHR {
++    VkStructureType                   sType;
++    const void*                       pNext;
++    VkAndroidSurfaceCreateFlagsKHR    flags;
++    ANativeWindow*                    window;
++} VkAndroidSurfaceCreateInfoKHR;
++
++typedef VkResult (VKAPI_PTR *PFN_vkCreateAndroidSurfaceKHR)(VkInstance instance, const VkAndroidSurfaceCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSurfaceKHR* pSurface);
++
++#ifndef VK_NO_PROTOTYPES
++VKAPI_ATTR VkResult VKAPI_CALL vkCreateAndroidSurfaceKHR(
++    VkInstance                                  instance,
++    const VkAndroidSurfaceCreateInfoKHR*        pCreateInfo,
++    const VkAllocationCallbacks*                pAllocator,
++    VkSurfaceKHR*                               pSurface);
++#endif
++#endif /* VK_KHR_android_surface */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/d3d11/d3d11_include.h b/src/d3d11/d3d11_include.h
+index 1598088..fa831f2 100644
+--- a/src/d3d11/d3d11_include.h
++++ b/src/d3d11/d3d11_include.h
+@@ -25,7 +25,11 @@
+ // directly, although others from the same header work.
+ // Some structures are missing from the mingw headers.
+ #ifndef _MSC_VER
+-#if !defined(__MINGW64_VERSION_MAJOR) || __MINGW64_VERSION_MAJOR < 9
++// The Android build compiles against the newer Wine-derived DirectX headers,
++// which already define this enum; DXVK_HAVE_NATIVE_D3D11_FORMAT_SUPPORT2 is
++// set by runtime/android/dxvk_shim/windows.h in that case.
++#if !defined(DXVK_HAVE_NATIVE_D3D11_FORMAT_SUPPORT2) && \
++    (!defined(__MINGW64_VERSION_MAJOR) || __MINGW64_VERSION_MAJOR < 9)
+ typedef enum D3D11_FORMAT_SUPPORT2 { 
+   D3D11_FORMAT_SUPPORT2_UAV_ATOMIC_ADD                                = 0x1,
+   D3D11_FORMAT_SUPPORT2_UAV_ATOMIC_BITWISE_OPS                        = 0x2,
+diff --git a/src/d3d11/d3d11_shader.cpp b/src/d3d11/d3d11_shader.cpp
+index 800bdea..84c044f 100644
+--- a/src/d3d11/d3d11_shader.cpp
++++ b/src/d3d11/d3d11_shader.cpp
+@@ -27,7 +27,7 @@ namespace dxvk {
+     const std::string dumpPath = env::getEnvVar("DXVK_SHADER_DUMP_PATH");
+     
+     if (dumpPath.size() != 0) {
+-      reader.store(std::ofstream(str::tows(str::format(dumpPath, "/", name, ".dxbc").c_str()).c_str(),
++      reader.store(std::ofstream(str::toPath(str::format(dumpPath, "/", name, ".dxbc").c_str()).c_str(),
+         std::ios_base::binary | std::ios_base::trunc));
+     }
+     
+@@ -47,7 +47,7 @@ namespace dxvk {
+     
+     if (dumpPath.size() != 0) {
+       std::ofstream dumpStream(
+-        str::tows(str::format(dumpPath, "/", name, ".spv").c_str()).c_str(),
++        str::toPath(str::format(dumpPath, "/", name, ".spv").c_str()).c_str(),
+         std::ios_base::binary | std::ios_base::trunc);
+       
+       m_shader->dump(dumpStream);
+diff --git a/src/d3d9/d3d9_fixed_function.cpp b/src/d3d9/d3d9_fixed_function.cpp
+index 37f6e1a..00d14ff 100644
+--- a/src/d3d9/d3d9_fixed_function.cpp
++++ b/src/d3d9/d3d9_fixed_function.cpp
+@@ -2359,7 +2359,7 @@ namespace dxvk {
+ 
+     if (dumpPath.size() != 0) {
+       std::ofstream dumpStream(
+-        str::tows(str::format(dumpPath, "/", Name, ".spv").c_str()).c_str(),
++        str::toPath(str::format(dumpPath, "/", Name, ".spv").c_str()).c_str(),
+         std::ios_base::binary | std::ios_base::trunc);
+       
+       m_shader->dump(dumpStream);
+diff --git a/src/d3d9/d3d9_include.h b/src/d3d9/d3d9_include.h
+index 8762265..c49d721 100644
+--- a/src/d3d9/d3d9_include.h
++++ b/src/d3d9/d3d9_include.h
+@@ -77,18 +77,19 @@
+ #define D3DPRESENT_FORCEIMMEDIATE              0x00000100L
+ #endif
+ 
+-// MinGW headers are broken. Who'dve guessed?
++// Modern MinGW/UCRT64 headers already define D3DDEVINFO_RESOURCEMANAGER.
+ #ifndef _MSC_VER
+-typedef struct _D3DDEVINFO_RESOURCEMANAGER
+-{
+-  char dummy;
+-} D3DDEVINFO_RESOURCEMANAGER, * LPD3DDEVINFO_RESOURCEMANAGER;
+-
+ #ifndef __WINE__
+ extern "C" WINUSERAPI WINBOOL WINAPI SetProcessDPIAware(VOID);
+ #endif
+ #endif
+ 
++// Wine's d3d9types.h spells this D3DDEVINFO_D3DRESOURCEMANAGER, while the
++// Windows SDK and DXVK use the shorter name.
++#if defined(__ANDROID__)
++typedef D3DDEVINFO_D3DRESOURCEMANAGER D3DDEVINFO_RESOURCEMANAGER;
++#endif
++
+ // This is the managed pool on D3D9Ex, it's just hidden!
+ #define D3DPOOL_MANAGED_EX D3DPOOL(6)
+ 
+diff --git a/src/d3d9/d3d9_shader.cpp b/src/d3d9/d3d9_shader.cpp
+index 8b5bb8b..434f394 100644
+--- a/src/d3d9/d3d9_shader.cpp
++++ b/src/d3d9/d3d9_shader.cpp
+@@ -31,7 +31,7 @@ namespace dxvk {
+       DxsoReader reader(
+         reinterpret_cast<const char*>(pShaderBytecode));
+ 
+-      reader.store(std::ofstream(str::tows(str::format(dumpPath, "/", name, ".dxso").c_str()).c_str(),
++      reader.store(std::ofstream(str::toPath(str::format(dumpPath, "/", name, ".dxso").c_str()).c_str(),
+         std::ios_base::binary | std::ios_base::trunc), bytecodeLength);
+ 
+       char comment[2048];
+@@ -43,7 +43,7 @@ namespace dxvk {
+         &blob);
+       
+       if (SUCCEEDED(hr)) {
+-        std::ofstream disassembledOut(str::tows(str::format(dumpPath, "/", name, ".dxso.dis").c_str()).c_str(), std::ios_base::binary | std::ios_base::trunc);
++        std::ofstream disassembledOut(str::toPath(str::format(dumpPath, "/", name, ".dxso.dis").c_str()).c_str(), std::ios_base::binary | std::ios_base::trunc);
+         disassembledOut.write(
+           reinterpret_cast<const char*>(blob->GetBufferPointer()),
+           blob->GetBufferSize());
+@@ -82,7 +82,7 @@ namespace dxvk {
+     
+     if (dumpPath.size() != 0) {
+       std::ofstream dumpStream(
+-        str::tows(str::format(dumpPath, "/", name, ".spv").c_str()).c_str(),
++        str::toPath(str::format(dumpPath, "/", name, ".spv").c_str()).c_str(),
+         std::ios_base::binary | std::ios_base::trunc);
+       
+       m_shaders[0]->dump(dumpStream);
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index 306a79b..7d821f4 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -4,8 +4,27 @@
+ 
+ #include "d3d9_hud.h"
+ 
++#ifdef __ANDROID__
++#include <android/native_window.h>
++#include <mutex>
++#include <unordered_map>
++
++/* The activity replaces its ANativeWindow across pause/resume.  The guest
++ * HWND is only an opaque token and never changes, so DXVK's normal
++ * window-changed check cannot see the replacement.  The platform layer
++ * publishes a generation alongside the window; Present uses it to drop the
++ * old VkSurfaceKHR/swap chain and build a new one. */
++extern "C" ANativeWindow* wc3_android_window_state(uint32_t* generation);
++#endif
++
+ namespace dxvk {
+ 
++#ifdef __ANDROID__
++  static std::mutex g_androidSwapchainMutex;
++  static std::unordered_map<const D3D9SwapChainEx*, uint32_t>
++      g_androidSwapchainGenerations;
++#endif
++
+ 
+   struct D3D9WindowData {
+     bool unicode;
+@@ -211,10 +230,25 @@ namespace dxvk {
+     // Apply initial window mode and fullscreen state
+     if (!m_presentParams.Windowed && FAILED(EnterFullscreenMode(pPresentParams, pFullscreenDisplayMode)))
+       throw DxvkError("D3D9: Failed to set initial fullscreen state");
++
++#ifdef __ANDROID__
++    uint32_t windowGeneration = 0;
++    if (wc3_android_window_state(&windowGeneration)) {
++      std::lock_guard<std::mutex> lock(g_androidSwapchainMutex);
++      g_androidSwapchainGenerations[this] = windowGeneration;
++    }
++#endif
+   }
+ 
+ 
+   D3D9SwapChainEx::~D3D9SwapChainEx() {
++#ifdef __ANDROID__
++    {
++      std::lock_guard<std::mutex> lock(g_androidSwapchainMutex);
++      g_androidSwapchainGenerations.erase(this);
++    }
++#endif
++
+     DestroyBackBuffers();
+ 
+     ResetWindowProc(m_window);
+@@ -252,6 +286,38 @@ namespace dxvk {
+           DWORD    dwFlags) {
+     D3D9DeviceLock lock = m_parent->LockDevice();
+ 
++#ifdef __ANDROID__
++    uint32_t windowGeneration = 0;
++    if (!wc3_android_window_state(&windowGeneration)) {
++      /* The activity has no surface while it is backgrounded.  The guest and
++       * its D3D device keep running; the next present after resume rebuilds
++       * the presenter from the replacement window. */
++      return D3D_OK;
++    }
++
++    bool windowChanged = false;
++    {
++      std::lock_guard<std::mutex> lock(g_androidSwapchainMutex);
++      auto entry = g_androidSwapchainGenerations.find(this);
++      if (entry == g_androidSwapchainGenerations.end()) {
++        g_androidSwapchainGenerations.emplace(this, windowGeneration);
++        /* The presenter was created before this map existed.  Rebuild it once
++         * so it is guaranteed to describe the window we just observed. */
++        windowChanged = true;
++      } else if (entry->second != windowGeneration) {
++        entry->second = windowGeneration;
++        windowChanged = true;
++      }
++    }
++
++    if (windowChanged) {
++      m_device->waitForSubmission(&m_presentStatus);
++      m_device->waitForIdle();
++      m_presenter = nullptr;
++      m_dirty = true;
++    }
++#endif
++
+     uint32_t presentInterval = m_presentParams.PresentationInterval;
+ 
+     // This is not true directly in d3d9 to to timing differences that don't matter for us.
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 2cd8951..45e5ab3 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -1,5 +1,3 @@
+-d3d9_res = wrc_generator.process('version.rc')
+-
+ d3d9_shaders = files([
+   'shaders/d3d9_convert_yuy2_uyvy.comp',
+   'shaders/d3d9_convert_l6v5u5.comp',
+@@ -42,15 +40,15 @@ d3d9_src = [
+   'd3d9_annotation.cpp'
+ ]
+ 
+-d3d9_dll = shared_library('d3d9'+dll_ext, d3d9_src, glsl_generator.process(d3d9_shaders), d3d9_res,
+-  name_prefix         : '',
++# WC3 recompilation: static archive for the multi-version host.
++d3d9_lib = static_library('d3d9', d3d9_src,
++  glsl_generator.process(d3d9_shaders),
+   dependencies        : [ dxso_dep, dxvk_dep ],
+   include_directories : dxvk_include_path,
+-  install             : true,
+-  vs_module_defs      : 'd3d9'+def_spec_ext,
++  install             : false,
+ )
+ 
+ d3d9_dep = declare_dependency(
+-  link_with           : [ d3d9_dll ],
++  link_with           : [ d3d9_lib ],
+   include_directories : [ dxvk_include_path ],
+ )
+diff --git a/src/dxvk/dxvk_cmdlist.cpp b/src/dxvk/dxvk_cmdlist.cpp
+index 565b9a7..d9241cb 100644
+--- a/src/dxvk/dxvk_cmdlist.cpp
++++ b/src/dxvk/dxvk_cmdlist.cpp
+@@ -217,7 +217,26 @@ namespace dxvk {
+     if (m_device->features().khrTimelineSemaphore.timelineSemaphore)
+       submitInfo.pNext = &timelineInfo;
+     
+-    return m_vkd->vkQueueSubmit(queue, 1, &submitInfo, fence);
++    VkResult result = m_vkd->vkQueueSubmit(queue, 1, &submitInfo, fence);
++
++#ifdef __ANDROID__
++    /* The Adreno driver intermittently rejects a perfectly ordinary submit
++     * with VK_ERROR_INITIALIZATION_FAILED (-3), roughly once every ten runs
++     * and with no visible pattern: it happens on the first scene submit of a
++     * 3-frame probe that does nothing but Clear, and never on the one before
++     * it.  -3 is a *rejection*, not VK_ERROR_DEVICE_LOST: the batch was not
++     * executed and the queue is still usable, so re-submitting the same
++     * VkSubmitInfo is safe.  Everything the batch references (images, buffers,
++     * the fence) is still alive at this point - DXVK only frees them after the
++     * fence signals. */
++    for (unsigned attempt = 1; result == VK_ERROR_INITIALIZATION_FAILED && attempt <= 4; attempt++) {
++      fprintf(stderr, "[submit-retry] attempt=%u r=%d cmds=%u\n",
++        attempt, int(result), submitInfo.commandBufferCount);
++      result = m_vkd->vkQueueSubmit(queue, 1, &submitInfo, fence);
++    }
++#endif
++
++    return result;
+   }
+   
+   void DxvkCommandList::cmdBeginDebugUtilsLabel(VkDebugUtilsLabelEXT *pLabelInfo) {
+diff --git a/src/dxvk/dxvk_queue.cpp b/src/dxvk/dxvk_queue.cpp
+index 86f0b4e..7ca9f86 100644
+--- a/src/dxvk/dxvk_queue.cpp
++++ b/src/dxvk/dxvk_queue.cpp
+@@ -122,17 +122,33 @@ namespace dxvk {
+       // On success, pass it on to the queue thread
+       lock = std::unique_lock<dxvk::mutex>(m_mutex);
+ 
++      const bool isCmdList = entry.submit.cmdList != nullptr;
++
+       if (status == VK_SUCCESS) {
+-        if (entry.submit.cmdList != nullptr)
++        if (isCmdList)
+           m_finishQueue.push(std::move(entry));
+-      } else if (status == VK_ERROR_DEVICE_LOST || entry.submit.cmdList != nullptr) {
+-        Logger::err(str::format("DxvkSubmissionQueue: Command submission failed: ", status));
+-        m_lastError = status;
+-        m_device->waitForIdle();
+       }
+ 
+       m_submitQueue.pop();
+       m_submitCond.notify_all();
++
++      /* A failed submission must be reported, not turned into a hang.
++       *
++       * DxvkDevice::waitForIdle() calls DxvkSubmissionQueue::synchronize(),
++       * which takes this same non-recursive m_mutex, and then waits for
++       * m_submitQueue to drain - a queue that only this thread empties.  Doing
++       * both while holding the lock is a self-deadlock: on the Adreno driver,
++       * one rejected vkQueueSubmit (VK_ERROR_INITIALIZATION_FAILED) was enough
++       * to wedge the whole process with all four threads in futex_wait, and
++       * the error above was the last line in the log.  Pop first, release the
++       * lock, then idle. */
++      if (status != VK_SUCCESS && (status == VK_ERROR_DEVICE_LOST || isCmdList)) {
++        Logger::err(str::format("DxvkSubmissionQueue: Command submission failed: ", status));
++        m_lastError = status;
++        lock.unlock();
++        m_device->waitForIdle();
++        lock.lock();
++      }
+     }
+   }
+   
+diff --git a/src/dxvk/dxvk_state_cache.cpp b/src/dxvk/dxvk_state_cache.cpp
+index 3cbf092..912191d 100644
+--- a/src/dxvk/dxvk_state_cache.cpp
++++ b/src/dxvk/dxvk_state_cache.cpp
+@@ -1004,7 +1004,7 @@ namespace dxvk {
+   }
+ 
+ 
+-  std::wstring DxvkStateCache::getCacheFileName() const {
++  str::path_string DxvkStateCache::getCacheFileName() const {
+     std::string path = getCacheDir();
+ 
+     if (!path.empty() && *path.rbegin() != '/')
+@@ -1012,7 +1012,7 @@ namespace dxvk {
+     
+     std::string exeName = env::getExeBaseName();
+     path += exeName + ".dxvk-cache";
+-    return str::tows(path.c_str());
++    return str::toPath(path);
+   }
+ 
+ 
+diff --git a/src/dxvk/dxvk_state_cache.h b/src/dxvk/dxvk_state_cache.h
+index f23c85f..b0030fa 100644
+--- a/src/dxvk/dxvk_state_cache.h
++++ b/src/dxvk/dxvk_state_cache.h
+@@ -186,7 +186,7 @@ namespace dxvk {
+ 
+     void createWriter();
+ 
+-    std::wstring getCacheFileName() const;
++    str::path_string getCacheFileName() const;
+     
+     std::string getCacheDir() const;
+ 
+diff --git a/src/dxvk/platform/dxvk_win32_exts.cpp b/src/dxvk/platform/dxvk_win32_exts.cpp
+index 25c81cc..90e4ca7 100644
+--- a/src/dxvk/platform/dxvk_win32_exts.cpp
++++ b/src/dxvk/platform/dxvk_win32_exts.cpp
+@@ -5,14 +5,23 @@ namespace dxvk {
+   DxvkPlatformExts DxvkPlatformExts::s_instance;
+ 
+   std::string_view DxvkPlatformExts::getName() {
++#ifdef __ANDROID__
++    return "Android WSI";
++#else
+     return "Win32 WSI";
++#endif
+   }
+ 
+ 
+   DxvkNameSet DxvkPlatformExts::getInstanceExtensions() {
+     DxvkNameSet names;
++#ifdef __ANDROID__
++    /* Same role as VK_KHR_win32_surface on the Windows host: the presenter
++     * turns the process's window into a VkSurfaceKHR through it. */
++    names.add(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
++#else
+     names.add(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+-
++#endif
+     return names;
+   }
+ 
+diff --git a/src/util/config/config.cpp b/src/util/config/config.cpp
+index 860debf..1b312a1 100644
+--- a/src/util/config/config.cpp
++++ b/src/util/config/config.cpp
+@@ -841,7 +841,7 @@ namespace dxvk {
+       filePath = "dxvk.conf";
+     
+     // Open the file if it exists
+-    std::ifstream stream(str::tows(filePath.c_str()).c_str());
++    std::ifstream stream(str::toPath(filePath).c_str());
+ 
+     if (!stream)
+       return config;
+diff --git a/src/util/config/config.h b/src/util/config/config.h
+index f947272..51f209d 100644
+--- a/src/util/config/config.h
++++ b/src/util/config/config.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <cstdint>
+ #include <string>
+ #include <unordered_map>
+ 
+diff --git a/src/util/log/log.cpp b/src/util/log/log.cpp
+index 59c9e60..fb4add1 100644
+--- a/src/util/log/log.cpp
++++ b/src/util/log/log.cpp
+@@ -10,7 +10,7 @@ namespace dxvk {
+       auto path = getFileName(file_name);
+ 
+       if (!path.empty())
+-        m_fileStream = std::ofstream(str::tows(path.c_str()).c_str());
++        m_fileStream = std::ofstream(str::toPath(path).c_str());
+     }
+   }
+   
+diff --git a/src/util/util_bit.h b/src/util/util_bit.h
+index 7682ace..a09f81b 100644
+--- a/src/util/util_bit.h
++++ b/src/util/util_bit.h
+@@ -55,7 +55,8 @@ namespace dxvk::bit {
+     return _tzcnt_u32(n);
+     #elif defined(__BMI__)
+     return __tzcnt_u32(n);
+-    #elif defined(__GNUC__) || defined(__clang__)
++    #elif (defined(__GNUC__) || defined(__clang__)) && \
++          (defined(__i386__) || defined(__x86_64__))
+     uint32_t res;
+     uint32_t tmp;
+     asm (
+@@ -65,6 +66,10 @@ namespace dxvk::bit {
+       : "=&r" (res), "=&r" (tmp)
+       : "r" (n));
+     return res;
++    #elif defined(__GNUC__) || defined(__clang__)
++    // bsf is x86-only; everywhere else the builtin is both correct and
++    // cheaper than the bit-twiddling fallback below.
++    return n != 0 ? uint32_t(__builtin_ctz(n)) : 32u;
+     #else
+     uint32_t r = 31;
+     n &= -n;
+diff --git a/src/util/util_luid.cpp b/src/util/util_luid.cpp
+index 96a2a09..c8b5363 100644
+--- a/src/util/util_luid.cpp
++++ b/src/util/util_luid.cpp
+@@ -5,9 +5,22 @@
+ 
+ #include <mutex>
+ #include <vector>
++#include <atomic>
+ 
+ namespace dxvk {
+ 
++  /* Windows exposes AllocateLocallyUniqueId from kernel32; there is no such
++   * entry point here, and the value only has to be unique within the process,
++   * so a counter is the whole contract.  File-local, matching what DXVK 3.1.1
++   * does on non-Windows targets. */
++#if !defined(_WIN32) || defined(__ANDROID__)
++  static BOOL AllocateLocallyUniqueId(LUID* luid) {
++    static std::atomic<uint32_t> counter = { 0u };
++    *luid = LUID{ ++counter, 0 };
++    return TRUE;
++  }
++#endif
++
+   LUID GetAdapterLUID(UINT Adapter) {
+     static dxvk::mutex       s_mutex;
+     static std::vector<LUID> s_luids;
+@@ -18,7 +31,7 @@ namespace dxvk {
+     while (s_luids.size() < newLuidCount) {
+       LUID luid = { 0, 0 };
+ 
+-      if (!::AllocateLocallyUniqueId(&luid))
++      if (!AllocateLocallyUniqueId(&luid))
+         Logger::err("Failed to allocate LUID");
+       
+         
+diff --git a/src/util/util_math.h b/src/util/util_math.h
+index 5457ef0..d9279a8 100644
+--- a/src/util/util_math.h
++++ b/src/util/util_math.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <cmath>
++#include <cstdint>
+ 
+ namespace dxvk {
+   
+diff --git a/src/util/util_string.h b/src/util/util_string.h
+index ae67403..831fd64 100644
+--- a/src/util/util_string.h
++++ b/src/util/util_string.h
+@@ -19,7 +19,33 @@ namespace dxvk::str {
+   }
+ 
+   std::wstring tows(const char* mbs);
+-  
++
++  /**
++   * \brief Path in the form the C++ streams accept
++   *
++   * The MSVC standard library gives the narrow streams a \c wchar_t
++   * overload so that a UTF-8 path can be widened; libc++ does not, and on
++   * Android the filesystem is byte-based anyway.  Wrapping the choice in a
++   * helper keeps the call sites identical on both platforms.
++   */
++#if defined(_WIN32) && !defined(__ANDROID__)
++  inline std::wstring toPath(const std::string& path) { return tows(path.c_str()); }
++#else
++  inline std::string toPath(const std::string& path) { return path; }
++#endif
++
++  /**
++   * \brief Type the C++ file streams take as a path
++   *
++   * Wide on Windows (the narrow ctors reject UTF-8 there), UTF-8 bytes
++   * everywhere else.
++   */
++#if defined(_WIN32) && !defined(__ANDROID__)
++  using path_string = std::wstring;
++#else
++  using path_string = std::string;
++#endif
++
+   inline void format1(std::stringstream&) { }
+ 
+   template<typename... Tx>
+diff --git a/src/util/util_time.h b/src/util/util_time.h
+index cbadfa5..3f9fc71 100644
+--- a/src/util/util_time.h
++++ b/src/util/util_time.h
+@@ -3,6 +3,15 @@
+ #include <chrono>
+ #include <cstdint>
+ 
++#if defined(__ANDROID__)
++/* The Android shim is <windows.h>.  It is included here, before the branch
++ * below, because _WIN32 decides which clock this file defines and a TU that
++ * reached <windows.h> late would otherwise define a different
++ * dxvk::high_resolution_clock than its neighbours - an ODR violation that
++ * surfaces only as a mismatched mangled name at link time. */
++#include <windows.h>
++#endif
++
+ #if defined(_WIN32) && !defined(__WINE__)
+ #include <windows.h>
+ #endif
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index faa5155..26ac95a 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -2,7 +2,21 @@
+ 
+ namespace dxvk::vk {
+ 
+-  static const PFN_vkGetInstanceProcAddr GetInstanceProcAddr = vkGetInstanceProcAddr;
++  /*
++   * The Android build can replace the Vulkan loader entry point at runtime:
++   * runtime/android/dxvk_entry.cpp opens libvulkan through libadrenotools,
++   * which makes the system loader load a custom ICD (Turnip) instead of the
++   * vendor driver.  Everything DXVK resolves goes through this pointer, so
++   * setting it before Direct3DCreate9 is enough to move the whole device to
++   * that ICD.  On the Windows host the default is the linked loader and the
++   * setter is simply never called.
++   */
++  static PFN_vkGetInstanceProcAddr GetInstanceProcAddr = vkGetInstanceProcAddr;
++
++  extern "C" void dxvk_set_vulkan_get_instance_proc_addr(PFN_vkGetInstanceProcAddr fn) {
++    if (fn)
++      GetInstanceProcAddr = fn;
++  }
+ 
+   PFN_vkVoidFunction LibraryLoader::sym(const char* name) const {
+     return dxvk::vk::GetInstanceProcAddr(nullptr, name);
+diff --git a/src/vulkan/vulkan_loader.h b/src/vulkan/vulkan_loader.h
+index 9d9a4d6..bef6471 100644
+--- a/src/vulkan/vulkan_loader.h
++++ b/src/vulkan/vulkan_loader.h
+@@ -4,6 +4,12 @@
+ #include "../util/rc/util_rc_ptr.h"
+ 
+ #define VK_USE_PLATFORM_WIN32_KHR 1
++#ifdef __ANDROID__
++/* The presenter creates its surface from an ANativeWindow here; the Win32
++ * entry point above stays declared because DXVK's own sources reference the
++ * HWND-typed structures unconditionally. */
++#define VK_USE_PLATFORM_ANDROID_KHR 1
++#endif
+ #include <vulkan/vulkan.h>
+ 
+ #define VULKAN_FN(name) \
+@@ -127,6 +133,10 @@ namespace dxvk::vk {
+     VULKAN_FN(vkGetPhysicalDeviceWin32PresentationSupportKHR);
+     #endif
+     
++    #ifdef VK_USE_PLATFORM_ANDROID_KHR
++    VULKAN_FN(vkCreateAndroidSurfaceKHR);
++    #endif
++    
+     VULKAN_FN(vkDestroySurfaceKHR);
+     
+     VULKAN_FN(vkGetPhysicalDeviceSurfaceSupportKHR);
+diff --git a/src/vulkan/vulkan_presenter.cpp b/src/vulkan/vulkan_presenter.cpp
+index b02869e..758d887 100644
+--- a/src/vulkan/vulkan_presenter.cpp
++++ b/src/vulkan/vulkan_presenter.cpp
+@@ -2,6 +2,19 @@
+ 
+ #include "../dxvk/dxvk_format.h"
+ 
++#ifdef __ANDROID__
++/* The render path on Android is the Windows one: a VkSurfaceKHR created from
++ * the process's window, a driver-owned swap chain, and WSI semaphores.  The
++ * only platform difference is which surface entry point createSurface() calls
++ * and which window object it hands over; there is no second presenter. */
++#include <android/native_window.h>
++
++/* Implemented by the platform layer (runtime/android/dxvk_win32.cpp): the
++ * ANativeWindow the hosting activity gave us.  The guest's HWND is a token
++ * with no window behind it, so the presenter cannot derive one from it. */
++extern "C" ANativeWindow* wc3_android_window();
++#endif
++
+ namespace dxvk::vk {
+ 
+   Presenter::Presenter(
+@@ -445,6 +458,29 @@ namespace dxvk::vk {
+ 
+ 
+   VkResult Presenter::createSurface() {
++#ifdef __ANDROID__
++    /* The only platform difference in the whole presenter: which entry point
++     * turns the window into a VkSurfaceKHR, and which object it is handed.
++     * Everything below - capabilities, formats, present modes, the swap chain
++     * and its semaphores - is DXVK's own code, exactly as on the Windows
++     * host.  The guest's HWND is an opaque token with no window behind it, so
++     * the ANativeWindow comes from the activity instead. */
++    ANativeWindow* window = wc3_android_window();
++
++    if (!window) {
++      Logger::err("Presenter: no ANativeWindow yet");
++      return VK_ERROR_SURFACE_LOST_KHR;
++    }
++
++    VkAndroidSurfaceCreateInfoKHR info;
++    info.sType      = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
++    info.pNext      = nullptr;
++    info.flags      = 0;
++    info.window     = window;
++
++    VkResult status = m_vki->vkCreateAndroidSurfaceKHR(
++      m_vki->instance(), &info, nullptr, &m_surface);
++#else
+     HINSTANCE instance = reinterpret_cast<HINSTANCE>(
+       GetWindowLongPtr(m_window, GWLP_HINSTANCE));
+     
+@@ -457,6 +493,7 @@ namespace dxvk::vk {
+     
+     VkResult status = m_vki->vkCreateWin32SurfaceKHR(
+       m_vki->instance(), &info, nullptr, &m_surface);
++#endif
+     
+     if (status != VK_SUCCESS)
+       return status;
+@@ -477,15 +514,20 @@ namespace dxvk::vk {
+ 
+ 
+   void Presenter::destroySwapchain() {
+-    for (const auto& img : m_images)
+-      m_vkd->vkDestroyImageView(m_vkd->device(), img.view, nullptr);
+-    
++    for (const auto& img : m_images) {
++      if (img.view)
++        m_vkd->vkDestroyImageView(m_vkd->device(), img.view, nullptr);
++    }
++
+     for (const auto& sem : m_semaphores) {
+-      m_vkd->vkDestroySemaphore(m_vkd->device(), sem.acquire, nullptr);
+-      m_vkd->vkDestroySemaphore(m_vkd->device(), sem.present, nullptr);
++      if (sem.acquire)
++        m_vkd->vkDestroySemaphore(m_vkd->device(), sem.acquire, nullptr);
++      if (sem.present)
++        m_vkd->vkDestroySemaphore(m_vkd->device(), sem.present, nullptr);
+     }
+ 
+-    m_vkd->vkDestroySwapchainKHR(m_vkd->device(), m_swapchain, nullptr);
++    if (m_swapchain)
++      m_vkd->vkDestroySwapchainKHR(m_vkd->device(), m_swapchain, nullptr);
+ 
+     m_images.clear();
+     m_semaphores.clear();
+@@ -495,7 +537,9 @@ namespace dxvk::vk {
+ 
+ 
+   void Presenter::destroySurface() {
+-    m_vki->vkDestroySurfaceKHR(m_vki->instance(), m_surface, nullptr);
++    if (m_surface)
++      m_vki->vkDestroySurfaceKHR(m_vki->instance(), m_surface, nullptr);
++    m_surface = VK_NULL_HANDLE;
+   }
+ 
+ }

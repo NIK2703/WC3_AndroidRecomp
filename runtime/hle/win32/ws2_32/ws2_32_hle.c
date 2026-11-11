@@ -1663,24 +1663,24 @@ static void socket_file_io(CPU *c, int is_send)
                                           : previous_read_file;
         if (previous) previous(c);
         else {
-            wc3_legacy_set_last_error(WSA_ERROR_INVALID_HANDLE);
+            wc3_legacy_set_last_error(c, WSA_ERROR_INVALID_HANDLE);
             c->eax = 0;
         }
         return;
     }
 
     if (bytes_ptr && !wc3_legacy_guest_ok(bytes_ptr, 4u)) {
-        wc3_legacy_set_last_error(WSA_ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, WSA_ERROR_INVALID_PARAMETER);
         c->eax = 0;
         return;
     }
     if (length && (!buffer || !wc3_legacy_guest_ok(buffer, length))) {
-        wc3_legacy_set_last_error(WSA_ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, WSA_ERROR_INVALID_PARAMETER);
         c->eax = 0;
         return;
     }
     if (length > WSA_IO_MAX_BYTES) {
-        wc3_legacy_set_last_error(WSA_ERROR_NOT_ENOUGH_MEMORY);
+        wc3_legacy_set_last_error(c, WSA_ERROR_NOT_ENOUGH_MEMORY);
         c->eax = 0;
         return;
     }
@@ -1706,16 +1706,16 @@ static void socket_file_io(CPU *c, int is_send)
                         r == -WC3_NET_ERR_WOULDBLOCK ||
                         r == -WC3_NET_ERR_INTR) {
                         if (total) break;
-                        wc3_legacy_set_last_error(WSA_ERROR_NO_DATA);
+                        wc3_legacy_set_last_error(c, WSA_ERROR_NO_DATA);
                     } else {
-                        wc3_legacy_set_last_error(
+                        wc3_legacy_set_last_error(c,
                             (uint32_t)net_error_result(r));
                     }
                     c->eax = 0;
                     return;
                 }
                 if (!moved) {
-                    wc3_legacy_set_last_error(WSA_ERROR_NO_DATA);
+                    wc3_legacy_set_last_error(c, WSA_ERROR_NO_DATA);
                     c->eax = 0;
                     return;
                 }
@@ -1733,9 +1733,9 @@ static void socket_file_io(CPU *c, int is_send)
                 if (r == -WC3_NET_ERR_AGAIN ||
                     r == -WC3_NET_ERR_WOULDBLOCK ||
                     r == -WC3_NET_ERR_INTR)
-                    wc3_legacy_set_last_error(WSA_ERROR_NO_DATA);
+                    wc3_legacy_set_last_error(c, WSA_ERROR_NO_DATA);
                 else
-                    wc3_legacy_set_last_error((uint32_t)net_error_result(r));
+                    wc3_legacy_set_last_error(c, (uint32_t)net_error_result(r));
                 c->eax = 0;
                 return;
             }
@@ -1751,7 +1751,7 @@ static void socket_file_io(CPU *c, int is_send)
     }
 
     if (!wc3_legacy_guest_ok(overlapped, 20u)) {
-        wc3_legacy_set_last_error(WSA_ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, WSA_ERROR_INVALID_PARAMETER);
         c->eax = 0;
         return;
     }
@@ -1764,7 +1764,7 @@ static void socket_file_io(CPU *c, int is_send)
                 "[net] %s handle=%08X -> no completion port\n",
                 is_send ? "WriteFile" : "ReadFile", (unsigned)handle);
 #endif
-        wc3_legacy_set_last_error(WSA_ERROR_NOT_SUPPORTED);
+        wc3_legacy_set_last_error(c, WSA_ERROR_NOT_SUPPORTED);
         c->eax = 0;
         return;
     }
@@ -1787,7 +1787,7 @@ static void socket_file_io(CPU *c, int is_send)
     } else {
         request.data = (uint8_t *)malloc(1u);
         if (!request.data) {
-            wc3_legacy_set_last_error(WSA_ERROR_NOT_ENOUGH_MEMORY);
+            wc3_legacy_set_last_error(c, WSA_ERROR_NOT_ENOUGH_MEMORY);
             c->eax = 0;
             return;
         }
@@ -1812,7 +1812,7 @@ static void socket_file_io(CPU *c, int is_send)
                 is_send ? "WriteFile" : "ReadFile", (unsigned)handle,
                 armed == 0 ? "no io worker" : "no free slot");
 #endif
-        wc3_legacy_set_last_error(WSA_ERROR_NOT_ENOUGH_MEMORY);
+        wc3_legacy_set_last_error(c, WSA_ERROR_NOT_ENOUGH_MEMORY);
         c->eax = 0;
         return;
     }
@@ -1822,7 +1822,7 @@ static void socket_file_io(CPU *c, int is_send)
             is_send ? "WriteFile" : "ReadFile", (unsigned)handle,
             (unsigned)length, (unsigned)overlapped);
 #endif
-    wc3_legacy_set_last_error(WSA_IO_PENDING);
+    wc3_legacy_set_last_error(c, WSA_IO_PENDING);
     c->eax = 0;
 }
 
@@ -2105,12 +2105,12 @@ static void h_closesocket(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_NET
     fprintf(stderr, "[net] closesocket handle=%08X -> %s last=%u ra=%08X\n",
             (unsigned)handle, r < 0 ? "failed" : "ok",
-            (unsigned)wc3_legacy_get_last_error(), (unsigned)ra);
+            (unsigned)wc3_legacy_get_last_error(c), (unsigned)ra);
 #endif
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
     fprintf(stderr, "[bnet] closesocket handle=%08X -> %s last=%u ra=%08X\n",
             (unsigned)handle, r < 0 ? "failed" : "ok",
-            (unsigned)wc3_legacy_get_last_error(), (unsigned)ra);
+            (unsigned)wc3_legacy_get_last_error(c), (unsigned)ra);
 #endif
 }
 
@@ -3592,22 +3592,22 @@ static void h_create_iocp(CPU *c)
     if (file && socket_lookup(file, &host)) {
         (void)host;
         if (!port) {
-            wc3_legacy_set_last_error(WSA_ERROR_INVALID_PARAMETER);
+            wc3_legacy_set_last_error(c, WSA_ERROR_INVALID_PARAMETER);
             c->eax = 0;
             return;
         }
         if (!iocp_associate(port) || !socket_set_iocp(file, port, key)) {
-            wc3_legacy_set_last_error(WSA_ERROR_NOT_ENOUGH_MEMORY);
+            wc3_legacy_set_last_error(c, WSA_ERROR_NOT_ENOUGH_MEMORY);
             c->eax = 0;
             return;
         }
-        wc3_legacy_set_last_error(0);
+        wc3_legacy_set_last_error(c, 0);
         c->eax = port;
         return;
     }
     if (previous_create_iocp) previous_create_iocp(c);
     else {
-        wc3_legacy_set_last_error(WSA_ERROR_INVALID_HANDLE);
+        wc3_legacy_set_last_error(c, WSA_ERROR_INVALID_HANDLE);
         c->eax = 0;
     }
     /* The game creates its network completion port during startup and starts
@@ -3651,10 +3651,10 @@ static void completion_deliver(CPU *c, const WsaIocpEvent *event)
     accept_write_u32(wc3_legacy_arg32(c, 2), event->key);
     accept_write_u32(wc3_legacy_arg32(c, 3), event->overlapped);
     if (event->success) {
-        wc3_legacy_set_last_error(0);
+        wc3_legacy_set_last_error(c, 0);
         c->eax = 1;
     } else {
-        wc3_legacy_set_last_error((uint32_t)event->error);
+        wc3_legacy_set_last_error(c, (uint32_t)event->error);
         c->eax = 0;
     }
 }
@@ -3668,7 +3668,7 @@ static void h_get_queued_completion(CPU *c)
             previous_get_queued_completion(c);
         else {
             completion_clear_outputs(c);
-            wc3_legacy_set_last_error(WSA_WAIT_TIMEOUT);
+            wc3_legacy_set_last_error(c, WSA_WAIT_TIMEOUT);
             c->eax = 0;
         }
         return;
@@ -3691,11 +3691,11 @@ static void h_get_queued_completion(CPU *c)
             set_guest_arg32(c, 4, timeout);
         } else {
             completion_clear_outputs(c);
-            wc3_legacy_set_last_error(WSA_WAIT_TIMEOUT);
+            wc3_legacy_set_last_error(c, WSA_WAIT_TIMEOUT);
             c->eax = 0;
         }
         if (c->eax != 0) return;
-        uint32_t error = wc3_legacy_get_last_error();
+        uint32_t error = wc3_legacy_get_last_error(c);
         if (error != WSA_WAIT_TIMEOUT) return;
         if (iocp_pop(port, &event)) {
             completion_deliver(c, &event);
@@ -3704,7 +3704,7 @@ static void h_get_queued_completion(CPU *c)
         if (timeout != WSA_INFINITE) {
             if (remaining <= slice) {
                 completion_clear_outputs(c);
-                wc3_legacy_set_last_error(WSA_WAIT_TIMEOUT);
+                wc3_legacy_set_last_error(c, WSA_WAIT_TIMEOUT);
                 c->eax = 0;
                 return;
             }
@@ -3723,7 +3723,7 @@ static void h_close_handle(CPU *c)
     }
     if (previous_close_handle) previous_close_handle(c);
     else {
-        wc3_legacy_set_last_error(WSA_ERROR_INVALID_HANDLE);
+        wc3_legacy_set_last_error(c, WSA_ERROR_INVALID_HANDLE);
         c->eax = 0;
     }
 }
@@ -3782,7 +3782,7 @@ static void h_load_library_a(CPU *c)
     }
     if (previous_load_library) previous_load_library(c);
     else {
-        wc3_legacy_set_last_error(126);
+        wc3_legacy_set_last_error(c, 126);
         c->eax = 0;
     }
 }
@@ -3795,7 +3795,7 @@ static void h_get_proc_address(CPU *c)
     if (!dll) {
         if (previous_get_proc_address) previous_get_proc_address(c);
         else {
-            wc3_legacy_set_last_error(127);
+            wc3_legacy_set_last_error(c, 127);
             c->eax = 0;
         }
         return;
@@ -3809,13 +3809,13 @@ static void h_get_proc_address(CPU *c)
                                 sizeof g_ws2_ordinals / sizeof g_ws2_ordinals[0],
                                 (uint16_t)name_or_ordinal);
         if (!name) {
-            wc3_legacy_set_last_error(127);
+            wc3_legacy_set_last_error(c, 127);
             c->eax = 0;
             return;
         }
     } else {
         if (!guest_cstr(name_or_ordinal, name_buf, sizeof name_buf)) {
-            wc3_legacy_set_last_error(127);
+            wc3_legacy_set_last_error(c, 127);
             c->eax = 0;
             return;
         }
@@ -3828,7 +3828,7 @@ static void h_get_proc_address(CPU *c)
         fprintf(stderr, "[net] GetProcAddress(%s,%s) -> not found\n", dll,
                 name);
 #endif
-        wc3_legacy_set_last_error(127);
+        wc3_legacy_set_last_error(c, 127);
         c->eax = 0;
         return;
     }

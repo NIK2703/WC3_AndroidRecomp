@@ -386,7 +386,7 @@ static void h_load_library_a(CPU *c)
     }
     if (previous_load_library) previous_load_library(c);
     else {
-        wc3_legacy_set_last_error(126u);
+        wc3_legacy_set_last_error(c, 126u);
         c->eax = 0u;
     }
 }
@@ -398,7 +398,7 @@ static void h_get_proc_address(CPU *c)
     if (module != DS_HMOD) {
         if (previous_get_proc_address) previous_get_proc_address(c);
         else {
-            wc3_legacy_set_last_error(127u);
+            wc3_legacy_set_last_error(c, 127u);
             c->eax = 0u;
         }
         return;
@@ -416,7 +416,7 @@ static void h_get_proc_address(CPU *c)
         }
     }
     if (!thunk) {
-        wc3_legacy_set_last_error(127u);
+        wc3_legacy_set_last_error(c, 127u);
         c->eax = 0u;
         return;
     }

@@ -34,7 +34,7 @@ static void finger_init(TouchFinger* f, int ptr_id) {
 }
 
 __attribute__((hot)) void touch_processor_on_finger_down(TouchActionResult* restrict result, int ptr_id, float x, float y, uint64_t now_tick) {
-    
+    wc3_timer_registry_invalidate();
     result->count = 0;
     TouchFinger* f = find_finger(ptr_id);
     if (!f) {
@@ -68,6 +68,7 @@ __attribute__((hot)) void touch_processor_on_finger_down(TouchActionResult* rest
 }
 
 __attribute__((hot)) void touch_processor_on_finger_move(TouchActionResult* restrict result, int ptr_id, float x, float y, uint64_t now_tick) {
+    wc3_timer_registry_invalidate();
     result->count = 0;
     TouchFinger* f = find_finger(ptr_id);
     if (__builtin_expect(!f, 0)) {
@@ -88,6 +89,7 @@ __attribute__((hot)) void touch_processor_on_finger_move(TouchActionResult* rest
 }
 
 __attribute__((hot)) void touch_processor_on_finger_up(TouchActionResult* restrict result, int ptr_id, float x, float y, uint64_t now_tick) {
+    wc3_timer_registry_invalidate();
     result->count = 0;
     TouchFinger* f = find_finger(ptr_id);
     if (__builtin_expect(!f, 0)) {

@@ -27,6 +27,11 @@ extern "C" {
 void        wc3_legacy_hle_call(uint32_t thunk, CPU *c);
 const char *wc3_legacy_hle_describe(uint32_t thunk);
 
+/* Record the CPU at every guest dispatch, not only at an HLE import.  A fault
+ * in lifted code on a guest thread that never called an import otherwise has
+ * no register file in the crash report.  Release compiles this to a no-op. */
+void        wc3_legacy_note_cpu(CPU *c);
+
 /* M5 strangler seam (H6.2/H6.3).  A target module installs its own handler over
  * an as-built table row while the as-built implementation is still linked.
  * The as-built row keeps argc and call convention, so the replacement must
@@ -50,11 +55,10 @@ int wc3_legacy_hle_chain(const char *dll, const char *name,
                          void (*impl)(CPU *c),
                          void (**previous)(CPU *c));
 
-/* The as-built last-error cell is thread-local static state.  These accessors
- * call its registered getter/setter so target handlers can report a Win32
- * error without duplicating the as-built symbol. */
-void wc3_legacy_set_last_error(uint32_t code);
-uint32_t wc3_legacy_get_last_error(void);
+/* Win32 last-error lives in CPU.hle_last_error, so target handlers can report
+ * an error without a host TLS lookup or a fabricated guest stack. */
+void wc3_legacy_set_last_error(CPU *c, uint32_t code);
+uint32_t wc3_legacy_get_last_error(CPU *c);
 
 /* Register an import row the as-built table did not define.  The resolver
  * creates a guessed-arity stub for an unknown import; this replaces that stub

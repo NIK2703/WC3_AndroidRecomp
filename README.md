@@ -150,6 +150,10 @@ tools\android\build_apk.ps1                 # debug, wc3.recomp.debug
 tools\android\build_apk.ps1 -Release        # release, wc3.recomp
 ```
 
+Both commands default to the relifted `build/corpus-full` corpus and the
+`rubattle` W3L profile. Pass `-W3LCompat off` for the exact baseline, or
+`-CorpusRoot '' -W3LCompat off` for the legacy corpus.
+
 Run host-side T0 checks with:
 
 ```powershell

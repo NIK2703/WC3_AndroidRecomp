@@ -220,6 +220,7 @@ void touch_processor_set_elements(const TouchElement* elements, int count) {
     build_spatial_grid();
 
     ELEMENTS_UNLOCK();
+    wc3_timer_registry_invalidate();
 }
 
 void touch_processor_set_snapping_size(float size) {
@@ -232,22 +233,27 @@ void touch_processor_set_snapping_size(float size) {
     }
     mark_all_dirty();
     build_spatial_grid();
+    wc3_timer_registry_invalidate();
 }
 
 void touch_processor_set_resolution_scale(float scale) {
     g_state.resolution_scale = scale;
+    wc3_timer_registry_invalidate();
 }
 
 void touch_processor_set_sim_touch_screen(bool enabled) {
     g_state.sim_touch_screen = enabled;
+    wc3_timer_registry_invalidate();
 }
 
 void touch_processor_set_xform_scale(float scale_x, float scale_y) {
     g_state.cfg.xform_scale_x = scale_x > 0.0f ? scale_x : 1.0f;
     g_state.cfg.xform_scale_y = scale_y > 0.0f ? scale_y : 1.0f;
+    wc3_timer_registry_invalidate();
 }
 
 void touch_processor_set_view_offset(float offset_x, float offset_y) {
     g_state.cfg.view_offset_x = offset_x;
     g_state.cfg.view_offset_y = offset_y;
+    wc3_timer_registry_invalidate();
 }

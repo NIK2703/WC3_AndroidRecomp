@@ -36,6 +36,21 @@ void controls_set_action_sink(Wc3ActionSink sink, void *user);
 int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
                        uint64_t event_time_ms);
 int controls_tick(uint64_t now_ms);
+
+/*
+ * 1 while the engine has a pending timer, auto-repeat, mouse movement, a
+ * held action, or one-shot cleanup to perform.  An active finger alone is not
+ * a tick reason.  When 0, the host may block until the next touch instead of
+ * polling controls_tick() at the tick rate.
+ */
+int controls_needs_tick(void);
+
+/*
+ * Exact absolute CLOCK_MONOTONIC millisecond deadline for the next tick, or 0
+ * when no timer is pending.  The host must treat 0 as "no deadline", not as
+ * "due now".  A returned value <= now_ms means run one tick immediately and
+ * query again.
+ */
 uint64_t controls_next_deadline_ms(uint64_t now_ms);
 void controls_cancel_all(void);
 
@@ -50,10 +65,19 @@ int controls_populate_overlay(Wc3Overlay *overlay);
 
 /*
  * Copy only visual state; element count, geometry and text are unchanged.
- * Returns 1 when at least one visual field changed, 0 when the overlay already
- * matches the engine, and -1 when the overlay cannot be synced.
+ * Returns 0 on success and -1 when the overlay cannot be synced.  Change
+ * detection belongs to overlay_visual_state_equal(); this function must not
+ * become a second publish policy.  A successful sync consumes the engine's
+ * visual-dirty marks.
  */
 int controls_sync_visuals(Wc3Overlay *overlay);
+
+/*
+ * 1 when the touch engine marked element visuals dirty since the last
+ * successful controls_sync_visuals(); 0 when the overlay cannot have changed.
+ * This is a cheap gate for the host input loop, not a second publish policy.
+ */
+int controls_visual_dirty(void);
 
 const char *controls_last_error(void);
 

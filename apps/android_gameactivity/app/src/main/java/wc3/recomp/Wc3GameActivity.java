@@ -19,6 +19,9 @@ import android.view.inputmethod.EditorInfo;
 import com.google.androidgamesdk.GameActivity;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 
 import wc3.recomp.launch.LaunchContract;
 
@@ -51,9 +54,14 @@ public class Wc3GameActivity extends GameActivity {
 
     private static native void nativeSetGameMode(String mode);
 
+    /* JNI matches by name only; host_shell.c must keep the same parameter
+     * order (driver id before driver root, DXVK version and config path last).
+     * These values are strings, so a swap compiles and fails only at
+     * runtime. */
     private static native void nativeApplyLaunchSettings(
             String gameDir, int width, int height, boolean sound,
-            String extraArgs);
+            String extraArgs, String driverId, String driverRoot,
+            String hookDir, String dxvkVersion, String dxvkConfigPath);
 
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
@@ -106,12 +114,61 @@ public class Wc3GameActivity extends GameActivity {
         final Bundle settings = intent.getBundleExtra(
                 LaunchContract.EXTRA_LAUNCH);
         if (settings == null) return;
+        final String driverId = settings.getString(LaunchContract.KEY_DRIVER_ID, "");
+        final String dxvkVersion = settings.getString(
+                LaunchContract.KEY_DXVK_VERSION,
+                LaunchContract.DEFAULT_DXVK_VERSION);
+        final String dxvkConfig = settings.getString(
+                LaunchContract.KEY_DXVK_CONFIG,
+                LaunchContract.DEFAULT_DXVK_CONFIG);
+        final String driverRoot = new java.io.File(getFilesDir(), "drivers")
+                .getAbsolutePath();
+        final String hookDir = driverId == null || driverId.isEmpty()
+                ? "" : wc3.recomp.launch.VulkanDriverStore.ensureHookDir(this);
+        final String dxvkConfigPath = writeDxvkConfig(dxvkConfig);
         nativeApplyLaunchSettings(
                 settings.getString(LaunchContract.KEY_GAME_DIR),
                 settings.getInt(LaunchContract.KEY_WIDTH, 0),
                 settings.getInt(LaunchContract.KEY_HEIGHT, 0),
                 settings.getBoolean(LaunchContract.KEY_SOUND, true),
-                settings.getString(LaunchContract.KEY_EXTRA_ARGS));
+                settings.getString(LaunchContract.KEY_EXTRA_ARGS),
+                driverId, driverRoot, hookDir, dxvkVersion, dxvkConfigPath);
+    }
+
+    /**
+     * DXVK 1.10.3 only reads {@code DXVK_CONFIG_FILE}; 3.1.1 additionally
+     * accepts the shorter {@code DXVK_CONFIG} environment form.  Writing the
+     * same file gives both backends one contract and avoids the semicolon
+     * escaping rules of the environment form.
+     *
+     * <p>The empty string is written as an empty file on purpose: it prevents
+     * DXVK from falling back to an unrelated {@code dxvk.conf} in the current
+     * working directory.  The temporary file and rename keep a failed write
+     * from leaving half a config for the loader.</p>
+     */
+    private String writeDxvkConfig(final String config) {
+        final File target = new File(getFilesDir(), "dxvk.conf");
+        final File temporary = new File(getFilesDir(), "dxvk.conf.tmp");
+        final String text = config == null ? "" : config;
+
+        try (FileOutputStream out = new FileOutputStream(temporary)) {
+            out.write(text.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            out.getFD().sync();
+        } catch (IOException ignored) {
+            temporary.delete();
+            return "";
+        }
+
+        if (target.exists() && !target.delete()) {
+            temporary.delete();
+            return "";
+        }
+        if (!temporary.renameTo(target)) {
+            temporary.delete();
+            return "";
+        }
+        return target.getAbsolutePath();
     }
 
     @Override
@@ -202,7 +259,19 @@ public class Wc3GameActivity extends GameActivity {
         return false;
     }
 
+    /**
+     * Debug-only T2 A/B.  The release resource is false, so this method is a
+     * no-op in the product; DebugOverlayReceiver only exists in the debug APK.
+     */
+    private boolean isOverlayExperimentHidden() {
+        if (!getResources().getBoolean(R.bool.overlay_experiment_supported))
+            return false;
+        return getSharedPreferences("wc3_debug", MODE_PRIVATE)
+                .getBoolean("overlay_hidden", false);
+    }
+
     private void installOverlaySurface() {
+        if (isOverlayExperimentHidden()) return;
         final SurfaceView view = new SurfaceView(this);
         view.setZOrderMediaOverlay(true);
         view.setFocusable(false);

@@ -420,11 +420,33 @@ int controls_tick(uint64_t now_ms) {
     return 0;
 }
 
+int controls_needs_tick(void) {
+    if (!g_initialized) return 0;
+    TP_STATE_LOCK();
+    int needed = touch_processor_needs_tick();
+    TP_STATE_UNLOCK();
+    return needed;
+}
+
 uint64_t controls_next_deadline_ms(uint64_t now_ms) {
+    if (!g_initialized) return 0;
+
+    TP_STATE_LOCK();
+    uint64_t deadline_tick = touch_processor_next_deadline_tick();
     int interval = g_timer_interval_ms > 0 ? g_timer_interval_ms : 16;
-    uint64_t from_last = (g_last_engine_tick + 1u) * (uint64_t)interval;
-    uint64_t from_now = (now_ms / (uint64_t)interval + 1u) * (uint64_t)interval;
-    return from_last > from_now ? from_last : from_now;
+    TP_STATE_UNLOCK();
+
+    if (deadline_tick == TOUCH_PROCESSOR_DEADLINE_NONE) return 0;
+    uint64_t deadline_ms;
+    if (deadline_tick > UINT64_MAX / (uint64_t)interval)
+        deadline_ms = UINT64_MAX;
+    else
+        deadline_ms = deadline_tick * (uint64_t)interval;
+
+    // A due deadline must still be a real wake request: 0 is the API's
+    // "no deadline" sentinel, not "now".
+    if (deadline_ms <= now_ms) return now_ms != 0 ? now_ms : 1;
+    return deadline_ms;
 }
 
 void controls_cancel_all(void) {
@@ -543,6 +565,20 @@ out_locked:
     return rc;
 }
 
+int controls_visual_dirty(void) {
+    if (!g_initialized) return 0;
+    int dirty = 0;
+    TP_STATE_LOCK();
+    for (int i = 0; i < DIRTY_MASK_WORDS; i++) {
+        if (g_state.visual_dirty_mask[i] != 0) {
+            dirty = 1;
+            break;
+        }
+    }
+    TP_STATE_UNLOCK();
+    return dirty;
+}
+
 int controls_sync_visuals(Wc3Overlay *overlay) {
     if (!overlay || !g_initialized) return -1;
 
@@ -568,6 +604,8 @@ int controls_sync_visuals(Wc3Overlay *overlay) {
         dst->selected = (src->flags & TOUCH_BIT_SELECTED) != 0;
         dst->active_petals = active_petals_from_engine(src);
     }
+    if (valid)
+        memset(g_state.visual_dirty_mask, 0, sizeof(g_state.visual_dirty_mask));
     ELEMENTS_UNLOCK();
     TP_STATE_UNLOCK();
 
@@ -592,20 +630,9 @@ int controls_sync_visuals(Wc3Overlay *overlay) {
 
     if (!valid) return -1;
 
-    bool changed = false;
     for (int i = 0; i < n; i++) {
         Wc3OverlayElement *dst = &overlay->elements[i];
         const Wc3OverlayElement *src = &snapshot[i];
-        if (dst->visual_layers != src->visual_layers ||
-            dst->alpha_outer != src->alpha_outer ||
-            dst->alpha_stroke != src->alpha_stroke ||
-            dst->alpha_fill != src->alpha_fill ||
-            dst->alpha_glow != src->alpha_glow ||
-            dst->engaged != src->engaged ||
-            dst->selected != src->selected ||
-            dst->active_petals != src->active_petals)
-            changed = true;
-
         dst->visual_layers = src->visual_layers;
         dst->alpha_outer = src->alpha_outer;
         dst->alpha_stroke = src->alpha_stroke;
@@ -615,7 +642,7 @@ int controls_sync_visuals(Wc3Overlay *overlay) {
         dst->selected = src->selected;
         dst->active_petals = src->active_petals;
     }
-    return changed ? 1 : 0;
+    return 0;
 }
 
 const char *controls_last_error(void) {

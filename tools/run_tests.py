@@ -143,6 +143,23 @@ def gcc() -> str | None:
     return shutil.which("gcc") or shutil.which("clang")
 
 
+LIFT_TOOLS = Path(os.environ.get("WC3_LIFT_TOOLS",
+                                 ROOT / "build" / "lift-tools"))
+
+
+def host_tool(name: str) -> Path:
+    suffix = ".exe" if os.name == "nt" else ""
+    return LIFT_TOOLS / f"{name}{suffix}"
+
+
+def run_host_tool(name: str, args: list[str]) -> int:
+    exe = host_tool(name)
+    if not exe.is_file():
+        print(f"{name}: unavailable (run tools/lift/build_tools.ps1)")
+        return 2
+    return run([str(exe), *args])
+
+
 def test_cpu_helpers() -> int:
     """T0: integer CPU helpers keep x86 flag and count semantics."""
     cc = gcc()
@@ -246,12 +263,11 @@ def test_profile_corpus() -> int:
 
 def test_boot_dispatch_hash() -> int:
     """O-24/O-53: the generated merged table matches the runtime lookup."""
-    return run([sys.executable, str(ROOT / "tools" / "gen_boot_dispatch.py"),
-                "--self-test"])
+    return run_host_tool("gen_boot_dispatch", ["--self-test"])
 
 
 def test_pass5_build_guards() -> int:
-    """O-52/O-55: the A/B switches stay explicit and the defaults stay safe."""
+    """O-52/O-55: native TLS/context are defaults; hardening stays on."""
     cmake = (ROOT / "CMakeLists.txt").read_text(
         encoding="utf-8", errors="replace")
     legacy = (ROOT / "cmake" / "Wc3LegacyBoot.cmake").read_text(
@@ -262,18 +278,16 @@ def test_pass5_build_guards() -> int:
         encoding="utf-8", errors="replace")
     problems: list[str] = []
 
-    def option_default(name: str, expected: str) -> None:
-        match = re.search(
-            rf"option\({re.escape(name)}\s+\"[^\"]*\"\s+(ON|OFF)\)",
-            cmake, re.S)
-        found = match.group(1) if match else "missing"
-        if found != expected:
-            problems.append(
-                f"CMake option {name} default is {found}, expected {expected}")
-
-    option_default("WC3_NATIVE_TLS", "OFF")
-    option_default("WC3_HOST_HARDENING", "ON")
-    if "add_compile_options(-fno-emulated-tls)" not in cmake:
+    if "set(_wc3_native_tls_default ON)" not in cmake:
+        problems.append("CMake does not default native TLS ON for products")
+    if "set(_wc3_softfloat_context_default ON)" not in cmake:
+        problems.append("CMake does not default SoftFloat context ON")
+    hardening = ('option(WC3_HOST_HARDENING\n'
+                 '       "Keep NDK stack-protector and Fortify on non-corpus '
+                 'targets" ON)')
+    if hardening not in cmake:
+        problems.append("CMake does not keep hardening ON by default")
+    if "-fno-emulated-tls" not in cmake:
         problems.append("CMake does not wire native ELF TLS")
     if "add_library(wc3_softfloat STATIC" not in legacy:
         problems.append("Wc3LegacyBoot.cmake does not build wc3_softfloat")
@@ -284,24 +298,26 @@ def test_pass5_build_guards() -> int:
         problems.append("CMake does not wire the O-55 opt-out")
 
     for needle in (
-        "$nativeTlsValue = if ($NativeTls) { 'ON' } else { 'OFF' }",
+        "$nativeTlsValue = if ($relifted) { 'ON' } else { 'OFF' }",
         '"-DWC3_NATIVE_TLS=$nativeTlsValue"',
+        "$softfloatContextValue = if ($relifted) { 'ON' } else { 'OFF' }",
+        '"-DWC3_SOFTFLOAT_CONTEXT=$softfloatContextValue"',
         "$hostHardeningValue = if ($NoHostHardening) { 'OFF' } else { 'ON' }",
         '"-DWC3_HOST_HARDENING=$hostHardeningValue"',
         'Write-Host "[app] debug $($Variant -eq \'debug\')"',
     ):
         if needle not in build_app:
             problems.append(f"build_app.ps1 missing {needle}")
-    for needle in ("$nativeParams['NativeTls'] = $true",
-                   "$nativeParams['NoHostHardening'] = $true"):
-        if needle not in build_apk:
-            problems.append(f"build_apk.ps1 missing {needle}")
+    if "$nativeParams['NoHostHardening'] = $true" not in build_apk:
+        problems.append("build_apk.ps1 missing NoHostHardening forwarding")
+    if "$nativeParams['NativeTls']" in build_apk:
+        problems.append("build_apk.ps1 still requires a NativeTls switch")
 
     if problems:
         for problem in problems:
             print(f"pass5_build_guards: {problem}", file=sys.stderr)
         return 1
-    print("pass5_build_guards: O-52/O-55 switches and defaults are wired")
+    print("pass5_build_guards: native TLS/context are product defaults")
     return 0
 
 
@@ -322,9 +338,9 @@ def test_boot_dispatch_compile() -> int:
         encoding="ascii")
     gen_list = work / "boot_dispatch_list.h"
     gen_hash = work / "boot_dispatch_hash.h"
-    rc = run([sys.executable, str(ROOT / "tools" / "gen_boot_dispatch.py"),
-              "--list", str(funcs), "--prefix", "004",
-              "--out", str(gen_list), "--hash-out", str(gen_hash)])
+    rc = run_host_tool("gen_boot_dispatch",
+                       ["--list", str(funcs), "--prefix", "004",
+                        "--out", str(gen_list), "--hash-out", str(gen_hash)])
     if rc != 0:
         return rc
 
@@ -369,9 +385,9 @@ def test_pass9_release_preprocess() -> int:
         encoding="ascii")
     gen_list = work / "boot_dispatch_list.h"
     gen_hash = work / "boot_dispatch_hash.h"
-    rc = run([sys.executable, str(ROOT / "tools" / "gen_boot_dispatch.py"),
-              "--list", str(funcs), "--prefix", "004",
-              "--out", str(gen_list), "--hash-out", str(gen_hash)])
+    rc = run_host_tool("gen_boot_dispatch",
+                       ["--list", str(funcs), "--prefix", "004",
+                        "--out", str(gen_list), "--hash-out", str(gen_hash)])
     if rc != 0:
         return rc
 
@@ -544,6 +560,25 @@ def test_splitcorpus_source_order() -> int:
     return 0
 
 
+def test_dxvk3_gate() -> int:
+    """DXVK 3.1.1: Turnip below 26.0.0 must stay on 1.10.3."""
+    cc = gcc()
+    if not cc:
+        print("dxvk3_gate: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "dxvk3_gate_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "gfx" / "android"),
+        str(ROOT / "tests" / "dxvk3_gate_test.c"),
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
 def test_dxvk_probe_cache() -> int:
     """O-25: a second Vulkan probe is served from the process memo."""
     cc = gcc()
@@ -558,6 +593,27 @@ def test_dxvk_probe_cache() -> int:
         str(ROOT / "tests" / "dxvk_probe_cache_test.c"),
         str(ROOT / "tests" / "dxvk_probe_cache_real_stub.c"),
         "-pthread", "-Wl,--wrap=wc3_vulkan_major_minor",
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_vulkan_driver_package() -> int:
+    """ADR-036/DRV-1..DRV-13: ADPkg directory and registry contract."""
+    cc = gcc()
+    if not cc:
+        print("vulkan_driver_package: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "vulkan_driver_package_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "platform" / "android"),
+        str(ROOT / "runtime" / "platform" / "android" /
+            "vulkan_driver_package.c"),
+        str(ROOT / "tests" / "vulkan_driver_package_test.c"),
         "-o", str(exe),
     ])
     if rc != 0:
@@ -1142,16 +1198,67 @@ def test_direct_call() -> int:
 
 def test_devirtualize_pass() -> int:
     """P0-1/G-15 source check: only constant dispatch sites are rewritten."""
-    return run([sys.executable,
-                str(ROOT / "tools" / "lift" / "passes" / "devirtualize.py"),
-                "--self-test"])
+    return run_host_tool("devirtualize", ["--self-test"])
 
 
 def test_dead_flags_pass() -> int:
     """P0-2 source check: only fully overwritten flag writes are elided."""
-    return run([sys.executable,
-                str(ROOT / "tools" / "lift" / "passes" / "dead_flags.py"),
-                "--self-test"])
+    return run_host_tool("dead_flags", ["--self-test"])
+
+
+def test_save_list_display_pass() -> int:
+    """V10/T2-save: the save-list LiftPass is idempotent and emits its marker."""
+    return run_host_tool("save_list_display", ["--self-test"])
+
+
+def test_required_save_fixes() -> int:
+    """V10/T2-save: both save fixes stay wired into every product build.
+
+    This is a source contract, not a behavioral proof: T2 remains the
+    behavioral gate.  It exists because the default legacy corpus bypassed the
+    save-list LiftPass entirely and an ordinary rebuild shipped without it.
+    """
+    required = {
+        ROOT / "cmake" / "Wc3LegacyBoot.cmake": [
+            "Wc3LegacyCorpusFixes.cmake",
+            "game_extra_0012",
+            "h_ov_offset",
+            "pwrite(",
+        ],
+        ROOT / "cmake" / "Wc3LegacyCorpusFixes.cmake": [
+            "--expect-sites",
+            "13",
+            "--marker",
+        ],
+        ROOT / "cmake" / "Wc3ReliftedCorpus.cmake": [
+            "WC3_SAVE_LIST_DISPLAY_EXE",
+            "--expect-sites",
+            "2",
+            "--marker",
+        ],
+        ROOT / "runtime" / "hle" / "android" / "hle_android.c": [
+            "h_ov_offset",
+            "pwrite(g->fd",
+            "guest_thread_get(h)",
+            "guest_thread_is_done",
+        ],
+        ROOT / "apps" / "android_gameactivity" / "app" / "build.gradle.kts": [
+            "setSrcDirs(emptyList<String>())",
+            "must not package src/main/jniLibs",
+        ],
+    }
+    failed = False
+    for path, needles in required.items():
+        if not path.is_file():
+            print(f"required_save_fixes: missing {path}")
+            failed = True
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for needle in needles:
+            if needle not in text:
+                print(f"required_save_fixes: {path.name} lacks {needle!r}")
+                failed = True
+    return 1 if failed else 0
 
 
 def test_w3l_compat() -> int:
@@ -1178,24 +1285,51 @@ def test_w3l_compat() -> int:
 
 def test_w3l_compat_pass() -> int:
     """W3L compat LiftPass: profile, idempotence, fail-closed and coverage."""
-    return run([sys.executable,
-                str(ROOT / "tools" / "lift" / "passes" / "w3l_compat.py"),
-                "--self-test"])
+    return run_host_tool("w3l_compat", ["--self-test"])
+
+
+def test_w3l_defaults() -> int:
+    """A plain product build must be rubattle, not a silent exact baseline."""
+    build_app = (ROOT / "tools" / "android" / "build_app.ps1").read_text(
+        encoding="utf-8", errors="replace")
+    build_apk = (ROOT / "tools" / "android" / "build_apk.ps1").read_text(
+        encoding="utf-8", errors="replace")
+    cmake = (ROOT / "CMakeLists.txt").read_text(
+        encoding="utf-8", errors="replace")
+    problems: list[str] = []
+    for name, text in (("build_app.ps1", build_app),
+                       ("build_apk.ps1", build_apk)):
+        if "[string]$W3LCompat = 'rubattle'" not in text:
+            problems.append(f"{name}: W3LCompat default is not rubattle")
+        if "[string]$CorpusRoot = 'build/corpus-full'" not in text:
+            problems.append(f"{name}: CorpusRoot default is not build/corpus-full")
+    if "$nativeParams['CorpusRoot'] = $CorpusRoot" not in build_apk:
+        problems.append("build_apk.ps1: explicit -CorpusRoot '' is not forwarded")
+    if "$nativeParams['W3LCompat'] = $W3LCompat" not in build_apk:
+        problems.append("build_apk.ps1: W3LCompat is not forwarded")
+    if "set(WC3_W3L_COMPAT_DEFAULT ON)" not in cmake:
+        problems.append("CMakeLists.txt: product default is not ON")
+    if problems:
+        for problem in problems:
+            print(f"w3l_defaults: {problem}", file=sys.stderr)
+        return 1
+    print("w3l_defaults: plain build is rubattle on build/corpus-full")
+    return 0
 
 
 def test_return_address_elide_pass() -> int:
     """P0-6 source check: only proven non-readers lose the return-address store."""
-    return run([sys.executable,
-                str(ROOT / "tools" / "lift" / "passes" /
-                    "return_address_elide.py"),
-                "--self-test"])
+    return run_host_tool("return_address_elide", ["--self-test"])
 
 
 def test_flag_read_audit() -> int:
     """P0-10 proof step: a live PF/AF read must fail the audit."""
-    return run([sys.executable,
-                str(ROOT / "tools" / "flag_read_audit.py"),
-                "--self-test"])
+    return run_host_tool("flag_read_audit", ["--self-test"])
+
+
+def test_audit_tls() -> int:
+    """O-51/O-52: the TLS audit tool parses ELF metadata correctly."""
+    return run_host_tool("audit_tls", ["--self-test"])
 
 
 def test_corpus_flag_policy() -> int:
@@ -1258,7 +1392,7 @@ def test_corpus_flag_policy() -> int:
 
 
 def test_pass6_build_guards() -> int:
-    """O-64/O-65: ICF and -fno-plt stay opt-in experiments, OFF by default."""
+    """O-64/O-65: ICF and -fno-plt are on in every Android product build."""
     cmake = (ROOT / "CMakeLists.txt").read_text(
         encoding="utf-8", errors="replace")
     build_app = (ROOT / "tools" / "android" / "build_app.ps1").read_text(
@@ -1267,18 +1401,13 @@ def test_pass6_build_guards() -> int:
         encoding="utf-8", errors="replace")
     problems: list[str] = []
 
-    def option_default(name: str, expected: str) -> None:
-        match = re.search(
-            rf"option\({re.escape(name)}\s+\"[^\"]*\"\s+(ON|OFF)\)",
-            cmake, re.S)
-        if not match or match.group(1) != expected:
-            found = match.group(1) if match else "missing"
-            problems.append(f"CMake option {name} default is {found}, "
-                            f"expected {expected}")
-
-    option_default("WC3_ICF", "OFF")
-    option_default("WC3_FNO_PLT", "OFF")
-    option_default("WC3_ICF_PRINT_SECTIONS", "ON")
+    if "set(_wc3_icf_default ON)" not in cmake:
+        problems.append("CMake does not default ICF ON")
+    if "set(_wc3_fno_plt_default ON)" not in cmake:
+        problems.append("CMake does not default -fno-plt ON")
+    if not re.search(
+            r'option\(WC3_ICF_PRINT_SECTIONS\s+"[^"]*"\s+ON\)', cmake, re.S):
+        problems.append("WC3_ICF_PRINT_SECTIONS default is not ON")
     mode = re.search(
         r'set\(WC3_ICF_MODE\s+"([^"]+)"\s+CACHE STRING', cmake, re.S)
     if not mode or mode.group(1) != "safe":
@@ -1289,30 +1418,29 @@ def test_pass6_build_guards() -> int:
         problems.append("CMake does not wire -fno-plt")
 
     for needle in (
-        "$icfValue = if ($Icf) { 'ON' } else { 'OFF' }",
+        "$icfValue = 'ON'",
         '"-DWC3_ICF=$icfValue"',
-        '"-DWC3_ICF_MODE=$IcfMode"',
-        '"-DWC3_ICF_PRINT_SECTIONS=$icfValue"',
-        "$fnoPltValue = if ($FnoPlt) { 'ON' } else { 'OFF' }",
+        '"-DWC3_ICF_MODE=safe"',
+        '"-DWC3_ICF_PRINT_SECTIONS=ON"',
+        "$fnoPltValue = 'ON'",
         '"-DWC3_FNO_PLT=$fnoPltValue"',
     ):
         if needle not in build_app:
             problems.append(f"build_app.ps1 missing {needle}")
-    for needle in ("$nativeParams['Icf'] = $true",
-                   "$nativeParams['FnoPlt'] = $true"):
-        if needle not in build_apk:
-            problems.append(f"build_apk.ps1 missing {needle}")
+    for needle in ("$nativeParams['Icf']", "$nativeParams['FnoPlt']"):
+        if needle in build_apk:
+            problems.append(f"build_apk.ps1 still requires {needle}")
 
     if problems:
         for problem in problems:
             print(f"pass6_build_guards: {problem}", file=sys.stderr)
         return 1
-    print("pass6_build_guards: WC3_ICF/WC3_FNO_PLT are explicit OFF defaults")
+    print("pass6_build_guards: ICF/-fno-plt are product defaults")
     return 0
 
 
 def test_pass7_build_guards() -> int:
-    """O-70/O-74: RELR and P0-6 stay explicit opt-ins, OFF by default."""
+    """O-70/O-74: packed relocations and P0-6 are product defaults."""
     cmake = (ROOT / "CMakeLists.txt").read_text(
         encoding="utf-8", errors="replace")
     corpus = (ROOT / "cmake" / "Wc3ReliftedCorpus.cmake").read_text(
@@ -1323,17 +1451,19 @@ def test_pass7_build_guards() -> int:
         encoding="utf-8", errors="replace")
     problems: list[str] = []
 
-    def option_default(name: str, expected: str) -> None:
-        match = re.search(
-            rf"option\({re.escape(name)}\s+\"[^\"]*\"\s+(ON|OFF)\)",
-            cmake, re.S)
-        if not match or match.group(1) != expected:
-            found = match.group(1) if match else "missing"
-            problems.append(f"CMake option {name} default is {found}, "
-                            f"expected {expected}")
-
-    option_default("WC3_PACK_DYN_RELOCS", "OFF")
-    option_default("WC3_RETURN_ADDRESS_ELIDE_P0_6", "OFF")
+    if "set(_wc3_pack_dyn_relocs_default ON)" not in cmake:
+        problems.append("CMake does not default packed relocations ON")
+    if "set(_wc3_lift_opt_default ON)" not in cmake:
+        problems.append("CMake does not default the LiftPass optimizations ON")
+    if "set(_wc3_thin_skip_writeonly_default ON)" not in cmake:
+        problems.append("CMake does not default the thin copy-in skip ON")
+    for name in ("WC3_DEVIRTUALIZE_P0_1", "WC3_DEAD_FLAGS_P0_2",
+                 "WC3_RETURN_ADDRESS_ELIDE_P0_6"):
+        if not re.search(
+                rf'option\({name}\s+"[^"]*"\s+\$\{{_wc3_lift_opt_default\}}\)',
+                cmake, re.S):
+            problems.append(f"CMake option {name} is not wired to the "
+                            "product LiftPass default")
     mode = re.search(
         r'set\(WC3_PACK_DYN_RELOCS_MODE\s+"([^"]+)"\s+CACHE STRING',
         cmake, re.S)
@@ -1343,18 +1473,24 @@ def test_pass7_build_guards() -> int:
         problems.append("CMake does not pass the selected relocation mode")
     if "if(WC3_RETURN_ADDRESS_ELIDE_P0_6)" not in corpus:
         problems.append("relifted corpus does not gate P0-6")
-    if "return_address_elide.py" not in corpus:
+    if "WC3_RETURN_ADDRESS_ELIDE_EXE" not in corpus:
         problems.append("relifted corpus does not invoke return_address_elide")
-    if '"-DWC3_PACK_DYN_RELOCS_MODE=$PackDynRelocsMode"' not in build_app:
+    if '"-DWC3_PACK_DYN_RELOCS_MODE=$packDynRelocsMode"' not in build_app:
         problems.append("build_app.ps1 does not pass the relocation mode")
-    if "$nativeParams['PackDynRelocsMode'] = $PackDynRelocsMode" not in build_apk:
-        problems.append("build_apk.ps1 does not pass the relocation mode")
+    for needle in ('"-DWC3_DEVIRTUALIZE_P0_1=$liftOptValue"',
+                   '"-DWC3_DEAD_FLAGS_P0_2=$liftOptValue"',
+                   '"-DWC3_RETURN_ADDRESS_ELIDE_P0_6=$liftOptValue"',
+                   '"-DWC3_THIN_SKIP_WRITEONLY_COPYIN=$thinSkipCopyinValue"'):
+        if needle not in build_app:
+            problems.append(f"build_app.ps1 missing {needle}")
+    if "$nativeParams['PackDynRelocsMode']" in build_apk:
+        problems.append("build_apk.ps1 still requires a pack switch")
 
     if problems:
         for problem in problems:
             print(f"pass7_build_guards: {problem}", file=sys.stderr)
         return 1
-    print("pass7_build_guards: RELR/P0-6 are explicit OFF opt-ins")
+    print("pass7_build_guards: packed relocations/P0 are product defaults")
     return 0
 
 
@@ -1605,11 +1741,9 @@ def test_pass4_build() -> int:
 
     build_app = (ROOT / "tools" / "android" / "build_app.ps1").read_text(
         encoding="utf-8")
-    check(re.search(
-        r"\$packDynRelocs\w*\s*=\s*if \(\$PackDynRelocs\)\s*\{\s*'ON'\s*\}\s*"
-        r"else\s*\{\s*'OFF'\s*\}", build_app) is not None,
-          "O-43 OFF is not passed on every configure")
-    check(re.search(r'"-DWC3_PACK_DYN_RELOCS=\$packDynRelocs\w*"',
+    check(re.search(r"\$packDynRelocsValue\s*=\s*'ON'", build_app) is not None,
+          "O-43 packed relocations are not a product default")
+    check(re.search(r'"-DWC3_PACK_DYN_RELOCS=\$packDynRelocsValue"',
                     build_app) is not None,
           "O-43 pack option is not deterministic")
     check("WC3_HIDE_DYNSYM=ON" in build_app and "WC3_HIDE_DYNSYM=OFF" in build_app,
@@ -3044,6 +3178,64 @@ def test_hle_time() -> int:
     return 0
 
 
+def test_controls_idle() -> int:
+    """T0: the input-thread idle gate tracks real timer state."""
+    cc = gcc()
+    if not cc:
+        print("controls_idle: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "controls_idle_test.exe"
+    rc = run([
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I" + str(ROOT / "third_party" / "winlator-input"),
+        str(ROOT / "third_party" / "winlator-input" / "core" / "tick.c"),
+        str(ROOT / "third_party" / "winlator-input" / "core" / "timer_registry.c"),
+        str(ROOT / "tests" / "controls_idle_test.c"),
+        "-lpthread",
+        "-o",
+        str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_input_adapter() -> int:
+    """T0: the input adapter ticks on a batch/fault or a due deadline only."""
+    cc = gcc()
+    if not cc:
+        print("input_adapter: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "input_adapter_test.exe"
+    controls = ROOT / "runtime" / "platform" / "android" / "controls"
+    rc = run([
+        cc,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I" + str(controls),
+        "-I" + str(ROOT / "third_party" / "winlator-input"),
+        str(controls / "input_ring.c"),
+        str(controls / "input_adapter.c"),
+        str(ROOT / "tests" / "input_adapter_test.c"),
+        "-lpthread",
+        "-o",
+        str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
 def test_overlay() -> int:
     """T0: cached overlay compositor has no software-rasteriser fallback."""
     cc = gcc()
@@ -3081,10 +3273,14 @@ TESTS = {
     "direct_call_multi_tu": test_direct_call_multi_tu,
     "devirtualize_pass": test_devirtualize_pass,
     "dead_flags_pass": test_dead_flags_pass,
+    "save_list_display_pass": test_save_list_display_pass,
+    "required_save_fixes": test_required_save_fixes,
     "w3l_compat": test_w3l_compat,
     "w3l_compat_pass": test_w3l_compat_pass,
+    "w3l_defaults": test_w3l_defaults,
     "return_address_elide_pass": test_return_address_elide_pass,
     "flag_read_audit": test_flag_read_audit,
+    "audit_tls": test_audit_tls,
     "corpus_flag_policy": test_corpus_flag_policy,
     "pass5_build_guards": test_pass5_build_guards,
     "pass6_build_guards": test_pass6_build_guards,
@@ -3136,6 +3332,8 @@ TESTS = {
     "msvcr80_rand": test_msvcr80_rand,
     "hle_bridge": test_hle_bridge,
     "pass4_build": test_pass4_build,
+    "controls_idle": test_controls_idle,
+    "input_adapter": test_input_adapter,
     "overlay": test_overlay,
     "file_layout": test_file_layout,
     "docs": test_docs,
@@ -3151,7 +3349,9 @@ TESTS = {
     "splitcorpus_packing": test_splitcorpus_packing,
     "splitcorpus_order": test_splitcorpus_order,
     "splitcorpus_source_order": test_splitcorpus_source_order,
+    "dxvk3_gate": test_dxvk3_gate,
     "dxvk_probe_cache": test_dxvk_probe_cache,
+    "vulkan_driver_package": test_vulkan_driver_package,
     "kernel32_file": test_kernel32_file,
     "atomic_lift": test_atomic_lift,
     "posix_shim": test_posix_shim,

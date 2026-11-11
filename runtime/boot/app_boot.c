@@ -23,6 +23,7 @@
 
 #include "init_array_probe.h"
 #include "hle_bridge.h"
+#include "wc3_trace.h"
 
 #ifndef WC3_DEBUG
 #define WC3_DEBUG 0
@@ -216,11 +217,13 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
     /* Keep the native buffer at the physical surface size; DXVK scales the
      * selected back buffer to it.  Publishing the window before the guest
      * creates its device is what makes DXVK's Android WSI create a surface. */
+    WC3_TRACE_BEGIN("wc3.window.publish");
     if (ANativeWindow_setBuffersGeometry(window, (int32_t)width,
                                          (int32_t)height,
                                          WINDOW_FORMAT_RGBA_8888) != 0)
         LOGE("setBuffersGeometry(%ux%u) failed", width, height);
     wc3_android_set_window(window, width, height);
+    WC3_TRACE_END();
     LOGI("window %ux%u guest %ux%u", width, height, guest_w, guest_h);
 
     char exe[1024];
@@ -234,7 +237,9 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
     argv[2] = (char *)data_dir;
     argv[3] = (char *)"Storm.dll";
 
+    WC3_TRACE_BEGIN("wc3.boot.guest");
     int rc = wc3_boot_probe_main(4, argv);
+    WC3_TRACE_END();
     LOGI("guest returned %d", rc);
 
     /* This thread owns the guest entry stack.  If the launcher returns after

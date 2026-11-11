@@ -6,6 +6,7 @@
 extern TouchProcessorState g_state;
 
 void touch_processor_cancel_all(TouchActionResult* restrict result) {
+    wc3_timer_registry_invalidate();
     result->count = 0;
 
     ELEMENTS_LOCK();

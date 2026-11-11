@@ -1,0 +1,304 @@
+From: WC3 Android recomp
+Subject: [PATCH] memory: place host-visible maps below 4 GB for the 32-bit guest
+
+The recomposed Warcraft III guest is 32-bit, so it can only dereference
+addresses below 4 GB.  DXVK normally maps host-visible memory wherever the
+driver chooses, which forces the thin D3D9 bridge to keep a low shadow copy
+of every locked vertex/index buffer and memcpy on Lock/Unlock.
+
+This is the 1.10.3 version of the same optimization as
+dxvk-3.1.1-lowmem-placed.patch.  1.10.3 bundles Vulkan 1.3.217 headers, so
+the KHR_map_memory2 and EXT_map_memory_placed definitions live in
+shim/wc3_vulkan_lowmem.h instead of the vendored header set.  Feature and
+property queries are chained manually in dxvk_adapter.cpp because 1.10.3
+predates the table-driven device-info code.
+
+When the physical device exposes VK_EXT_map_memory_placed, ask the driver to
+place host-visible mappings in the window that the WC3 Win32 shim reserves
+for them.  VK_KHR_map_memory2 is enabled as well, and the placed feature is
+chained only when both device extensions are enabled.  The shim probes a free
+gap with MAP_FIXED_NOREPLACE, unmaps it, and returns the address; the
+allocator calls vkMapMemory2KHR with VK_MEMORY_MAP_PLACED_BIT_EXT.  Any
+refusal falls back to the ordinary vkMapMemory path, so a driver without the
+extension (or a fragmented low window) keeps the shadow behavior.
+
+1.10.3 already picks a 64 MB host-visible chunk on a 64-bit host, which fits
+the measured low holes; no extra cap is needed.  The feature is controlled by
+dxvk.lowMemoryPlaced (default true).
+
+This is WC3-specific rather than an upstream-compatible default: the low
+window and the 4 GB assumption come from runtime/guest layouts.
+
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -2,6 +2,9 @@
+ 
+ #include "dxvk_device.h"
+ #include "dxvk_memory.h"
++
++/* The shim owns the low address-space window; DXVK only asks for a hole. */
++#include "wc3_lowmem.h"
+ 
+ namespace dxvk {
+   
+@@ -232,6 +235,24 @@
+         }
+       }
+     }
++
++    /* The 32-bit guest can only dereference a pointer below 4 GB.  When the
++     * driver supports placed mappings, ask it to put host-visible memory in
++     * the window the shim reserves for that; the thin D3D9 bridge then hands
++     * the mapping to the guest directly and no staging copy is needed. */
++    const auto& features = m_device->features();
++
++    m_usePlacedMemory = m_device->config().lowMemoryPlaced
++                     && m_device->extensions().khrMapMemory2
++                     && m_device->extensions().extMapMemoryPlaced
++                     && features.extMapMemoryPlaced.memoryMapPlaced
++                     && m_vkd->vkMapMemory2KHR != nullptr;
++
++    if (m_usePlacedMemory) {
++      m_placedAlignment = m_device->properties().extMapMemoryPlaced.minPlacedMemoryMapAlignment;
++      if (!m_placedAlignment)
++        m_placedAlignment = 4096u;
++    }
+   }
+   
+   
+@@ -428,9 +449,39 @@
+       return DxvkDeviceMemory();
+     
+     if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+-      VkResult status = m_vkd->vkMapMemory(m_vkd->device(), result.memHandle, 0, VK_WHOLE_SIZE, 0, &result.memPointer);
+-
+-      if (status != VK_SUCCESS) {
++      VkResult status = VK_SUCCESS;
++
++      /* A placed mapping below 4 GB is what makes the direct guest pointer
++       * possible.  Driver or platform refusal is expected on some devices
++       * and is not an error: the ordinary mapping below keeps working. */
++      if (m_usePlacedMemory) {
++        uintptr_t address = wc3_lowmem_acquire(size, m_placedAlignment);
++
++        if (address) {
++          VkMemoryMapPlacedInfoEXT placed = { VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT };
++          placed.pPlacedAddress = reinterpret_cast<void*>(address);
++
++          VkMemoryMapInfoKHR info = { VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR };
++          info.flags = VK_MEMORY_MAP_PLACED_BIT_EXT;
++          info.memory = result.memHandle;
++          info.offset = 0u;
++          info.size = size;
++          info.pNext = &placed;
++
++          status = m_vkd->vkMapMemory2KHR(m_vkd->device(), &info, &result.memPointer);
++
++          if (status != VK_SUCCESS) {
++            result.memPointer = nullptr;
++            Logger::debug(str::format("DxvkMemoryAllocator: Placed mapping failed with ", status));
++          }
++        }
++      }
++
++      if (!result.memPointer) {
++        status = m_vkd->vkMapMemory(m_vkd->device(), result.memHandle, 0, VK_WHOLE_SIZE, 0, &result.memPointer);
++      }
++
++      if (status != VK_SUCCESS || !result.memPointer) {
+         Logger::err(str::format("DxvkMemoryAllocator: Mapping memory failed with ", status));
+         m_vkd->vkFreeMemory(m_vkd->device(), result.memHandle, nullptr);
+         return DxvkDeviceMemory();
+
+diff --git a/src/dxvk/dxvk_memory.h b/src/dxvk/dxvk_memory.h
+--- a/src/dxvk/dxvk_memory.h
++++ b/src/dxvk/dxvk_memory.h
+@@ -393,6 +393,11 @@
+     void freeEmptyChunks(
+       const DxvkMemoryHeap*       heap);
+ 
++    /* Placed low mappings: enabled only when the driver exposes
++     * VK_EXT_map_memory_placed and the shim can find a hole below 4 GB. */
++    bool                m_usePlacedMemory = false;
++    VkDeviceSize        m_placedAlignment = 0u;
++
+   };
+   
+ }
+
+diff --git a/src/dxvk/dxvk_adapter.cpp b/src/dxvk/dxvk_adapter.cpp
+--- a/src/dxvk/dxvk_adapter.cpp
++++ b/src/dxvk/dxvk_adapter.cpp
+@@ -267,7 +267,7 @@
+           DxvkDeviceFeatures  enabledFeatures) {
+     DxvkDeviceExtensions devExtensions;
+ 
+-    std::array<DxvkExt*, 32> devExtensionList = {{
++    std::array<DxvkExt*, 34> devExtensionList = {{
+       &devExtensions.amdMemoryOverallocationBehaviour,
+       &devExtensions.amdShaderFragmentMask,
+       &devExtensions.ext4444Formats,
+@@ -277,6 +277,7 @@
+       &devExtensions.extExtendedDynamicState,
+       &devExtensions.extFullScreenExclusive,
+       &devExtensions.extHostQueryReset,
++      &devExtensions.extMapMemoryPlaced,
+       &devExtensions.extMemoryBudget,
+       &devExtensions.extMemoryPriority,
+       &devExtensions.extNonSeamlessCubeMap,
+@@ -294,6 +295,7 @@
+       &devExtensions.khrExternalMemoryWin32,
+       &devExtensions.khrExternalSemaphoreWin32,
+       &devExtensions.khrImageFormatList,
++      &devExtensions.khrMapMemory2,
+       &devExtensions.khrSamplerMirrorClampToEdge,
+       &devExtensions.khrShaderFloatControls,
+       &devExtensions.khrSwapchain,
+@@ -335,6 +337,11 @@
+ 
+     enabledFeatures.ext4444Formats.formatA4B4G4R4 = m_deviceFeatures.ext4444Formats.formatA4B4G4R4;
+     enabledFeatures.ext4444Formats.formatA4R4G4B4 = m_deviceFeatures.ext4444Formats.formatA4R4G4B4;
++
++    /* DXVK itself asks for this feature; the D3D9/D3D11 feature subset does
++     * not need to know about it.  It is harmless when the extension is not
++     * enabled, because the value comes from the queried support struct. */
++    enabledFeatures.extMapMemoryPlaced.memoryMapPlaced = m_deviceFeatures.extMapMemoryPlaced.memoryMapPlaced;
+     
+     Logger::info(str::format("Device properties:"
+       "\n  Device name:     : ", m_deviceInfo.core.properties.deviceName,
+@@ -377,6 +384,11 @@
+     if (devExtensions.extHostQueryReset) {
+       enabledFeatures.extHostQueryReset.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT;
+       enabledFeatures.extHostQueryReset.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.extHostQueryReset);
++    }
++
++    if (devExtensions.extMapMemoryPlaced && devExtensions.khrMapMemory2) {
++      enabledFeatures.extMapMemoryPlaced.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT;
++      enabledFeatures.extMapMemoryPlaced.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.extMapMemoryPlaced);
+     }
+ 
+     if (devExtensions.extMemoryPriority) {
+@@ -608,6 +620,11 @@
+       m_deviceInfo.extCustomBorderColor.pNext = std::exchange(m_deviceInfo.core.pNext, &m_deviceInfo.extCustomBorderColor);
+     }
+ 
++    if (m_deviceExtensions.supports(VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME)) {
++      m_deviceInfo.extMapMemoryPlaced.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_PROPERTIES_EXT;
++      m_deviceInfo.extMapMemoryPlaced.pNext = std::exchange(m_deviceInfo.core.pNext, &m_deviceInfo.extMapMemoryPlaced);
++    }
++
+     if (m_deviceExtensions.supports(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)) {
+       m_deviceInfo.extRobustness2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_EXT;
+       m_deviceInfo.extRobustness2.pNext = std::exchange(m_deviceInfo.core.pNext, &m_deviceInfo.extRobustness2);
+@@ -697,6 +714,11 @@
+     if (m_deviceExtensions.supports(VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME)) {
+       m_deviceFeatures.extHostQueryReset.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT;
+       m_deviceFeatures.extHostQueryReset.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.extHostQueryReset);
++    }
++
++    if (m_deviceExtensions.supports(VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME)) {
++      m_deviceFeatures.extMapMemoryPlaced.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT;
++      m_deviceFeatures.extMapMemoryPlaced.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.extMapMemoryPlaced);
+     }
+ 
+     if (m_deviceExtensions.supports(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME)) {
+@@ -817,6 +839,8 @@
+       "\n  extendedDynamicState                   : ", features.extExtendedDynamicState.extendedDynamicState ? "1" : "0",
+       "\n", VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME,
+       "\n  hostQueryReset                         : ", features.extHostQueryReset.hostQueryReset ? "1" : "0",
++      "\n", VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME,
++      "\n  memoryMapPlaced                        : ", features.extMapMemoryPlaced.memoryMapPlaced ? "1" : "0",
+       "\n", VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME,
+       "\n  memoryPriority                         : ", features.extMemoryPriority.memoryPriority ? "1" : "0",
+       "\n", VK_EXT_NON_SEAMLESS_CUBE_MAP_EXTENSION_NAME,
+
+diff --git a/src/dxvk/dxvk_device_info.h b/src/dxvk/dxvk_device_info.h
+--- a/src/dxvk/dxvk_device_info.h
++++ b/src/dxvk/dxvk_device_info.h
+@@ -18,6 +18,7 @@
+     VkPhysicalDeviceSubgroupProperties                        coreSubgroup;
+     VkPhysicalDeviceConservativeRasterizationPropertiesEXT    extConservativeRasterization;
+     VkPhysicalDeviceCustomBorderColorPropertiesEXT            extCustomBorderColor;
++    VkPhysicalDeviceMapMemoryPlacedPropertiesEXT              extMapMemoryPlaced;
+     VkPhysicalDeviceRobustness2PropertiesEXT                  extRobustness2;
+     VkPhysicalDeviceTransformFeedbackPropertiesEXT            extTransformFeedback;
+     VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT       extVertexAttributeDivisor;
+@@ -43,6 +44,7 @@
+     VkPhysicalDeviceDepthClipEnableFeaturesEXT                extDepthClipEnable;
+     VkPhysicalDeviceExtendedDynamicStateFeaturesEXT           extExtendedDynamicState;
+     VkPhysicalDeviceHostQueryResetFeaturesEXT                 extHostQueryReset;
++    VkPhysicalDeviceMapMemoryPlacedFeaturesEXT                extMapMemoryPlaced;
+     VkPhysicalDeviceMemoryPriorityFeaturesEXT                 extMemoryPriority;
+     VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT             extNonSeamlessCubeMap;
+     VkPhysicalDeviceRobustness2FeaturesEXT                    extRobustness2;
+
+diff --git a/src/dxvk/dxvk_extensions.h b/src/dxvk/dxvk_extensions.h
+--- a/src/dxvk/dxvk_extensions.h
++++ b/src/dxvk/dxvk_extensions.h
+@@ -285,6 +285,7 @@
+     DxvkExt extExtendedDynamicState           = { VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,             DxvkExtMode::Optional };
+     DxvkExt extFullScreenExclusive            = { VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME,              DxvkExtMode::Optional };
+     DxvkExt extHostQueryReset                 = { VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME,                   DxvkExtMode::Optional };
++    DxvkExt extMapMemoryPlaced                = { VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME,                 DxvkExtMode::Optional };
+     DxvkExt extMemoryBudget                   = { VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,                      DxvkExtMode::Passive  };
+     DxvkExt extMemoryPriority                 = { VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME,                    DxvkExtMode::Optional };
+     DxvkExt extNonSeamlessCubeMap             = { VK_EXT_NON_SEAMLESS_CUBE_MAP_EXTENSION_NAME,              DxvkExtMode::Optional };
+@@ -302,6 +303,7 @@
+     DxvkExt khrExternalMemoryWin32            = { VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,              DxvkExtMode::Optional };
+     DxvkExt khrExternalSemaphoreWin32         = { VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,           DxvkExtMode::Optional };
+     DxvkExt khrImageFormatList                = { VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,                  DxvkExtMode::Required };
++    DxvkExt khrMapMemory2                     = { VK_KHR_MAP_MEMORY_2_EXTENSION_NAME,                     DxvkExtMode::Optional };
+     DxvkExt khrSamplerMirrorClampToEdge       = { VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME,       DxvkExtMode::Optional };
+     DxvkExt khrShaderFloatControls            = { VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,              DxvkExtMode::Optional };
+     DxvkExt khrSwapchain                      = { VK_KHR_SWAPCHAIN_EXTENSION_NAME,                          DxvkExtMode::Required };
+
+diff --git a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -7,6 +7,7 @@
+     enableStateCache      = config.getOption<bool>    ("dxvk.enableStateCache",       true);
+     numCompilerThreads    = config.getOption<int32_t> ("dxvk.numCompilerThreads",     0);
+     useRawSsbo            = config.getOption<Tristate>("dxvk.useRawSsbo",             Tristate::Auto);
++    lowMemoryPlaced       = config.getOption<bool>    ("dxvk.lowMemoryPlaced",        true);
+     shrinkNvidiaHvvHeap   = config.getOption<Tristate>("dxvk.shrinkNvidiaHvvHeap",    Tristate::Auto);
+     hud                   = config.getOption<std::string>("dxvk.hud", "");
+   }
+
+diff --git a/src/dxvk/dxvk_options.h b/src/dxvk/dxvk_options.h
+--- a/src/dxvk/dxvk_options.h
++++ b/src/dxvk/dxvk_options.h
+@@ -21,6 +21,11 @@
+     /// Shader-related options
+     Tristate useRawSsbo;
+ 
++    /// Place host-visible memory below 4 GB when the driver supports
++    /// VK_EXT_map_memory_placed; the thin D3D9 bridge then hands the
++    /// pointer to the 32-bit guest without a staging copy.
++    bool lowMemoryPlaced;
++
+     /// Workaround for NVIDIA driver bug 3114283
+     Tristate shrinkNvidiaHvvHeap;
+ 
+
+diff --git a/src/vulkan/vulkan_loader.h b/src/vulkan/vulkan_loader.h
+--- a/src/vulkan/vulkan_loader.h
++++ b/src/vulkan/vulkan_loader.h
+@@ -11,6 +11,9 @@
+ #define VK_USE_PLATFORM_ANDROID_KHR 1
+ #endif
+ #include <vulkan/vulkan.h>
++
++/* VK_KHR_map_memory2/VK_EXT_map_memory_placed postdate these headers. */
++#include "wc3_vulkan_lowmem.h"
+ 
+ #define VULKAN_FN(name) \
+   ::PFN_ ## name name = reinterpret_cast<::PFN_ ## name>(sym(#name))
+@@ -181,6 +184,7 @@
+     VULKAN_FN(vkAllocateMemory);
+     VULKAN_FN(vkFreeMemory);
+     VULKAN_FN(vkMapMemory);
++    VULKAN_FN(vkMapMemory2KHR);
+     VULKAN_FN(vkUnmapMemory);
+     VULKAN_FN(vkFlushMappedMemoryRanges);
+     VULKAN_FN(vkInvalidateMappedMemoryRanges);

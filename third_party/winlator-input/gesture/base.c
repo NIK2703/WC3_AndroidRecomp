@@ -124,6 +124,64 @@ void gesture_tick(uint64_t now_tick, TouchActionResult* result) {
     }
 }
 
+static inline uint64_t gesture_deadline_min(uint64_t a, uint64_t b) {
+    return a < b ? a : b;
+}
+
+static inline uint64_t gesture_deadline_after(uint64_t start, int delay) {
+    // TIMER_ELAPSED() casts a negative delay to uint64_t, so such a timer
+    // never expires.  Returning NONE keeps the host asleep instead of
+    // polling a timer that cannot fire.
+    if (delay < 0) return UINT64_MAX;
+    return start + (uint64_t)delay;
+}
+
+uint64_t gesture_next_deadline_tick(void) {
+    if (!g_state.cfg.caps_has_gesture_bindings) return UINT64_MAX;
+    if (g_state.cfg.caps_mode_mask == 0 && g_state.dt_waiting_count == 0)
+        return UINT64_MAX;
+
+    uint64_t best = UINT64_MAX;
+    for (int i = 0; i < MAX_FINGERS; i++) {
+        TouchFinger* f = &g_state.fingers[i];
+        if (!f->active || f->engaged_elem_count > 0) continue;
+
+        const GesturePairSlot* slot = select_gesture_slot(f);
+        if (!slot) continue;
+
+        if (f->cached_has_long_press_timer) {
+            if (f->cached_has_moved_beyond_threshold ||
+                g_state.gesture_is_action_held) {
+                // handle_tick() clears the stale latch before processing.
+                // One immediate tick is enough to reach the same state.
+                best = 0;
+            } else if (!f->gesture_activated_in_touch) {
+                best = gesture_deadline_min(best,
+                    gesture_deadline_after(f->down_tick,
+                        g_state.cfg.long_press_timeout_ticks));
+            }
+        }
+
+        if (f->single_tap_hold_delay_ticks > 0
+            && !g_state.gesture_is_action_held
+            && !f->cached_has_moved_beyond_threshold) {
+            GesturePairResult gr = gesture_resolve(f, SELECT_S_SLOT(f));
+            if (gr.non_drag_count > 0) {
+                best = gesture_deadline_min(best,
+                    gesture_deadline_after(f->single_tap_hold_timer_tick,
+                        f->single_tap_hold_delay_ticks));
+            }
+        }
+
+        if (g_ctx[i].dt.waiting) {
+            best = gesture_deadline_min(best,
+                gesture_deadline_after(g_ctx[i].dt.start_tick,
+                    g_state.cfg.double_tap_timeout_ticks));
+        }
+    }
+    return best;
+}
+
 
 // Execute S on finger-down: start hold timer, defer to drag/up, or execute now.
 // Pass resolved bindings (x = non-drag, x_cnt) instead of hardcoded single_tap.

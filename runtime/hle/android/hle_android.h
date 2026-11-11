@@ -58,6 +58,11 @@ int wc3_android_set_surface_size(uint32_t width, uint32_t height);
  * formats into a local buffer and write(2)s it). */
 void hle_android_report(void);
 
+/* Remember the CPU that entered the latest import for the crash report.  The
+ * fast HLE path does not go through hle_call(), which used to be the only
+ * writer of that diagnostic pointer. */
+void hle_android_note_cpu(CPU *c);
+
 /* True when [addr, addr+size) is mapped guest memory (static arenas plus
  * ranges committed after startup).  Used by the thin D3D9 COM bridge before
  * a native COM method reads a guest pointer. */

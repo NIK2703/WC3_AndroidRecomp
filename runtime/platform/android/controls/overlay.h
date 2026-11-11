@@ -65,6 +65,11 @@ typedef struct {
     int overlay_width;
     int overlay_height;
     Wc3OverlayCacheLayer layers[WC3_OVERLAY_CACHE_MAX_LAYERS];
+    /* Fast element/slot -> layer index.  -1 means "not built"; a cache made by
+     * an older caller may leave this zeroed, so lookup falls back to a linear
+     * scan when the indexed entry does not match. */
+    int16_t layer_index[WC3_OVERLAY_MAX_ELEMENTS]
+                        [WC3_OVERLAY_CACHE_SLOT_COUNT];
 } Wc3OverlayCache;
 
 typedef enum {
@@ -214,6 +219,17 @@ int overlay_cache_add_layer(Wc3Overlay *overlay, int element, int slot,
                                 int dst_x, int dst_y, int rotation);
 void overlay_cache_clear(Wc3Overlay *overlay);
 void overlay_destroy(Wc3Overlay *overlay);
+
+/*
+ * Compare only the state that overlay_render() consumes.  Geometry, labels,
+ * shapes and the button-only `selected`/`engaged` flags do not change the
+ * rendered frame and are deliberately ignored; the D-pad `engaged` and
+ * `active_petals` fields do.  Keep this predicate aligned with
+ * draw_button_cached()/draw_dpad_cached() when the compositor grows new
+ * visual inputs.  Returns true when both overlays describe the same frame.
+ */
+bool overlay_visual_state_equal(const Wc3Overlay *shown,
+                                const Wc3Overlay *candidate);
 
 /*
  * Composite the cached Canvas atlas into an RGBA8 buffer.  The whole buffer is

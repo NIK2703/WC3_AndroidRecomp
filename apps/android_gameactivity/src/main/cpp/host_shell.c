@@ -31,6 +31,7 @@
 #include "app_boot.h"
 #include "controls.h"
 #include "guest_layout.h"
+#include "vulkan_driver_android.h"
 #include "guest_memory.h"
 #include "haptics_android.h"
 #include "input_adapter.h"
@@ -44,6 +45,7 @@
 #include "platform.h"
 #include "platform_android.h"
 #include "wc3_debug.h"
+#include "wc3_trace.h"
 #include "window_settle.h"
 
 #if WC3_WITH_ASBUILT_HLE
@@ -65,6 +67,13 @@
 #else
 #define LOGI(...) ((void)0)
 #define LOGE(...) ((void)0)
+#endif
+
+#if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
+#define GPU_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "GPU_DRIVERS", __VA_ARGS__)
+#else
+#define GPU_LOG(...) ((void)0)
 #endif
 
 static Wc3Platform g_platform;
@@ -124,32 +133,31 @@ static _Atomic int g_visual_reading;
 static _Atomic unsigned g_visual_gen;
 static _Atomic int g_visual_ready;
 
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+/* Phase 0 overlay-load counters.  They live only in the debug variant and are
+ * touched by one thread each: publish counters by the input thread, present
+ * counters by the overlay thread. */
+static unsigned g_dbg_publish_calls;
+static unsigned g_dbg_publish_changed;
+static unsigned g_dbg_publish_equal;
+static unsigned g_dbg_publish_errors;
+static unsigned g_dbg_publish_skipped;
+static unsigned g_dbg_presents;
+static uint64_t g_dbg_present_ns_total;
+static uint64_t g_dbg_present_ns_max;
+#endif
+
 static pthread_mutex_t g_overlay_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_overlay_cond;
 static pthread_once_t g_overlay_cond_once = PTHREAD_ONCE_INIT;
-static int g_overlay_cond_monotonic;
 
-/* E3.1: platform sync objects wait on CLOCK_MONOTONIC.  The overlay thread
- * uses the same clock for its deadline so a wall-clock adjustment cannot make
- * a 100 ms redraw wait last longer (or return immediately) by the size of the
- * step.  The condition variable is initialized once, before either a signal
- * or the wait can use it. */
+/* The overlay renderer waits for a generation/stop signal.  It does not need
+ * a periodic timeout: every producer of g_visual_gen, every surface change
+ * and overlay_stop() broadcast this condition.  Waiting indefinitely removes
+ * the old 10 Hz idle wakeup while keeping the same wake paths. */
 static void overlay_cond_init(void)
 {
-    pthread_condattr_t attr;
-    if (pthread_condattr_init(&attr) == 0) {
-#if defined(__ANDROID__)
-        if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0)
-            g_overlay_cond_monotonic = 1;
-#endif
-        if (pthread_cond_init(&g_overlay_cond, &attr) != 0) {
-            pthread_cond_init(&g_overlay_cond, NULL);
-            g_overlay_cond_monotonic = 0;
-        }
-        pthread_condattr_destroy(&attr);
-    } else {
-        pthread_cond_init(&g_overlay_cond, NULL);
-    }
+    pthread_cond_init(&g_overlay_cond, NULL);
 }
 
 static void overlay_cond_ensure(void)
@@ -255,6 +263,9 @@ static char g_data_dir[1024];
 static char g_state_dir[1024];
 /* Wc3RocActivity overrides the default before GameActivity starts android_main. */
 static char g_game_mode[8] = "tft";
+static char g_vulkan_driver_root[1024];
+static char g_vulkan_driver_id[WC3_VULKAN_DRIVER_ID_MAX];
+static char g_vulkan_driver_hook_dir[1024];
 
 #define SHARED_DATA_DIR_NAME "Warcraft 3"
 
@@ -336,6 +347,15 @@ static uint64_t host_now_ms(void)
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
     return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
+
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+static uint64_t host_now_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+#endif
 
 static char *read_text_file(const char *path)
 {
@@ -545,6 +565,7 @@ static void cache_publish(Wc3OverlayCache *built)
 static void *cache_worker_main(void *arg)
 {
     (void)arg;
+    WC3_TRACE_THREAD_NAME("wc3-cache");
 
     for (;;) {
         pthread_mutex_lock(&g_cache_lock);
@@ -576,11 +597,14 @@ static void *cache_worker_main(void *arg)
 
         if (!have_source) continue;
 
-        if (overlay_canvas_build(&source) == 0) {
-            Wc3OverlayCache built = source.cache;
-            memset(&source.cache, 0, sizeof source.cache);
-            cache_publish(&built);
-            free(built.pixels);
+        {
+            WC3_TRACE_SCOPE("wc3.overlay.cache");
+            if (overlay_canvas_build(&source) == 0) {
+                Wc3OverlayCache built = source.cache;
+                memset(&source.cache, 0, sizeof source.cache);
+                cache_publish(&built);
+                free(built.pixels);
+            }
         }
         overlay_destroy(&source);
     }
@@ -698,6 +722,7 @@ static int visual_initialize(int width, int height)
 
 static void publish_visual(void)
 {
+    WC3_TRACE_SCOPE("wc3.overlay.publish");
     pthread_mutex_lock(&g_overlay_lock);
     if (!atomic_load_explicit(&g_visual_ready, memory_order_acquire)) {
         pthread_mutex_unlock(&g_overlay_lock);
@@ -712,14 +737,40 @@ static void publish_visual(void)
         }
     }
     int changed = 0;
+    int sync_failed = 0;
     if (next >= 0) {
-        changed = controls_sync_visuals(&g_visual[next]);
-        if (changed > 0) {
+        int rc = controls_sync_visuals(&g_visual[next]);
+        if (rc < 0) {
+            sync_failed = 1;
+        } else if (active < 0 || active >= OVERLAY_SNAPSHOTS ||
+                   !overlay_visual_state_equal(&g_visual[active],
+                                               &g_visual[next])) {
+            /* Compare with the displayed snapshot, not with the staging
+             * buffer just filled.  A release that arrives before the next
+             * publish must still become visible, while a steady-state tick
+             * must not present a duplicate frame. */
             atomic_store_explicit(&g_visual_active, next, memory_order_release);
             atomic_fetch_add_explicit(&g_visual_gen, 1u, memory_order_release);
+            changed = 1;
         }
     }
     pthread_mutex_unlock(&g_overlay_lock);
+
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    g_dbg_publish_calls++;
+    if (changed)
+        g_dbg_publish_changed++;
+    else if (sync_failed)
+        g_dbg_publish_errors++;
+    else
+        g_dbg_publish_equal++;
+    if ((g_dbg_publish_calls % 300u) == 0u) {
+        OVERLAY_LOGI("publish calls=%u changed=%u equal=%u errors=%u",
+                     g_dbg_publish_calls, g_dbg_publish_changed,
+                     g_dbg_publish_equal, g_dbg_publish_errors);
+    }
+#endif
+
     if (changed > 0) visual_signal();
 }
 
@@ -737,6 +788,7 @@ static void *overlay_thread_main(void *arg)
     (void)arg;
     unsigned seen = 0;
     int first = 1;
+    WC3_TRACE_THREAD_NAME("wc3-overlay");
 
     overlay_cond_ensure();
     for (;;) {
@@ -745,16 +797,7 @@ static void *overlay_thread_main(void *arg)
             unsigned gen = atomic_load_explicit(&g_visual_gen,
                                                 memory_order_acquire);
             if (first || gen != seen) break;
-            struct timespec deadline;
-            clock_gettime(g_overlay_cond_monotonic ? CLOCK_MONOTONIC
-                                                   : CLOCK_REALTIME,
-                          &deadline);
-            deadline.tv_nsec += 100000000L;
-            if (deadline.tv_nsec >= 1000000000L) {
-                deadline.tv_sec++;
-                deadline.tv_nsec -= 1000000000L;
-            }
-            pthread_cond_timedwait(&g_overlay_cond, &g_overlay_lock, &deadline);
+            pthread_cond_wait(&g_overlay_cond, &g_overlay_lock);
         }
         if (atomic_load_explicit(&g_overlay_stop, memory_order_acquire)) {
             pthread_mutex_unlock(&g_overlay_lock);
@@ -762,6 +805,7 @@ static void *overlay_thread_main(void *arg)
         }
         seen = atomic_load_explicit(&g_visual_gen, memory_order_acquire);
         first = 0;
+        WC3_TRACE_SCOPE("wc3.overlay.tick");
         ANativeWindow *window = g_overlay_window;
         int width = g_overlay_width;
         int height = g_overlay_height;
@@ -791,12 +835,37 @@ static void *overlay_thread_main(void *arg)
             cache_release(cache_slot);
             continue;
         }
-        if (have_snapshot) {
-            overlay_android_present(window, &local);
-        } else {
-            present_blank(window, width > 0 ? width : 1,
-                          height > 0 ? height : 1);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        uint64_t present_start_ns = host_now_ns();
+#endif
+        {
+            WC3_TRACE_SCOPE("wc3.overlay.present");
+            if (have_snapshot) {
+                overlay_android_present(window, &local);
+            } else {
+                present_blank(window, width > 0 ? width : 1,
+                              height > 0 ? height : 1);
+            }
         }
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        uint64_t present_end_ns = host_now_ns();
+        if (present_start_ns && present_end_ns &&
+            present_end_ns >= present_start_ns) {
+            uint64_t elapsed_ns = present_end_ns - present_start_ns;
+            g_dbg_present_ns_total += elapsed_ns;
+            if (elapsed_ns > g_dbg_present_ns_max)
+                g_dbg_present_ns_max = elapsed_ns;
+        }
+        g_dbg_presents++;
+        if ((g_dbg_presents % 60u) == 0u) {
+            unsigned long long avg_us =
+                (unsigned long long)(g_dbg_present_ns_total /
+                                     (uint64_t)g_dbg_presents / 1000ull);
+            OVERLAY_LOGI("overlay presents=%u avg_us=%llu max_us=%llu",
+                         g_dbg_presents, avg_us,
+                         (unsigned long long)(g_dbg_present_ns_max / 1000ull));
+        }
+#endif
         cache_release(cache_slot);
         ANativeWindow_release(window);
     }
@@ -811,6 +880,7 @@ static void overlay_stop(void)
     int started = g_overlay_thread_started;
     if (started) {
         atomic_store_explicit(&g_overlay_stop, 1, memory_order_release);
+        overlay_cond_ensure();
         pthread_cond_broadcast(&g_overlay_cond);
     }
     pthread_mutex_unlock(&g_overlay_lock);
@@ -936,16 +1006,78 @@ static int has_arg_token(const char *args, const char *token)
 JNIEXPORT void JNICALL
 Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     JNIEnv *env, jclass clazz, jstring game_dir, jint width, jint height,
-    jboolean sound, jstring extra_args)
+    jboolean sound, jstring extra_args, jstring driver_id, jstring driver_root,
+    jstring hook_dir, jstring dxvk_version, jstring dxvk_config_path)
 {
+    /* JNI has no type checking between two jstring parameters.  Keep this
+     * order identical to Wc3GameActivity.nativeApplyLaunchSettings: id before
+     * root, DXVK version and config path last, or values are copied into the
+     * wrong slot. */
     (void)clazz;
     const char *dir = NULL;
     const char *user_args = NULL;
+    const char *vulkan_root = NULL;
+    const char *vulkan_id = NULL;
+    const char *vulkan_hooks = NULL;
+    const char *dxvk = NULL;
+    const char *dxvk_config = NULL;
+    int dxvk_forced = 0;
 
     if (game_dir)
         dir = (*env)->GetStringUTFChars(env, game_dir, NULL);
     if (extra_args)
         user_args = (*env)->GetStringUTFChars(env, extra_args, NULL);
+    if (driver_root)
+        vulkan_root = (*env)->GetStringUTFChars(env, driver_root, NULL);
+    if (driver_id)
+        vulkan_id = (*env)->GetStringUTFChars(env, driver_id, NULL);
+    if (hook_dir)
+        vulkan_hooks = (*env)->GetStringUTFChars(env, hook_dir, NULL);
+    if (dxvk_version)
+        dxvk = (*env)->GetStringUTFChars(env, dxvk_version, NULL);
+    if (dxvk_config_path)
+        dxvk_config = (*env)->GetStringUTFChars(env, dxvk_config_path, NULL);
+
+    GPU_LOG("apply launch driver id='%s' root='%s' hooks='%s' dxvk='%s' "
+            "config='%s'",
+            vulkan_id ? vulkan_id : "(null)",
+            vulkan_root ? vulkan_root : "(null)",
+            vulkan_hooks ? vulkan_hooks : "(null)",
+            dxvk ? dxvk : "(null)",
+            dxvk_config ? dxvk_config : "(null)");
+
+    /* An explicit version is a compatibility override, not an automatic
+     * choice: the as-built thin bridge treats "1"/"3" as forced and skips its
+     * version selector.  The DXVK entry wrappers also suppress the
+     * 3.1.1 -> 1.10.3 fallback while "3" is forced. */
+    dxvk_forced = dxvk && (strcmp(dxvk, "1") == 0 || strcmp(dxvk, "3") == 0);
+    if (dxvk_forced)
+        setenv("WC3_DXVK_VERSION", dxvk, 1);
+    else
+        unsetenv("WC3_DXVK_VERSION");
+    GPU_LOG("DXVK selection '%s'", dxvk_forced ? dxvk : "auto");
+
+    /* Both vendored DXVK versions read DXVK_CONFIG_FILE.  DXVK 1.10.3 has no
+     * DXVK_CONFIG environment form, so the app writes one key-value file and
+     * points both majors at it.  Unset the 3.1.1-only environment override so
+     * an inherited shell variable cannot silently win after the file parse. */
+    if (dxvk_config && dxvk_config[0]) {
+        setenv("DXVK_CONFIG_FILE", dxvk_config, 1);
+        GPU_LOG("DXVK config file '%s'", dxvk_config);
+    } else {
+        unsetenv("DXVK_CONFIG_FILE");
+        GPU_LOG("DXVK config file disabled");
+    }
+    unsetenv("DXVK_CONFIG");
+
+    /* The package choice is latched before android_main installs the platform
+     * table.  A missing/empty root keeps the system loader. */
+    snprintf(g_vulkan_driver_root, sizeof g_vulkan_driver_root, "%s",
+             vulkan_root ? vulkan_root : "");
+    snprintf(g_vulkan_driver_id, sizeof g_vulkan_driver_id, "%s",
+             vulkan_id ? vulkan_id : "");
+    snprintf(g_vulkan_driver_hook_dir, sizeof g_vulkan_driver_hook_dir, "%s",
+             vulkan_hooks ? vulkan_hooks : "");
 
     if (dir && dir[0])
         setenv("WC3_GAME_DATA_DIR", dir, 1);
@@ -983,10 +1115,28 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     else
         unsetenv("WC3_ARGS");
 
+    if (wc3_android_vulkan_driver_configure(g_vulkan_driver_root,
+                                            g_vulkan_driver_id,
+                                            g_vulkan_driver_hook_dir) != 0)
+        LOGE("Vulkan driver settings rejected (id=%s)",
+             g_vulkan_driver_id);
+    else
+        GPU_LOG("driver settings configured");
+
     if (dir)
         (*env)->ReleaseStringUTFChars(env, game_dir, dir);
     if (user_args)
         (*env)->ReleaseStringUTFChars(env, extra_args, user_args);
+    if (vulkan_root)
+        (*env)->ReleaseStringUTFChars(env, driver_root, vulkan_root);
+    if (vulkan_id)
+        (*env)->ReleaseStringUTFChars(env, driver_id, vulkan_id);
+    if (vulkan_hooks)
+        (*env)->ReleaseStringUTFChars(env, hook_dir, vulkan_hooks);
+    if (dxvk)
+        (*env)->ReleaseStringUTFChars(env, dxvk_version, dxvk);
+    if (dxvk_config)
+        (*env)->ReleaseStringUTFChars(env, dxvk_config_path, dxvk_config);
 }
 
 static void canvas_attach_provider(struct android_app *app)
@@ -1230,17 +1380,50 @@ static void host_haptic_sink(int effect, void *user)
 static void *input_thread_main(void *arg)
 {
     (void)arg;
+    WC3_TRACE_THREAD_NAME("wc3-input");
     haptics_android_attach_thread();
     while (!atomic_load_explicit(&g_input_stop, memory_order_acquire)) {
         uint64_t now = host_now_ms();
-        input_adapter_drain(&g_input_adapter, now);
-        publish_visual();
+        {
+            WC3_TRACE_SCOPE("wc3.input.drain");
+            input_adapter_drain(&g_input_adapter, now);
+        }
+        const Wc3InputAdapterStats *input_stats =
+            input_adapter_stats(&g_input_adapter);
+        /* A move-only batch is published only when the engine marked the
+         * overlay dirty.  Down/up/cancel keep the input-event fallback so a
+         * missing mark can never leave a control stuck on screen. */
+        int visual_dirty = controls_visual_dirty() ||
+                           (input_stats && input_stats->last_control_events > 0);
+        int pending_visual = 0;
+        if (visual_dirty) {
+            WC3_TRACE_SCOPE("wc3.input.publish");
+            publish_visual();
+            /* A failed sync or an unavailable snapshot must be retried even
+             * when the engine has no timer left to wake the input thread. */
+            pending_visual = controls_visual_dirty();
+        }
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        else {
+            g_dbg_publish_skipped++;
+            if ((g_dbg_publish_skipped % 600u) == 0u) {
+                OVERLAY_LOGI("overlay idle publish skips=%u",
+                             g_dbg_publish_skipped);
+            }
+        }
+#endif
 
         uint64_t deadline = input_adapter_next_deadline_ms(&g_input_adapter,
                                                            now);
-        uint64_t after = host_now_ms();
-        int timeout = deadline > after ? (int)(deadline - after) : 0;
-        if (timeout > 1000) timeout = 1000;
+        int timeout = -1;
+        if (deadline != 0) {
+            uint64_t after = host_now_ms();
+            timeout = deadline > after ? (int)(deadline - after) : 0;
+            if (timeout > 1000) timeout = 1000;
+        }
+        if (pending_visual && (timeout < 0 || timeout > 16))
+            timeout = 16;
+        /* timeout == -1 is the idle state: block until a touch or stop. */
         input_wake_wait(g_input_wake, timeout);
     }
     haptics_android_detach_thread();
@@ -1363,6 +1546,7 @@ static void overlay_input_stop(void)
 static int queue_touch(Wc3TouchPhase phase, int32_t pointer_id, float x,
                        float y, uint64_t event_time_ms)
 {
+    WC3_TRACE_SCOPE("wc3.input.queue");
     if (!atomic_load_explicit(&g_input_ready, memory_order_acquire) ||
         !g_input_wake)
         return -1;
@@ -1384,6 +1568,8 @@ static void *boot_thread(void *arg)
     ANativeWindow *window = NULL;
     uint32_t width = 0;
     uint32_t height = 0;
+    WC3_TRACE_THREAD_NAME("wc3-boot");
+    WC3_TRACE_SCOPE("wc3.boot.thread");
 
     /* GameActivity can replace the starting surface once the activity is laid
      * out.  The pointer must still survive one settle interval, but a surface
@@ -1821,6 +2007,8 @@ static int load_image(const char *dir, const char *name, uint32_t base)
 
 void android_main(struct android_app *app)
 {
+    WC3_TRACE_THREAD_NAME("wc3-ui");
+    WC3_TRACE_SCOPE("wc3.android_main");
     LOGI("android_main pid=%d", (int)getpid());
     g_app = app;
     app->onAppCmd = on_app_cmd;
@@ -1828,10 +2016,14 @@ void android_main(struct android_app *app)
 
     if (wc3_android_platform_init(&g_platform) != 0) {
         LOGE("platform init failed");
-    } else if (wc3_platform_install(&g_platform) != 0) {
-        LOGE("platform install failed");
     } else {
-        g_platform_ready = 1;
+        GPU_LOG("platform init ok; installing Vulkan driver api");
+        wc3_android_vulkan_driver_install(&g_platform.vulkan_driver);
+        GPU_LOG("Vulkan driver api installed");
+        if (wc3_platform_install(&g_platform) != 0)
+            LOGE("platform install failed");
+        else
+            g_platform_ready = 1;
     }
 
     const char *data_dir = pick_data_dir(app);

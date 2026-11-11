@@ -1,0 +1,716 @@
+[
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/util_env.cpp.obj -MF \"src\\util\\libutil.a.p\\util_env.cpp.obj.d\" -o src/util/libutil.a.p/util_env.cpp.obj \"-c\" ../src/util/util_env.cpp",
+    "file": "../src/util/util_env.cpp",
+    "output": "src/util/libutil.a.p/util_env.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/util_string.cpp.obj -MF \"src\\util\\libutil.a.p\\util_string.cpp.obj.d\" -o src/util/libutil.a.p/util_string.cpp.obj \"-c\" ../src/util/util_string.cpp",
+    "file": "../src/util/util_string.cpp",
+    "output": "src/util/libutil.a.p/util_string.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/util_fps_limiter.cpp.obj -MF \"src\\util\\libutil.a.p\\util_fps_limiter.cpp.obj.d\" -o src/util/libutil.a.p/util_fps_limiter.cpp.obj \"-c\" ../src/util/util_fps_limiter.cpp",
+    "file": "../src/util/util_fps_limiter.cpp",
+    "output": "src/util/libutil.a.p/util_fps_limiter.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/util_gdi.cpp.obj -MF \"src\\util\\libutil.a.p\\util_gdi.cpp.obj.d\" -o src/util/libutil.a.p/util_gdi.cpp.obj \"-c\" ../src/util/util_gdi.cpp",
+    "file": "../src/util/util_gdi.cpp",
+    "output": "src/util/libutil.a.p/util_gdi.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/util_luid.cpp.obj -MF \"src\\util\\libutil.a.p\\util_luid.cpp.obj.d\" -o src/util/libutil.a.p/util_luid.cpp.obj \"-c\" ../src/util/util_luid.cpp",
+    "file": "../src/util/util_luid.cpp",
+    "output": "src/util/libutil.a.p/util_luid.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/util_matrix.cpp.obj -MF \"src\\util\\libutil.a.p\\util_matrix.cpp.obj.d\" -o src/util/libutil.a.p/util_matrix.cpp.obj \"-c\" ../src/util/util_matrix.cpp",
+    "file": "../src/util/util_matrix.cpp",
+    "output": "src/util/libutil.a.p/util_matrix.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/util_monitor.cpp.obj -MF \"src\\util\\libutil.a.p\\util_monitor.cpp.obj.d\" -o src/util/libutil.a.p/util_monitor.cpp.obj \"-c\" ../src/util/util_monitor.cpp",
+    "file": "../src/util/util_monitor.cpp",
+    "output": "src/util/libutil.a.p/util_monitor.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/util_shared_res.cpp.obj -MF \"src\\util\\libutil.a.p\\util_shared_res.cpp.obj.d\" -o src/util/libutil.a.p/util_shared_res.cpp.obj \"-c\" ../src/util/util_shared_res.cpp",
+    "file": "../src/util/util_shared_res.cpp",
+    "output": "src/util/libutil.a.p/util_shared_res.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/thread.cpp.obj -MF \"src\\util\\libutil.a.p\\thread.cpp.obj.d\" -o src/util/libutil.a.p/thread.cpp.obj \"-c\" ../src/util/thread.cpp",
+    "file": "../src/util/thread.cpp",
+    "output": "src/util/libutil.a.p/thread.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/com_com_guid.cpp.obj -MF \"src\\util\\libutil.a.p\\com_com_guid.cpp.obj.d\" -o src/util/libutil.a.p/com_com_guid.cpp.obj \"-c\" ../src/util/com/com_guid.cpp",
+    "file": "../src/util/com/com_guid.cpp",
+    "output": "src/util/libutil.a.p/com_com_guid.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/com_com_private_data.cpp.obj -MF \"src\\util\\libutil.a.p\\com_com_private_data.cpp.obj.d\" -o src/util/libutil.a.p/com_com_private_data.cpp.obj \"-c\" ../src/util/com/com_private_data.cpp",
+    "file": "../src/util/com/com_private_data.cpp",
+    "output": "src/util/libutil.a.p/com_com_private_data.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/config_config.cpp.obj -MF \"src\\util\\libutil.a.p\\config_config.cpp.obj.d\" -o src/util/libutil.a.p/config_config.cpp.obj \"-c\" ../src/util/config/config.cpp",
+    "file": "../src/util/config/config.cpp",
+    "output": "src/util/libutil.a.p/config_config.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/log_log.cpp.obj -MF \"src\\util\\libutil.a.p\\log_log.cpp.obj.d\" -o src/util/libutil.a.p/log_log.cpp.obj \"-c\" ../src/util/log/log.cpp",
+    "file": "../src/util/log/log.cpp",
+    "output": "src/util/libutil.a.p/log_log.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/log_log_debug.cpp.obj -MF \"src\\util\\libutil.a.p\\log_log_debug.cpp.obj.d\" -o src/util/libutil.a.p/log_log_debug.cpp.obj \"-c\" ../src/util/log/log_debug.cpp",
+    "file": "../src/util/log/log_debug.cpp",
+    "output": "src/util/libutil.a.p/log_log_debug.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/gcc.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/sha1_sha1.c.obj -MF \"src\\util\\libutil.a.p\\sha1_sha1.c.obj.d\" -o src/util/libutil.a.p/sha1_sha1.c.obj \"-c\" ../src/util/sha1/sha1.c",
+    "file": "../src/util/sha1/sha1.c",
+    "output": "src/util/libutil.a.p/sha1_sha1.c.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/sha1_sha1_util.cpp.obj -MF \"src\\util\\libutil.a.p\\sha1_sha1_util.cpp.obj.d\" -o src/util/libutil.a.p/sha1_sha1_util.cpp.obj \"-c\" ../src/util/sha1/sha1_util.cpp",
+    "file": "../src/util/sha1/sha1_util.cpp",
+    "output": "src/util/libutil.a.p/sha1_sha1_util.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\util\\libutil.a.p\" \"-Isrc\\util\" \"-I..\\src\\util\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/util/libutil.a.p/sync_sync_recursive.cpp.obj -MF \"src\\util\\libutil.a.p\\sync_sync_recursive.cpp.obj.d\" -o src/util/libutil.a.p/sync_sync_recursive.cpp.obj \"-c\" ../src/util/sync/sync_recursive.cpp",
+    "file": "../src/util/sync/sync_recursive.cpp",
+    "output": "src/util/libutil.a.p/sync_sync_recursive.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\spirv\\libspirv.a.p\" \"-Isrc\\spirv\" \"-I..\\src\\spirv\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/spirv/libspirv.a.p/spirv_code_buffer.cpp.obj -MF \"src\\spirv\\libspirv.a.p\\spirv_code_buffer.cpp.obj.d\" -o src/spirv/libspirv.a.p/spirv_code_buffer.cpp.obj \"-c\" ../src/spirv/spirv_code_buffer.cpp",
+    "file": "../src/spirv/spirv_code_buffer.cpp",
+    "output": "src/spirv/libspirv.a.p/spirv_code_buffer.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\spirv\\libspirv.a.p\" \"-Isrc\\spirv\" \"-I..\\src\\spirv\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/spirv/libspirv.a.p/spirv_compression.cpp.obj -MF \"src\\spirv\\libspirv.a.p\\spirv_compression.cpp.obj.d\" -o src/spirv/libspirv.a.p/spirv_compression.cpp.obj \"-c\" ../src/spirv/spirv_compression.cpp",
+    "file": "../src/spirv/spirv_compression.cpp",
+    "output": "src/spirv/libspirv.a.p/spirv_compression.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\spirv\\libspirv.a.p\" \"-Isrc\\spirv\" \"-I..\\src\\spirv\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/spirv/libspirv.a.p/spirv_module.cpp.obj -MF \"src\\spirv\\libspirv.a.p\\spirv_module.cpp.obj.d\" -o src/spirv/libspirv.a.p/spirv_module.cpp.obj \"-c\" ../src/spirv/spirv_module.cpp",
+    "file": "../src/spirv/spirv_module.cpp",
+    "output": "src/spirv/libspirv.a.p/spirv_module.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\vulkan\\libvkcommon.a.p\" \"-Isrc\\vulkan\" \"-I..\\src\\vulkan\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/vulkan/libvkcommon.a.p/vulkan_loader.cpp.obj -MF \"src\\vulkan\\libvkcommon.a.p\\vulkan_loader.cpp.obj.d\" -o src/vulkan/libvkcommon.a.p/vulkan_loader.cpp.obj \"-c\" ../src/vulkan/vulkan_loader.cpp",
+    "file": "../src/vulkan/vulkan_loader.cpp",
+    "output": "src/vulkan/libvkcommon.a.p/vulkan_loader.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\vulkan\\libvkcommon.a.p\" \"-Isrc\\vulkan\" \"-I..\\src\\vulkan\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/vulkan/libvkcommon.a.p/vulkan_names.cpp.obj -MF \"src\\vulkan\\libvkcommon.a.p\\vulkan_names.cpp.obj.d\" -o src/vulkan/libvkcommon.a.p/vulkan_names.cpp.obj \"-c\" ../src/vulkan/vulkan_names.cpp",
+    "file": "../src/vulkan/vulkan_names.cpp",
+    "output": "src/vulkan/libvkcommon.a.p/vulkan_names.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\vulkan\\libvkcommon.a.p\" \"-Isrc\\vulkan\" \"-I..\\src\\vulkan\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/vulkan/libvkcommon.a.p/vulkan_presenter.cpp.obj -MF \"src\\vulkan\\libvkcommon.a.p\\vulkan_presenter.cpp.obj.d\" -o src/vulkan/libvkcommon.a.p/vulkan_presenter.cpp.obj \"-c\" ../src/vulkan/vulkan_presenter.cpp",
+    "file": "../src/vulkan/vulkan_presenter.cpp",
+    "output": "src/vulkan/libvkcommon.a.p/vulkan_presenter.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_adapter.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_adapter.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_adapter.cpp.obj \"-c\" ../src/dxvk/dxvk_adapter.cpp",
+    "file": "../src/dxvk/dxvk_adapter.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_adapter.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_barrier.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_barrier.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_barrier.cpp.obj \"-c\" ../src/dxvk/dxvk_barrier.cpp",
+    "file": "../src/dxvk/dxvk_barrier.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_barrier.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_buffer.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_buffer.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_buffer.cpp.obj \"-c\" ../src/dxvk/dxvk_buffer.cpp",
+    "file": "../src/dxvk/dxvk_buffer.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_buffer.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_cmdlist.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_cmdlist.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_cmdlist.cpp.obj \"-c\" ../src/dxvk/dxvk_cmdlist.cpp",
+    "file": "../src/dxvk/dxvk_cmdlist.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_cmdlist.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_compute.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_compute.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_compute.cpp.obj \"-c\" ../src/dxvk/dxvk_compute.cpp",
+    "file": "../src/dxvk/dxvk_compute.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_compute.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_context.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_context.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_context.cpp.obj \"-c\" ../src/dxvk/dxvk_context.cpp",
+    "file": "../src/dxvk/dxvk_context.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_context.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_cs.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_cs.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_cs.cpp.obj \"-c\" ../src/dxvk/dxvk_cs.cpp",
+    "file": "../src/dxvk/dxvk_cs.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_cs.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_data.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_data.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_data.cpp.obj \"-c\" ../src/dxvk/dxvk_data.cpp",
+    "file": "../src/dxvk/dxvk_data.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_data.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_descriptor.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_descriptor.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_descriptor.cpp.obj \"-c\" ../src/dxvk/dxvk_descriptor.cpp",
+    "file": "../src/dxvk/dxvk_descriptor.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_descriptor.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_device.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_device.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_device.cpp.obj \"-c\" ../src/dxvk/dxvk_device.cpp",
+    "file": "../src/dxvk/dxvk_device.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_device.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_device_filter.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_device_filter.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_device_filter.cpp.obj \"-c\" ../src/dxvk/dxvk_device_filter.cpp",
+    "file": "../src/dxvk/dxvk_device_filter.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_device_filter.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_extensions.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_extensions.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_extensions.cpp.obj \"-c\" ../src/dxvk/dxvk_extensions.cpp",
+    "file": "../src/dxvk/dxvk_extensions.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_extensions.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_fence.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_fence.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_fence.cpp.obj \"-c\" ../src/dxvk/dxvk_fence.cpp",
+    "file": "../src/dxvk/dxvk_fence.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_fence.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_format.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_format.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_format.cpp.obj \"-c\" ../src/dxvk/dxvk_format.cpp",
+    "file": "../src/dxvk/dxvk_format.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_format.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_framebuffer.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_framebuffer.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_framebuffer.cpp.obj \"-c\" ../src/dxvk/dxvk_framebuffer.cpp",
+    "file": "../src/dxvk/dxvk_framebuffer.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_framebuffer.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_gpu_event.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_gpu_event.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_gpu_event.cpp.obj \"-c\" ../src/dxvk/dxvk_gpu_event.cpp",
+    "file": "../src/dxvk/dxvk_gpu_event.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_gpu_event.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_gpu_query.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_gpu_query.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_gpu_query.cpp.obj \"-c\" ../src/dxvk/dxvk_gpu_query.cpp",
+    "file": "../src/dxvk/dxvk_gpu_query.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_gpu_query.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_graphics.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_graphics.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_graphics.cpp.obj \"-c\" ../src/dxvk/dxvk_graphics.cpp",
+    "file": "../src/dxvk/dxvk_graphics.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_graphics.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_image.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_image.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_image.cpp.obj \"-c\" ../src/dxvk/dxvk_image.cpp",
+    "file": "../src/dxvk/dxvk_image.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_image.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_instance.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_instance.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_instance.cpp.obj \"-c\" ../src/dxvk/dxvk_instance.cpp",
+    "file": "../src/dxvk/dxvk_instance.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_instance.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_lifetime.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_lifetime.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_lifetime.cpp.obj \"-c\" ../src/dxvk/dxvk_lifetime.cpp",
+    "file": "../src/dxvk/dxvk_lifetime.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_lifetime.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_memory.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_memory.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_memory.cpp.obj \"-c\" ../src/dxvk/dxvk_memory.cpp",
+    "file": "../src/dxvk/dxvk_memory.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_memory.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_meta_blit.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_meta_blit.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_meta_blit.cpp.obj \"-c\" ../src/dxvk/dxvk_meta_blit.cpp",
+    "file": "../src/dxvk/dxvk_meta_blit.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_meta_blit.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_meta_clear.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_meta_clear.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_meta_clear.cpp.obj \"-c\" ../src/dxvk/dxvk_meta_clear.cpp",
+    "file": "../src/dxvk/dxvk_meta_clear.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_meta_clear.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_meta_copy.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_meta_copy.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_meta_copy.cpp.obj \"-c\" ../src/dxvk/dxvk_meta_copy.cpp",
+    "file": "../src/dxvk/dxvk_meta_copy.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_meta_copy.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_meta_mipgen.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_meta_mipgen.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_meta_mipgen.cpp.obj \"-c\" ../src/dxvk/dxvk_meta_mipgen.cpp",
+    "file": "../src/dxvk/dxvk_meta_mipgen.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_meta_mipgen.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_meta_pack.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_meta_pack.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_meta_pack.cpp.obj \"-c\" ../src/dxvk/dxvk_meta_pack.cpp",
+    "file": "../src/dxvk/dxvk_meta_pack.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_meta_pack.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_meta_resolve.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_meta_resolve.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_meta_resolve.cpp.obj \"-c\" ../src/dxvk/dxvk_meta_resolve.cpp",
+    "file": "../src/dxvk/dxvk_meta_resolve.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_meta_resolve.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_openvr.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_openvr.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_openvr.cpp.obj \"-c\" ../src/dxvk/dxvk_openvr.cpp",
+    "file": "../src/dxvk/dxvk_openvr.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_openvr.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_openxr.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_openxr.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_openxr.cpp.obj \"-c\" ../src/dxvk/dxvk_openxr.cpp",
+    "file": "../src/dxvk/dxvk_openxr.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_openxr.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_options.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_options.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_options.cpp.obj \"-c\" ../src/dxvk/dxvk_options.cpp",
+    "file": "../src/dxvk/dxvk_options.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_options.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_pipecache.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_pipecache.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_pipecache.cpp.obj \"-c\" ../src/dxvk/dxvk_pipecache.cpp",
+    "file": "../src/dxvk/dxvk_pipecache.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_pipecache.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_pipelayout.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_pipelayout.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_pipelayout.cpp.obj \"-c\" ../src/dxvk/dxvk_pipelayout.cpp",
+    "file": "../src/dxvk/dxvk_pipelayout.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_pipelayout.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_pipemanager.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_pipemanager.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_pipemanager.cpp.obj \"-c\" ../src/dxvk/dxvk_pipemanager.cpp",
+    "file": "../src/dxvk/dxvk_pipemanager.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_pipemanager.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_queue.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_queue.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_queue.cpp.obj \"-c\" ../src/dxvk/dxvk_queue.cpp",
+    "file": "../src/dxvk/dxvk_queue.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_queue.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_renderpass.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_renderpass.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_renderpass.cpp.obj \"-c\" ../src/dxvk/dxvk_renderpass.cpp",
+    "file": "../src/dxvk/dxvk_renderpass.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_renderpass.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_resource.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_resource.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_resource.cpp.obj \"-c\" ../src/dxvk/dxvk_resource.cpp",
+    "file": "../src/dxvk/dxvk_resource.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_resource.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_sampler.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_sampler.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_sampler.cpp.obj \"-c\" ../src/dxvk/dxvk_sampler.cpp",
+    "file": "../src/dxvk/dxvk_sampler.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_sampler.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_shader.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_shader.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_shader.cpp.obj \"-c\" ../src/dxvk/dxvk_shader.cpp",
+    "file": "../src/dxvk/dxvk_shader.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_shader.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_shader_key.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_shader_key.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_shader_key.cpp.obj \"-c\" ../src/dxvk/dxvk_shader_key.cpp",
+    "file": "../src/dxvk/dxvk_shader_key.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_shader_key.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_signal.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_signal.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_signal.cpp.obj \"-c\" ../src/dxvk/dxvk_signal.cpp",
+    "file": "../src/dxvk/dxvk_signal.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_signal.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_spec_const.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_spec_const.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_spec_const.cpp.obj \"-c\" ../src/dxvk/dxvk_spec_const.cpp",
+    "file": "../src/dxvk/dxvk_spec_const.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_spec_const.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_staging.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_staging.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_staging.cpp.obj \"-c\" ../src/dxvk/dxvk_staging.cpp",
+    "file": "../src/dxvk/dxvk_staging.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_staging.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_state_cache.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_state_cache.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_state_cache.cpp.obj \"-c\" ../src/dxvk/dxvk_state_cache.cpp",
+    "file": "../src/dxvk/dxvk_state_cache.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_state_cache.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_stats.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_stats.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_stats.cpp.obj \"-c\" ../src/dxvk/dxvk_stats.cpp",
+    "file": "../src/dxvk/dxvk_stats.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_stats.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_swapchain_blitter.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_swapchain_blitter.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_swapchain_blitter.cpp.obj \"-c\" ../src/dxvk/dxvk_swapchain_blitter.cpp",
+    "file": "../src/dxvk/dxvk_swapchain_blitter.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_swapchain_blitter.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_unbound.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_unbound.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_unbound.cpp.obj \"-c\" ../src/dxvk/dxvk_unbound.cpp",
+    "file": "../src/dxvk/dxvk_unbound.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_unbound.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/dxvk_util.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\dxvk_util.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/dxvk_util.cpp.obj \"-c\" ../src/dxvk/dxvk_util.cpp",
+    "file": "../src/dxvk/dxvk_util.cpp",
+    "output": "src/dxvk/libdxvk.a.p/dxvk_util.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/platform_dxvk_win32_exts.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\platform_dxvk_win32_exts.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/platform_dxvk_win32_exts.cpp.obj \"-c\" ../src/dxvk/platform/dxvk_win32_exts.cpp",
+    "file": "../src/dxvk/platform/dxvk_win32_exts.cpp",
+    "output": "src/dxvk/libdxvk.a.p/platform_dxvk_win32_exts.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/hud_dxvk_hud.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\hud_dxvk_hud.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/hud_dxvk_hud.cpp.obj \"-c\" ../src/dxvk/hud/dxvk_hud.cpp",
+    "file": "../src/dxvk/hud/dxvk_hud.cpp",
+    "output": "src/dxvk/libdxvk.a.p/hud_dxvk_hud.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/hud_dxvk_hud_font.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\hud_dxvk_hud_font.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/hud_dxvk_hud_font.cpp.obj \"-c\" ../src/dxvk/hud/dxvk_hud_font.cpp",
+    "file": "../src/dxvk/hud/dxvk_hud_font.cpp",
+    "output": "src/dxvk/libdxvk.a.p/hud_dxvk_hud_font.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/hud_dxvk_hud_item.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\hud_dxvk_hud_item.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/hud_dxvk_hud_item.cpp.obj \"-c\" ../src/dxvk/hud/dxvk_hud_item.cpp",
+    "file": "../src/dxvk/hud/dxvk_hud_item.cpp",
+    "output": "src/dxvk/libdxvk.a.p/hud_dxvk_hud_item.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxvk\\libdxvk.a.p\" \"-Isrc\\dxvk\" \"-I..\\src\\dxvk\" \"-I..\\include\" \"-I.\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" \"-pthread\" -MD -MQ src/dxvk/libdxvk.a.p/hud_dxvk_hud_renderer.cpp.obj -MF \"src\\dxvk\\libdxvk.a.p\\hud_dxvk_hud_renderer.cpp.obj.d\" -o src/dxvk/libdxvk.a.p/hud_dxvk_hud_renderer.cpp.obj \"-c\" ../src/dxvk/hud/dxvk_hud_renderer.cpp",
+    "file": "../src/dxvk/hud/dxvk_hud_renderer.cpp",
+    "output": "src/dxvk/libdxvk.a.p/hud_dxvk_hud_renderer.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_common.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_common.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_common.cpp.obj \"-c\" ../src/dxso/dxso_common.cpp",
+    "file": "../src/dxso/dxso_common.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_common.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_options.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_options.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_options.cpp.obj \"-c\" ../src/dxso/dxso_options.cpp",
+    "file": "../src/dxso/dxso_options.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_options.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_module.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_module.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_module.cpp.obj \"-c\" ../src/dxso/dxso_module.cpp",
+    "file": "../src/dxso/dxso_module.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_module.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_reader.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_reader.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_reader.cpp.obj \"-c\" ../src/dxso/dxso_reader.cpp",
+    "file": "../src/dxso/dxso_reader.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_reader.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_header.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_header.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_header.cpp.obj \"-c\" ../src/dxso/dxso_header.cpp",
+    "file": "../src/dxso/dxso_header.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_header.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_ctab.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_ctab.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_ctab.cpp.obj \"-c\" ../src/dxso/dxso_ctab.cpp",
+    "file": "../src/dxso/dxso_ctab.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_ctab.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_util.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_util.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_util.cpp.obj \"-c\" ../src/dxso/dxso_util.cpp",
+    "file": "../src/dxso/dxso_util.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_util.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_code.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_code.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_code.cpp.obj \"-c\" ../src/dxso/dxso_code.cpp",
+    "file": "../src/dxso/dxso_code.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_code.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_tables.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_tables.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_tables.cpp.obj \"-c\" ../src/dxso/dxso_tables.cpp",
+    "file": "../src/dxso/dxso_tables.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_tables.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_decoder.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_decoder.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_decoder.cpp.obj \"-c\" ../src/dxso/dxso_decoder.cpp",
+    "file": "../src/dxso/dxso_decoder.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_decoder.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_analysis.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_analysis.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_analysis.cpp.obj \"-c\" ../src/dxso/dxso_analysis.cpp",
+    "file": "../src/dxso/dxso_analysis.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_analysis.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_compiler.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_compiler.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_compiler.cpp.obj \"-c\" ../src/dxso/dxso_compiler.cpp",
+    "file": "../src/dxso/dxso_compiler.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_compiler.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\dxso\\libdxso.a.p\" \"-Isrc\\dxso\" \"-I..\\src\\dxso\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/dxso/libdxso.a.p/dxso_enums.cpp.obj -MF \"src\\dxso\\libdxso.a.p\\dxso_enums.cpp.obj.d\" -o src/dxso/libdxso.a.p/dxso_enums.cpp.obj \"-c\" ../src/dxso/dxso_enums.cpp",
+    "file": "../src/dxso/dxso_enums.cpp",
+    "output": "src/dxso/libdxso.a.p/dxso_enums.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_main.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_main.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_main.cpp.obj \"-c\" ../src/d3d9/d3d9_main.cpp",
+    "file": "../src/d3d9/d3d9_main.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_main.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_interface.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_interface.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_interface.cpp.obj \"-c\" ../src/d3d9/d3d9_interface.cpp",
+    "file": "../src/d3d9/d3d9_interface.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_interface.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_adapter.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_adapter.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_adapter.cpp.obj \"-c\" ../src/d3d9/d3d9_adapter.cpp",
+    "file": "../src/d3d9/d3d9_adapter.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_adapter.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_monitor.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_monitor.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_monitor.cpp.obj \"-c\" ../src/d3d9/d3d9_monitor.cpp",
+    "file": "../src/d3d9/d3d9_monitor.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_monitor.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_device.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_device.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_device.cpp.obj \"-c\" ../src/d3d9/d3d9_device.cpp",
+    "file": "../src/d3d9/d3d9_device.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_device.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_state.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_state.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_state.cpp.obj \"-c\" ../src/d3d9/d3d9_state.cpp",
+    "file": "../src/d3d9/d3d9_state.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_state.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_cursor.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_cursor.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_cursor.cpp.obj \"-c\" ../src/d3d9/d3d9_cursor.cpp",
+    "file": "../src/d3d9/d3d9_cursor.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_cursor.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_swapchain.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_swapchain.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_swapchain.cpp.obj \"-c\" ../src/d3d9/d3d9_swapchain.cpp",
+    "file": "../src/d3d9/d3d9_swapchain.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_swapchain.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_format.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_format.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_format.cpp.obj \"-c\" ../src/d3d9/d3d9_format.cpp",
+    "file": "../src/d3d9/d3d9_format.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_format.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_common_texture.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_common_texture.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_common_texture.cpp.obj \"-c\" ../src/d3d9/d3d9_common_texture.cpp",
+    "file": "../src/d3d9/d3d9_common_texture.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_common_texture.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_texture.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_texture.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_texture.cpp.obj \"-c\" ../src/d3d9/d3d9_texture.cpp",
+    "file": "../src/d3d9/d3d9_texture.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_texture.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_surface.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_surface.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_surface.cpp.obj \"-c\" ../src/d3d9/d3d9_surface.cpp",
+    "file": "../src/d3d9/d3d9_surface.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_surface.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_volume.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_volume.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_volume.cpp.obj \"-c\" ../src/d3d9/d3d9_volume.cpp",
+    "file": "../src/d3d9/d3d9_volume.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_volume.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_common_buffer.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_common_buffer.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_common_buffer.cpp.obj \"-c\" ../src/d3d9/d3d9_common_buffer.cpp",
+    "file": "../src/d3d9/d3d9_common_buffer.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_common_buffer.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_buffer.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_buffer.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_buffer.cpp.obj \"-c\" ../src/d3d9/d3d9_buffer.cpp",
+    "file": "../src/d3d9/d3d9_buffer.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_buffer.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_shader.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_shader.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_shader.cpp.obj \"-c\" ../src/d3d9/d3d9_shader.cpp",
+    "file": "../src/d3d9/d3d9_shader.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_shader.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_vertex_declaration.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_vertex_declaration.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_vertex_declaration.cpp.obj \"-c\" ../src/d3d9/d3d9_vertex_declaration.cpp",
+    "file": "../src/d3d9/d3d9_vertex_declaration.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_vertex_declaration.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_query.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_query.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_query.cpp.obj \"-c\" ../src/d3d9/d3d9_query.cpp",
+    "file": "../src/d3d9/d3d9_query.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_query.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_multithread.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_multithread.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_multithread.cpp.obj \"-c\" ../src/d3d9/d3d9_multithread.cpp",
+    "file": "../src/d3d9/d3d9_multithread.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_multithread.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_options.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_options.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_options.cpp.obj \"-c\" ../src/d3d9/d3d9_options.cpp",
+    "file": "../src/d3d9/d3d9_options.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_options.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_stateblock.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_stateblock.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_stateblock.cpp.obj \"-c\" ../src/d3d9/d3d9_stateblock.cpp",
+    "file": "../src/d3d9/d3d9_stateblock.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_stateblock.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_sampler.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_sampler.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_sampler.cpp.obj \"-c\" ../src/d3d9/d3d9_sampler.cpp",
+    "file": "../src/d3d9/d3d9_sampler.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_sampler.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_util.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_util.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_util.cpp.obj \"-c\" ../src/d3d9/d3d9_util.cpp",
+    "file": "../src/d3d9/d3d9_util.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_util.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_initializer.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_initializer.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_initializer.cpp.obj \"-c\" ../src/d3d9/d3d9_initializer.cpp",
+    "file": "../src/d3d9/d3d9_initializer.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_initializer.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_fixed_function.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_fixed_function.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_fixed_function.cpp.obj \"-c\" ../src/d3d9/d3d9_fixed_function.cpp",
+    "file": "../src/d3d9/d3d9_fixed_function.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_fixed_function.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_names.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_names.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_names.cpp.obj \"-c\" ../src/d3d9/d3d9_names.cpp",
+    "file": "../src/d3d9/d3d9_names.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_names.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_swvp_emu.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_swvp_emu.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_swvp_emu.cpp.obj \"-c\" ../src/d3d9/d3d9_swvp_emu.cpp",
+    "file": "../src/d3d9/d3d9_swvp_emu.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_swvp_emu.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_format_helpers.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_format_helpers.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_format_helpers.cpp.obj \"-c\" ../src/d3d9/d3d9_format_helpers.cpp",
+    "file": "../src/d3d9/d3d9_format_helpers.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_format_helpers.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_hud.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_hud.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_hud.cpp.obj \"-c\" ../src/d3d9/d3d9_hud.cpp",
+    "file": "../src/d3d9/d3d9_hud.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_hud.cpp.obj"
+  },
+  {
+    "directory": "E:\\projects\\warcraft3_recomp\\third_party\\dxvk-1.10.3\\build-win64-ucrt",
+    "command": "\"C:/msys64/ucrt64/bin/g++.exe\" \"-Isrc\\d3d9\\libd3d9.a.p\" \"-Isrc\\d3d9\" \"-I..\\src\\d3d9\" \"-I..\\include\" \"-fdiagnostics-color=always\" \"-D_GLIBCXX_ASSERTIONS=1\" \"-D_FILE_OFFSET_BITS=64\" \"-Wall\" \"-Winvalid-pch\" \"-std=c++17\" \"-O3\" \"-DNOMINMAX\" \"-D_WIN32_WINNT=0xa00\" \"-msse\" \"-msse2\" \"-msse3\" \"-mfpmath=sse\" \"-Wimplicit-fallthrough\" -MD -MQ src/d3d9/libd3d9.a.p/d3d9_annotation.cpp.obj -MF \"src\\d3d9\\libd3d9.a.p\\d3d9_annotation.cpp.obj.d\" -o src/d3d9/libd3d9.a.p/d3d9_annotation.cpp.obj \"-c\" ../src/d3d9/d3d9_annotation.cpp",
+    "file": "../src/d3d9/d3d9_annotation.cpp",
+    "output": "src/d3d9/libd3d9.a.p/d3d9_annotation.cpp.obj"
+  }
+]

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <!-- Debug-only simpleperf/Perfetto/heapprofd attach point. -->
+        <profileable
+            android:shell="true"
+            tools:targetApi="29" />
+        <receiver
+            android:name=".DebugOverlayReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="wc3.recomp.action.DEBUG_OVERLAY" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

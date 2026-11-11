@@ -65,13 +65,26 @@ void wc3_legacy_hle_call(uint32_t thunk, CPU *c)
     }
 #else
     /* Debug keeps the as-built path, including its per-call ring, trace and
-     * missing-import/stack diagnostics. */
+     * missing-import/stack diagnostics.  The CPU note is Android-only: the
+     * host T0 bridge test links this file without the Android HLE. */
+#if defined(__ANDROID__)
+    hle_android_note_cpu(c);
+#endif
     if (wc3_hle_fast_call(thunk, c)) return;
     hle_call(thunk, c);
     return;
 #endif
     if (wc3_hle_fast_call(thunk, c)) return;
     hle_call(thunk, c);
+}
+
+void wc3_legacy_note_cpu(CPU *c)
+{
+#if WC3_DEBUG && defined(__ANDROID__)
+    hle_android_note_cpu(c);
+#else
+    (void)c;
+#endif
 }
 
 const char *wc3_legacy_hle_describe(uint32_t thunk)
@@ -206,12 +219,6 @@ int wc3_legacy_hle_chain(const char *dll, const char *name,
     return 0;
 }
 
-static HleFn find_hle_fn(const char *dll, const char *name)
-{
-    int row = find_hle_row(dll, name);
-    return row < 0 ? NULL : g_hle[row].fn;
-}
-
 uint32_t wc3_legacy_hle_thunk_of(const char *dll, const char *name)
 {
     int row = find_hle_row(dll, name);
@@ -219,32 +226,18 @@ uint32_t wc3_legacy_hle_thunk_of(const char *dll, const char *name)
     return GUEST_HLE_BASE + (uint32_t)row * (uint32_t)HLE_STRIDE;
 }
 
-/* The as-built last-error cell is thread-local static state in the as-built HLE.
- * Call its registered accessor rather than reaching for the symbol.  The
- * fabricated stack only carries the one argument the setter reads. */
-void wc3_legacy_set_last_error(uint32_t code)
+/* Win32 last-error is per guest thread.  Every new HLE handler already receives
+ * that thread's CPU, so read and write the field directly instead of
+ * fabricating a stack, allocating guest memory, and dispatching through the
+ * as-built import table. */
+void wc3_legacy_set_last_error(CPU *c, uint32_t code)
 {
-    HleFn set_last_error = find_hle_fn("KERNEL32.dll", "SetLastError");
-    if (!set_last_error) return;
-    uint32_t stack = hle_guest_alloc(8u);
-    if (!stack) return;
-    wr32g(stack, 0u);
-    wr32g(stack + 4u, code);
-    CPU c;
-    memset(&c, 0, sizeof c);
-    c.esp = stack;
-    set_last_error(&c);
-    hle_guest_free(stack);
+    if (c) c->hle_last_error = code;
 }
 
-uint32_t wc3_legacy_get_last_error(void)
+uint32_t wc3_legacy_get_last_error(CPU *c)
 {
-    HleFn get_last_error = find_hle_fn("KERNEL32.dll", "GetLastError");
-    if (!get_last_error) return 0u;
-    CPU c;
-    memset(&c, 0, sizeof c);
-    get_last_error(&c);
-    return c.eax;
+    return c ? c->hle_last_error : 0u;
 }
 
 static void copy_bounded(char *dst, size_t cap, const char *src)

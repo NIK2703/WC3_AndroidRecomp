@@ -27,7 +27,10 @@
     <style name="Wc3LaunchTheme.Base" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:windowFullscreen">false</item>
+        <!-- The shortcut opens a dedicated settings window, not a game
+             surface.  Match the host's fullscreen presentation and keep the
+             status bar out of the form; the navigation bar remains available. -->
+        <item name="android:windowFullscreen">true</item>
         <item name="android:colorBackground">@color/launch_bg</item>
         <item name="android:windowBackground">@color/launch_bg</item>
         <item name="android:statusBarColor">@color/launch_bg</item>

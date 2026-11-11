@@ -187,7 +187,7 @@ static uint32_t read_u32(uint32_t addr)
 
 static double pop_x87(CPU *c)
 {
-    float64_t f = extF80_to_f64(fpop(c));
+    float64_t f = X87_EXTF80_TO_F64(c, fpop(c));
     double value;
     memcpy(&value, &f.v, sizeof value);
     return value;

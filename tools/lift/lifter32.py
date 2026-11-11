@@ -1093,7 +1093,7 @@ class Lifter:
             a = self.addr_expr(insn, memop)
             return [f"c->fpu_cw = rd16({a});"]
         if m in ("fnclex", "fclex"):
-            return ["c->fpu_sw &= ~0x003Fu; softfloat_exceptionFlags = 0;"]
+            return ["x87_fnclex(c);"]
         if m in ("fninit", "finit"):
             return ["cpu_x87_init(c);"]
         if m in ("fwait", "wait", "fnop"):

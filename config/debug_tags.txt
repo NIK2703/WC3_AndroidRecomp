@@ -1,0 +1,15 @@
+# Debug-only diagnostic tags for -Variant debug.
+# One tag per line; '#' starts a comment. Semicolons, commas and spaces also
+# separate tags. Read by tools/android/build_app.ps1 at build start.
+# Edit this file to change the set. Release builds ignore it.
+BOOT
+ASSETS
+INPUT
+GRAPHICS
+JNI
+MEMORY
+CRASH
+BATTLE_NET
+GPU_DRIVERS
+# ATrace slices for simpleperf/Perfetto captures (runtime/diag/wc3_trace.h).
+PERF

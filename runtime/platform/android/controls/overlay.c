@@ -102,7 +102,16 @@ static bool cache_ready(const Wc3Overlay *o) {
 static const Wc3OverlayCacheLayer *cache_find_layer(const Wc3Overlay *o,
                                                     int element, int slot) {
     if (!cache_ready(o)) return NULL;
+    if (element < 0 || element >= WC3_OVERLAY_MAX_ELEMENTS || slot < 0 ||
+        slot >= WC3_OVERLAY_CACHE_SLOT_COUNT)
+        return NULL;
     const Wc3OverlayCache *cache = cache_source(o);
+    int index = cache->layer_index[element][slot];
+    if (index >= 0 && index < cache->layer_count) {
+        const Wc3OverlayCacheLayer *l = &cache->layers[index];
+        if (l->element == element && l->slot == slot) return l;
+    }
+    /* Caches built by older callers may not have layer_index populated. */
     for (int i = 0; i < cache->layer_count; i++) {
         const Wc3OverlayCacheLayer *l = &cache->layers[i];
         if (l->element == element && l->slot == slot) return l;
@@ -324,6 +333,9 @@ int overlay_cache_set_atlas(Wc3Overlay *overlay, uint8_t *pixels,
     overlay->cache.element_count = element_count;
     overlay->cache.overlay_width = overlay->width;
     overlay->cache.overlay_height = overlay->height;
+    for (int e = 0; e < WC3_OVERLAY_MAX_ELEMENTS; e++)
+        for (int s = 0; s < WC3_OVERLAY_CACHE_SLOT_COUNT; s++)
+            overlay->cache.layer_index[e][s] = -1;
     return 0;
 }
 
@@ -345,8 +357,9 @@ int overlay_cache_add_layer(Wc3Overlay *overlay, int element, int slot,
         return -1;
     if (rotation != 0 && src_w != src_h) return -1;
 
-    Wc3OverlayCacheLayer *layer =
-        &overlay->cache.layers[overlay->cache.layer_count++];
+    int layer_index = overlay->cache.layer_count;
+    Wc3OverlayCacheLayer *layer = &overlay->cache.layers[layer_index];
+    overlay->cache.layer_count = layer_index + 1;
     layer->element = element;
     layer->slot = slot;
     layer->src_x = src_x;
@@ -356,6 +369,8 @@ int overlay_cache_add_layer(Wc3Overlay *overlay, int element, int slot,
     layer->dst_x = dst_x;
     layer->dst_y = dst_y;
     layer->rotation = rotation;
+    if (overlay->cache.layer_index[element][slot] < 0)
+        overlay->cache.layer_index[element][slot] = (int16_t)layer_index;
     return 0;
 }
 
@@ -472,6 +487,75 @@ void overlay_clear_active(Wc3Overlay *overlay) {
             overlay->elements[i].visual_layers = WC3_OVERLAY_LAYER_FILL |
                                                  WC3_OVERLAY_LAYER_STROKE_TEXT;
     }
+}
+
+static bool element_visual_state_equal(const Wc3OverlayElement *shown,
+                                       const Wc3OverlayElement *candidate) {
+    if (shown->type != candidate->type) return false;
+    if (shown->has_opacity != candidate->has_opacity) return false;
+    if (shown->has_opacity && shown->opacity != candidate->opacity)
+        return false;
+
+    if (shown->type == WC3_OVERLAY_ELEMENT_DPAD) {
+        /* draw_dpad_cached() only reads the engaged mask and the petals; the
+         * layer mask and per-layer alphas belong to the button path. */
+        return shown->engaged == candidate->engaged &&
+               shown->active_petals == candidate->active_petals;
+    }
+
+    /*
+     * Reduce the raw mask to the draw calls draw_button_cached() actually
+     * makes.  For example, STROKE_TEXT is redundant with FILL and a zero mask
+     * already draws the stroke; those differences must not wake the render
+     * thread.
+     */
+    const uint8_t a = shown->visual_layers;
+    const uint8_t b = candidate->visual_layers;
+    const bool a_fill = (a & WC3_OVERLAY_LAYER_FILL) != 0;
+    const bool b_fill = (b & WC3_OVERLAY_LAYER_FILL) != 0;
+    const bool a_glow = (a & WC3_OVERLAY_LAYER_GLOW) != 0;
+    const bool b_glow = (b & WC3_OVERLAY_LAYER_GLOW) != 0;
+    const bool a_outer = (a & WC3_OVERLAY_LAYER_OUTER_STROKE) != 0;
+    const bool b_outer = (b & WC3_OVERLAY_LAYER_OUTER_STROKE) != 0;
+    const bool a_stroke =
+        a == 0 || ((a & WC3_OVERLAY_LAYER_STROKE_TEXT) &&
+                   (a_glow || !a_fill));
+    const bool b_stroke =
+        b == 0 || ((b & WC3_OVERLAY_LAYER_STROKE_TEXT) &&
+                   (b_glow || !b_fill));
+
+    if (a_fill != b_fill || a_stroke != b_stroke || a_glow != b_glow ||
+        a_outer != b_outer)
+        return false;
+    if (a_fill && shown->alpha_fill != candidate->alpha_fill) return false;
+    if (a_glow && shown->alpha_glow != candidate->alpha_glow) return false;
+    if (a_outer && shown->alpha_outer != candidate->alpha_outer) return false;
+    return true;
+}
+
+bool overlay_visual_state_equal(const Wc3Overlay *shown,
+                                const Wc3Overlay *candidate) {
+    if (shown == candidate) return true;
+    if (!shown || !candidate) return false;
+    if (shown->element_count < 0 ||
+        shown->element_count > WC3_OVERLAY_MAX_ELEMENTS)
+        return false;
+
+    if (shown->width != candidate->width ||
+        shown->height != candidate->height ||
+        shown->alpha_mode != candidate->alpha_mode ||
+        shown->element_count != candidate->element_count ||
+        shown->style.overlay_opacity != candidate->style.overlay_opacity ||
+        shown->style.fill_alpha_inactive !=
+            candidate->style.fill_alpha_inactive)
+        return false;
+
+    for (int i = 0; i < shown->element_count; i++) {
+        if (!element_visual_state_equal(&shown->elements[i],
+                                        &candidate->elements[i]))
+            return false;
+    }
+    return true;
 }
 
 void overlay_render(Wc3Overlay *overlay, uint8_t *rgba, int stride_bytes) {

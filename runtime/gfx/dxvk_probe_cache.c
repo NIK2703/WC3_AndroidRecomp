@@ -13,6 +13,16 @@
  */
 #include <pthread.h>
 
+#include "wc3_debug.h"
+
+#if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
+#include <android/log.h>
+#define PROBE_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "GPU_DRIVERS", __VA_ARGS__)
+#else
+#define PROBE_LOG(...) ((void)0)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -37,6 +47,8 @@ static void run_probe_once(void)
     g_probe_major = major;
     g_probe_minor = minor;
     g_probe_done = 1;
+    PROBE_LOG("probe result=%d major=%d minor=%d", g_probe_result,
+              g_probe_major, g_probe_minor);
 }
 
 int __wrap_wc3_vulkan_major_minor(int *major, int *minor)

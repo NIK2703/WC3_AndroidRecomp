@@ -3,35 +3,36 @@
 # Native code is built by build_app.ps1/CMake; Gradle only packages the Java
 # activity and the already-built libwc3gameactivity.so.  No script from the old
 # working tree is executed.  Exit codes: 0 built, 1 failure, 2 unavailable.
+#
+# There is deliberately no -Clean switch: building must never delete the
+# native or DXVK output as a side effect.  A true clean rebuild is a manual
+# action (delete build\android_app and build\android\dxvk by hand).
 
 [CmdletBinding()]
 param(
-    [switch]$Clean,
     [switch]$Release,
     [switch]$NativeDebug,
     [switch]$Install,
     [switch]$Launch,
-    [switch]$PackDynRelocs,
-    [ValidateSet('android', 'relr', 'android+relr')]
-    [string]$PackDynRelocsMode = 'android',
-    [switch]$Icf,
-    [ValidateSet('safe', 'all')]
-    [string]$IcfMode = 'safe',
-    [switch]$FnoPlt,
     [switch]$KeepDynsym,
-    # O-52/O-55: forward the unmeasured A/B switches to build_app.ps1.
-    [switch]$NativeTls,
+    # O-52: initial-exec is rejected by bionic for a dlopen'ed app library.
+    # Only global-dynamic is accepted.
+    [ValidateSet('global-dynamic')]
+    [string]$TlsModel = 'global-dynamic',
+    # O-55: security A/B only; this is not a performance optimization.
     [switch]$NoHostHardening,
-    # W3L/PvPGN/rubattle compat profile.  auto = rubattle when -CorpusRoot is
-    # given, otherwise off; off is the exact baseline.
+    # W3L/PvPGN/rubattle compat profile.  The default is rubattle so a plain
+    # APK build can log in to rubattle.net without an extra flag; off is the
+    # explicit exact baseline.
     [ValidateSet('auto', 'rubattle', 'pvpgn', 'off')]
-    [string]$W3LCompat = 'auto',
+    [string]$W3LCompat = 'rubattle',
     [ValidateRange(30, 255)]
     [int]$W3LLatency = 100,
     [string]$Serial = '',
     [string]$GamesActivityAar = '',
-    [string]$DebugTags = '',
-    [string]$CorpusRoot = ''
+    # Product builds use the relifted corpus by default.  Pass -CorpusRoot ''
+    # together with -W3LCompat off for the legacy exact-baseline build.
+    [string]$CorpusRoot = 'build/corpus-full'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -125,27 +126,18 @@ if (-not $gradle) { Write-Host '[apk] unavailable: Gradle 8.10.2 not found'; exi
 $buildTools = Get-BuildTools -Sdk $sdk
 if (-not $buildTools) { Write-Host '[apk] unavailable: aapt2 not found'; exit 2 }
 
-if ($Clean) { Remove-Item $outDir -Recurse -Force -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Force $outDir | Out-Null
 
 # Native library first; the APK must contain this exact build.
 $nativeScript = Join-Path $PSScriptRoot 'build_app.ps1'
 $nativeParams = @{ Variant = $variant }
-if ($Clean) { $nativeParams['Clean'] = $true }
 if ($GamesActivityAar) { $nativeParams['GamesActivityAar'] = $GamesActivityAar }
-if ($DebugTags) { $nativeParams['DebugTags'] = $DebugTags }
-if ($CorpusRoot) { $nativeParams['CorpusRoot'] = $CorpusRoot }
-if ($PackDynRelocs) {
-    $nativeParams['PackDynRelocs'] = $true
-    $nativeParams['PackDynRelocsMode'] = $PackDynRelocsMode
-}
-if ($Icf) {
-    $nativeParams['Icf'] = $true
-    $nativeParams['IcfMode'] = $IcfMode
-}
-if ($FnoPlt) { $nativeParams['FnoPlt'] = $true }
+# Always forward the value, including an explicit empty string: the empty
+# value is the legacy exact-baseline escape hatch and must override the
+# build_app default.
+$nativeParams['CorpusRoot'] = $CorpusRoot
 if ($KeepDynsym) { $nativeParams['KeepDynsym'] = $true }
-if ($NativeTls) { $nativeParams['NativeTls'] = $true }
+$nativeParams['TlsModel'] = $TlsModel
 if ($NoHostHardening) { $nativeParams['NoHostHardening'] = $true }
 # Forward the compat choice on every APK build; build_app resolves auto
 # against CorpusRoot and passes ON/OFF explicitly to CMake.
@@ -175,6 +167,34 @@ New-Item -ItemType Directory -Force $jniDir | Out-Null
 $jniSo = Join-Path $jniDir 'libwc3gameactivity.so'
 Copy-Item $nativeSo $jniSo -Force
 
+# ADR-036/DRV-20: libadrenotools hooks stay pinned transitional binaries until
+# the upstream sources are vendored.  Copy them next to the product .so and
+# verify the exact bytes instead of trusting a stale manual jniLibs copy.
+$adrenotoolsDir = $env:WC3_ADRENOTOOLS_DIR
+if (-not $adrenotoolsDir) {
+    $upstream = Get-Content (Join-Path $root 'config\build_upstream.json') -Raw |
+        ConvertFrom-Json
+    $adrenotoolsDir = Join-Path $upstream.upstream.path 'build/android-shared/adrenotools'
+}
+$hookHashes = [ordered]@{
+    'libmain_hook.so' = 'be1cbb5774d76d1a06be0e2f67d4c11d681f9af9cb8959d5e2a6c0fa285bc103'
+    'libhook_impl.so' = 'f95475bd98254c9172c9efa29ced69dc3404631fff96fbb589b4c919e6e9d855'
+}
+foreach ($hook in $hookHashes.Keys) {
+    $source = Join-Path $adrenotoolsDir $hook
+    if (-not (Test-Path $source)) {
+        Write-Host "[apk] unavailable: $hook not found in $adrenotoolsDir"
+        exit 2
+    }
+    $actual = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $hookHashes[$hook]) {
+        Write-Host "[apk] $hook sha256 $actual != pinned $($hookHashes[$hook])"
+        exit 1
+    }
+    Copy-Item -LiteralPath $source (Join-Path $jniDir $hook) -Force
+}
+Write-Host '[apk] hooks   libmain_hook.so/libhook_impl.so pinned'
+
 # The native host is linked against the NDK's shared C++ runtime.  Android
 # does not provide libc++_shared.so as a platform library, so it must ship in
 # the APK next to libwc3gameactivity.so.
@@ -187,6 +207,12 @@ if (-not (Test-Path $libcxx)) {
 }
 Copy-Item $libcxx (Join-Path $jniDir 'libc++_shared.so') -Force
 
+$readelf = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-readelf.exe'
+if (-not (Test-Path $readelf)) {
+    Write-Host '[apk] unavailable: NDK llvm-readelf not found'
+    exit 2
+}
+
 # O-41: AGP's stripReleaseDebugSymbols is a no-op for this prebuilt library in
 # the useLegacyPackaging=false layout.  Strip only the release copy and only
 # non-PT_LOAD metadata: .symtab/.strtab/.debug_* go away.  O-42 additionally
@@ -196,7 +222,6 @@ Copy-Item $libcxx (Join-Path $jniDir 'libc++_shared.so') -Force
 # The debug copy intentionally keeps symbols for the wc3.recomp.debug package.
 if ($variant -eq 'release') {
     $strip = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe'
-    $readelf = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-readelf.exe'
     if (-not (Test-Path $strip) -or -not (Test-Path $readelf)) {
         Write-Host '[apk] unavailable: NDK llvm-strip/llvm-readelf not found'
         exit 2
@@ -230,6 +255,50 @@ if ($variant -eq 'release') {
     }
     Write-Host "[apk] stripped release .so: $((Get-Item $jniSo).Length) bytes"
 }
+
+# V10/T2-save: the packaged copy, after release stripping, must still carry the
+# save-list marker and the overlapped-I/O libc calls.  build_app.ps1 checks the
+# unstripped artifact; this check covers what Gradle will actually package.
+$fixReport = Join-Path $root 'reports\generated\required_fixes.json'
+if (-not (Test-Path -LiteralPath $fixReport)) {
+    Write-Host "[apk] required-fix report missing: $fixReport"
+    exit 1
+}
+$fixes = Get-Content -LiteralPath $fixReport -Raw | ConvertFrom-Json
+if ($null -eq $fixes.fixes.save_list_display -or
+    [int]$fixes.fixes.save_list_display.sites -lt 1 -or
+    $null -eq $fixes.fixes.overlapped_save_io) {
+    Write-Host '[apk] required-fix report does not declare both save fixes'
+    exit 1
+}
+$strings = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strings.exe'
+if (-not (Test-Path $strings)) {
+    Write-Host '[apk] unavailable: NDK llvm-strings not found'
+    exit 2
+}
+$packagedStrings = (& $strings $jniSo 2>&1) -join "`n"
+if ($packagedStrings -notmatch 'WC3_SAVE_LIST_STRIP_W3Z') {
+    Write-Host '[apk] save-list display fix marker is absent from the packaged .so'
+    exit 1
+}
+$packagedDynsyms = (& $readelf --dyn-syms $jniSo 2>&1) -join "`n"
+if ($packagedDynsyms -notmatch '\bpwrite\b' -or
+    $packagedDynsyms -notmatch '\bpread\b') {
+    Write-Host '[apk] overlapped save I/O is absent from the packaged .so'
+    exit 1
+}
+Write-Host "[apk] fixes save-list=$($fixes.fixes.save_list_display.sites) site(s), overlapped-save-io=present"
+
+# ADR-036/E7.2: DXVK 1.10.3's undefined vkGetInstanceProcAddr is satisfied by
+# dxvk_entry.cpp's hidden shim.  A DT_NEEDED libvulkan.so would load the system
+# loader before the custom-driver hook and defeat ICD selection.
+$dynamic = (& $readelf -d $jniSo) -join "`n"
+if ($LASTEXITCODE -ne 0) { Write-Host '[apk] llvm-readelf -d failed'; exit 1 }
+if ($dynamic -match '\(NEEDED\).*\[libvulkan\.so') {
+    Write-Host '[apk] product .so has DT_NEEDED libvulkan.so; ADR-036 requires the hidden shim'
+    exit 1
+}
+Write-Host '[apk] product .so has no DT_NEEDED libvulkan.so'
 
 # The APK must contain the library produced by this native build.  Gradle can
 # silently pick a stale src/main/jniLibs copy when the per-buildType source
@@ -316,7 +385,11 @@ $zip = [System.IO.Compression.ZipFile]::OpenRead($final)
 try {
     $required = @(
         'lib/arm64-v8a/libwc3gameactivity.so',
-        'lib/arm64-v8a/libc++_shared.so'
+        'lib/arm64-v8a/libc++_shared.so',
+        # libadrenotools hooks are read from the APK and extracted to filesDir
+        # on first use; they must be present and stored (O-12 stays closed).
+        'lib/arm64-v8a/libmain_hook.so',
+        'lib/arm64-v8a/libhook_impl.so'
     )
     foreach ($name in $required) {
         $entry = $zip.Entries | Where-Object { $_.FullName -eq $name }

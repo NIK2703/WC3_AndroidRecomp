@@ -13,9 +13,9 @@
 #
 # On Windows the MSYS2 ccache binary rejects a compiler argument containing
 # backslashes ("Could not find compiler ... in PATH").  CMake writes the NDK
-# compiler path with Windows separators, so a tiny Python launcher normalizes
-# that one argument before handing the command to ccache.  The launcher adds
-# no cache logic of its own; it only fixes the path spelling.
+# compiler path with Windows separators, so the compiled ccache_wrapper
+# normalizes that one argument before handing the command to ccache.  The
+# wrapper adds no cache logic of its own; it only fixes the path spelling.
 
 option(WC3_USE_CCACHE "Use ccache for C/C++ compilation" ON)
 option(WC3_REQUIRE_CCACHE "Fail configuration when ccache is unavailable" OFF)
@@ -105,18 +105,22 @@ set(WC3_CCACHE "${_wc3_ccache}" CACHE FILEPATH "ccache executable" FORCE)
 
 set(_wc3_launcher "${_wc3_ccache}")
 if(CMAKE_HOST_WIN32)
-    find_program(WC3_PYTHON_EXECUTABLE NAMES python3 python python.exe)
-    set(_wc3_wrapper "${WC3_ROOT}/tools/ccache_wrapper.py")
-    if(WC3_PYTHON_EXECUTABLE AND EXISTS "${_wc3_wrapper}")
-        set(_wc3_launcher
-            "${WC3_PYTHON_EXECUTABLE};${_wc3_wrapper};${_wc3_ccache}")
+    # The compiled wrapper removes Python from the hot configure path and is
+    # built by tools/lift/build_tools.ps1 with the other host tools.
+    find_program(WC3_CCACHE_WRAPPER_EXE
+        NAMES ccache_wrapper ccache_wrapper.exe
+        HINTS "${WC3_ROOT}/build/lift-tools"
+        NO_DEFAULT_PATH)
+    if(WC3_CCACHE_WRAPPER_EXE)
+        set(_wc3_launcher "${WC3_CCACHE_WRAPPER_EXE};${_wc3_ccache}")
     elseif(WC3_REQUIRE_CCACHE)
         message(FATAL_ERROR
-            "The Windows ccache launcher needs Python and "
-            "${_wc3_wrapper}; set WC3_PYTHON_EXECUTABLE or disable ccache.")
+            "The Windows ccache launcher needs ccache_wrapper.exe in "
+            "${WC3_ROOT}/build/lift-tools; run tools/lift/build_tools.ps1 "
+            "or disable ccache.")
     else()
         message(WARNING
-            "[wc3] ccache path wrapper unavailable; using ccache directly")
+            "[wc3] ccache_wrapper.exe unavailable; using ccache directly")
     endif()
 endif()
 

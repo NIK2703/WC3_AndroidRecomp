@@ -12,6 +12,34 @@
 
     <string name="launch_sound_label">Звук</string>
 
+    <string name="launch_driver_label">Драйвер Vulkan</string>
+    <string name="launch_driver_system">Системный драйвер Vulkan (рекомендуется)</string>
+    <string name="launch_driver_import">Установить ZIP</string>
+    <string name="launch_driver_remove">Удалить</string>
+    <string name="launch_driver_installing">Установка пакета драйвера…</string>
+    <string name="launch_driver_details">%1$s · %2$s · %3$d МБ</string>
+    <string name="launch_driver_picker_missing">Системный выбор файла недоступен.</string>
+    <string name="launch_driver_installed">%1$s — %2$s</string>
+    <string name="launch_driver_removed">Пакет драйвера удалён. Будет использоваться системный драйвер.</string>
+    <string name="launch_driver_remove_confirm">Удалить пакет драйвера «%1$s»? Сам APK не затрагивается.</string>
+    <string name="launch_driver_installed_toast">Установлено: %1$s</string>
+    <string name="launch_driver_error_open">Не удалось открыть ZIP-файл.</string>
+    <string name="launch_driver_error_zip">Файл не является корректным пакетом драйвера.</string>
+    <string name="launch_driver_error_meta">В пакете нет корректного meta.json.</string>
+    <string name="launch_driver_error_library">Указанная библиотека драйвера отсутствует или имеет недопустимое имя.</string>
+    <string name="launch_driver_error_elf">Драйвер не является разделяемой библиотекой AArch64.</string>
+    <string name="launch_driver_error_io">Не удалось записать драйвер в хранилище приложения.</string>
+    <string name="launch_driver_error_api">Для этого драйвера нужна более новая версия Android.</string>
+    <string name="launch_driver_error_duplicate">Этот пакет драйвера уже установлен.</string>
+
+    <string name="launch_dxvk_label">Версия DXVK</string>
+    <string name="launch_dxvk_auto">Авто</string>
+    <string name="launch_dxvk_config_label">Конфигурация DXVK</string>
+    <string name="launch_dxvk_config_key">Ключ</string>
+    <string name="launch_dxvk_config_value">Значение</string>
+    <string name="launch_dxvk_config_add">Добавить переменную</string>
+    <string name="launch_dxvk_config_remove">Удалить переменную</string>
+
     <string name="launch_args_label">Дополнительные аргументы</string>
 
     <string name="launch_play">Играть</string>

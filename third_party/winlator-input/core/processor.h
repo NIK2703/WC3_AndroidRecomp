@@ -63,6 +63,19 @@ void touch_processor_on_finger_up(TouchActionResult* restrict result, int ptr_id
 // Timer tick — called periodically for long-press, double-tap timeouts
 void touch_processor_tick(TouchActionResult* restrict result, uint64_t now_tick);
 
+// Sentinel returned when the engine has no future tick work.
+#define TOUCH_PROCESSOR_DEADLINE_NONE UINT64_MAX
+
+// Absolute engine tick at which touch_processor_tick() must next run, or
+// TOUCH_PROCESSOR_DEADLINE_NONE.  This is an exact timer query: an active
+// finger alone is not a reason to tick.  A returned tick may already be due;
+// the host must run one tick and query again.
+uint64_t touch_processor_next_deadline_tick(void);
+
+// Nonzero while touch_processor_next_deadline_tick() has a deadline.  Kept as
+// a convenience for callers that do not need the timestamp.
+int touch_processor_needs_tick(void);
+
 // Full cancel: releases ALL held keys, element bindings, and clears all state.
 void touch_processor_cancel_all(TouchActionResult* restrict result);
 

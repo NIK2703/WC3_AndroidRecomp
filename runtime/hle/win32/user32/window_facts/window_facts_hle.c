@@ -686,7 +686,7 @@ static void h_get_window_thread_process_id(CPU *c)
     const uint32_t process_id = wc3_legacy_arg32(c, 1u);
 
     if (process_id && !wc3_legacy_guest_ok(process_id, 4u)) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
@@ -713,7 +713,7 @@ static void h_get_window_thread_process_id(CPU *c)
     pthread_mutex_unlock(&g_window_lock);
 
     if (!found) {
-        wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
@@ -839,12 +839,12 @@ static void h_get_class_info(CPU *c)
     const uint32_t out = wc3_legacy_arg32(c, 2u);
 
     if (!out || !wc3_legacy_guest_ok(out, WNDCLASSA_SIZE)) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
     if (!class_arg) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
@@ -858,7 +858,7 @@ static void h_get_class_info(CPU *c)
 
     if (class_arg >= 0x10000u) {
         if (!read_guest_string(class_arg, name, sizeof name)) {
-            wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+            wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
             c->eax = 0u;
             return;
         }
@@ -889,13 +889,13 @@ static void h_get_class_info(CPU *c)
     }
 
     if (!found) {
-        wc3_legacy_set_last_error(ERROR_CLASS_DOES_NOT_EXIST);
+        wc3_legacy_set_last_error(c, ERROR_CLASS_DOES_NOT_EXIST);
         c->eax = 0u;
         return;
     }
     if (!builtin && instance && snapshot.instance &&
         instance != snapshot.instance) {
-        wc3_legacy_set_last_error(ERROR_CLASS_DOES_NOT_EXIST);
+        wc3_legacy_set_last_error(c, ERROR_CLASS_DOES_NOT_EXIST);
         c->eax = 0u;
         return;
     }
@@ -925,7 +925,7 @@ static void h_get_update_rgn(CPU *c)
     (void)wc3_legacy_arg32(c, 2u);
 
     if (!region) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
@@ -938,7 +938,7 @@ static void h_get_update_rgn(CPU *c)
     const int found = find_window_index_locked(handle) < WINDOW_MAX;
     pthread_mutex_unlock(&g_window_lock);
     if (!found) {
-        wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
@@ -954,12 +954,12 @@ static void h_set_window_placement(CPU *c)
 
     if (!placement ||
         !wc3_legacy_guest_ok(placement, WINDOW_PLACEMENT_SIZE)) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
     if (wc3_legacy_rd32g(placement + 0u) != WINDOW_PLACEMENT_SIZE) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
@@ -977,14 +977,14 @@ static void h_set_window_placement(CPU *c)
     const int32_t bottom = (int32_t)wc3_legacy_rd32g(placement + 40u);
 
     if (right < left || bottom < top) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
 
     WindowFact *window = lock_window(handle);
     if (!window) {
-        wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
@@ -1036,12 +1036,12 @@ static void h_get_dlg_item(CPU *c)
     pthread_mutex_unlock(&g_window_lock);
 
     if (parent_invalid) {
-        wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
     if (!handle) {
-        wc3_legacy_set_last_error(ERROR_CONTROL_ID_NOT_FOUND);
+        wc3_legacy_set_last_error(c, ERROR_CONTROL_ID_NOT_FOUND);
         c->eax = 0u;
         return;
     }
@@ -1062,7 +1062,7 @@ static void h_get_dlg_item_text(CPU *c)
         return;
     }
     if (!wc3_legacy_guest_ok(buffer, capacity)) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
@@ -1089,13 +1089,13 @@ static void h_get_dlg_item_text(CPU *c)
         pthread_mutex_unlock(&g_window_locks[item_index]);
     }
     if (parent_invalid) {
-        wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
 
     if (!found) {
-        wc3_legacy_set_last_error(ERROR_CONTROL_ID_NOT_FOUND);
+        wc3_legacy_set_last_error(c, ERROR_CONTROL_ID_NOT_FOUND);
         c->eax = 0u;
         return;
     }
@@ -1118,7 +1118,7 @@ static void h_set_dlg_item_text(CPU *c)
 
     if (text) {
         if (!wc3_legacy_guest_ok(text, 1u)) {
-            wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+            wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
             c->eax = 0u;
             return;
         }
@@ -1146,13 +1146,13 @@ static void h_set_dlg_item_text(CPU *c)
         pthread_mutex_unlock(&g_window_locks[item_index]);
     }
     if (parent_invalid) {
-        wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
 
     if (!found) {
-        wc3_legacy_set_last_error(ERROR_CONTROL_ID_NOT_FOUND);
+        wc3_legacy_set_last_error(c, ERROR_CONTROL_ID_NOT_FOUND);
         c->eax = 0u;
         return;
     }
@@ -1164,7 +1164,7 @@ static void h_get_window_placement(CPU *c)
     const uint32_t handle = wc3_legacy_arg32(c, 0u);
     const uint32_t placement = wc3_legacy_arg32(c, 1u);
     if (!placement || !wc3_legacy_guest_ok(placement, WINDOW_PLACEMENT_SIZE)) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
@@ -1192,7 +1192,7 @@ static void h_get_window_placement(CPU *c)
     }
 
     if (!found) {
-        wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
@@ -1311,7 +1311,7 @@ static void h_map_window_points(CPU *c)
     }
     if (!points || count > UINT32_MAX / 8u ||
         !wc3_legacy_guest_ok(points, count * 8u)) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
@@ -1319,7 +1319,7 @@ static void h_map_window_points(CPU *c)
     int32_t from_x = 0, from_y = 0, to_x = 0, to_y = 0;
     if (!window_origin(from, &from_x, &from_y) ||
         !window_origin(to, &to_x, &to_y)) {
-        wc3_legacy_set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_WINDOW_HANDLE);
         c->eax = 0u;
         return;
     }
@@ -1384,12 +1384,12 @@ static void h_get_monitor_info(CPU *c)
     uint32_t width = 0, height = 0;
 
     if (monitor != MONITOR_HANDLE) {
-        wc3_legacy_set_last_error(ERROR_INVALID_MONITOR_HANDLE);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_MONITOR_HANDLE);
         c->eax = 0u;
         return;
     }
     if (!info || !wc3_legacy_guest_ok(info, 4u)) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
@@ -1397,12 +1397,12 @@ static void h_get_monitor_info(CPU *c)
     const uint32_t size = wc3_legacy_rd32g(info);
     if ((size != MONITORINFO_SIZE && size != MONITORINFOEXA_SIZE) ||
         !wc3_legacy_guest_ok(info, size)) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }
     if (!monitor_size(&width, &height)) {
-        wc3_legacy_set_last_error(ERROR_INVALID_PARAMETER);
+        wc3_legacy_set_last_error(c, ERROR_INVALID_PARAMETER);
         c->eax = 0u;
         return;
     }

@@ -30,6 +30,7 @@
 
 #include "host.h"
 #include "hle_android.h"
+#include "wc3_trace.h"
 
 void dispatch(CPU *c, uint32_t target);
 void wc3_dispatch_init(void);
@@ -42,7 +43,10 @@ typedef struct {
 
 /* Modules this probe mapped for real.  The pe_image has to outlive the call,
  * because GetProcAddress resolves against it later. */
-#define PROBE_MOD_MAX 6
+/* war3 + Storm + ijl15 + Mss32 + game + ver-IX86-3 + the optional Miles
+ * plug-ins.  Six was enough before the downloaded version DLL became a real
+ * guest module; the table must be able to hold every mapped image at once. */
+#define PROBE_MOD_MAX 12
 #define PROBE_MOD_PATH_MAX 1024
 static pe_image g_probe_mods[PROBE_MOD_MAX];
 static char     g_probe_mod_paths[PROBE_MOD_MAX][PROBE_MOD_PATH_MAX];
@@ -227,13 +231,28 @@ static void wc3_mss_after_d3d9(void *cpu_ptr)
     fflush(stdout);
 #endif
     CPU saved = *cpu;
+    WC3_TRACE_BEGIN("wc3.dll.mss32");
     call_dll_entry(cpu, g_mss_image, 0x7EFFFFFDu, 0);
+    WC3_TRACE_END();
 #if WC3_DEBUG
     printf("android boot probe: deferred Mss32 entry returned eax=%08X\n",
            cpu->eax);
     fflush(stdout);
 #endif
+    /* The saved copy restores the caller's guest register file.  Win32
+     * last-error/TLS, the qsort scratch and CPU-owned SoftFloat state are
+     * host-side per-thread state, not guest registers: side effects made by
+     * DllMain must survive the restore. */
+    uint32_t hle_last_error = cpu->hle_last_error;
+    uint32_t hle_tmp_guest = cpu->hle_tmp_guest;
+    uint32_t hle_tls[64];
+    softfloat_state sf_state = cpu->sf_state;
+    memcpy(hle_tls, cpu->hle_tls, sizeof hle_tls);
     *cpu = saved;
+    cpu->hle_last_error = hle_last_error;
+    cpu->hle_tmp_guest = hle_tmp_guest;
+    memcpy(cpu->hle_tls, hle_tls, sizeof hle_tls);
+    cpu->sf_state = sf_state;
 }
 
 /* Windows paths are case-insensitive, Android's are not: the launcher asks for
@@ -369,6 +388,13 @@ static int probe_load_dll(const char *name, uint32_t *out_base, const void **out
     } else if (!strcasecmp(leaf, "Mp3dec.asi")) {
         preferred = GUEST_IMAGE_MP3DEC;
         relocate = 1;
+    } else if (!strcasecmp(leaf, "ver-IX86-3.dll")) {
+        /* The file is downloaded at runtime, so its on-disk ImageBase is the
+         * PE default 0x10000000, while the corpus was lifted from a copy
+         * rebased to 0x35400000.  Map and relocate it to that base, otherwise
+         * every lifted CheckRevision address would miss the image. */
+        preferred = GUEST_IMAGE_VER;
+        relocate = 1;
     }
     pe_image *m = &g_probe_mods[g_probe_mod_count];
     memset(m, 0, sizeof *m);
@@ -435,6 +461,7 @@ int wc3_boot_probe_main(int argc, char **argv)
     }
     const char *exe = argv[1];
     const char *storm_path = argc >= 4 ? argv[3] : "Storm.dll";
+    WC3_TRACE_SCOPE("wc3.boot.probe");
     if (argc >= 3 && chdir(argv[2]) != 0) {
         fprintf(stderr, "cannot enter workdir %s\n", argv[2]);
         return 2;
@@ -492,7 +519,9 @@ int wc3_boot_probe_main(int argc, char **argv)
         printf("android boot probe: calling Storm entry %08X\n", storm->entry);
         fflush(stdout);
 #endif
+        WC3_TRACE_BEGIN("wc3.dll.storm");
         call_dll_entry(&c, storm, 0x7EFFFFFEu, 1);
+        WC3_TRACE_END();
 #if WC3_DEBUG
         printf("android boot probe: Storm entry returned eax=%08X\n", c.eax);
         fflush(stdout);
@@ -618,7 +647,9 @@ int wc3_boot_probe_main(int argc, char **argv)
         printf("android boot probe: calling ijl15 entry %08X\n", ijl->entry);
         fflush(stdout);
 #endif
+        WC3_TRACE_BEGIN("wc3.dll.ijl15");
         call_dll_entry(&c, ijl, 0x7EFFFFFDu, 1);
+        WC3_TRACE_END();
 #if WC3_DEBUG
         printf("android boot probe: ijl15 entry returned eax=%08X\n", c.eax);
         fflush(stdout);
@@ -649,7 +680,9 @@ int wc3_boot_probe_main(int argc, char **argv)
     printf("android boot probe: entering %08X\n", img.entry);
     fflush(stdout);
 #endif
+    WC3_TRACE_BEGIN("wc3.launcher.entry");
     dispatch(&c, img.entry);
+    WC3_TRACE_END();
 #if WC3_DEBUG
     printf("android boot probe: entry returned eax=%08X esp=%08X eip=%08X\n",
            c.eax, c.esp, c.eip);

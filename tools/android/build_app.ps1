@@ -8,47 +8,122 @@
 # directory, WC3_DEBUG and the diagnostic tag set, so the native half of an
 # APK can no longer disagree with its Gradle half.  Debug stays optimised
 # (BV-1.1): CMAKE_BUILD_TYPE is Release for both variants.
+#
+# There is deliberately no -Clean switch; delete build\android_app\<variant>
+# and build\android\dxvk by hand if a true clean rebuild is required.
 
 [CmdletBinding()]
 param(
     [ValidateSet('release', 'debug')]
     [string]$Variant = 'release',
-    [switch]$Clean,
     [string]$GamesActivityAar = '',
-    [string]$CorpusRoot = '',
-    [string]$DebugTags = '',
-    [switch]$PackDynRelocs,
-    [ValidateSet('android', 'relr', 'android+relr')]
-    [string]$PackDynRelocsMode = 'android',
-    [switch]$Icf,
-    [ValidateSet('safe', 'all')]
-    [string]$IcfMode = 'safe',
-    [switch]$FnoPlt,
+    # Product builds use the relifted corpus by default.  Pass -CorpusRoot ''
+    # together with -W3LCompat off for the legacy exact-baseline build.
+    [string]$CorpusRoot = 'build/corpus-full',
     [switch]$KeepDynsym,
-    # O-51/O-52: opt-in native ELF TLS.  It also switches the legacy
-    # emulated-TLS libsoftfloat.a input to a build of the pinned 302-source
-    # surface, so this is an A/B experiment until T2 validates dlopen TLS.
-    [switch]$NativeTls,
-    # O-55: opt-in A/B only.  The default keeps the NDK stack canary and
-    # Fortify on every non-corpus target.
+    # O-52: initial-exec is rejected by bionic for a dlopen'ed app library.
+    # Only global-dynamic is accepted; the switch remains so old A/B commands
+    # fail loudly instead of silently changing TLS models.
+    [ValidateSet('global-dynamic')]
+    [string]$TlsModel = 'global-dynamic',
+    # O-55: opt-out A/B only.  The default keeps the NDK stack canary and
+    # Fortify on every non-corpus target.  This is a security control, not a
+    # performance optimization.
     [switch]$NoHostHardening,
-    # W3L/PvPGN/rubattle compat profile.  auto = rubattle when -CorpusRoot is
-    # given, otherwise off; off is the exact baseline.
+    # W3L/PvPGN/rubattle compat profile.  The default is rubattle so a plain
+    # product build can log in to rubattle.net without an extra flag; off is
+    # the explicit exact baseline.
     [ValidateSet('auto', 'rubattle', 'pvpgn', 'off')]
-    [string]$W3LCompat = 'auto',
+    [string]$W3LCompat = 'rubattle',
     [ValidateRange(30, 255)]
     [int]$W3LLatency = 100
 )
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+
+# BV-5.3: the debug tag list lives in config/debug_tags.txt, not in this
+# script.  The file is parsed here so a build only needs the variant; there is
+# no command-line tag override.  Tags are checked against the single registry
+# in wc3_debug.h so a typo cannot silently disable a subsystem.
+function Get-DeclaredDebugTags {
+    param([string]$HeaderPath)
+    if (-not (Test-Path -LiteralPath $HeaderPath)) {
+        throw "debug tag registry not found: $HeaderPath"
+    }
+    $known = @{}
+    $text = [IO.File]::ReadAllText($HeaderPath)
+    foreach ($m in [regex]::Matches($text,
+                '#define\s+WC3_DEBUG_([A-Za-z0-9_]+)')) {
+        $known[$m.Groups[1].Value.ToUpperInvariant()] = $true
+    }
+    return $known
+}
+
+function ConvertTo-DebugTagList {
+    param(
+        [string]$Text,
+        [string]$Source,
+        [hashtable]$Known
+    )
+    $tags = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($Text -split "`r?`n")) {
+        $line = $line -replace '#.*$', ''
+        foreach ($piece in ($line -split '[;,\s]+')) {
+            $tag = $piece.Trim().ToUpperInvariant()
+            if (-not $tag) { continue }
+            if ($tag.StartsWith('WC3_DEBUG_')) {
+                $tag = $tag.Substring('WC3_DEBUG_'.Length)
+            }
+            if (-not $Known.ContainsKey($tag)) {
+                throw "unknown debug tag '$piece' in $Source; " +
+                      'declare it in runtime/diag/wc3_debug.h'
+            }
+            if (-not $tags.Contains($tag)) {
+                $tags.Add($tag)
+            }
+        }
+    }
+    return $tags
+}
+
+function Read-DebugTagsFile {
+    param(
+        [string]$Path,
+        [hashtable]$Known
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "debug tag file not found: $Path"
+    }
+    $text = [IO.File]::ReadAllText($Path)
+    return @(ConvertTo-DebugTagList -Text $text -Source $Path -Known $Known)
+}
+
+# Resolve the tag set before the first side effect (SDK checks, AAR
+# extraction).  A broken tag file must fail the build before it touches
+# output.
+if ($Variant -eq 'release') {
+    $DebugTags = ''
+} else {
+    $tagPath = Join-Path $root 'config\debug_tags.txt'
+    $knownTags = Get-DeclaredDebugTags `
+        -HeaderPath (Join-Path $root 'runtime\diag\wc3_debug.h')
+    $tagList = @(Read-DebugTagsFile -Path $tagPath -Known $knownTags)
+    $DebugTags = $tagList -join ';'
+    Write-Host "[app] debug_tags '$DebugTags' (from $tagPath)"
+}
+
 if ($CorpusRoot) {
     $corpusPath = if ([IO.Path]::IsPathRooted($CorpusRoot)) {
         $CorpusRoot
     } else {
         Join-Path $root $CorpusRoot
     }
-    $CorpusRoot = (Resolve-Path $corpusPath).Path
+    if (-not (Test-Path -LiteralPath $corpusPath)) {
+        Write-Host "[app] corpus root not found: $corpusPath"
+        exit 1
+    }
+    $CorpusRoot = (Resolve-Path -LiteralPath $corpusPath).Path
 }
 
 # The compat profile edits generated C, so it needs the relifted corpus.  An
@@ -126,6 +201,11 @@ if (-not (Test-Path $cmake) -or -not (Test-Path $ninja) -or
     exit 2
 }
 
+# DXVK is a target product now: both archives are built from
+# third_party/dxvk by the target script, not consumed from the legacy tree.
+$dxvkScript = Join-Path $PSScriptRoot 'build_dxvk.ps1'
+& $dxvkScript -Variant $Variant -Api 26 -Ndk $ndk.Root
+
 if (-not $GamesActivityAar) {
     $cache = Join-Path $env:USERPROFILE `
         '.gradle\caches\modules-2\files-2.1\androidx.games\games-activity\4.4.2'
@@ -144,9 +224,6 @@ $GamesActivityAar = (Resolve-Path $GamesActivityAar).Path
 # BV-3.1: per-variant build tree prevents a stale .so from another variant.
 $out = Join-Path $root "build\android_app\$Variant"
 $ga = Join-Path $out 'gameactivity-aar'
-if ($Clean) {
-    Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
-}
 New-Item -ItemType Directory -Force $out | Out-Null
 Remove-Item $ga -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $ga | Out-Null
@@ -154,16 +231,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::ExtractToDirectory($GamesActivityAar, $ga)
 
 $debugValue = if ($Variant -eq 'debug') { 'ON' } else { 'OFF' }
-# BV-5.3: release never activates a tag.  Debug gets a default host-shell set
-# so the existing T2 smoke markers (boot/surface/PE) stay observable; callers
-# may narrow it with -DebugTags 'GRAPHICS;HLE_SYNC'.  BATTLE_NET is included
-# by default because it emits one decoded header per packet, gateway selection
-# and Battle.net file accesses, not NET's full hex dump.
-if ($Variant -eq 'release') {
-    $DebugTags = ''
-} elseif (-not $DebugTags) {
-    $DebugTags = 'BOOT;ASSETS;INPUT;GRAPHICS;JNI;MEMORY;CRASH;BATTLE_NET'
-}
 $configure = @(
     '-S', $root,
     '-B', (Join-Path $out 'cmake'),
@@ -196,29 +263,36 @@ if ($CorpusRoot) {
 $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
 $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
-# O-43/O-70 experiment: the product default stays unpacked until T2 proves
-# the bionic API 26 loader and PM-22/GB-5.2 show a benefit.  Pass both values
-# on every configure, not only when the switch is set: CMake cache entries
-# survive a previous -PackDynRelocs run, and an omitted OFF would silently
-# leave the next "default" build packed.  The mode keeps APS2 (`android`),
-# RELR and the combined table selectable for the A/B run.
-$packDynRelocsValue = if ($PackDynRelocs) { 'ON' } else { 'OFF' }
+# Optimization policy: every normal Android product build gets the full
+# implemented optimization set.  There are deliberately no per-optimization
+# command-line switches; the only exception is the corpus-less legacy
+# exact-baseline path (CorpusRoot=''), where the generated-corpus
+# transformations cannot run.  Explicit -D values remain available to CMake
+# for an intentional A/B, but an ordinary build always passes ON here so a
+# stale CMake cache cannot silently disable an optimization.
+$relifted = [bool]$CorpusRoot
+$packDynRelocsValue = 'ON'
+$packDynRelocsMode = 'android'
+$nativeTlsValue = if ($relifted) { 'ON' } else { 'OFF' }
+$softfloatContextValue = if ($relifted) { 'ON' } else { 'OFF' }
+$liftOptValue = if ($relifted) { 'ON' } else { 'OFF' }
+$thinSkipCopyinValue = 'ON'
 $configure += "-DWC3_PACK_DYN_RELOCS=$packDynRelocsValue"
-$configure += "-DWC3_PACK_DYN_RELOCS_MODE=$PackDynRelocsMode"
-# O-52: pass the choice on every configure; an omitted value would inherit a
-# stale cache entry from a previous A/B build.
-$nativeTlsValue = if ($NativeTls) { 'ON' } else { 'OFF' }
+$configure += "-DWC3_PACK_DYN_RELOCS_MODE=$packDynRelocsMode"
 $configure += "-DWC3_NATIVE_TLS=$nativeTlsValue"
+$configure += "-DWC3_TLS_MODEL=$TlsModel"
+$configure += "-DWC3_SOFTFLOAT_CONTEXT=$softfloatContextValue"
+$configure += "-DWC3_DEVIRTUALIZE_P0_1=$liftOptValue"
+$configure += "-DWC3_DEAD_FLAGS_P0_2=$liftOptValue"
+$configure += "-DWC3_RETURN_ADDRESS_ELIDE_P0_6=$liftOptValue"
+$configure += "-DWC3_THIN_SKIP_WRITEONLY_COPYIN=$thinSkipCopyinValue"
 $hostHardeningValue = if ($NoHostHardening) { 'OFF' } else { 'ON' }
 $configure += "-DWC3_HOST_HARDENING=$hostHardeningValue"
-# O-64/O-65: pass ON and OFF on every configure.  CMake cache entries survive
-# an earlier experiment, so omitting OFF here would silently keep ICF or
-# -fno-plt in the next "default" build.
-$icfValue = if ($Icf) { 'ON' } else { 'OFF' }
+$icfValue = 'ON'
 $configure += "-DWC3_ICF=$icfValue"
-$configure += "-DWC3_ICF_MODE=$IcfMode"
-$configure += "-DWC3_ICF_PRINT_SECTIONS=$icfValue"
-$fnoPltValue = if ($FnoPlt) { 'ON' } else { 'OFF' }
+$configure += "-DWC3_ICF_MODE=safe"
+$configure += "-DWC3_ICF_PRINT_SECTIONS=ON"
+$fnoPltValue = 'ON'
 $configure += "-DWC3_FNO_PLT=$fnoPltValue"
 # O-42: release ships only the JNI surface.  Debug keeps all dynamic symbols so
 # on-device crash logs retain L_<va> names; -KeepDynsym is the explicit escape
@@ -230,10 +304,13 @@ if ($hideDynsym) {
     $configure += '-DWC3_HIDE_DYNSYM=OFF'
 }
 Write-Host "[app] ndk   $($ndk.Root)"
-Write-Host "[app] pack_dyn_relocs $($PackDynRelocs.IsPresent) ($PackDynRelocsMode)"
-Write-Host "[app] icf $($Icf.IsPresent) ($IcfMode)"
-Write-Host "[app] fno_plt $($FnoPlt.IsPresent)"
-Write-Host "[app] native_tls $($nativeTlsValue -eq 'ON')"
+Write-Host "[app] pack_dyn_relocs $($packDynRelocsValue -eq 'ON') ($packDynRelocsMode)"
+Write-Host "[app] icf $($icfValue -eq 'ON') (safe)"
+Write-Host "[app] fno_plt $($fnoPltValue -eq 'ON')"
+Write-Host "[app] native_tls $($nativeTlsValue -eq 'ON') model $TlsModel"
+Write-Host "[app] softfloat_context $($softfloatContextValue -eq 'ON')"
+Write-Host "[app] lift_p0_1/2/6 $($liftOptValue -eq 'ON')"
+Write-Host "[app] thin_skip_writeonly_copyin $($thinSkipCopyinValue -eq 'ON')"
 Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
 Write-Host "[app] hide_dynsym $hideDynsym"
@@ -275,5 +352,40 @@ if (-not ($hasMain -and $hasJni -and $hasGa)) {
     Write-Host '[app] required GameActivity symbols are missing'
     exit 1
 }
+
+# V10/T2-save: a rebuild is not "the product" unless both known save fixes are
+# in the artifact.  The CMake configure step writes the corpus/fix contract;
+# these checks read the actual .so instead of trusting the command line.
+$fixReport = Join-Path $root 'reports\generated\required_fixes.json'
+if (-not (Test-Path -LiteralPath $fixReport)) {
+    Write-Host "[app] required-fix report missing: $fixReport"
+    exit 1
+}
+$fixes = Get-Content -LiteralPath $fixReport -Raw | ConvertFrom-Json
+if ($null -eq $fixes.fixes.save_list_display -or
+    [int]$fixes.fixes.save_list_display.sites -lt 1) {
+    Write-Host '[app] required-fix report does not declare the save-list fix'
+    exit 1
+}
+if ($null -eq $fixes.fixes.overlapped_save_io) {
+    Write-Host '[app] required-fix report does not declare the overlapped save-I/O fix'
+    exit 1
+}
+
+$strings = Join-Path $ndk.Root 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strings.exe'
+if (-not (Test-Path $strings)) {
+    Write-Host '[app] unavailable: NDK llvm-strings not found'
+    exit 2
+}
+$soStrings = (& $strings $so 2>&1) -join "`n"
+if ($soStrings -notmatch 'WC3_SAVE_LIST_STRIP_W3Z') {
+    Write-Host '[app] save-list display fix marker is absent from the product .so'
+    exit 1
+}
+if ($dynSyms -notmatch '\bpwrite\b' -or $dynSyms -notmatch '\bpread\b') {
+    Write-Host '[app] overlapped save I/O is absent from the product .so'
+    exit 1
+}
+Write-Host "[app] fixes save-list=$($fixes.fixes.save_list_display.sites) site(s), overlapped-save-io=present"
 Write-Host '[app] built'
 exit 0

@@ -147,8 +147,9 @@ uint32_t wc3_legacy_arg32(const CPU *cpu, unsigned index)
 /* The HLE debug chains print the guest LastError next to every I/O result.
  * The host-side stub has no TEB, so a fixed zero keeps the test focused on the
  * file-cache behaviour instead of emulating the thread state. */
-uint32_t wc3_legacy_get_last_error(void)
+uint32_t wc3_legacy_get_last_error(CPU *c)
 {
+    (void)c;
     return 0;
 }
 
