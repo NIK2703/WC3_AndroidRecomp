@@ -773,6 +773,89 @@ static inline int16_t wc3_voice_sample(const Wc3Voice *v, uint64_t abs,
     return (s1 == s2) ? value : 0;
 }
 
+/* Fast tap decoders for the mixer's two output channels.  The mixer always
+ * mixes stereo and maps a mono voice onto both channels; the source frame of
+ * a mono voice therefore yields the same value twice. */
+static inline int16_t wc3_voice_decode_u8(const uint8_t *p)
+{
+    return (int16_t)(((int)p[0] - 128) << 8);
+}
+
+static inline int16_t wc3_voice_decode_s16(const uint8_t *p)
+{
+    uint16_t w = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    int16_t value;
+    memcpy(&value, &w, sizeof value);
+    return value;
+}
+
+/* One normalized ring frame, both mixer channels, legacy per-slot seqlock.
+ *
+ * AM-1: the two channels share one seqlock observation.  A writer that owns the
+ * slot makes the whole tap silent; a stable slot yields L and R from the same
+ * generation, never a torn pair.  With no concurrent writer this is exactly
+ * the old per-channel result.
+ *
+ * `pos` must already be in [0, frames); `pub` is the chunk's cached published
+ * high-water and is non-zero (the caller marks a zero high-water chunk
+ * silent).  A stale `pub` is monotonic: it can only keep a tap silent for one
+ * extra chunk, never expose unpublished PCM. */
+static inline void wc3_voice_sample_legacy_pair(
+    const Wc3Voice *v, const uint8_t *pcm, const _Atomic uint32_t *seq,
+    uint64_t pub, uint32_t pos, int loop, int16_t out[2])
+{
+    out[0] = 0;
+    out[1] = 0;
+    if (!loop && (uint64_t)pos >= pub) {
+        WC3_VOICE_DBG_INC(v, stale_read);
+        return;
+    }
+    uint32_t byte_off = pos * v->bpf;
+    uint32_t slot = byte_off / WC3_VOICE_SLOT_BYTES;
+    uint32_t in_slot = byte_off % WC3_VOICE_SLOT_BYTES;
+    uint32_t s1 = atomic_load_explicit(&seq[slot], memory_order_acquire);
+    if (s1 & 1u) {
+        WC3_VOICE_DBG_INC(v, inflight_zero);
+        return;
+    }
+    const uint8_t *p = pcm + (size_t)slot * WC3_VOICE_SLOT_BYTES + in_slot;
+    if (v->bits == 8u) {
+        out[0] = wc3_voice_decode_u8(p);
+        out[1] = v->channels >= 2u ? wc3_voice_decode_u8(p + 1u) : out[0];
+    } else {
+        out[0] = wc3_voice_decode_s16(p);
+        out[1] = v->channels >= 2u ? wc3_voice_decode_s16(p + 2u) : out[0];
+    }
+    uint32_t s2 = atomic_load_explicit(&seq[slot], memory_order_acquire);
+    if (s1 != s2) {
+        WC3_VOICE_DBG_INC(v, inflight_zero);
+        out[0] = 0;
+        out[1] = 0;
+    }
+}
+
+/* Same as above for an immutable N-18 snapshot.  No seqlock is needed: the
+ * snapshot cannot be recycled while the render chunk holds its ref. */
+static inline void wc3_voice_sample_snap_pair(
+    const Wc3Voice *v, const uint8_t *pcm, uint64_t pub, uint32_t pos,
+    int loop, int16_t out[2])
+{
+    out[0] = 0;
+    out[1] = 0;
+    if (!loop && (uint64_t)pos >= pub) {
+        WC3_VOICE_DBG_INC(v, stale_read);
+        return;
+    }
+    const uint8_t *p = pcm + (size_t)pos * v->bpf;
+    if (v->bits == 8u) {
+        out[0] = wc3_voice_decode_u8(p);
+        out[1] = v->channels >= 2u ? wc3_voice_decode_u8(p + 1u) : out[0];
+    } else {
+        out[0] = wc3_voice_decode_s16(p);
+        out[1] = v->channels >= 2u ? wc3_voice_decode_s16(p + 2u) : out[0];
+    }
+}
+
 static inline void wc3_voice_control(Wc3Voice *v, int playing, int loop,
                                      uint32_t frequency, int volume, int pan)
 {
@@ -905,8 +988,7 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
     const unsigned out_ch = m->channels;
     /* Always compute a stereo mix: a mono device is a (L+R)/2 downmix at the
      * output stage, not "take only the left channel".  A mono voice is
-     * duplicated by wc3_voice_sample(), so this is also correct there. */
-    const unsigned mix_ch = 2u;
+     * duplicated by the pair decoder, so this is also correct there. */
     uint8_t *out = (uint8_t *)dst;
     uint64_t clipped = 0u;
     float peak = 0.0f;
@@ -964,15 +1046,30 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
                 if (snap < 0) muted = 1;
             }
 
+            const uint32_t v_frames = v->frames;
+            const uint8_t *legacy_pcm = v->pcm;
+            const _Atomic uint32_t *legacy_seq = v->seq;
+            /* One high-water snapshot per voice/chunk.  It is monotonic, so
+             * a cached value can only delay visibility by this chunk; it can
+             * never pair old PCM with a newer published frame. */
+            uint64_t pub = snap >= 0
+                ? snap_pub
+                : atomic_load_explicit(&v->published_frame,
+                                       memory_order_acquire);
+            /* A zero high-water means every tap is silence.  Keep the stale
+             * cursor's old behavior for this case: silent is not the same as
+             * stale-muted, so `position` and `stale_source` still advance. */
+            int silent = muted || pub == 0u;
+
             for (uint32_t f = 0; f < n; f++) {
-                if (!loop && v->position >= (double)v->frames) {
+                if (!loop && v->position >= (double)v_frames) {
                     atomic_store_explicit(&v->playing, 0,
                                           memory_order_release);
                     v->position = 0.0;
                     v->stale_source = 0.0;
                     break;
                 }
-                if (!muted) {
+                if (!silent) {
                     uint64_t a = (uint64_t)v->position;
                     double frac = v->position - (double)a;
                     if (step < 1.0) {
@@ -981,51 +1078,87 @@ static inline uint32_t wc3_mixer_render(Wc3PcmMixer *m, void *dst,
                         if (index >= WC3_SINC_PHASES)
                             index = WC3_SINC_PHASES - 1u;
                         float blend = (float)(phase - (double)index);
-                        for (unsigned ch = 0; ch < mix_ch; ch++) {
-                            float sum = 0.0f;
-                            for (unsigned t = 0; t < WC3_SINC_TAPS; t++) {
-                                int64_t src = (int64_t)a + (int)t - 7;
-                                if (src < 0 || src >= (int64_t)v->frames) {
-                                    if (loop) {
-                                        src %= (int64_t)v->frames;
-                                        if (src < 0)
-                                            src += (int64_t)v->frames;
-                                    } else {
-                                        src = src < 0
-                                            ? 0
-                                            : (int64_t)v->frames - 1;
-                                    }
+                        const float *w0 = m->kernel.weights[index];
+                        const float *w1 = m->kernel.weights[index + 1u];
+                        /* AM-0: normalize the absolute source cursor once
+                         * per output frame, then wrap each tap by the ring
+                         * size.  The old code divided per tap because a
+                         * looping voice's `a` grows without bound. */
+                        uint32_t base = loop
+                            ? (uint32_t)(a % v_frames)
+                            : (uint32_t)a;
+                        float sum_l = 0.0f;
+                        float sum_r = 0.0f;
+                        for (unsigned t = 0; t < WC3_SINC_TAPS; t++) {
+                            int64_t src = (int64_t)base + (int)t - 7;
+                            if (loop) {
+                                if (src < 0) {
+                                    do {
+                                        src += (int64_t)v_frames;
+                                    } while (src < 0);
+                                } else {
+                                    while (src >= (int64_t)v_frames)
+                                        src -= (int64_t)v_frames;
                                 }
-                                float w = m->kernel.weights[index][t] +
-                                    (m->kernel.weights[index + 1u][t] -
-                                     m->kernel.weights[index][t]) * blend;
-                                int16_t s = snap >= 0
-                                    ? wc3_voice_sample_snap(
-                                          v, snap_pcm, snap_pub,
-                                          (uint64_t)src, ch, loop)
-                                    : wc3_voice_sample(
-                                          v, (uint64_t)src, ch, loop);
-                                sum += ((float)s / 32768.0f) * w;
+                            } else if (src < 0) {
+                                src = 0;
+                            } else if (src >= (int64_t)v_frames) {
+                                src = (int64_t)v_frames - 1;
                             }
-                            mix[f * 2u + ch] += sum * (ch ? gr : gl);
+                            uint32_t pos = (uint32_t)src;
+                            /* AM-1: one weight per tap, both channels. */
+                            float w = w0[t] + (w1[t] - w0[t]) * blend;
+                            int16_t pair[2];
+                            if (snap >= 0)
+                                wc3_voice_sample_snap_pair(
+                                    v, snap_pcm, pub, pos, loop, pair);
+                            else
+                                wc3_voice_sample_legacy_pair(
+                                    v, legacy_pcm, legacy_seq, pub, pos,
+                                    loop, pair);
+                            sum_l += ((float)pair[0] / 32768.0f) * w;
+                            sum_r += ((float)pair[1] / 32768.0f) * w;
                         }
+                        mix[f * 2u] += sum_l * gl;
+                        mix[f * 2u + 1u] += sum_r * gr;
                     } else {
-                        uint64_t a1 = a + 1u;
-                        if (!loop && a1 >= v->frames) a1 = v->frames - 1u;
-                        for (unsigned ch = 0; ch < mix_ch; ch++) {
-                            int16_t s0 = snap >= 0
-                                ? wc3_voice_sample_snap(v, snap_pcm, snap_pub,
-                                                      a, ch, loop)
-                                : wc3_voice_sample(v, a, ch, loop);
-                            int16_t s1 = snap >= 0
-                                ? wc3_voice_sample_snap(v, snap_pcm, snap_pub,
-                                                      a1, ch, loop)
-                                : wc3_voice_sample(v, a1, ch, loop);
-                            float s = (float)s0 / 32768.0f +
-                                ((float)s1 - (float)s0) / 32768.0f *
-                                (float)frac;
-                            mix[f * 2u + ch] += s * (ch ? gr : gl);
+                        uint32_t pos0;
+                        uint32_t pos1;
+                        if (loop) {
+                            pos0 = (uint32_t)(a % v_frames);
+                            pos1 = pos0 + 1u;
+                            if (pos1 >= v_frames) pos1 = 0u;
+                        } else {
+                            pos0 = (uint32_t)a;
+                            uint64_t a1 = a + 1u;
+                            if (a1 >= v_frames) a1 = v_frames - 1u;
+                            pos1 = (uint32_t)a1;
                         }
+                        int16_t pair0[2];
+                        int16_t pair1[2];
+                        if (snap >= 0) {
+                            wc3_voice_sample_snap_pair(
+                                v, snap_pcm, pub, pos0, loop, pair0);
+                            wc3_voice_sample_snap_pair(
+                                v, snap_pcm, pub, pos1, loop, pair1);
+                        } else {
+                            wc3_voice_sample_legacy_pair(
+                                v, legacy_pcm, legacy_seq, pub, pos0, loop,
+                                pair0);
+                            wc3_voice_sample_legacy_pair(
+                                v, legacy_pcm, legacy_seq, pub, pos1, loop,
+                                pair1);
+                        }
+                        float l0f = (float)pair0[0];
+                        float l1f = (float)pair1[0];
+                        float sum_l = l0f / 32768.0f +
+                            (l1f - l0f) / 32768.0f * (float)frac;
+                        float r0f = (float)pair0[1];
+                        float r1f = (float)pair1[1];
+                        float sum_r = r0f / 32768.0f +
+                            (r1f - r0f) / 32768.0f * (float)frac;
+                        mix[f * 2u] += sum_l * gl;
+                        mix[f * 2u + 1u] += sum_r * gr;
                     }
                 }
                 v->position += step;
