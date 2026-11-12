@@ -76,8 +76,8 @@ static const char *const g_messages[] = {
     "Illegal byte sequence",
 };
 
-static THREAD_LOCAL uint32_t g_message_buffer;
-static THREAD_LOCAL uint32_t g_errno_cell;
+static _Thread_local uint32_t g_message_buffer;
+static _Thread_local uint32_t g_errno_cell;
 
 static void h_errno(CPU *c)
 {

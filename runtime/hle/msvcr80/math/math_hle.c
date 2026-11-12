@@ -32,20 +32,17 @@
 #include "cpu.h"
 #include "hle_bridge.h"
 
-/* The guest x87 register file is an exact 80-bit SoftFloat value.  The
- * conversion through a host double is the same narrowing the as-built HLE used,
- * so moving the handler does not add a second rounding step. */
+/* The guest x87 register file stores a native double.  This is the same
+ * narrowing the as-built HLE used, so moving the handler does not add a second
+ * rounding step. */
 static double pop_f64(CPU *c)
 {
-    float64_t f = X87_EXTF80_TO_F64(c, fpop(c));
-    double d;
-    memcpy(&d, &f.v, sizeof d);
-    return d;
+    return fpop(c).v.d;
 }
 
 static void push_f64(CPU *c, double value)
 {
-    fpush(c, x87_from_f64(c, value));
+    fpush(c, x87_from_f64(value));
 }
 
 /* cdecl double argument.  Each double occupies two 32-bit stack words, low

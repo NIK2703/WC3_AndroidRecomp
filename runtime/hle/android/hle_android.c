@@ -5751,7 +5751,7 @@ static void *guest_thread_proc(void *p)
 
     CPU c;
     memset(&c, 0, sizeof c);
-    cpu_x87_init(&c);
+    cpu_x87_init_thread(&c);
     c.esp = t->stack_base + t->stack_size - 0x100;
     teb_init_local(&c, t->teb, t->stack_base, t->stack_size, t->guest_id);
 #if WC3_DEBUG && WC3_DEBUG_HLE
@@ -5973,31 +5973,28 @@ static void cr_controlfp_s(CPU *c)
 }
 static void cr_clearfp(CPU *c) { c->eax = 0; }
 
-/* Pop an x87 value and view it as a host double.  SoftFloat's float64_t is a
- * struct, so the conversion is a memcpy of the payload. */
+/* Pop an x87 value and view it as a host double.  The x87 slot stores the
+ * native double directly. */
 static double fpop_f64(CPU *c)
 {
-    float64_t f = X87_EXTF80_TO_F64(c, fpop(c));
-    double d;
-    memcpy(&d, &f.v, sizeof d);
-    return d;
+    return fpop(c).v.d;
 }
 
 static void cr_cisqrt(CPU *c)
 {
     double x = fpop_f64(c);
-    fpush(c, x87_from_f64(c, sqrt(x)));
+    fpush(c, x87_from_f64(sqrt(x)));
 }
 static void cr_cilog10(CPU *c)
 {
     double x = fpop_f64(c);
-    fpush(c, x87_from_f64(c, log10(x)));
+    fpush(c, x87_from_f64(log10(x)));
 }
 static void cr_cipow(CPU *c)
 {
     double y = fpop_f64(c);
     double x = fpop_f64(c);
-    fpush(c, x87_from_f64(c, pow(x, y)));
+    fpush(c, x87_from_f64(pow(x, y)));
 }
 /* _CIfmod is the compiler's internal fmod: both operands come off the x87
  * stack and the result goes back onto it, so a stub that only sets eax leaves
@@ -6007,7 +6004,7 @@ static void cr_cifmod(CPU *c)
 {
     double y = fpop_f64(c);
     double x = fpop_f64(c);
-    fpush(c, x87_from_f64(c, fmod(x, y)));
+    fpush(c, x87_from_f64(fmod(x, y)));
 }
 /* _CIatan2 is the compiler's x87 atan2, not a cdecl function: the caller
  * leaves y in ST(1) and x in ST(0), and fpatan replaces them with
@@ -6018,7 +6015,7 @@ static void cr_ciatan2(CPU *c)
 {
     double x = fpop_f64(c);
     double y = fpop_f64(c);
-    fpush(c, x87_from_f64(c, atan2(y, x)));
+    fpush(c, x87_from_f64(atan2(y, x)));
 }
 
 /* MSVCR80's ordinary math functions take their arguments on the *stack*
@@ -6040,13 +6037,13 @@ static double cr_arg_f64(CPU *c, unsigned n)
     static void cr_f64_##fn(CPU *c)                                     \
     {                                                                   \
         double x = cr_arg_f64(c, 0);                                    \
-        fpush(c, x87_from_f64(c, expr));                                \
+        fpush(c, x87_from_f64(expr));                                   \
     }
 #define CR_MATH2(fn, expr)                                              \
     static void cr_f64_##fn(CPU *c)                                     \
     {                                                                   \
         double x = cr_arg_f64(c, 0), y = cr_arg_f64(c, 1);              \
-        fpush(c, x87_from_f64(c, expr));                                \
+        fpush(c, x87_from_f64(expr));                                   \
     }
 
 CR_MATH1(ceil,  ceil(x))

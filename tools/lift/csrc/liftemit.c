@@ -46,8 +46,17 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
     cs_x86_op *memop = (nops && OP(insn, 0)->type == X86_OP_MEM) ? OP(insn, 0) : NULL;
 
     if (LST(m, "fbld", "fbstp")) {
-        lf_push(&e, lf_todo((uint32_t)insn->address,
-                            lf_afmt("x87 packed BCD: %s %s", m, insn->op_str)));
+        if (!memop) {
+            lf_push(&e, lf_todo((uint32_t)insn->address,
+                                lf_afmt("%s without memory: %s", m, insn->op_str)));
+            return e;
+        }
+        if (!strcmp(m, "fbld"))
+            lf_push(&e, lf_afmt("fpush(c, x87_ld_bcd(c, %s));",
+                                lf_addr_expr(L, insn, memop)));
+        else
+            lf_push(&e, lf_afmt("x87_st_bcd(c, %s, *fst(c, 0)); fpop(c);",
+                                lf_addr_expr(L, insn, memop)));
         return e;
     }
     if (LST(m, "fldenv", "fnstenv", "fsave", "fnsave", "frstor")) {
@@ -99,7 +108,7 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
                                 lf_afmt("fst m%d: %s", sz * 8, insn->op_str)));
             return e;
         }
-        lf_push(&e, lf_afmt("*fst(c, %d) = *fst(c, 0);%s",
+        lf_push(&e, lf_afmt("x87_fst_reg(c, %d);%s",
                             nops ? st_index(L, OP(insn, nops - 1)) : 0, pop));
         return e;
     }
@@ -123,7 +132,8 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
     }
 
     if (LST(m, "fprem", "fprem1")) {
-        lf_push(&e, "*fst(c, 0) = x87_fprem(c, *fst(c, 0), *fst(c, 1));");
+        lf_push(&e, lf_afmt("*fst(c, 0) = %s(c, *fst(c, 0), *fst(c, 1));",
+                            !strcmp(m, "fprem1") ? "x87_fprem1" : "x87_fprem"));
         return e;
     }
     if (!strcmp(m, "frndint")) { lf_push(&e, "*fst(c, 0) = x87_roundint(c, *fst(c, 0));"); return e; }
@@ -219,7 +229,7 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
 
     if (LST(m, "fcom", "fcomp", "fcompp", "fucom", "fucomp", "fucompp", "ficom", "ficomp")) {
         char *src;
-        int signaling = !strncmp(m, "fcom", 4);
+        int signaling = !strncmp(m, "fcom", 4) || !strncmp(m, "ficom", 5);
         if (memop) src = fmem(L, insn, memop, (m[1] == 'c') ? 'f' : 'i');
         else if (nops) src = lf_afmt("*fst(c, %d)", st_index(L, OP(insn, nops - 1)));
         else src = (char *)"*fst(c, 1)";
@@ -248,7 +258,7 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
     if (!strcmp(m, "fptan")) { lf_push(&e, "*fst(c, 0) = x87_fptan(c, *fst(c, 0)); fpush(c, x87_one());"); return e; }
     if (!strcmp(m, "fpatan")) { lf_push(&e, "*fst(c, 1) = x87_fpatan(c, *fst(c, 1), *fst(c, 0)); fpop(c);"); return e; }
     if (!strcmp(m, "fyl2x")) { lf_push(&e, "*fst(c, 1) = x87_fyl2x(c, *fst(c, 0), *fst(c, 1)); fpop(c);"); return e; }
-    if (!strcmp(m, "fyl2xp1")) { lf_push(&e, "*fst(c, 1) = x87_fyl2xp1(c, *fst(c, 0), *fst(c, 1));"); return e; }
+    if (!strcmp(m, "fyl2xp1")) { lf_push(&e, "*fst(c, 1) = x87_fyl2xp1(c, *fst(c, 0), *fst(c, 1)); fpop(c);"); return e; }
     if (!strcmp(m, "f2xm1")) { lf_push(&e, "*fst(c, 0) = x87_f2xm1(c, *fst(c, 0));"); return e; }
     if (!strcmp(m, "fsincos")) {
         lf_push(&e, "{ x87_ext _x = *fst(c, 0); *fst(c, 0) = x87_fsin(c, _x); fpush(c, x87_fcos(c, _x)); }");
@@ -270,7 +280,7 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
                                 lf_afmt("fldcw without memory: %s", insn->op_str)));
             return e;
         }
-        lf_push(&e, lf_afmt("c->fpu_cw = rd16(%s);", lf_addr_expr(L, insn, memop)));
+        lf_push(&e, lf_afmt("x87_fldcw(c, %s);", lf_addr_expr(L, insn, memop)));
         return e;
     }
     if (LST(m, "fnclex", "fclex")) {

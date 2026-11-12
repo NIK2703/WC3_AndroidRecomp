@@ -93,7 +93,6 @@ $targets = @(
     @{ out = 'liftpass.exe'; src = @('liftpass.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'atomiccheck.exe'; src = @('atomiccheck.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'devirtualize.exe'; src = @('devirtualize.c'); dir = $csrcLocal },
-    @{ out = 'softfloat_context_fnclex.exe'; src = @('softfloat_context_fnclex.c'); dir = $csrcLocal },
     @{ out = 'gen_boot_dispatch.exe'; src = @('gen_boot_dispatch.c'); dir = $csrcLocal },
     @{ out = 'save_list_display.exe'; src = @('save_list_display.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'dead_flags.exe'; src = @('dead_flags.c', 'sha256.c'); dir = $csrcLocal },
@@ -103,7 +102,6 @@ $targets = @(
     @{ out = 'dxvk_isolate_archive_elf.exe'; src = @('dxvk_isolate_archive_elf.c'); dir = $csrcLocal },
     @{ out = 'flag_read_audit.exe'; src = @('flag_read_audit.c'); dir = $csrcLocal },
     @{ out = 'audit_tls.exe'; src = @('audit_tls.c', 'sha256.c'); dir = $csrcLocal },
-    @{ out = 'softfloat_context_gen.exe'; src = @('softfloat_context_gen.c'); dir = $csrcLocal },
     @{ out = 'dxvk_android_probe.exe'; src = @('dxvk_android_probe.c'); dir = $csrcLocal },
     @{ out = 'closure_pipeline.exe'; src = @('closure_pipeline.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'thunkseeds.exe'; srcfull = @((Join-Path $csrcLocal 'thunkseeds.c'), (Join-Path $csrc 'csglue.c')) },
@@ -319,12 +317,6 @@ void L_00401000(CPU *c)
     if ($LASTEXITCODE -ne 0 -or -not ($dvOut -match 'self-test.*OK')) {
         $dvOut | ForEach-Object { Write-Host $_ }
         throw 'devirtualize self-test failed'
-    }
-    $sf = Join-Path $bin 'softfloat_context_fnclex.exe'
-    $sfOut = & $sf --self-test 2>&1
-    if ($LASTEXITCODE -ne 0 -or -not ($sfOut -match 'self-test OK')) {
-        $sfOut | ForEach-Object { Write-Host $_ }
-        throw 'softfloat_context_fnclex self-test failed'
     }
     $bg = Join-Path $bin 'gen_boot_dispatch.exe'
     $bgOut = & $bg --self-test 2>&1

@@ -74,15 +74,10 @@ $common = @(
     '-fno-strict-aliasing',
     '-fwrapv',
     '-ffp-contract=off',
-    '-DSOFTFLOAT_FAST_INT64',
-    '-DLITTLEENDIAN',
-    '-DTHREAD_LOCAL=_Thread_local',
     '-DWC3_DEBUG=0',
     '-DNDEBUG',
     '-I', (Join-Path $root 'runtime\cpu'),
     '-I', (Join-Path $root 'runtime\legacy'),
-    '-I', (Join-Path $root 'third_party\softfloat\source\include'),
-    '-I', (Join-Path $root 'third_party\softfloat\source\8086-SSE'),
     '-I', $genDir
 )
 
@@ -162,9 +157,7 @@ if ($D3D9) {
         '-I', (Join-Path $LegacyRoot 'build27'),
         '-I', (Join-Path $LegacyRoot 'runtime\android'),
         '-I', (Join-Path $root 'runtime\cpu'),
-        '-I', (Join-Path $root 'runtime\legacy'),
-        '-I', (Join-Path $root 'third_party\softfloat\source\include'),
-        '-I', (Join-Path $root 'third_party\softfloat\source\8086-SSE')
+        '-I', (Join-Path $root 'runtime\legacy')
     )
     Write-Host '[boot] compile dxvk_entry.cpp'
     Invoke-Wc3Compile $clangxx ($cxxCommon + @('-c', $dxvkSrc, '-o', $dxvkObj))
@@ -186,7 +179,6 @@ $rspLines = @(
     '-o', (RspPath $out)
 )
 foreach ($obj in $objects) { $rspLines += (RspPath $obj) }
-$rspLines += (RspPath (Join-Path $LegacyRoot 'build\android\libsoftfloat.a'))
 if ($D3D9) {
     $rspLines += @('-Wl,--whole-archive')
     $rspLines += (RspPath (Join-Path $LegacyRoot 'build\android\libdxvk1_iso.a'))

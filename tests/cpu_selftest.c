@@ -11,9 +11,12 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/mman.h>
 #endif
 #include "cpu.h"
 
@@ -50,9 +53,63 @@ static void eq(const char *what, uint32_t got, uint32_t want)
     }
 }
 
+static x87_ext ext_bits(uint64_t bits)
+{
+    return x87_from_f64(x87_from_bits(bits));
+}
+
+/* x87 memory helpers take a 32-bit guest VA.  Map a page below 4 GiB so the
+ * test is runnable on a 64-bit host as well as under a 32-bit compiler. */
+static unsigned char *map_low(size_t size)
+{
+#ifdef _WIN32
+    return (unsigned char *)VirtualAlloc((void *)(uintptr_t)0x20000000u,
+                                         size, MEM_COMMIT | MEM_RESERVE,
+                                         PAGE_READWRITE);
+#else
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_FIXED_NOREPLACE
+    flags |= MAP_FIXED_NOREPLACE;
+#else
+    flags |= MAP_FIXED;
+#endif
+    void *p = mmap((void *)(uintptr_t)0x20000000u, size,
+                   PROT_READ | PROT_WRITE, flags, -1, 0);
+    if (p == MAP_FAILED) {
+#ifdef MAP_32BIT
+        p = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+#else
+        p = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#endif
+    }
+    if (p == MAP_FAILED)
+        return NULL;
+    if ((uintptr_t)p + size > UINT64_C(0x100000000)) {
+        (void)munmap(p, size);
+        return NULL;
+    }
+    return (unsigned char *)p;
+#endif
+}
+
+static void unmap_low(unsigned char *p, size_t size)
+{
+    if (!p)
+        return;
+#ifdef _WIN32
+    (void)size;
+    (void)VirtualFree(p, 0, MEM_RELEASE);
+#else
+    (void)munmap(p, size);
+#endif
+}
+
 int main(void)
 {
     CPU c = {0};
+    setvbuf(stdout, NULL, _IONBF, 0);
     cpu_x87_init(&c);
 
     /* rotates: 32-bit */
@@ -217,13 +274,13 @@ int main(void)
      * the ordered answers makes a game take the wrong branch exactly when a
      * value has already gone wrong. The status-word bits are C3|C2|C0 of a
      * 0x4700 mask; the EFLAGS mapping is not the integer one. */
-    extFloat80_t one80 = x87_from_i32(1);
-    extFloat80_t two80 = x87_from_i32(2);
-    extFloat80_t nan80 = x87_div(&c, x87_zero(), x87_zero());
+    x87_ext one80 = x87_from_i32(1);
+    x87_ext two80 = x87_from_i32(2);
+    x87_ext nan80 = x87_div(&c, x87_zero(), x87_zero());
     x87_compare(&c, two80, one80, 1);  eq("fcom greater  -> sw", c.fpu_sw & 0x4700u, 0x0000u);
     x87_compare(&c, one80, two80, 1);  eq("fcom less     -> C0", c.fpu_sw & 0x4700u, 0x0100u);
     x87_compare(&c, one80, one80, 1);  eq("fcom equal    -> C3", c.fpu_sw & 0x4700u, 0x4000u);
-    x87_compare(&c, nan80, one80, 1);  eq("fcom unord -> C3|C2|C0", c.fpu_sw & 0x4700u, 0x4700u);
+    x87_compare(&c, nan80, one80, 1);  eq("fcom unord -> C3|C2|C0", c.fpu_sw & 0x4700u, 0x4500u);
 
 #define FLAGS3(cc) (((cc).zf << 2) | ((cc).pf << 1) | (cc).cf)
     x87_compare_eflags(&c, two80, one80, 1); eq("fcomi greater  -> 000", FLAGS3(c), 0u);
@@ -236,55 +293,241 @@ int main(void)
     eq("fcomi clears OF|SF|AF", (uint32_t)(c.of | c.sf | c.af), 0u);
 #undef FLAGS3
 
-    /* ---- x87 extended, the ten-byte format ----
-     *
-     * The patterns are what a real x87 stores: taken from a compiler whose
-     * long double IS this format, which MSVC's is not - it makes long double
-     * a double, so comparing against it here would compare nothing. Pinning
-     * the bytes instead means the check works in the build that matters.
-     *
-     * Reading eight of the ten bytes as a double would give a number that
-     * looks plausible and is not, which is the whole reason these exist. */
+    /* ---- native x87 semantics ---- */
     {
-        static const struct { uint64_t m; uint16_t se; } x87[] = {
-            { 0x8000000000000000ULL, 0x3FFF },
-            { 0x8000000000000000ULL, 0x3FFE },
-            { 0xC90FDAA221688800ULL, 0xC000 },
-            { 0xBF21E44003ACE000ULL, 0x43E3 },
-            { 0xAB70FE17C79AC800ULL, 0xBC1A },
-            { 0x0000000000000000ULL, 0x0000 },
-            { 0x0000000000000000ULL, 0x8000 },
-            { 0x8000000000000000ULL, 0x401E },
-            { 0xAAAAAAAAAAAAA800ULL, 0x3FFD },
+        x87_ext qnan = ext_bits(UINT64_C(0x7FF8000000000000));
+        x87_ext snan = ext_bits(UINT64_C(0x7FF0000000000001));
+        x87_ext inf  = ext_bits(UINT64_C(0x7FF0000000000000));
+        x87_ext ninf = ext_bits(UINT64_C(0xFFF0000000000000));
+        x87_ext r;
+
+        c.fpu_sw = 0;
+        (void)x87_add(&c, qnan, one80);
+        eq("qnan + 1 does not raise IE", c.fpu_sw & X87_IE, 0u);
+        c.fpu_sw = 0;
+        (void)x87_add(&c, snan, one80);
+        eq("snan + 1 raises IE", c.fpu_sw & X87_IE, X87_IE);
+        c.fpu_sw = 0;
+        r = x87_add(&c, inf, ninf);
+        eq("inf + -inf raises IE", c.fpu_sw & X87_IE, X87_IE);
+        eq("inf + -inf is NaN", x87_is_nan_bits(x87_bits(r.v.d)), 1u);
+        c.fpu_sw = 0;
+        r = x87_mul(&c, x87_zero(), inf);
+        eq("0 * inf raises IE", c.fpu_sw & X87_IE, X87_IE);
+        eq("0 * inf is NaN", x87_is_nan_bits(x87_bits(r.v.d)), 1u);
+        c.fpu_sw = 0;
+        r = x87_div(&c, x87_zero(), x87_zero());
+        eq("0 / 0 raises IE", c.fpu_sw & X87_IE, X87_IE);
+        eq("0 / 0 is NaN", x87_is_nan_bits(x87_bits(r.v.d)), 1u);
+        c.fpu_sw = 0;
+        r = x87_div(&c, one80, x87_zero());
+        eq("1 / 0 keeps IE clear", c.fpu_sw & X87_IE, 0u);
+        eq("1 / 0 is Inf", x87_is_inf_bits(x87_bits(r.v.d)), 1u);
+        c.fpu_sw = 0;
+        r = x87_sqrt(&c, x87_from_i32(-1));
+        eq("sqrt(-1) raises IE", c.fpu_sw & X87_IE, X87_IE);
+        eq("sqrt(-1) is NaN", x87_is_nan_bits(x87_bits(r.v.d)), 1u);
+        c.fpu_sw = 0;
+        r = x87_fprem1(&c, x87_from_i32(5), x87_from_i32(2));
+        eqd("fprem1 5,2", r.v.d, 1.0);
+        (void)x87_fprem1(&c, x87_from_i32(5), x87_zero());
+        eq("fprem1 x,0 raises IE", c.fpu_sw & X87_IE, X87_IE);
+
+        /* FSCALE returns a NaN scale operand, and only an SNaN raises IE. */
+        cpu_x87_init(&c);
+        fpush(&c, ext_bits(UINT64_C(0x7FF8000000000123)));
+        fpush(&c, x87_from_i32(2));
+        x87_fscale(&c);
+        eq("fscale qnan keeps IE clear", c.fpu_sw & X87_IE, 0u);
+        eq("fscale qnan result is NaN",
+           x87_is_nan_bits(x87_bits(fst(&c, 0)->v.d)), 1u);
+        cpu_x87_init(&c);
+        fpush(&c, ext_bits(UINT64_C(0x7FF0000000000123)));
+        fpush(&c, x87_from_i32(2));
+        x87_fscale(&c);
+        eq("fscale snan raises IE", c.fpu_sw & X87_IE, X87_IE);
+        eq("fscale snan result is quiet",
+           x87_is_snan_bits(x87_bits(fst(&c, 0)->v.d)), 0u);
+
+        cpu_x87_init(&c);
+        fpush(&c, x87_from_i32(8));
+        x87_fxtract(&c);
+        eq("fxtract 8 keeps IE clear", c.fpu_sw & X87_IE, 0u);
+        eqd("fxtract 8 significand", fst(&c, 0)->v.d, 1.0);
+        eqd("fxtract 8 exponent", fst(&c, 1)->v.d, 3.0);
+        cpu_x87_init(&c);
+        fpush(&c, x87_zero());
+        x87_fxtract(&c);
+        eq("fxtract 0 keeps IE clear", c.fpu_sw & X87_IE, 0u);
+        eqd("fxtract 0 significand", fst(&c, 0)->v.d, 0.0);
+        eqd("fxtract 0 exponent", fst(&c, 1)->v.d, -INFINITY);
+
+        cpu_x87_init(&c);
+        fpush(&c, one80);
+        *fst(&c, 0) = x87_zero();       /* helper-style write leaves tag valid */
+        x87_refresh_tags(&c);
+        eq("tag refresh sees zero", x87_tag(&c, c.fpu_top), 1u);
+        cpu_x87_init(&c);
+        fpush(&c, one80);
+        x87_fst_reg(&c, 1);
+        eq("fst st(1) copies tag", x87_tag(&c, (c.fpu_top + 1) & 7), 0u);
+
+        eq("x87 slot is 16 bytes", (uint32_t)sizeof(x87_ext), 16u);
+        eq("CPU x87 stack is 128 bytes", (uint32_t)sizeof c.st, 128u);
+        c.st[0] = one80;
+        eq("mm aliases x87 low word", (uint32_t)(*mm_get(&c, 0) ==
+                                                 x87_bits(one80.v.d)), 1u);
+        mmx_emms(&c);
+        c.fpu_cw = 0;
+        cpu_x87_init(&c);
+        eq("FNINIT cw", c.fpu_cw, 0x037Fu);
+        cpu_x87_init_thread(&c);
+        eq("thread-init cw", c.fpu_cw, 0x027Fu);
+        cpu_x87_init(&c);
+    }
+
+    /* ---- x87 f80 memory codec ----
+     *
+     * The native register stores a double, so a 64-bit x87 significand cannot
+     * round-trip bit-for-bit.  These checks pin the accepted conversion:
+     * normal values decode to the nearest double, low eleven significand bits
+     * are lost, and unsupported encodings become signed zero. */
+    {
+        static const struct { uint64_t sig; uint16_t se; double want; } x87[] = {
+            { UINT64_C(0x8000000000000000), 0x3FFF, 1.0 },
+            { UINT64_C(0x8000000000000000), 0x3FFE, 0.5 },
+            { UINT64_C(0xC90FDAA22168C235), 0x4000, 3.14159265358979323846 },
+            { UINT64_C(0x0000000000000000), 0x0000, 0.0 },
+            { UINT64_C(0x0000000000000000), 0x8000, -0.0 },
+            { UINT64_C(0x8000000000000000), 0x7FFF, INFINITY },
+            { UINT64_C(0x8000000000000000), 0xFFFF, -INFINITY },
+            { UINT64_C(0x8000000000000000), 0x0001, 0.0 },   /* denormal */
+            { UINT64_C(0x7FFFFFFFFFFFFFFF), 0x3FFF, 0.0 },   /* unnormal */
+            { UINT64_C(0x7FFFFFFFFFFFFFFF), 0x7FFF, 0.0 },   /* pseudo-NaN */
         };
         unsigned k;
-#ifdef _WIN32
-        unsigned char *buf = (unsigned char *)VirtualAlloc(
-            (void *)(uintptr_t)0x20000000u, 4096,
-            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-#else
-        unsigned char *buf = malloc(16);
-#endif
+        unsigned char *buf = map_low(4096);
         if (!buf) { printf("FAIL low test buffer\n"); fails++; return 1; }
         for (k = 0; k < sizeof(x87) / sizeof(x87[0]); k++) {
-            uint64_t m; uint16_t se;
-
-            memcpy(buf,     &x87[k].m,  8);
-            memcpy(buf + 8, &x87[k].se, 2);
-            extFloat80_t v = x87_ld_f80((uint32_t)(uintptr_t)buf);
-            eq("fld tbyte mantissa hi", (uint32_t)(v.signif >> 32),
-               (uint32_t)(x87[k].m >> 32));
-            eq("fld tbyte mantissa lo", (uint32_t)v.signif, (uint32_t)x87[k].m);
-            eq("fld tbyte sign+exp", v.signExp, x87[k].se);
+            memcpy(buf,     &x87[k].sig, 8);
+            memcpy(buf + 8, &x87[k].se,  2);
+            x87_ext v = x87_ld_f80((uint32_t)(uintptr_t)buf);
+            eqd("fld tbyte -> double", v.v.d, x87[k].want);
 
             memset(buf, 0xCC, 16);
             x87_st_f80((uint32_t)(uintptr_t)buf, v);
-            memcpy(&m,  buf,     8);
-            memcpy(&se, buf + 8, 2);
-            eq("fstp tbyte mantissa hi", (uint32_t)(m >> 32), (uint32_t)(x87[k].m >> 32));
-            eq("fstp tbyte mantissa lo", (uint32_t)m,         (uint32_t)x87[k].m);
-            eq("fstp tbyte sign+exp",    se,                  x87[k].se);
+            x87_ext back = x87_ld_f80((uint32_t)(uintptr_t)buf);
+            eqd("f80 round-trip double", back.v.d, v.v.d);
         }
+
+        /* low 11 bits of the source significand are not preserved */
+        {
+            static const uint64_t sig = UINT64_C(0xC90FDAA22168C235);
+            static const uint16_t se = 0x4000;
+            uint64_t stored;
+            memcpy(buf, &sig, 8);
+            memcpy(buf + 8, &se, 2);
+            x87_ext v = x87_ld_f80((uint32_t)(uintptr_t)buf);
+            memset(buf, 0xCC, 16);
+            x87_st_f80((uint32_t)(uintptr_t)buf, v);
+            memcpy(&stored, buf, 8);
+            eq("f80 low 11 bits cleared", (uint32_t)(stored & 0x7FFu), 0u);
+        }
+
+        /* rounding control is applied when the guest writes FCW */
+        {
+            uint16_t *cw = (uint16_t *)(void *)(buf + 256);
+            int32_t *out = (int32_t *)(void *)(buf + 260);
+            volatile double two_nine = 2.9;   /* keep nearbyint runtime */
+            *cw = 0x0F7F;           /* round toward zero, 64-bit precision */
+            x87_fldcw(&c, (uint32_t)(uintptr_t)cw);
+            x87_st_i32(&c, (uint32_t)(uintptr_t)out,
+                       x87_from_f64(two_nine));
+            eq("fist with RC=truncate", (uint32_t)*out, 2u);
+            *cw = 0x037F;
+            x87_fldcw(&c, (uint32_t)(uintptr_t)cw);
+            x87_st_i32(&c, (uint32_t)(uintptr_t)out,
+                       x87_from_f64(two_nine));
+            eq("fist with RC=nearest", (uint32_t)*out, 3u);
+        }
+
+        /* packed BCD uses its own integer codec */
+        {
+            unsigned char *bcd = buf;
+            x87_ext v;
+            memset(bcd, 0, 10);
+            bcd[0] = 0x23; bcd[1] = 0x01;   /* 123 */
+            v = x87_ld_bcd(&c, (uint32_t)(uintptr_t)bcd);
+            eqd("fbld 123", v.v.d, 123.0);
+            memset(bcd, 0, 10);
+            x87_st_bcd(&c, (uint32_t)(uintptr_t)bcd, v);
+            eq("fbstp low digit pair", bcd[0], 0x23u);
+            eq("fbstp high digit pair", bcd[1], 0x01u);
+            eq("fbstp zero pair", bcd[2], 0x00u);
+            eq("fbstp sign", bcd[9], 0x00u);
+
+            /* Invalid BCD digits have an undefined value but do not raise IE;
+             * FBSTP out-of-range does raise IE and stores the BCD indefinite. */
+            memset(bcd, 0, 10);
+            bcd[0] = 0xAB;
+            c.fpu_sw = 0;
+            v = x87_ld_bcd(&c, (uint32_t)(uintptr_t)bcd);
+            eq("fbld invalid digits keep IE clear", c.fpu_sw & X87_IE, 0u);
+            eqd("fbld masks invalid digits", v.v.d, 111.0);
+            c.fpu_sw = 0;
+            memset(bcd, 0, 10);
+            x87_st_bcd(&c, (uint32_t)(uintptr_t)bcd, x87_from_f64(INFINITY));
+            eq("fbstp inf raises IE", c.fpu_sw & X87_IE, X87_IE);
+            eq("fbstp indefinite byte 7", bcd[7], 0xC0u);
+            eq("fbstp indefinite byte 8", bcd[8], 0xFFu);
+            eq("fbstp indefinite byte 9", bcd[9], 0xFFu);
+        }
+
+        /* 32-bit protected-mode environment is seven dword slots, not
+         * packed 16-bit fields.  Mss32 reads FIP/FDP with these offsets. */
+        {
+            uint32_t e[7];
+            CPU d;
+            c.fpu_cw = 0x037F;
+            c.fpu_sw = 0;
+            c.fpu_tag = 0xFFFFu;
+            c.fpu_ip = 0x11111111u; c.fpu_cs = 0x2222u;
+            c.fpu_dp = 0x33333333u; c.fpu_ds = 0x4444u;
+            memset(buf, 0xCC, 32);
+            x87_fnstenv(&c, (uint32_t)(uintptr_t)buf);
+            memcpy(e, buf, sizeof e);
+            eq("fnstenv cw slot", e[0], 0x037Fu);
+            eq("fnstenv sw slot", e[1], 0u);
+            eq("fnstenv tag slot", e[2], 0xFFFFu);
+            eq("fnstenv ip slot", e[3], 0x11111111u);
+            eq("fnstenv cs slot", e[4], 0x2222u);
+            eq("fnstenv dp slot", e[5], 0x33333333u);
+            eq("fnstenv ds slot", e[6], 0x4444u);
+            memset(&d, 0, sizeof d);
+            cpu_x87_init(&d);
+            x87_fldenv(&d, (uint32_t)(uintptr_t)buf);
+            eq("fldenv cw", d.fpu_cw, 0x037Fu);
+            eq("fldenv ip", d.fpu_ip, 0x11111111u);
+            eq("fldenv cs", d.fpu_cs, 0x2222u);
+            eq("fldenv dp", d.fpu_dp, 0x33333333u);
+            eq("fldenv ds", d.fpu_ds, 0x4444u);
+        }
+
+        /* FNSAVE/FRSTOR use the 28-byte environment plus eight 10-byte
+         * registers, and FNSAVE leaves the x87 in the FNINIT state. */
+        {
+            cpu_x87_init(&c);
+            fpush(&c, x87_from_f64(1.25));
+            memset(buf, 0, 128);
+            x87_fnsave(&c, (uint32_t)(uintptr_t)buf);
+            eq("fnsave resets cw", c.fpu_cw, 0x037Fu);
+            eq("fnsave clears tags", c.fpu_tag, 0xFFFFu);
+            x87_frstor(&c, (uint32_t)(uintptr_t)buf);
+            eq("frstor restores cw", c.fpu_cw, 0x037Fu);
+            eqd("frstor restores st0", fst(&c, 0)->v.d, 1.25);
+        }
+
+        unmap_low(buf, 4096);
     }
 
     /* fs: via the portable simulated-TIB path (FS_* macros). The MSVC default
@@ -293,19 +536,26 @@ int main(void)
      * This is what a non-Windows host relies on for SEH prologues. */
 #if !defined(_MSC_VER) || defined(RECOMP_FS_SIMULATED)
     {
-        static uint8_t tib[256];
-        CPU fc; memset(&fc, 0, sizeof fc);
-        fc.fs_base = (uint32_t)(uintptr_t)tib;
-        *(uint32_t *)(tib + 0) = 0xDEADBEEFu;            /* prior SEH list head */
-        eq("fs:[0] read",      FS_RD32(&fc, 0x00000000u), 0xDEADBEEFu);
-        FS_WR32(&fc, 0x00000000u, 0x00123450u);          /* push a record */
-        eq("fs:[0] write",     FS_RD32(&fc, 0x00000000u), 0x00123450u);
-        FS_WR16(&fc, 0x00000004u, 0xBEEF);
-        eq("fs:[4] word",      FS_RD16(&fc, 0x00000004u), 0xBEEFu);
-        FS_WR8 (&fc, 0x00000006u, 0x5A);
-        eq("fs:[6] byte",      FS_RD8 (&fc, 0x00000006u), 0x5Au);
-        FS_WR32(&fc, 0x00000018u, fc.fs_base);           /* fs:[0x18] = self */
-        eq("fs:[0x18] self",   FS_RD32(&fc, 0x00000018u), fc.fs_base);
+        uint8_t *tib = map_low(4096);
+        CPU fc;
+        if (!tib) {
+            printf("FAIL low TIB buffer\n");
+            fails++;
+        } else {
+            memset(&fc, 0, sizeof fc);
+            fc.fs_base = (uint32_t)(uintptr_t)tib;
+            *(uint32_t *)(tib + 0) = 0xDEADBEEFu;        /* prior SEH list head */
+            eq("fs:[0] read",      FS_RD32(&fc, 0x00000000u), 0xDEADBEEFu);
+            FS_WR32(&fc, 0x00000000u, 0x00123450u);      /* push a record */
+            eq("fs:[0] write",     FS_RD32(&fc, 0x00000000u), 0x00123450u);
+            FS_WR16(&fc, 0x00000004u, 0xBEEF);
+            eq("fs:[4] word",      FS_RD16(&fc, 0x00000004u), 0xBEEFu);
+            FS_WR8 (&fc, 0x00000006u, 0x5A);
+            eq("fs:[6] byte",      FS_RD8 (&fc, 0x00000006u), 0x5Au);
+            FS_WR32(&fc, 0x00000018u, fc.fs_base);       /* fs:[0x18] = self */
+            eq("fs:[0x18] self",   FS_RD32(&fc, 0x00000018u), fc.fs_base);
+            unmap_low(tib, 4096);
+        }
     }
 #endif
 

@@ -31,7 +31,7 @@ FOCUS_SYMBOLS = (
     "flags_logicz",
     "rd32",
     "op_shl",
-    "x87_begin",
+    "x87_add",
     "sse_load_ss",
 )
 HELPER_PREFIXES = ("flags_", "op_", "x87_", "sse_", "mm_", "rd", "wr")

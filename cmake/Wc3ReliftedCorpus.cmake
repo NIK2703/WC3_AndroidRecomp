@@ -38,11 +38,6 @@ find_program(WC3_DEVIRTUALIZE_EXE
     HINTS "${WC3_ROOT}/build/lift-tools"
     NO_DEFAULT_PATH)
 
-find_program(WC3_SOFTFLOAT_CONTEXT_FNCLEX_EXE
-    NAMES softfloat_context_fnclex softfloat_context_fnclex.exe
-    HINTS "${WC3_ROOT}/build/lift-tools"
-    NO_DEFAULT_PATH)
-
 find_program(WC3_SAVE_LIST_DISPLAY_EXE
     NAMES save_list_display save_list_display.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -419,74 +414,6 @@ if(WC3_W3L_COMPAT)
     endif()
 endif()
 
-if(WC3_SOFTFLOAT_CONTEXT)
-    # The old lifter emitted FNCLEX as a direct SoftFloat TLS clear.  In a
-    # context build the live x87 flags are CPU.sf_state, so normalize the
-    # generated statement before compilation.  This is a LiftPass over
-    # generated C, not a hand edit; the report records every changed file and
-    # the pass fails closed if another direct state reference appears.
-    if(NOT WC3_SOFTFLOAT_CONTEXT_FNCLEX_EXE)
-        message(FATAL_ERROR
-            "softfloat_context_fnclex.exe missing; run "
-            "tools/lift/build_tools.ps1 before configuring")
-    endif()
-    set(_sfctx_manifest
-        "${CMAKE_CURRENT_BINARY_DIR}/softfloat_context_chunks.txt")
-    set(_sfctx_out_manifest
-        "${CMAKE_CURRENT_BINARY_DIR}/softfloat_context_chunks.out.txt")
-    set(_sfctx_out_dir
-        "${CMAKE_CURRENT_BINARY_DIR}/softfloat_context")
-    file(MAKE_DIRECTORY "${_sfctx_out_dir}")
-    file(WRITE "${_sfctx_manifest}" "")
-    foreach(_src IN LISTS WC3_RELIFTED_SOURCES)
-        file(APPEND "${_sfctx_manifest}" "${_src}\n")
-    endforeach()
-
-    set(_sfctx_need 0)
-    if(NOT EXISTS "${_sfctx_out_manifest}" OR
-       "${WC3_SOFTFLOAT_CONTEXT_FNCLEX_EXE}" IS_NEWER_THAN
-           "${_sfctx_out_manifest}")
-        set(_sfctx_need 1)
-    else()
-        file(STRINGS "${_sfctx_out_manifest}" _sfctx_outputs)
-        foreach(_out IN LISTS _sfctx_outputs)
-            if(NOT EXISTS "${_out}")
-                set(_sfctx_need 1)
-            endif()
-        endforeach()
-        foreach(_src IN LISTS WC3_RELIFTED_SOURCES)
-            if("${_src}" IS_NEWER_THAN "${_sfctx_out_manifest}")
-                set(_sfctx_need 1)
-            endif()
-        endforeach()
-    endif()
-
-    if(_sfctx_need)
-        execute_process(
-            COMMAND "${WC3_SOFTFLOAT_CONTEXT_FNCLEX_EXE}"
-                    --manifest "${_sfctx_manifest}"
-                    --out-dir "${_sfctx_out_dir}"
-                    --out-manifest "${_sfctx_out_manifest}"
-                    --json
-                    "${WC3_ROOT}/reports/generated/softfloat_context_fnclex.json"
-            RESULT_VARIABLE _sfctx_rc
-            OUTPUT_VARIABLE _sfctx_out
-            ERROR_VARIABLE _sfctx_err)
-        if(NOT _sfctx_rc EQUAL 0)
-            message(FATAL_ERROR
-                "softfloat-context FNCLEX pass failed (rc=${_sfctx_rc}):\n"
-                "${_sfctx_out}\n${_sfctx_err}")
-        endif()
-        string(STRIP "${_sfctx_out}" _sfctx_out)
-        message(STATUS "${_sfctx_out}")
-    endif()
-    file(STRINGS "${_sfctx_out_manifest}" WC3_RELIFTED_SOURCES)
-    list(LENGTH WC3_RELIFTED_SOURCES _wc3_sfctx_nchunks)
-    if(_wc3_sfctx_nchunks EQUAL 0)
-        message(FATAL_ERROR "softfloat-context pass produced no sources")
-    endif()
-endif()
-
 if(NOT WC3_RELIFTED_SOURCES)
     message(FATAL_ERROR "relifted corpus has no translation units")
 endif()
@@ -494,13 +421,8 @@ endif()
 add_library(wc3_corpus_relifted STATIC ${WC3_RELIFTED_SOURCES})
 target_include_directories(wc3_corpus_relifted PRIVATE
     "${WC3_ROOT}/runtime/cpu"
-    "${WC3_ROOT}/runtime/guest"
-    "${WC3_ROOT}/third_party/softfloat/source/include"
-    "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
+    "${WC3_ROOT}/runtime/guest")
 target_compile_definitions(wc3_corpus_relifted PRIVATE
-    SOFTFLOAT_FAST_INT64
-    LITTLEENDIAN
-    THREAD_LOCAL=_Thread_local
     GVA_DELTA=0
     WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
     WC3_DEBUG=${WC3_DEBUG_DEFINE})

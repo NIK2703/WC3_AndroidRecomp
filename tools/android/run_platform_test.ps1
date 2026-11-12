@@ -83,8 +83,7 @@ $commonArgs = @(
     '-I' + (Join-Path $root 'runtime\cpu'),
     '-I' + (Join-Path $root 'runtime\guest'),
     '-I' + (Join-Path $root 'runtime\platform'),
-    '-I' + (Join-Path $root 'runtime\platform\android'),
-    '-I' + (Join-Path $root 'third_party\softfloat\source\include')
+    '-I' + (Join-Path $root 'runtime\platform\android')
 )
 $sources = @(
     (Join-Path $root 'tests\platform_android_test.c'),

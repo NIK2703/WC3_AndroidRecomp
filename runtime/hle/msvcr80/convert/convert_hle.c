@@ -309,7 +309,7 @@ static void h_wcstod(CPU *c)
         }
         wc3_legacy_wr32g(endptr, text + consumed * 2u);
     }
-    fpush(c, x87_from_f64(c, value));
+    fpush(c, x87_from_f64(value));
 }
 
 static void h_atof(CPU *c)
@@ -322,7 +322,7 @@ static void h_atof(CPU *c)
     /* Host strtod has the same decimal grammar in the C locale and performs
      * correct rounding.  The legacy handler returned zero for every input. */
     const double value = strtod(buffer, NULL);
-    fpush(c, x87_from_f64(c, value));
+    fpush(c, x87_from_f64(value));
 }
 
 static void h_strtod(CPU *c)
@@ -345,7 +345,7 @@ static void h_strtod(CPU *c)
         wc3_legacy_wr32g(endptr, text + consumed);
     }
 
-    fpush(c, x87_from_f64(c, value));
+    fpush(c, x87_from_f64(value));
 }
 
 static void h_strtol(CPU *c)

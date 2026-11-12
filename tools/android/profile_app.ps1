@@ -415,10 +415,10 @@ function Write-SimpleperfSummary {
         $_.Symbol -eq 'pthread_getspecific'
     } | Measure-Object -Property Percent -Sum).Sum
     if ($null -eq $tlsPercent) { $tlsPercent = 0.0 }
-    $softFloatPercent = ($symbols | Where-Object {
-        $_.Symbol -match '^(softfloat_|extF80_|f32_|f64_|i32_|ui32_|x87_)'
+    $nativeX87Percent = ($symbols | Where-Object {
+        $_.Symbol -match '^x87_'
     } | Measure-Object -Property Percent -Sum).Sum
-    if ($null -eq $softFloatPercent) { $softFloatPercent = 0.0 }
+    if ($null -eq $nativeX87Percent) { $nativeX87Percent = 0.0 }
     $dxvkPercent = ($symbols | Where-Object {
         $_.Symbol -match '^wc3_dxvk'
     } | Measure-Object -Property Percent -Sum).Sum
@@ -445,7 +445,7 @@ function Write-SimpleperfSummary {
     $lines.Add([string]::Format($culture,
         '  TLS runtime (emutls/tlsdesc): {0:F2}%', $tlsPercent))
     $lines.Add([string]::Format($culture,
-        '  SoftFloat/x87 helpers:        {0:F2}%', $softFloatPercent))
+        '  native x87 helpers:           {0:F2}%', $nativeX87Percent))
     $lines.Add([string]::Format($culture,
         '  DXVK bridge:                 {0:F2}%', $dxvkPercent))
     $lines.Add([string]::Format($culture,

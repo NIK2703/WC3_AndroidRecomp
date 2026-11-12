@@ -17,8 +17,8 @@ param(
     [ValidateSet('release', 'debug')]
     [string]$Variant = 'release',
     [string]$GamesActivityAar = '',
-    # Product builds use the relifted corpus by default.  Pass -CorpusRoot ''
-    # together with -W3LCompat off for the legacy exact-baseline build.
+    # Product builds require the relifted corpus.  SoftFloat was removed, so
+    # the prebuilt legacy corpus is not a linkable product input.
     [string]$CorpusRoot = 'build/corpus-full',
     [switch]$KeepDynsym,
     # O-52: initial-exec is rejected by bionic for a dlopen'ed app library.
@@ -250,14 +250,10 @@ $configure = @(
     '-DWC3_BUILD_APP=ON',
     "-DGAMEACTIVITY_ROOT=$ga"
 )
-if ($CorpusRoot) {
-    $configure += "-DWC3_RELIFTED_CORPUS_ROOT=$CorpusRoot"
-} else {
-    # CMake cache entries survive a previous configure.  Clear a stale corpus
-    # selection explicitly so an exact-baseline build cannot silently reuse
-    # generated units from an earlier -CorpusRoot build.
-    $configure += '-DWC3_RELIFTED_CORPUS_ROOT='
+if (-not $CorpusRoot) {
+    throw 'SoftFloat was removed; a corpus-less legacy product build is not supported. Pass -CorpusRoot build/corpus-full.'
 }
+$configure += "-DWC3_RELIFTED_CORPUS_ROOT=$CorpusRoot"
 # Pass the compat mode on every configure: a cached ON from an earlier
 # rubattle build must not survive an explicit -W3LCompat off.
 $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
@@ -265,23 +261,19 @@ $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
 # Optimization policy: every normal Android product build gets the full
 # implemented optimization set.  There are deliberately no per-optimization
-# command-line switches; the only exception is the corpus-less legacy
-# exact-baseline path (CorpusRoot=''), where the generated-corpus
-# transformations cannot run.  Explicit -D values remain available to CMake
-# for an intentional A/B, but an ordinary build always passes ON here so a
-# stale CMake cache cannot silently disable an optimization.
-$relifted = [bool]$CorpusRoot
+# command-line switches; the generated-corpus transformations always run.
+# Explicit -D values remain available to CMake for an intentional A/B, but an
+# ordinary build always passes ON here so a stale CMake cache cannot silently
+# disable an optimization.
 $packDynRelocsValue = 'ON'
 $packDynRelocsMode = 'android'
-$nativeTlsValue = if ($relifted) { 'ON' } else { 'OFF' }
-$softfloatContextValue = if ($relifted) { 'ON' } else { 'OFF' }
-$liftOptValue = if ($relifted) { 'ON' } else { 'OFF' }
+$nativeTlsValue = 'ON'
+$liftOptValue = 'ON'
 $thinSkipCopyinValue = 'ON'
 $configure += "-DWC3_PACK_DYN_RELOCS=$packDynRelocsValue"
 $configure += "-DWC3_PACK_DYN_RELOCS_MODE=$packDynRelocsMode"
 $configure += "-DWC3_NATIVE_TLS=$nativeTlsValue"
 $configure += "-DWC3_TLS_MODEL=$TlsModel"
-$configure += "-DWC3_SOFTFLOAT_CONTEXT=$softfloatContextValue"
 $configure += "-DWC3_DEVIRTUALIZE_P0_1=$liftOptValue"
 $configure += "-DWC3_DEAD_FLAGS_P0_2=$liftOptValue"
 $configure += "-DWC3_RETURN_ADDRESS_ELIDE_P0_6=$liftOptValue"
@@ -308,7 +300,6 @@ Write-Host "[app] pack_dyn_relocs $($packDynRelocsValue -eq 'ON') ($packDynReloc
 Write-Host "[app] icf $($icfValue -eq 'ON') (safe)"
 Write-Host "[app] fno_plt $($fnoPltValue -eq 'ON')"
 Write-Host "[app] native_tls $($nativeTlsValue -eq 'ON') model $TlsModel"
-Write-Host "[app] softfloat_context $($softfloatContextValue -eq 'ON')"
 Write-Host "[app] lift_p0_1/2/6 $($liftOptValue -eq 'ON')"
 Write-Host "[app] thin_skip_writeonly_copyin $($thinSkipCopyinValue -eq 'ON')"
 Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"

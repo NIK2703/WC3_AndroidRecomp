@@ -134,13 +134,8 @@ void wc3_lift_todo(unsigned va, const char *text, unsigned eip, unsigned esp,
 add_library(wc3_legacy_fix_save_list STATIC "${_wc3_fix_source}")
 target_include_directories(wc3_legacy_fix_save_list PRIVATE
     "${WC3_ROOT}/runtime/cpu"
-    "${WC3_ROOT}/runtime/guest"
-    "${WC3_ROOT}/third_party/softfloat/source/include"
-    "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
+    "${WC3_ROOT}/runtime/guest")
 target_compile_definitions(wc3_legacy_fix_save_list PRIVATE
-    SOFTFLOAT_FAST_INT64
-    LITTLEENDIAN
-    THREAD_LOCAL=_Thread_local
     # The pinned object was built with the runtime image delta.  The product
     # keeps g_image_delta at zero (fixed identity mapping), but matching the
     # original object's relocation contract keeps this TU indistinguishable

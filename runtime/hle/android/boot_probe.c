@@ -240,19 +240,18 @@ static void wc3_mss_after_d3d9(void *cpu_ptr)
     fflush(stdout);
 #endif
     /* The saved copy restores the caller's guest register file.  Win32
-     * last-error/TLS, the qsort scratch and CPU-owned SoftFloat state are
-     * host-side per-thread state, not guest registers: side effects made by
-     * DllMain must survive the restore. */
+     * last-error/TLS and the qsort scratch are host-side per-thread state,
+     * not guest registers: side effects made by DllMain must survive the
+     * restore.  The x87 stack is ordinary CPU state and is restored with the
+     * saved copy. */
     uint32_t hle_last_error = cpu->hle_last_error;
     uint32_t hle_tmp_guest = cpu->hle_tmp_guest;
     uint32_t hle_tls[64];
-    softfloat_state sf_state = cpu->sf_state;
     memcpy(hle_tls, cpu->hle_tls, sizeof hle_tls);
     *cpu = saved;
     cpu->hle_last_error = hle_last_error;
     cpu->hle_tmp_guest = hle_tmp_guest;
     memcpy(cpu->hle_tls, hle_tls, sizeof hle_tls);
-    cpu->sf_state = sf_state;
 }
 
 /* Windows paths are case-insensitive, Android's are not: the launcher asks for
@@ -490,7 +489,7 @@ int wc3_boot_probe_main(int argc, char **argv)
 
     CPU c;
     memset(&c, 0, sizeof c);
-    cpu_x87_init(&c);
+    cpu_x87_init_thread(&c);
     c.esp = GUEST_STACK_BASE + GUEST_STACK_SIZE - 0x200;
     teb_init(&c, GUEST_TEB_BASE, GUEST_STACK_BASE, GUEST_STACK_SIZE, 5678);
 

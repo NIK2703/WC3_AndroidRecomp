@@ -374,9 +374,9 @@ static int cmd_dispatch(int argc, char **argv) {
            * dispatch loop that is already on the stack; that loop runs the
            * next extent with the same frame.  A real `call` still nests, so
            * guest calls keep their host-stack call chain. */
-          "static THREAD_LOCAL int g_disp_depth;\n"
-          "static THREAD_LOCAL int g_tail_pending;\n"
-          "static THREAD_LOCAL uint32_t g_tail_target;\n"
+          "static _Thread_local int g_disp_depth;\n"
+          "static _Thread_local int g_tail_pending;\n"
+          "static _Thread_local uint32_t g_tail_target;\n"
           "#if !defined(__ANDROID__) || defined(WC3_DEBUG)\n"
           "static void rg_report(CPU *c, uint32_t target, uint32_t ra,\n"
           "                      uint32_t bx, uint32_t si, uint32_t di, uint32_t bp) {\n"

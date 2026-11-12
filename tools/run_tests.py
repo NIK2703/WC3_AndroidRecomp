@@ -166,23 +166,41 @@ def test_cpu_helpers() -> int:
     if not cc:
         print("cpu helpers: unavailable (no host C compiler)")
         return 2
-    archive = ROOT / "third_party" / "softfloat" / "build-host" / "softfloat.a"
-    if not archive.is_file():
-        print("cpu helpers: unavailable (host SoftFloat archive missing)")
-        return 2
     BUILD.mkdir(parents=True, exist_ok=True)
     exe = BUILD / "cpu_helpers_test.exe"
     obj = BUILD / "cpu_helpers_test.o"
     include = [
         "-I" + str(ROOT / "runtime" / "cpu"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     rc = run([cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
               *include, "-c", str(ROOT / "tests" / "cpu_helpers_test.c"),
               "-o", str(obj)])
     if rc != 0:
         return rc
-    rc = run([cc, str(obj), str(archive), "-lm", "-o", str(exe)])
+    rc = run([cc, str(obj), "-lm", "-o", str(exe)])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_cpu_selftest() -> int:
+    """T0: native x87 codec, BCD, environment, tags and rounding."""
+    cc = gcc()
+    if not cc:
+        print("cpu selftest: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "cpu_selftest.exe"
+    obj = BUILD / "cpu_selftest.o"
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+    ]
+    rc = run([cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+              *include, "-c", str(ROOT / "tests" / "cpu_selftest.c"),
+              "-o", str(obj)])
+    if rc != 0:
+        return rc
+    rc = run([cc, str(obj), "-lm", "-o", str(exe)])
     if rc != 0:
         return rc
     return run([str(exe)])
@@ -198,7 +216,6 @@ def test_hle_abi() -> int:
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle" / "abi"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -267,7 +284,7 @@ def test_boot_dispatch_hash() -> int:
 
 
 def test_pass5_build_guards() -> int:
-    """O-52/O-55: native TLS/context are defaults; hardening stays on."""
+    """O-52/O-55: native TLS, mandatory relift, no SoftFloat, hardening on."""
     cmake = (ROOT / "CMakeLists.txt").read_text(
         encoding="utf-8", errors="replace")
     legacy = (ROOT / "cmake" / "Wc3LegacyBoot.cmake").read_text(
@@ -280,8 +297,14 @@ def test_pass5_build_guards() -> int:
 
     if "set(_wc3_native_tls_default ON)" not in cmake:
         problems.append("CMake does not default native TLS ON for products")
-    if "set(_wc3_softfloat_context_default ON)" not in cmake:
-        problems.append("CMake does not default SoftFloat context ON")
+    if "WC3_SOFTFLOAT_CONTEXT" in cmake:
+        problems.append("CMake still exposes the SoftFloat context option")
+    if "wc3_softfloat" in legacy:
+        problems.append("Wc3LegacyBoot.cmake still references wc3_softfloat")
+    if "no_softfloat_symbols" not in cmake:
+        problems.append("CMake is missing the post-link no_softfloat gate")
+    if "SoftFloat was removed from the product" not in legacy:
+        problems.append("Wc3LegacyBoot.cmake does not reject the legacy corpus")
     hardening = ('option(WC3_HOST_HARDENING\n'
                  '       "Keep NDK stack-protector and Fortify on non-corpus '
                  'targets" ON)')
@@ -289,25 +312,20 @@ def test_pass5_build_guards() -> int:
         problems.append("CMake does not keep hardening ON by default")
     if "-fno-emulated-tls" not in cmake:
         problems.append("CMake does not wire native ELF TLS")
-    if "add_library(wc3_softfloat STATIC" not in legacy:
-        problems.append("Wc3LegacyBoot.cmake does not build wc3_softfloat")
-    if not re.search(r"target_link_libraries\(wc3gameactivity PRIVATE"
-                     r"[\s\S]*?\bwc3_softfloat\b", legacy):
-        problems.append("wc3gameactivity does not link wc3_softfloat")
     if "        -fno-stack-protector\n" not in cmake:
         problems.append("CMake does not wire the O-55 opt-out")
 
     for needle in (
-        "$nativeTlsValue = if ($relifted) { 'ON' } else { 'OFF' }",
+        "$nativeTlsValue = 'ON'",
         '"-DWC3_NATIVE_TLS=$nativeTlsValue"',
-        "$softfloatContextValue = if ($relifted) { 'ON' } else { 'OFF' }",
-        '"-DWC3_SOFTFLOAT_CONTEXT=$softfloatContextValue"',
         "$hostHardeningValue = if ($NoHostHardening) { 'OFF' } else { 'ON' }",
         '"-DWC3_HOST_HARDENING=$hostHardeningValue"',
         'Write-Host "[app] debug $($Variant -eq \'debug\')"',
     ):
         if needle not in build_app:
             problems.append(f"build_app.ps1 missing {needle}")
+    if "WC3_SOFTFLOAT_CONTEXT" in build_app:
+        problems.append("build_app.ps1 still configures SoftFloat context")
     if "$nativeParams['NoHostHardening'] = $true" not in build_apk:
         problems.append("build_apk.ps1 missing NoHostHardening forwarding")
     if "$nativeParams['NativeTls']" in build_apk:
@@ -317,7 +335,7 @@ def test_pass5_build_guards() -> int:
         for problem in problems:
             print(f"pass5_build_guards: {problem}", file=sys.stderr)
         return 1
-    print("pass5_build_guards: native TLS/context are product defaults")
+    print("pass5_build_guards: native TLS, relift required, no SoftFloat")
     return 0
 
 
@@ -355,8 +373,6 @@ def test_boot_dispatch_compile() -> int:
         ROOT / "runtime" / "platform",
         ROOT / "runtime" / "platform" / "android",
         ROOT / "runtime" / "diag",
-        ROOT / "third_party" / "softfloat" / "source" / "include",
-        ROOT / "third_party" / "softfloat" / "source" / "8086-SSE",
     ]
     include_dirs.extend(
         path for path in (ROOT / "runtime" / "hle").rglob("*")
@@ -400,8 +416,6 @@ def test_pass9_release_preprocess() -> int:
         ROOT / "runtime" / "platform",
         ROOT / "runtime" / "platform" / "android",
         ROOT / "runtime" / "diag",
-        ROOT / "third_party" / "softfloat" / "source" / "include",
-        ROOT / "third_party" / "softfloat" / "source" / "8086-SSE",
     ]
     include_dirs.extend(
         path for path in (ROOT / "runtime" / "hle").rglob("*")
@@ -447,14 +461,8 @@ def test_pass9_release_preprocess() -> int:
     return 0
 
 
-def test_softfloat_manifest() -> int:
-    """O-52: native TLS can replace the emulated-TLS SoftFloat archive."""
-    return run([sys.executable, str(ROOT / "tools" /
-                                    "check_softfloat_manifest.py")])
-
-
-def test_x87_publication_guard() -> int:
-    """O-22: SoftFloat publication keeps the reviewed exactness shape."""
+def test_no_softfloat() -> int:
+    """SoftFloat is absent from the native x87 source and both lifters."""
     return run([sys.executable, str(ROOT / "tools" / "check_x87_guard.py")])
 
 
@@ -636,7 +644,6 @@ def test_kernel32_file() -> int:
         "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "file"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "file"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -872,7 +879,6 @@ def test_platform_headless() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "runtime" / "platform" / "headless"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     headless = ROOT / "runtime" / "platform" / "headless"
     common = [
@@ -920,7 +926,6 @@ def test_guest_memory() -> int:
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "platform"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     exe = BUILD / "guest_memory_test.exe"
     rc = run([
@@ -977,8 +982,6 @@ def test_dsound_hle() -> int:
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "platform"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
     ]
     common = [
         cc,
@@ -1018,8 +1021,6 @@ def test_winmm_guard_timer() -> int:
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "platform"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
     ]
     common = [
         cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", *include,
@@ -1054,8 +1055,6 @@ def test_ws2_32_hle() -> int:
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "ws2_32"),
         "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "runtime" / "diag"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
     ]
     common = [
         cc,
@@ -1149,7 +1148,6 @@ def test_dispatch() -> int:
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle" / "abi"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
         "-I" + str(BUILD),
         "-I" + str(ROOT / "tests" / "fixtures"),
     ]
@@ -1273,7 +1271,6 @@ def test_w3l_compat() -> int:
         cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "compat"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
         str(ROOT / "tests" / "w3l_compat_test.c"),
         str(ROOT / "runtime" / "compat" / "w3l_compat.c"),
         "-o", str(exe),
@@ -1660,8 +1657,6 @@ def test_direct_call_multi_tu() -> int:
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle" / "abi"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "8086-SSE"),
         "-I" + str(ROOT / "tests"),
         "-I" + str(ROOT / "tests" / "fixtures"),
         "-I" + str(BUILD),
@@ -1849,7 +1844,6 @@ def test_module_registry() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "runtime" / "cpu"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -1895,7 +1889,6 @@ def test_corpus_binding() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "runtime" / "cpu"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -1935,7 +1928,6 @@ def test_hle_process() -> int:
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "process"),
         "-I" + str(ROOT / "runtime" / "platform"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -1972,7 +1964,6 @@ def test_user32_window() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "window"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2009,7 +2000,6 @@ def test_user32_display() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "display"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2046,7 +2036,6 @@ def test_hle_system() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "process"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2084,7 +2073,6 @@ def test_hle_memory() -> int:
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "memory"),
         "-I" + str(ROOT / "runtime" / "platform"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2121,7 +2109,6 @@ def test_hle_string() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "string"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2158,7 +2145,6 @@ def test_hle_resource() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "resource"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2195,7 +2181,6 @@ def test_comctl32_imagelist() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "comctl32" / "imagelist"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2233,7 +2218,6 @@ def test_gdi_dc() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "dc"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2271,7 +2255,6 @@ def test_user32_menu() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "menu"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2309,7 +2292,6 @@ def test_scroll_hle() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "scroll"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2347,7 +2329,6 @@ def test_gdi_objects() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "objects"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2386,7 +2367,6 @@ def test_window_facts() -> int:
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "window_facts"),
         "-I" + str(ROOT / "runtime" / "platform"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2424,7 +2404,6 @@ def test_user_object() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "user32" / "user_object"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2462,7 +2441,6 @@ def test_gdi_device() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "device"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2500,7 +2478,6 @@ def test_dragdrop() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "shell32" / "dragdrop"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2538,7 +2515,6 @@ def test_gdi_palette() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "gdi32" / "palette"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2577,7 +2553,6 @@ def test_registry_hle() -> int:
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "advapi32" / "registry"),
         "-I" + str(ROOT / "runtime" / "diag"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2618,7 +2593,6 @@ def test_msvcr80_string() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "string"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2655,7 +2629,6 @@ def test_msvcr80_rand() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "rand"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2686,17 +2659,12 @@ def test_msvcr80_math() -> int:
     if not cc:
         print("msvcr80 math: unavailable (no host C compiler)")
         return 2
-    archive = ROOT / "third_party" / "softfloat" / "build-host" / "softfloat.a"
-    if not archive.is_file():
-        print("msvcr80 math: unavailable (host SoftFloat archive missing)")
-        return 2
     BUILD.mkdir(parents=True, exist_ok=True)
     include = [
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "math"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     sources = [
         ROOT / "runtime" / "hle" / "msvcr80" / "math" / "math_hle.c",
@@ -2716,7 +2684,7 @@ def test_msvcr80_math() -> int:
                 return rc
             objects.append(str(obj))
         exe = BUILD / name
-        rc = run([cc, *objects, str(archive), "-lm", "-o", str(exe)])
+        rc = run([cc, *objects, "-lm", "-o", str(exe)])
         if rc != 0:
             return rc
         rc = run([str(exe)])
@@ -2731,17 +2699,12 @@ def test_msvcr80_convert() -> int:
     if not cc:
         print("msvcr80 convert: unavailable (no host C compiler)")
         return 2
-    archive = ROOT / "third_party" / "softfloat" / "build-host" / "softfloat.a"
-    if not archive.is_file():
-        print("msvcr80 convert: unavailable (host SoftFloat archive missing)")
-        return 2
     BUILD.mkdir(parents=True, exist_ok=True)
     include = [
         "-I" + str(ROOT / "runtime" / "cpu"),
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "convert"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     sources = [
         ROOT / "runtime" / "hle" / "msvcr80" / "convert" / "convert_hle.c",
@@ -2761,7 +2724,7 @@ def test_msvcr80_convert() -> int:
                 return rc
             objects.append(str(obj))
         exe = BUILD / name
-        rc = run([cc, *objects, str(archive), "-lm", "-o", str(exe)])
+        rc = run([cc, *objects, "-lm", "-o", str(exe)])
         if rc != 0:
             return rc
         rc = run([str(exe)])
@@ -2783,7 +2746,6 @@ def test_msvcr80_crt() -> int:
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "diag"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "crt"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2822,7 +2784,6 @@ def test_msvcr80_file() -> int:
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "file"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2863,7 +2824,6 @@ def test_msvcr80_stdio() -> int:
         "-I" + str(ROOT / "runtime" / "platform"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "file"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "stdio"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2902,7 +2862,6 @@ def test_msvcr80_sort() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "sort"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2939,7 +2898,6 @@ def test_msvcr80_secure() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "secure"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -2976,7 +2934,6 @@ def test_msvcr80_error() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "error"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -3014,7 +2971,6 @@ def test_msvcr80_time() -> int:
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "time"),
         "-I" + str(ROOT / "runtime" / "platform"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -3051,7 +3007,6 @@ def test_msvcr80_heap() -> int:
         "-I" + str(ROOT / "runtime" / "guest"),
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "msvcr80" / "heap"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -3090,7 +3045,6 @@ def test_hle_bridge() -> int:
         "-I" + str(ROOT / "runtime" / "hle" / "abi"),
         "-I" + str(ROOT / "runtime" / "hle" / "android"),
         "-I" + str(ROOT / "runtime" / "platform"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -3153,7 +3107,6 @@ def test_hle_time() -> int:
         "-I" + str(ROOT / "runtime" / "hle"),
         "-I" + str(ROOT / "runtime" / "hle" / "win32" / "kernel32" / "time"),
         "-I" + str(ROOT / "runtime" / "platform"),
-        "-I" + str(ROOT / "third_party" / "softfloat" / "source" / "include"),
     ]
     common = [
         cc,
@@ -3268,6 +3221,7 @@ def test_overlay() -> int:
 
 TESTS = {
     "cpu_helpers": test_cpu_helpers,
+    "cpu_selftest": test_cpu_selftest,
     "hle_abi": test_hle_abi,
     "direct_call": test_direct_call,
     "direct_call_multi_tu": test_direct_call_multi_tu,
@@ -3344,8 +3298,7 @@ TESTS = {
     "profile_corpus": test_profile_corpus,
     "boot_dispatch_hash": test_boot_dispatch_hash,
     "boot_dispatch_compile": test_boot_dispatch_compile,
-    "softfloat_manifest": test_softfloat_manifest,
-    "x87_publication_guard": test_x87_publication_guard,
+    "no_softfloat": test_no_softfloat,
     "splitcorpus_packing": test_splitcorpus_packing,
     "splitcorpus_order": test_splitcorpus_order,
     "splitcorpus_source_order": test_splitcorpus_source_order,

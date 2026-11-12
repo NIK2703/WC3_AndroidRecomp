@@ -899,10 +899,14 @@ class Lifter:
         m = insn.mnemonic; ops = insn.operands
         memop = ops[0] if ops and ops[0].type == X86_OP_MEM else None
 
-        # Packed BCD is still not represented in the CPU struct. Do not pretend
-        # a ten-byte BCD value is an extF80.
+        # Packed BCD uses its own integer codec; it is not an extF80 value.
         if m in ("fbld", "fbstp"):
-            return [_todo(insn.address, f"x87 packed BCD: {m} {insn.op_str}")]
+            if not memop:
+                return [_todo(insn.address, f"{m} without memory: {insn.op_str}")]
+            a = self.addr_expr(insn, memop)
+            if m == "fbld":
+                return [f"fpush(c, x87_ld_bcd(c, {a}));"]
+            return [f"x87_st_bcd(c, {a}, *fst(c, 0)); fpop(c);"]
         # The 32-bit protected-mode environment is 28 bytes; FNSAVE/FRSTOR use
         # the 108-byte image (environment plus eight 10-byte registers).
         if m in ("fldenv", "fnstenv", "fsave", "fnsave", "frstor"):
@@ -948,7 +952,7 @@ class Lifter:
                     return [f"x87_st_f80({a}, *fst(c, 0));{pop}"]
                 return [_todo(insn.address, f"fst m{sz * 8}: {insn.op_str}")]
             i = self._st_idx(ops[-1]) if ops else 0
-            return [f"*fst(c, {i}) = *fst(c, 0);{pop}"]
+            return [f"x87_fst_reg(c, {i});{pop}"]
         if m in ("fist", "fistp", "fisttp"):
             pop = " fpop(c);" if m in ("fistp", "fisttp") else ""
             if not memop:
@@ -965,7 +969,8 @@ class Lifter:
 
         # ---- remainder / rounding / extraction ------------------------------
         if m in ("fprem", "fprem1"):
-            return ["*fst(c, 0) = x87_fprem(c, *fst(c, 0), *fst(c, 1));"]
+            fn = "x87_fprem1" if m == "fprem1" else "x87_fprem"
+            return [f"*fst(c, 0) = {fn}(c, *fst(c, 0), *fst(c, 1));"]
         if m == "frndint":
             return ["*fst(c, 0) = x87_roundint(c, *fst(c, 0));"]
         if m == "fscale":
@@ -1048,7 +1053,7 @@ class Lifter:
                 src = f"*fst(c, {self._st_idx(ops[-1])})"
             else:
                 src = "*fst(c, 1)"
-            signaling = 1 if m.startswith("fcom") else 0
+            signaling = 1 if (m.startswith("fcom") or m.startswith("ficom")) else 0
             out = [f"x87_compare(c, *fst(c, 0), {src}, {signaling});"]
             if m in ("fcomp", "fucomp", "ficomp"): out.append("fpop(c);")
             if m in ("fcompp", "fucompp"): out += ["fpop(c);", "fpop(c);"]
@@ -1091,7 +1096,7 @@ class Lifter:
             if not memop:
                 return [_todo(insn.address, f"fldcw without memory: {insn.op_str}")]
             a = self.addr_expr(insn, memop)
-            return [f"c->fpu_cw = rd16({a});"]
+            return [f"x87_fldcw(c, {a});"]
         if m in ("fnclex", "fclex"):
             return ["x87_fnclex(c);"]
         if m in ("fninit", "finit"):

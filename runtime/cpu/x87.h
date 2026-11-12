@@ -1,296 +1,218 @@
 /*
- * x87.h - exact 80-bit x87 model for the CPU-struct recompiler.
+ * x87.h - native x87 model for the CPU-struct recompiler.
  *
- * This is the replacement for the old `double st[8]` model. The arithmetic
- * core is Berkeley SoftFloat's extF80 implementation; `tests/x87_softfloat_probe.c`
- * checks add/sub/mul/div/sqrt and the status flags against the host x87 over
- * random normal operands.
+ * The register file is a 16-byte slot shared by x87 and MMX.  x87 arithmetic
+ * uses the low 64 bits as a native `double`; MMX uses the same low 64 bits as
+ * an integer register.  The upper 8 bytes are padding so CPU.st[8] keeps the
+ * layout the generated C expects.
  *
- * The generated code calls only the helpers below. Keep that boundary: a raw
- * C `double` operation on an x87 register is a silent precision bug.
+ * This is deliberately not a bit-exact x87.  It follows FEX's
+ * X87ReducedPrecision model: 53-bit double arithmetic, PC ignored, f80 only at
+ * the memory/save boundary, and only IE plus C0-C3 are tracked.  The accepted
+ * deviations are recorded in docs/ADR.md (ADR-037) and docs/EXACTNESS.md E4.1.
  *
- * Not yet exact, and deliberately marked here:
- *   - transcendental microcode (fsin/fcos/fpatan/fyl2x/f2xm1) uses the host
- *     `long double`; the x87 microcode is not correctly rounded, so these need
- *     a trace-based replacement before the final gate;
- *   - fprem/fprem1 use IEEE remainder rather than the x87 partial-remainder
- *     algorithm with C2;
- *   - fnstenv/fnsave save zero FIP/FDP unless a guest environment image
- *     supplied them; the lifter does not yet update the instruction pointers.
- * MMX now aliases the low 64 bits of the same physical st[] registers through
- * `mm_get`; there is no separate MMX array.
+ * The generated code calls only the helpers below.  Keep that boundary:
+ * generated C uses x87_ext, fst/fpush/fpop and these helpers, never the union
+ * members directly.
  */
 #ifndef PCRECOMP_X87_H
 #define PCRECOMP_X87_H
 
-#ifndef LITTLEENDIAN
-#define LITTLEENDIAN 1
-#endif
-#ifndef SOFTFLOAT_FAST_INT64
-#define SOFTFLOAT_FAST_INT64 1
-#endif
-#ifndef THREAD_LOCAL
-#define THREAD_LOCAL _Thread_local
-#endif
-#include "softfloat.h"
-#include "softfloat_state.h"
-
-/* WC3_SOFTFLOAT_CONTEXT: the x87 hot path passes CPU.sf_state to SoftFloat instead
- * of paying a TLS resolver per state access.  The generated context entry
- * points live in softfloat_ctx.h and are produced by
- * tools/lift/csrc_local/softfloat_context_gen.c.  With the option off this header keeps the
- * original SoftFloat ABI, so the legacy archive still builds. */
-#ifndef WC3_SOFTFLOAT_CONTEXT
-#define WC3_SOFTFLOAT_CONTEXT 0
-#endif
-#if WC3_SOFTFLOAT_CONTEXT
-#include "softfloat_ctx.h"
-#define X87_SF(c) (&(c)->sf_state)
-#define X87_EXTF80_TO_F32(c, v) extF80_to_f32_ctx(X87_SF(c), (v))
-#define X87_EXTF80_TO_F64(c, v) extF80_to_f64_ctx(X87_SF(c), (v))
-#define X87_EXTF80_TO_F128(c, v) extF80_to_f128_ctx(X87_SF(c), (v))
-#define X87_F128_TO_EXTF80(c, v) f128_to_extF80_ctx(X87_SF(c), (v))
-#define X87_EXTF80_TO_I32(c, v, m, e) extF80_to_i32_ctx(X87_SF(c), (v), (m), (e))
-#define X87_EXTF80_TO_I64(c, v, m, e) extF80_to_i64_ctx(X87_SF(c), (v), (m), (e))
-#define X87_F32_TO_EXTF80(c, v) f32_to_extF80_ctx(X87_SF(c), (v))
-#define X87_F64_TO_EXTF80(c, v) f64_to_extF80_ctx(X87_SF(c), (v))
-#define X87_EXTF80_ADD(c, a, b) extF80_add_ctx(X87_SF(c), (a), (b))
-#define X87_EXTF80_SUB(c, a, b) extF80_sub_ctx(X87_SF(c), (a), (b))
-#define X87_EXTF80_MUL(c, a, b) extF80_mul_ctx(X87_SF(c), (a), (b))
-#define X87_EXTF80_DIV(c, a, b) extF80_div_ctx(X87_SF(c), (a), (b))
-#define X87_EXTF80_REM(c, a, b) extF80_rem_ctx(X87_SF(c), (a), (b))
-#define X87_EXTF80_SQRT(c, v) extF80_sqrt_ctx(X87_SF(c), (v))
-#define X87_EXTF80_ROUNDTOINT(c, v, m, e) \
-    extF80_roundToInt_ctx(X87_SF(c), (v), (m), (e))
-#define X87_SET_INVALID(c) ((c)->sf_state.exceptionFlags |= softfloat_flag_invalid)
-#else
-#define X87_EXTF80_TO_F32(c, v) extF80_to_f32((v))
-#define X87_EXTF80_TO_F64(c, v) extF80_to_f64((v))
-#define X87_EXTF80_TO_F128(c, v) extF80_to_f128((v))
-#define X87_F128_TO_EXTF80(c, v) f128_to_extF80((v))
-#define X87_F32_TO_EXTF80(c, v) f32_to_extF80((v))
-#define X87_F64_TO_EXTF80(c, v) f64_to_extF80((v))
-#define X87_EXTF80_TO_I32(c, v, m, e) extF80_to_i32((v), (m), (e))
-#define X87_EXTF80_TO_I64(c, v, m, e) extF80_to_i64((v), (m), (e))
-#define X87_EXTF80_ADD(c, a, b) extF80_add((a), (b))
-#define X87_EXTF80_SUB(c, a, b) extF80_sub((a), (b))
-#define X87_EXTF80_MUL(c, a, b) extF80_mul((a), (b))
-#define X87_EXTF80_DIV(c, a, b) extF80_div((a), (b))
-#define X87_EXTF80_REM(c, a, b) extF80_rem((a), (b))
-#define X87_EXTF80_SQRT(c, v) extF80_sqrt((v))
-#define X87_EXTF80_ROUNDTOINT(c, v, m, e) extF80_roundToInt((v), (m), (e))
-#define X87_SET_INVALID(c) (softfloat_exceptionFlags |= softfloat_flag_invalid)
-#endif
+#include <fenv.h>
+#include <limits.h>
 #include <math.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+_Static_assert(sizeof(x87_ext) == 16, "x87 slot must stay 16 bytes");
+_Static_assert(offsetof(x87_ext, v) == 0, "x87 value must be at offset 0");
+
+/* ---- host floating-point environment ----------------------------------- */
+
+/* RC is copied to the host only when the guest CW changes.  x87 arithmetic
+ * itself is native double; doing a save/set/restore around every operation
+ * would reintroduce the cost this path removes. */
+static inline int x87_host_round(uint16_t cw) {
+    switch ((cw >> 10) & 3u) {
+    case 0:  return FE_TONEAREST;
+    case 1:  return FE_DOWNWARD;
+    case 2:  return FE_UPWARD;
+    default: return FE_TOWARDZERO;
+    }
+}
+#if defined(__aarch64__)
+static inline void x87_clear_ftz(void) {
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr &= ~((UINT64_C(1) << 24) | (UINT64_C(1) << 25)); /* FZ, DN */
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+}
+#else
+static inline void x87_clear_ftz(void) { }
+#endif
+static inline void x87_apply_rounding(CPU *c) {
+    (void)fesetround(x87_host_round(c->fpu_cw));
+}
+
+/* ---- bit classification ------------------------------------------------- */
+
+static inline uint64_t x87_bits(double d) {
+    uint64_t b;
+    memcpy(&b, &d, sizeof b);
+    return b;
+}
+static inline double x87_from_bits(uint64_t b) {
+    double d;
+    memcpy(&d, &b, sizeof d);
+    return d;
+}
+static inline int x87_is_zero_bits(uint64_t b) {
+    return (b & UINT64_C(0x7FFFFFFFFFFFFFFF)) == 0;
+}
+static inline int x87_is_inf_bits(uint64_t b) {
+    return (b & UINT64_C(0x7FFFFFFFFFFFFFFF)) == UINT64_C(0x7FF0000000000000);
+}
+static inline int x87_is_nan_bits(uint64_t b) {
+    return (b & UINT64_C(0x7FF0000000000000)) == UINT64_C(0x7FF0000000000000)
+        && (b & UINT64_C(0x000FFFFFFFFFFFFF)) != 0;
+}
+static inline int x87_is_finite_bits(uint64_t b) {
+    return (b & UINT64_C(0x7FF0000000000000)) != UINT64_C(0x7FF0000000000000);
+}
+static inline double x87_quiet_nan(double d) {
+    return x87_from_bits(x87_bits(d) | UINT64_C(0x0008000000000000));
+}
+/* A signalling NaN has the quiet bit clear and a non-zero payload.  The
+ * exponent check keeps infinity from being treated as a NaN. */
+static inline int x87_is_snan_bits(uint64_t b) {
+    return (b & UINT64_C(0x7FF0000000000000)) == UINT64_C(0x7FF0000000000000)
+        && (b & UINT64_C(0x000FFFFFFFFFFFFF)) != 0
+        && (b & UINT64_C(0x0008000000000000)) == 0;
+}
+
+/* IE for arithmetic without per-op SNaN/Inf tests on the common path.  x87
+ * invalid arithmetic always produces a NaN; when it does, classify the inputs
+ * (QNaN propagation is not invalid, SNaN and non-NaN invalid cases are). */
+static inline int x87_invalid_result(double r, double a, double b) {
+    if (!isnan(r)) return 0;
+    const uint64_t ab = x87_bits(a), bb = x87_bits(b);
+    return x87_is_snan_bits(ab) || x87_is_snan_bits(bb)
+        || (!x87_is_nan_bits(ab) && !x87_is_nan_bits(bb));
+}
+
+/* ---- f80 memory codec --------------------------------------------------- */
+
+/* double -> 80-bit extended: explicit integer bit, sign in bit 15 of signExp.
+ * Normal values are exact; the low 11 bits of a wider x87 significand do not
+ * exist in a double and are therefore zero. */
+static inline void x87_d_to_f80(double d, uint64_t *sig, uint16_t *se) {
+    const uint64_t b = x87_bits(d);
+    const uint16_t sign = (uint16_t)(((b >> 48) & UINT64_C(0x8000)));
+    const uint16_t exp = (uint16_t)((b >> 52) & 0x7FFu);
+    const uint64_t frac = b & UINT64_C(0x000FFFFFFFFFFFFF);
+
+    if (exp == 0x7FFu) {
+        *se = (uint16_t)(sign | 0x7FFFu);
+        *sig = frac ? UINT64_C(0xC000000000000000)
+                    : UINT64_C(0x8000000000000000);
+        return;
+    }
+    if (exp != 0) {
+        *sig = UINT64_C(0x8000000000000000) | (frac << 11);
+        *se = (uint16_t)(sign | (exp + 15360u));
+        return;
+    }
+    if (!frac) {
+        *sig = 0;
+        *se = sign;
+        return;
+    }
+    {
+        int k = 52;
+        while (!(frac & (UINT64_C(1) << k))) k--;
+        *sig = UINT64_C(0x8000000000000000) | (frac << (63 - k));
+        *se = (uint16_t)(sign | (unsigned)(k + 15309));
+    }
+}
+
+/* 80-bit extended -> double.  f80 denormals and unsupported encodings are
+ * outside the double range or are not representable, so they become zero with
+ * the sign preserved.  NaN becomes a canonical quiet NaN; Inf stays Inf. */
+static inline double x87_f80_to_d(uint64_t sig, uint16_t se) {
+    const uint16_t sign = se & 0x8000u;
+    const uint16_t exp = se & 0x7FFFu;
+
+    if (exp == 0x7FFFu) {
+        if (sig == UINT64_C(0x8000000000000000))
+            return sign ? -INFINITY : INFINITY;
+        if (!(sig & UINT64_C(0x8000000000000000)))
+            return sign ? -0.0 : 0.0;       /* pseudo-NaN */
+        return x87_from_bits((UINT64_C(0x7FF8000000000000))
+                             | ((uint64_t)(sign != 0) << 63));
+    }
+    if (exp == 0 || !(sig & UINT64_C(0x8000000000000000)))
+        return sign ? -0.0 : 0.0;           /* denormal/unnormal/pseudo */
+    {
+        double d = ldexp((double)sig, (int)exp - 16446);
+        return sign ? -d : d;
+    }
+}
+
+static inline x87_ext x87_from_f64(double d) {
+    x87_ext v;
+    v.v.d = d;
+    v.reserved = 0;
+    return v;
+}
+static inline x87_ext x87_indefinite(void) {
+    return x87_from_f64(x87_from_bits(UINT64_C(0xFFF8000000000000)));
+}
 
 /* ---- constants ---------------------------------------------------------- */
 
-static inline extFloat80_t x87_zero(void) {
-    extFloat80_t v = { 0, 0 };
-    return v;
-}
-static inline extFloat80_t x87_one(void) {
-    extFloat80_t v = { UINT64_C(0x8000000000000000), 0x3FFF };
-    return v;
-}
-static inline extFloat80_t x87_pi(void) {
-    extFloat80_t v = { UINT64_C(0xC90FDAA22168C235), 0x4000 };
-    return v;
-}
-static inline extFloat80_t x87_l2e(void) {
-    extFloat80_t v = { UINT64_C(0xB8AA3B295C17F0BC), 0x3FFF };
-    return v;
-}
-static inline extFloat80_t x87_l2t(void) {
-    extFloat80_t v = { UINT64_C(0xD49A784BCD1B8AFE), 0x4000 };
-    return v;
-}
-static inline extFloat80_t x87_lg2(void) {
-    extFloat80_t v = { UINT64_C(0x9A209A84FBCFF799), 0x3FFD };
-    return v;
-}
-static inline extFloat80_t x87_ln2(void) {
-    extFloat80_t v = { UINT64_C(0xB17217F7D1CF79AC), 0x3FFE };
-    return v;
-}
+static inline x87_ext x87_zero(void) { return x87_from_f64(0.0); }
+static inline x87_ext x87_one(void)  { return x87_from_f64(1.0); }
+static inline x87_ext x87_pi(void)   { return x87_from_f64(0x1.921fb54442d18p+1); }
+static inline x87_ext x87_l2e(void)  { return x87_from_f64(0x1.71547652b82fep+0); }
+static inline x87_ext x87_l2t(void)  { return x87_from_f64(0x1.a934f0979a371p+1); }
+static inline x87_ext x87_lg2(void)  { return x87_from_f64(0x1.34413509f79ffp-2); }
+static inline x87_ext x87_ln2(void)  { return x87_from_f64(0x1.62e42fefa39efp-1); }
 
-static inline extFloat80_t x87_from_f64(CPU *c, double d) {
-    float64_t f;
-    (void)c;
-    memcpy(&f.v, &d, 8);
-    return X87_F64_TO_EXTF80(c, f);
-}
-static inline extFloat80_t x87_from_i16(int16_t i) { return i32_to_extF80((int32_t)i); }
-static inline extFloat80_t x87_from_i32(int32_t i) { return i32_to_extF80(i); }
-static inline extFloat80_t x87_from_i64(int64_t i) { return i64_to_extF80(i); }
-
-/* ---- classification ----------------------------------------------------- */
-
-static inline int x87_is_zero(extFloat80_t v) {
-    return ((v.signExp & 0x7FFF) == 0) && (v.signif == 0);
-}
-static inline int x87_is_denorm(extFloat80_t v) {
-    /* Exp 0 with any non-zero significand is a denormal operand for the
-     * hardware, including the pseudo-denormal encoding where bit 63 is set. */
-    return ((v.signExp & 0x7FFF) == 0) && (v.signif != 0);
-}
-static inline extFloat80_t x87_canonical(extFloat80_t v) {
-    /* SoftFloat rejects a pseudo-denormal (exp 0, integer bit 1). The hardware
-     * treats it as a denormal; shift it into the representable denormal form.
-     * The discarded bit is below the real denormal resolution, so the only
-     * observable loss is the exact value of a signalling 1-ulp case. */
-    if (((v.signExp & 0x7FFF) == 0)
-        && (v.signif & UINT64_C(0x8000000000000000)))
-        v.signif >>= 1;
-    return v;
-}
-/* Pseudo-denormals, unnormals and pseudo-NaNs are the encodings the x87 tag
- * word calls "special" and FXAM calls unsupported. They are not arithmetic
- * denormals and must not be normalised silently. */
-static inline int x87_is_unnormal(extFloat80_t v) {
-    uint16_t e = v.signExp & 0x7FFF;
-    if (e == 0x7FFF) return 0;
-    if (e == 0) return (v.signif != 0)
-        && ((v.signif & UINT64_C(0x8000000000000000)) != 0);
-    return (v.signif & UINT64_C(0x8000000000000000)) == 0;
-}
-/* Everything Intel calls an unsupported encoding: pseudo-denormal (exp 0,
- * integer bit 1), unnormal (exp != 0, integer bit 0) and pseudo-NaN/infinity
- * (exp 7FFF, integer bit 0). Arithmetic on these raises IE and DE and returns
- * the indefinite QNaN; loading one into ST only marks it "special". */
-static inline int x87_is_pseudo(extFloat80_t v) {
-    uint16_t e = v.signExp & 0x7FFF;
-    if (e == 0x7FFF)
-        return (v.signif & UINT64_C(0x8000000000000000)) == 0;
-    if (e == 0)
-        return 0;      /* pseudo-denormal: accepted as a denormal by x87 */
-    return (v.signif & UINT64_C(0x8000000000000000)) == 0;
-}
-static inline int x87_is_inf(extFloat80_t v) {
-    return ((v.signExp & 0x7FFF) == 0x7FFF)
-        && (v.signif == UINT64_C(0x8000000000000000));
-}
-static inline int x87_is_nan(extFloat80_t v) {
-    return ((v.signExp & 0x7FFF) == 0x7FFF)
-        && ((v.signif & UINT64_C(0x7FFFFFFFFFFFFFFF)) != 0);
-}
-static inline int x87_is_snan(extFloat80_t v) {
-    return x87_is_nan(v)
-        && ((v.signif & UINT64_C(0x4000000000000000)) == 0)
-        && ((v.signif & UINT64_C(0x3FFFFFFFFFFFFFFF)) != 0);
-}
+static inline x87_ext x87_from_i16(int16_t i) { return x87_from_f64((double)i); }
+static inline x87_ext x87_from_i32(int32_t i) { return x87_from_f64((double)i); }
+static inline x87_ext x87_from_i64(int64_t i) { return x87_from_f64((double)i); }
 
 /* ---- control/status ----------------------------------------------------- */
 
-/* x87 control-word fields are two bits wide.  Tables keep the hot path
- * branch-free; the switch forms compiled to a chain or an indirect branch on
- * the ARM64 target. */
-static const uint8_t x87_round_mode_table[4] = {
-    softfloat_round_near_even,  /* 00 */
-    softfloat_round_min,        /* 01 */
-    softfloat_round_max,        /* 10 */
-    softfloat_round_minMag      /* 11 */
-};
-static const uint8_t x87_precision_table[4] = {
-    32,   /* 00: 24-bit significand */
-    80,   /* 01: reserved encoding, treated as 64-bit significand */
-    64,   /* 10: 53-bit significand */
-    80    /* 11: reserved encoding, treated as 64-bit significand */
-};
-static inline uint8_t x87_round_mode(const CPU *c) {
-    return x87_round_mode_table[(c->fpu_cw >> 10) & 3u];
+#define X87_IE  0x0001u
+#define X87_C0  0x0100u
+#define X87_C1  0x0200u
+#define X87_C2  0x0400u
+#define X87_C3  0x4000u
+
+static inline void x87_raise_invalid(CPU *c) {
+    c->fpu_sw |= X87_IE;
 }
-static inline uint8_t x87_precision(const CPU *c) {
-    return x87_precision_table[(c->fpu_cw >> 8) & 3u];
-}
-/* x87 status bits raised from the SoftFloat exception flags.  The five flags
- * are bits 0..4, so a 32-entry table replaces five tests and branches with one
- * load and one OR.  x87 has no bit for softfloat_flag_denormal. */
-_Static_assert(softfloat_flag_inexact   == 0x01 &&
-               softfloat_flag_underflow == 0x02 &&
-               softfloat_flag_overflow  == 0x04 &&
-               softfloat_flag_infinite  == 0x08 &&
-               softfloat_flag_invalid   == 0x10,
-               "x87 status table assumes the SoftFloat flag encoding");
-static const uint8_t x87_status_from_flags[32] = {
-    0x00, 0x20, 0x10, 0x30, 0x08, 0x28, 0x18, 0x38,
-    0x04, 0x24, 0x14, 0x34, 0x0C, 0x2C, 0x1C, 0x3C,
-    0x01, 0x21, 0x11, 0x31, 0x09, 0x29, 0x19, 0x39,
-    0x05, 0x25, 0x15, 0x35, 0x0D, 0x2D, 0x1D, 0x3D
-};
 static inline void x87_set_top(CPU *c) {
     c->fpu_sw = (c->fpu_sw & ~0x3800u) | ((uint32_t)(c->fpu_top & 7) << 11);
 }
-static inline void x87_begin(CPU *c) {
-    /* O-22 publication guard: the SoftFloat state is thread-local and is
-     * usually already at the guest's current CW.  Skip a store only when it
-     * would write the same value; this is bit-exact (no native FP replaces
-     * SoftFloat) and leaves E4 as the final exactness gate. */
-    const uint8_t mode = x87_round_mode(c);
-    const uint8_t precision = x87_precision(c);
-#if WC3_SOFTFLOAT_CONTEXT
-    softfloat_state *sf = &c->sf_state;
-    if (sf->roundingMode != mode)
-        sf->roundingMode = mode;
-    if (sf->extF80RoundingPrecision != precision)
-        sf->extF80RoundingPrecision = precision;
-    if (sf->exceptionFlags)
-        sf->exceptionFlags = 0;
-#else
-    if (softfloat_roundingMode != mode)
-        softfloat_roundingMode = mode;
-    if (extF80_roundingPrecision != precision)
-        extF80_roundingPrecision = precision;
-    if (softfloat_exceptionFlags)
-        softfloat_exceptionFlags = 0;
-#endif
-}
-static inline void x87_end(CPU *c) {
-#if WC3_SOFTFLOAT_CONTEXT
-    uint_fast8_t f = c->sf_state.exceptionFlags & 0x1Fu;
-    if (c->sf_state.exceptionFlags)
-        c->sf_state.exceptionFlags = 0;
-#else
-    uint_fast8_t f = softfloat_exceptionFlags & 0x1Fu;
-    if (softfloat_exceptionFlags)
-        softfloat_exceptionFlags = 0;
-#endif
-    /* Most operations raise nothing.  Avoid touching the status word in that
-     * case; the branch is exact and predictable. */
-    if (f)
-        c->fpu_sw |= x87_status_from_flags[f];
-}
-static inline void x87_denorm_check(CPU *c, extFloat80_t a) {
-    if (x87_is_denorm(a)) c->fpu_sw |= 0x02;
-}
-static inline extFloat80_t x87_indefinite(void) {
-    extFloat80_t v = { UINT64_C(0xC000000000000000), 0xFFFF };
-    return v;
-}
-/* An unsupported operand poisons the operation before SoftFloat sees it:
- * SoftFloat would silently normalise an unnormal, which the hardware does
- * not do. The hardware raises IE|DE, leaves C1 alone for arithmetic, and
- * returns the indefinite QNaN. */
-static inline int x87_unsupported(CPU *c, extFloat80_t v) {
-    if (!x87_is_pseudo(v)) return 0;
-    c->fpu_sw |= 0x01;      /* IE; the hardware does not also set DE here */
-    return 1;
-}
 static inline void x87_stack_fault(CPU *c) {
-    c->fpu_sw |= 0x41;             /* IE | SF */
-    c->fpu_sw |= 0x0200;           /* C1 */
+    c->fpu_sw |= X87_IE | 0x0040u;   /* IE | SF */
+    c->fpu_sw |= X87_C1;
 }
 static inline void x87_set_c(CPU *c, uint32_t c3, uint32_t c2, uint32_t c0) {
     c->fpu_sw = (c->fpu_sw & ~0x4700u)
-              | (c3 ? 0x4000u : 0) | (c2 ? 0x0400u : 0) | (c0 ? 0x0100u : 0);
+              | (c3 ? X87_C3 : 0) | (c2 ? X87_C2 : 0) | (c0 ? X87_C0 : 0);
 }
 static inline void x87_fnclex(CPU *c) {
-    c->fpu_sw &= ~0x003Fu;
-#if WC3_SOFTFLOAT_CONTEXT
-    c->sf_state.exceptionFlags = 0;
-#else
-    softfloat_exceptionFlags = 0;
-#endif
+    c->fpu_sw &= ~0x00FFu;   /* exception flags, ES, and stack fault */
+}
+static inline void x87_fldcw(CPU *c, uint32_t a) {
+    const uint16_t cw = rd16(a);
+    if (cw == c->fpu_cw) return;
+    c->fpu_cw = cw;
+    x87_apply_rounding(c);
 }
 
 /* ---- tag word ----------------------------------------------------------- */
@@ -302,39 +224,57 @@ static inline void x87_set_tag(CPU *c, int p, uint16_t t) {
     c->fpu_tag = (uint16_t)((c->fpu_tag & ~(3u << (p * 2)))
                           | ((t & 3u) << (p * 2)));
 }
-static inline uint16_t x87_tag_for(extFloat80_t v) {
-    if (x87_is_zero(v)) return 1;
-    /* Denormals are valid, not special. Tag 2 is for NaN, infinity and the
-     * unsupported/unnormal encodings only. */
-    if (x87_is_nan(v) || x87_is_inf(v) || x87_is_unnormal(v)) return 2;
+static inline uint16_t x87_tag_for(x87_ext v) {
+    const uint64_t b = x87_bits(v.v.d);
+    if (x87_is_zero_bits(b)) return 1;
+    if ((b & UINT64_C(0x7FF0000000000000)) == UINT64_C(0x7FF0000000000000))
+        return 2;
     return 0;
+}
+/* Arithmetic helpers write .v.d directly, so the cached tag may still say
+ * "zero" after a nonzero result.  Tags only gate empty/valid and the saved tag
+ * word; refresh them at the environment boundary, not in the hot path. */
+static inline void x87_refresh_tags(CPU *c) {
+    for (int p = 0; p < 8; p++)
+        if (x87_tag(c, p) != 3)
+            x87_set_tag(c, p, x87_tag_for(c->st[p]));
 }
 
 /* ---- stack -------------------------------------------------------------- */
-static inline void fpush(CPU *c, extFloat80_t v) {
-    int p = (c->fpu_top - 1) & 7;
+
+static inline void fpush(CPU *c, x87_ext v) {
+    const int p = (c->fpu_top - 1) & 7;
     if (x87_tag(c, p) != 3) x87_stack_fault(c);   /* stack overflow */
     c->fpu_top = p;
     c->st[p] = v;
     x87_set_tag(c, p, x87_tag_for(v));
     x87_set_top(c);
 }
-static inline extFloat80_t fpop(CPU *c) {
-    int p = c->fpu_top;
-    extFloat80_t v = c->st[p];
+static inline x87_ext fpop(CPU *c) {
+    const int p = c->fpu_top;
+    const x87_ext v = c->st[p];
     if (x87_tag(c, p) == 3) x87_stack_fault(c);   /* stack underflow */
     x87_set_tag(c, p, 3);
     c->fpu_top = (c->fpu_top + 1) & 7;
     x87_set_top(c);
     return v;
 }
-static inline extFloat80_t *fst(CPU *c, int i) {
+static inline x87_ext *fst(CPU *c, int i) {
     return &c->st[(c->fpu_top + i) & 7];
 }
+/* FST ST(i), ST(0) writes the destination register and its tag.  A plain slot
+ * assignment would leave an empty destination tag empty and make a later
+ * access see a stack fault. */
+static inline void x87_fst_reg(CPU *c, int i) {
+    const int d = (c->fpu_top + i) & 7;
+    const int s = c->fpu_top;
+    c->st[d] = c->st[s];
+    x87_set_tag(c, d, x87_tag(c, s));
+}
 static inline void x87_fxch(CPU *c, int i) {
-    int a = c->fpu_top, b = (c->fpu_top + i) & 7;
-    extFloat80_t t = c->st[a];
-    uint16_t tt = x87_tag(c, a);
+    const int a = c->fpu_top, b = (c->fpu_top + i) & 7;
+    const x87_ext t = c->st[a];
+    const uint16_t tt = x87_tag(c, a);
     c->st[a] = c->st[b]; x87_set_tag(c, a, x87_tag(c, b));
     c->st[b] = t;        x87_set_tag(c, b, tt);
 }
@@ -349,402 +289,426 @@ static inline void x87_fincstp(CPU *c) {
 }
 static inline void x87_fcmov(CPU *c, int cond, int i) {
     if (!cond) return;
-    int s = (c->fpu_top + i) & 7;
+    const int s = (c->fpu_top + i) & 7;
     if (x87_tag(c, s) == 3) { x87_stack_fault(c); return; }
     c->st[c->fpu_top] = c->st[s];
     x87_set_tag(c, c->fpu_top, x87_tag(c, s));
 }
 static inline void x87_fchs(CPU *c) {
-    (*fst(c, 0)).signExp ^= 0x8000;
+    (*fst(c, 0)).v.mm ^= UINT64_C(0x8000000000000000);
 }
 static inline void x87_fabs(CPU *c) {
-    (*fst(c, 0)).signExp &= 0x7FFF;
+    (*fst(c, 0)).v.mm &= UINT64_C(0x7FFFFFFFFFFFFFFF);
 }
 
 /* ---- memory loads/stores ------------------------------------------------ */
-#if WC3_SOFTFLOAT_CONTEXT
-/* The generated corpus calls x87_ld_f32(a) inside a function that already has
- * `CPU *c`.  The macro supplies the owning context without changing the
- * lifted call site or requiring another corpus pass.  f32/f64 -> extF80 is
- * state-free for normal values, but a signaling NaN raises invalid; publishing
- * that flag immediately is what makes the load path exact. */
-static inline extFloat80_t x87_ld_f32_ctx(CPU *c, uint32_t a) {
-    float32_t f; memcpy(&f.v, (void *)(uintptr_t)a, 4);
-    extFloat80_t v = X87_F32_TO_EXTF80(c, f);
-    /* FLD of a signaling NaN raises invalid.  Publish it now: a following
-     * arithmetic instruction calls x87_begin(), which clears pending flags,
-     * and the converted QNaN would no longer raise it itself. */
-    x87_end(c);
-    return v;
+
+static inline x87_ext x87_ld_f32(uint32_t a) {
+    float f;
+    memcpy(&f, (void *)(uintptr_t)a, 4);
+    return x87_from_f64((double)f);
 }
-static inline extFloat80_t x87_ld_f64_ctx(CPU *c, uint32_t a) {
-    float64_t f; memcpy(&f.v, (void *)(uintptr_t)a, 8);
-    extFloat80_t v = X87_F64_TO_EXTF80(c, f);
-    x87_end(c);
-    return v;
+static inline x87_ext x87_ld_f64(uint32_t a) {
+    double d;
+    memcpy(&d, (void *)(uintptr_t)a, 8);
+    return x87_from_f64(d);
 }
-#define x87_ld_f32(a) x87_ld_f32_ctx(c, (a))
-#define x87_ld_f64(a) x87_ld_f64_ctx(c, (a))
-#else
-static inline extFloat80_t x87_ld_f32(uint32_t a) {
-    float32_t f; memcpy(&f.v, (void *)(uintptr_t)a, 4);
-    return f32_to_extF80(f);
+static inline x87_ext x87_ld_f80(uint32_t a) {
+    uint64_t sig;
+    uint16_t se;
+    memcpy(&sig, (void *)(uintptr_t)a, 8);
+    memcpy(&se, (void *)((uintptr_t)a + 8), 2);
+    return x87_from_f64(x87_f80_to_d(sig, se));
 }
-static inline extFloat80_t x87_ld_f64(uint32_t a) {
-    float64_t f; memcpy(&f.v, (void *)(uintptr_t)a, 8);
-    return f64_to_extF80(f);
-}
-#endif
-static inline extFloat80_t x87_ld_f80(uint32_t a) {
-    extFloat80_t v;
-    memcpy(&v.signif, (void *)(uintptr_t)a, 8);
-    memcpy(&v.signExp, (void *)((uintptr_t)a + 8), 2);
-    return v;
-}
-static inline extFloat80_t x87_ld_i16(uint32_t a) {
+static inline x87_ext x87_ld_i16(uint32_t a) {
     int16_t i; memcpy(&i, (void *)(uintptr_t)a, 2); return x87_from_i16(i);
 }
-static inline extFloat80_t x87_ld_i32(uint32_t a) {
+static inline x87_ext x87_ld_i32(uint32_t a) {
     int32_t i; memcpy(&i, (void *)(uintptr_t)a, 4); return x87_from_i32(i);
 }
-static inline extFloat80_t x87_ld_i64(uint32_t a) {
+static inline x87_ext x87_ld_i64(uint32_t a) {
     int64_t i; memcpy(&i, (void *)(uintptr_t)a, 8); return x87_from_i64(i);
 }
-static inline void x87_st_f32(CPU *c, uint32_t a, extFloat80_t v) {
-    x87_begin(c);
-    float32_t f = X87_EXTF80_TO_F32(c, v);
-    memcpy((void *)(uintptr_t)a, &f.v, 4);
-    x87_end(c);
+static inline void x87_st_f32(CPU *c, uint32_t a, x87_ext v) {
+    (void)c;   /* SNaN handling at the m32 boundary is accepted as a deviation */
+    float f = (float)v.v.d;
+    memcpy((void *)(uintptr_t)a, &f, 4);
 }
-static inline void x87_st_f64(CPU *c, uint32_t a, extFloat80_t v) {
-    x87_begin(c);
-    float64_t f = X87_EXTF80_TO_F64(c, v);
-    memcpy((void *)(uintptr_t)a, &f.v, 8);
-    x87_end(c);
+static inline void x87_st_f64(CPU *c, uint32_t a, x87_ext v) {
+    (void)c;
+    memcpy((void *)(uintptr_t)a, &v.v.d, 8);
 }
-static inline void x87_st_f80(uint32_t a, extFloat80_t v) {
-    memcpy((void *)(uintptr_t)a, &v.signif, 8);
-    memcpy((void *)((uintptr_t)a + 8), &v.signExp, 2);
+static inline void x87_st_f80(uint32_t a, x87_ext v) {
+    uint64_t sig;
+    uint16_t se;
+    x87_d_to_f80(v.v.d, &sig, &se);
+    memcpy((void *)(uintptr_t)a, &sig, 8);
+    memcpy((void *)((uintptr_t)a + 8), &se, 2);
 }
-static inline void x87_st_i16(CPU *c, uint32_t a, extFloat80_t v) {
-    x87_begin(c);
-    int32_t i = X87_EXTF80_TO_I32(c, v, x87_round_mode(c), true);
-    if (i < -32768 || i > 32767) { c->fpu_sw |= 0x01; i = (int16_t)0x8000; }
-    int16_t o = (int16_t)i;
-    memcpy((void *)(uintptr_t)a, &o, 2);
-    x87_end(c);
+
+#define X87_DEFINE_STORE_INT(fn, type, minv, maxv, indef, truncate)           \
+static inline void fn(CPU *c, uint32_t a, x87_ext v) {                        \
+    type i;                                                                    \
+    if (!x87_is_finite_bits(x87_bits(v.v.d))) {                                \
+        x87_raise_invalid(c); i = (type)(indef);                               \
+    } else {                                                                   \
+        const double r = (truncate) ? trunc(v.v.d) : nearbyint(v.v.d);         \
+        if (!(r >= (minv) && r < (maxv))) {                                    \
+            x87_raise_invalid(c); i = (type)(indef);                           \
+        } else i = (type)r;                                                    \
+    }                                                                          \
+    memcpy((void *)(uintptr_t)a, &i, sizeof i);                                \
 }
-/* FISTTP (SSE3) always truncates toward zero, independent of the control
- * word. It is present in the war3.exe image and is kept out of the "unknown
- * x87" list even though the fixed Pentium 4 CPUID profile does not advertise
- * SSE3; unreachability still has to be proven by the trace harness. */
-static inline void x87_st_i16_rz(CPU *c, uint32_t a, extFloat80_t v) {
-    x87_begin(c);
-    int32_t i = X87_EXTF80_TO_I32(c, v, softfloat_round_minMag, true);
-    if (i < -32768 || i > 32767) { c->fpu_sw |= 0x01; i = (int16_t)0x8000; }
-    int16_t o = (int16_t)i;
-    memcpy((void *)(uintptr_t)a, &o, 2);
-    x87_end(c);
+X87_DEFINE_STORE_INT(x87_st_i16,    int16_t, -32768.0, 32768.0, 0x8000, 0)
+X87_DEFINE_STORE_INT(x87_st_i16_rz, int16_t, -32768.0, 32768.0, 0x8000, 1)
+X87_DEFINE_STORE_INT(x87_st_i32,    int32_t, -2147483648.0, 2147483648.0,
+                     0x80000000u, 0)
+X87_DEFINE_STORE_INT(x87_st_i32_rz, int32_t, -2147483648.0, 2147483648.0,
+                     0x80000000u, 1)
+X87_DEFINE_STORE_INT(x87_st_i64,    int64_t, -9223372036854775808.0,
+                     9223372036854775808.0, INT64_MIN, 0)
+X87_DEFINE_STORE_INT(x87_st_i64_rz, int64_t, -9223372036854775808.0,
+                     9223372036854775808.0, INT64_MIN, 1)
+#undef X87_DEFINE_STORE_INT
+
+/* ---- packed BCD --------------------------------------------------------- */
+
+static inline x87_ext x87_ld_bcd(CPU *c, uint32_t a) {
+    uint8_t b[10];
+    double value = 0.0;
+    (void)c;
+    memcpy(b, (void *)(uintptr_t)a, sizeof b);
+    /* Invalid BCD digits have an undefined result; masking the nibbles is a
+     * deterministic integer codec and, unlike IE, matches the no-exception
+     * behaviour of the hardware. */
+    for (int i = 17; i >= 0; i--) {
+        const unsigned digit = (i & 1) ? (b[i >> 1] >> 4) : (b[i >> 1] & 0x0Fu);
+        value = value * 10.0 + (double)digit;
+    }
+    if (b[9] & 0x80u) value = -value;
+    return x87_from_f64(value);
 }
-static inline void x87_st_i32_rz(CPU *c, uint32_t a, extFloat80_t v) {
-    x87_begin(c);
-    int32_t i = X87_EXTF80_TO_I32(c, v, softfloat_round_minMag, true);
-    memcpy((void *)(uintptr_t)a, &i, 4);
-    x87_end(c);
+static inline void x87_bcd_indefinite(uint32_t a) {
+    uint8_t b[10];
+    memset(b, 0, sizeof b);
+    b[7] = 0xC0u;                 /* invalid packed BCD: 00..00 C0 FF FF */
+    b[8] = b[9] = 0xFFu;
+    memcpy((void *)(uintptr_t)a, b, sizeof b);
 }
-static inline void x87_st_i64_rz(CPU *c, uint32_t a, extFloat80_t v) {
-    x87_begin(c);
-    int64_t i = X87_EXTF80_TO_I64(c, v, softfloat_round_minMag, true);
-    memcpy((void *)(uintptr_t)a, &i, 8);
-    x87_end(c);
-}
-static inline void x87_st_i32(CPU *c, uint32_t a, extFloat80_t v) {
-    x87_begin(c);
-    int32_t i = X87_EXTF80_TO_I32(c, v, x87_round_mode(c), true);
-    memcpy((void *)(uintptr_t)a, &i, 4);
-    x87_end(c);
-}
-static inline void x87_st_i64(CPU *c, uint32_t a, extFloat80_t v) {
-    x87_begin(c);
-    int64_t i = X87_EXTF80_TO_I64(c, v, x87_round_mode(c), true);
-    memcpy((void *)(uintptr_t)a, &i, 8);
-    x87_end(c);
+static inline void x87_st_bcd(CPU *c, uint32_t a, x87_ext v) {
+    uint8_t b[10];
+    const double d = v.v.d;
+    double r;
+    uint64_t n;
+
+    /* NaN and Inf fail both comparisons.  The valid packed range is
+     * -999999999999999999 .. +999999999999999999. */
+    if (!(d > -1.0e18 && d < 1.0e18)) {
+        x87_raise_invalid(c);
+        x87_bcd_indefinite(a);
+        return;
+    }
+    r = nearbyint(d);
+    if (!(r > -1.0e18 && r < 1.0e18)) {
+        x87_raise_invalid(c);
+        x87_bcd_indefinite(a);
+        return;
+    }
+    n = (uint64_t)(r < 0.0 ? -r : r);
+    for (int i = 0; i < 9; i++) {
+        b[i] = (uint8_t)((n % 10u) | (((n / 10u) % 10u) << 4));
+        n /= 100u;
+    }
+    b[9] = (uint8_t)(signbit(d) ? 0x80u : 0u);
+    memcpy((void *)(uintptr_t)a, b, sizeof b);
 }
 
 /* ---- protected-mode environment (32-bit) --------------------------------
  *
  * FNSAVE/FRSTOR move the complete 108-byte image. FNSTENV/FLDENV move the
- * 28-byte environment only and do not touch the register stack. The layout is
- * the 32-bit protected-mode one used by every PE32 WC3 module:
- *   +0 cw, +2 sw, +4 tag, +6 FIP, +10 CS, +12 FDP, +16 DS.
- * Register images follow the environment in ST(0)..ST(7) order.
- */
+ * 28-byte environment only and do not touch the register stack.  The layout is
+ * seven 32-bit slots used by every PE32 WC3 module:
+ *   +0 CW, +4 SW, +8 TAG, +12 FIP, +16 FCS/FOP, +20 FDP, +24 FDS.
+ * Control, status and tag words occupy the low 16 bits of their slot; FOP is
+ * not tracked and stays zero in the high half of the FCS slot.  Register
+ * images follow the environment in ST(0)..ST(7) order. */
 static inline void x87_fnstenv(CPU *c, uint32_t a) {
+    x87_refresh_tags(c);
     x87_set_top(c);
-    wr16(a + 0, c->fpu_cw);
-    wr16(a + 2, (uint16_t)c->fpu_sw);
-    wr16(a + 4, c->fpu_tag);
-    wr32(a + 6, c->fpu_ip);
-    wr16(a + 10, c->fpu_cs);
-    wr32(a + 12, c->fpu_dp);
-    wr16(a + 16, c->fpu_ds);
+    wr32(a + 0,  c->fpu_cw);
+    wr32(a + 4,  c->fpu_sw);
+    wr32(a + 8,  c->fpu_tag);
+    wr32(a + 12, c->fpu_ip);
+    wr32(a + 16, c->fpu_cs);
+    wr32(a + 20, c->fpu_dp);
+    wr32(a + 24, c->fpu_ds);
 }
 static inline void x87_fnsave(CPU *c, uint32_t a) {
-    int i;
     x87_fnstenv(c, a);
-    for (i = 0; i < 8; i++)
+    for (int i = 0; i < 8; i++)
         x87_st_f80(a + 28 + (uint32_t)i * 10, *fst(c, i));
-    /* FNSAVE leaves the FPU in the FNINIT state. */
     cpu_x87_init(c);
 }
 static inline void x87_fldenv(CPU *c, uint32_t a) {
-    c->fpu_cw  = rd16(a + 0);
-    c->fpu_sw  = rd16(a + 2);
+    const uint16_t cw = (uint16_t)rd32(a + 0);
+    c->fpu_sw  = (uint16_t)rd32(a + 4);
     c->fpu_top = (int)((c->fpu_sw >> 11) & 7u);
-    c->fpu_tag = rd16(a + 4);
-    c->fpu_ip  = rd32(a + 6);
-    c->fpu_cs  = rd16(a + 10);
-    c->fpu_dp  = rd32(a + 12);
-    c->fpu_ds  = rd16(a + 16);
-#if WC3_SOFTFLOAT_CONTEXT
-    c->sf_state.exceptionFlags = 0;
-#else
-    softfloat_exceptionFlags = 0;
-#endif
+    c->fpu_tag = (uint16_t)rd32(a + 8);
+    c->fpu_ip  = rd32(a + 12);
+    c->fpu_cs  = (uint16_t)rd32(a + 16);
+    c->fpu_dp  = rd32(a + 20);
+    c->fpu_ds  = (uint16_t)rd32(a + 24);
+    if (cw != c->fpu_cw) {
+        c->fpu_cw = cw;
+        x87_apply_rounding(c);
+    }
 }
 static inline void x87_frstor(CPU *c, uint32_t a) {
-    int i;
     x87_fldenv(c, a);
-    for (i = 0; i < 8; i++)
+    for (int i = 0; i < 8; i++)
         *fst(c, i) = x87_ld_f80(a + 28 + (uint32_t)i * 10);
 }
 
 /* FXAM: C3 C2 C0 = 000 unsupported, 001 NaN, 010 normal, 011 infinity,
  * 100 zero, 101 empty, 110 denormal. C1 carries the sign. */
 static inline void x87_fxam(CPU *c) {
-    extFloat80_t v = *fst(c, 0);
-    uint32_t sign = (v.signExp >> 15) & 1u;
+    const x87_ext v = *fst(c, 0);
+    const uint64_t b = x87_bits(v.v.d);
+    uint32_t sign = (uint32_t)(b >> 63);
     uint32_t c3 = 0, c2 = 0, c0 = 0;
+
     if (x87_tag(c, c->fpu_top) == 3) {
         c3 = 1; c2 = 0; c0 = 1;
         sign = 0;
-    } else if (x87_is_zero(v)) {
+    } else if (x87_is_zero_bits(b)) {
         c3 = 1; c2 = 0; c0 = 0;
-    } else if (x87_is_unnormal(v)) {
-        c3 = 0; c2 = 0; c0 = 0;
-    } else if (x87_is_nan(v)) {
+    } else if (x87_is_nan_bits(b)) {
         c3 = 0; c2 = 0; c0 = 1;
-    } else if (x87_is_inf(v)) {
+    } else if (x87_is_inf_bits(b)) {
         c3 = 0; c2 = 1; c0 = 1;
-    } else if (x87_is_denorm(v)) {
-        c3 = 1; c2 = 1; c0 = 0;
+    } else if ((b & UINT64_C(0x7FF0000000000000)) == 0) {
+        c3 = 1; c2 = 1; c0 = 0;       /* double subnormal */
     } else {
-        c3 = 0; c2 = 1; c0 = 0;
+        c3 = 0; c2 = 1; c0 = 0;       /* normal */
     }
     x87_set_c(c, c3, c2, c0);
-    c->fpu_sw = (c->fpu_sw & ~0x0200u) | (sign ? 0x0200u : 0);
+    c->fpu_sw = (c->fpu_sw & ~X87_C1) | (sign ? X87_C1 : 0);
 }
 
 /* ---- arithmetic --------------------------------------------------------- */
-static inline extFloat80_t x87_prepare(CPU *c, extFloat80_t v) {
-    if (x87_unsupported(c, v)) return v;
-    x87_denorm_check(c, v);
-    return x87_canonical(v);
+
+static inline x87_ext x87_add(CPU *c, x87_ext a, x87_ext b) {
+    const double r = a.v.d + b.v.d;
+    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
+    a.v.d = r;
+    a.reserved = 0;
+    return a;
 }
-/* NaN operands suppress the denormal-operand flag: hardware answers
- * QNaN+denormal with just the QNaN and status 0. */
-static inline void x87_prepare_pair(CPU *c, extFloat80_t *a, extFloat80_t *b) {
-    if (x87_is_nan(*a) || x87_is_nan(*b)) return;
-    *a = x87_prepare(c, *a); *b = x87_prepare(c, *b);
+static inline x87_ext x87_sub(CPU *c, x87_ext a, x87_ext b) {
+    const double r = a.v.d - b.v.d;
+    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
+    a.v.d = r;
+    a.reserved = 0;
+    return a;
 }
-static inline extFloat80_t x87_add(CPU *c, extFloat80_t a, extFloat80_t b) {
-    if (x87_unsupported(c, a) || x87_unsupported(c, b)) return x87_indefinite();
-    x87_prepare_pair(c, &a, &b);
-    x87_begin(c); a = X87_EXTF80_ADD(c, a, b); x87_end(c); return a;
+static inline x87_ext x87_mul(CPU *c, x87_ext a, x87_ext b) {
+    const double r = a.v.d * b.v.d;
+    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
+    a.v.d = r;
+    a.reserved = 0;
+    return a;
 }
-static inline extFloat80_t x87_sub(CPU *c, extFloat80_t a, extFloat80_t b) {
-    if (x87_unsupported(c, a) || x87_unsupported(c, b)) return x87_indefinite();
-    x87_prepare_pair(c, &a, &b);
-    x87_begin(c); a = X87_EXTF80_SUB(c, a, b); x87_end(c); return a;
+static inline x87_ext x87_div(CPU *c, x87_ext a, x87_ext b) {
+    const double r = a.v.d / b.v.d;
+    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
+    a.v.d = r;
+    a.reserved = 0;
+    return a;
 }
-static inline extFloat80_t x87_mul(CPU *c, extFloat80_t a, extFloat80_t b) {
-    if (x87_unsupported(c, a) || x87_unsupported(c, b)) return x87_indefinite();
-    x87_prepare_pair(c, &a, &b);
-    x87_begin(c); a = X87_EXTF80_MUL(c, a, b); x87_end(c); return a;
+static inline x87_ext x87_sqrt(CPU *c, x87_ext a) {
+    const double r = sqrt(a.v.d);
+    if (x87_invalid_result(r, a.v.d, a.v.d)) x87_raise_invalid(c);
+    a.v.d = r;
+    a.reserved = 0;
+    return a;
 }
-static inline extFloat80_t x87_div(CPU *c, extFloat80_t a, extFloat80_t b) {
-    if (x87_unsupported(c, a) || x87_unsupported(c, b)) return x87_indefinite();
-    /* Divide-by-zero takes precedence: hardware reports ZE and does not also
-     * report a denormal-operand exception for the numerator. */
-    if (!x87_is_nan(a) && !x87_is_nan(b) && !x87_is_zero(b))
-        x87_prepare_pair(c, &a, &b);
-    x87_begin(c); a = X87_EXTF80_DIV(c, a, b); x87_end(c); return a;
-}
-static inline extFloat80_t x87_sqrt(CPU *c, extFloat80_t a) {
-    if (x87_unsupported(c, a)) return x87_indefinite();
-    /* Invalid (negative) sqrt does not also set DE for a negative denormal. */
-    if (!x87_is_nan(a) && !(a.signExp & 0x8000))
-        a = x87_prepare(c, a);
-    x87_begin(c); a = X87_EXTF80_SQRT(c, a); x87_end(c); return a;
-}
-static inline extFloat80_t x87_roundint(CPU *c, extFloat80_t a) {
-    if (x87_unsupported(c, a)) return x87_indefinite();
-    if (!x87_is_nan(a)) a = x87_prepare(c, a);
-    x87_begin(c); a = X87_EXTF80_ROUNDTOINT(c, a, x87_round_mode(c), true);
-    x87_end(c); return a;
+static inline x87_ext x87_roundint(CPU *c, x87_ext a) {
+    const double r = nearbyint(a.v.d);
+    if (x87_invalid_result(r, a.v.d, a.v.d)) x87_raise_invalid(c);
+    a.v.d = r;
+    a.reserved = 0;
+    return a;
 }
 
-/* x87 fprem/fprem1. This is the IEEE remainder approximation for now; the
- * x87 C2 quotient-bit semantics are not modelled. No Warcraft III game.dll
- * x87 instruction is in this set; Mss32 has six, tracked for the audio gate. */
-static inline extFloat80_t x87_fprem(CPU *c, extFloat80_t a, extFloat80_t b) {
-    if (x87_unsupported(c, a) || x87_unsupported(c, b)) return x87_indefinite();
-    a = x87_prepare(c, a); b = x87_prepare(c, b);
-    x87_begin(c); a = X87_EXTF80_REM(c, a, b); x87_end(c); return a;
+/* x87 FPREM/FPREM1 are not the microcode partial-remainder loop.  C2 is
+ * always zero (quotient complete) and the result is the IEEE remainder. */
+static inline x87_ext x87_fprem(CPU *c, x87_ext a, x87_ext b) {
+    const double r = fmod(a.v.d, b.v.d);
+    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
+    a.v.d = r;
+    a.reserved = 0;
+    c->fpu_sw &= ~X87_C2;
+    return a;
+}
+static inline x87_ext x87_fprem1(CPU *c, x87_ext a, x87_ext b) {
+    const double r = remainder(a.v.d, b.v.d);
+    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
+    a.v.d = r;
+    a.reserved = 0;
+    c->fpu_sw &= ~X87_C2;
+    return a;
 }
 
 /* ---- comparison --------------------------------------------------------- */
-static inline void x87_compare(CPU *c, extFloat80_t a, extFloat80_t b,
-                               int signaling) {
-    x87_begin(c);
-    c->fpu_sw &= ~0x0200u;             /* C1 is cleared by FCOM/FUCOM */
-    int an = x87_is_nan(a), bn = x87_is_nan(b);
+
+static inline void x87_compare(CPU *c, x87_ext a, x87_ext b, int signaling) {
+    const uint64_t ab = x87_bits(a.v.d), bb = x87_bits(b.v.d);
+    const int an = x87_is_nan_bits(ab), bn = x87_is_nan_bits(bb);
+    c->fpu_sw &= ~X87_C1;
     if (an || bn) {
-        /* fcom raises invalid for any NaN; fucom only for an SNaN. */
-        if (signaling || x87_is_snan(a) || x87_is_snan(b))
-            X87_SET_INVALID(c);
+        if (signaling || x87_is_snan_bits(ab) || x87_is_snan_bits(bb))
+            x87_raise_invalid(c);
         x87_set_c(c, 1, 1, 1);
-    } else if (extF80_lt(a, b)) {
+    } else if (a.v.d < b.v.d) {
         x87_set_c(c, 0, 0, 1);
-    } else if (extF80_eq(a, b)) {
+    } else if (a.v.d == b.v.d) {
         x87_set_c(c, 1, 0, 0);
     } else {
         x87_set_c(c, 0, 0, 0);
     }
-    x87_end(c);
 }
-static inline void x87_compare_eflags(CPU *c, extFloat80_t a, extFloat80_t b,
+static inline void x87_compare_eflags(CPU *c, x87_ext a, x87_ext b,
                                       int signaling) {
-    x87_begin(c);
-    c->fpu_sw &= ~0x0200u;             /* FCOMI clears C1 */
-    int an = x87_is_nan(a), bn = x87_is_nan(b);
+    const uint64_t ab = x87_bits(a.v.d), bb = x87_bits(b.v.d);
+    const int an = x87_is_nan_bits(ab), bn = x87_is_nan_bits(bb);
+    c->fpu_sw &= ~X87_C1;
     if (an || bn) {
-        if (signaling || x87_is_snan(a) || x87_is_snan(b))
-            X87_SET_INVALID(c);
+        if (signaling || x87_is_snan_bits(ab) || x87_is_snan_bits(bb))
+            x87_raise_invalid(c);
         c->zf = c->pf = c->cf = 1;
-    } else if (extF80_lt(a, b)) {
+    } else if (a.v.d < b.v.d) {
         c->zf = 0; c->pf = 0; c->cf = 1;
-    } else if (extF80_eq(a, b)) {
+    } else if (a.v.d == b.v.d) {
         c->zf = 1; c->pf = 0; c->cf = 0;
     } else {
         c->zf = 0; c->pf = 0; c->cf = 0;
     }
     c->of = c->sf = c->af = 0;
-    x87_end(c);
 }
 
 /* ---- integer/exponent helpers ------------------------------------------ */
-static inline extFloat80_t x87_pow2(int e) {
-    extFloat80_t v = { UINT64_C(0x8000000000000000), 0 };
-    int x = e + 16383;
-    if (x <= 0) {
-        /* Subnormal power of two; shift the explicit integer bit. */
-        if (x < -63) { v.signif = 0; v.signExp = 0; return v; }
-        v.signif = UINT64_C(0x8000000000000000) >> (1 - x);
-        v.signExp = 0;
-        return v;
-    }
-    if (x >= 0x7FFF) { v.signif = UINT64_C(0x8000000000000000); v.signExp = 0x7FFF; return v; }
-    v.signExp = (uint16_t)x;
-    return v;
-}
+
 static inline void x87_fscale(CPU *c) {
-    int e = (int)X87_EXTF80_TO_I32(c, *fst(c, 1), softfloat_round_minMag, false);
-    extFloat80_t x = *fst(c, 0);
-    extFloat80_t p = x87_pow2(e);
-    x87_denorm_check(c, x);
-    x87_begin(c);
-    x = X87_EXTF80_MUL(c, x, p);
-    x87_end(c);
-    *fst(c, 0) = x;
+    const x87_ext x = *fst(c, 0);
+    const double y = fst(c, 1)->v.d;
+    double r;
+    int e;
+    if (isnan(y)) {
+        /* FSCALE with a NaN scale returns a NaN (Table 3-34).  Only an SNaN
+         * source raises IE; the result is quieted like ordinary arithmetic. */
+        const int invalid = x87_invalid_result(y, x.v.d, y);
+        r = invalid ? x87_quiet_nan(y) : y;
+        if (invalid) x87_raise_invalid(c);
+        fst(c, 0)->v.d = r;
+        fst(c, 0)->reserved = 0;
+        c->fpu_sw &= ~X87_C1;
+        return;
+    } else if (y >= 2147483647.0) e = 2147483647;
+    else if (y <= -2147483648.0) e = INT_MIN;
+    else e = (int)trunc(y);
+    r = scalbn(x.v.d, e);
+    if (x87_invalid_result(r, x.v.d, y)) x87_raise_invalid(c);
+    fst(c, 0)->v.d = r;
+    fst(c, 0)->reserved = 0;
+    c->fpu_sw &= ~X87_C1;
 }
 static inline void x87_fxtract(CPU *c) {
-    extFloat80_t x = *fst(c, 0);
-    int e;
-    extFloat80_t m;
-    if (x87_is_zero(x) || x87_is_nan(x) || x87_is_inf(x)) {
-        /* The hardware leaves these cases to the invalid/stack path. */
-        x87_stack_fault(c);
-        e = 0; m = x;
-    } else if (x87_is_denorm(x)) {
-        uint64_t sig = x.signif;
-        int sh = 0;
-        while (!(sig & UINT64_C(0x8000000000000000))) { sig <<= 1; sh++; }
-        e = 1 - 16383 - sh;
-        m.signif = sig;
-        m.signExp = (uint16_t)((x.signExp & 0x8000) | 0x3FFF);
+    x87_ext x = *fst(c, 0);
+    const uint64_t b = x87_bits(x.v.d);
+    if (x87_is_zero_bits(b)) {
+        /* logb(+-0) is -inf, and the significand keeps the sign. */
+        *fst(c, 0) = x87_from_f64(-INFINITY);
+        fpush(c, x);
+    } else if (x87_is_nan_bits(b)) {
+        if (x87_is_snan_bits(b)) {
+            x87_raise_invalid(c);
+            x.v.d = x87_quiet_nan(x.v.d);
+            x.reserved = 0;
+        }
+        *fst(c, 0) = x;
+        fpush(c, x);
+    } else if (x87_is_inf_bits(b)) {
+        x87_raise_invalid(c);
+        *fst(c, 0) = x87_indefinite();
+        fpush(c, x87_indefinite());
     } else {
-        e = (x.signExp & 0x7FFF) - 16383;
-        m.signif = x.signif;
-        m.signExp = (uint16_t)((x.signExp & 0x8000) | 0x3FFF);
+        int e = 0;
+        double f = frexp(x.v.d, &e);
+        f *= 2.0;
+        e -= 1;
+        *fst(c, 0) = x87_from_i32(e);
+        fpush(c, x87_from_f64(f));
     }
-    *fst(c, 0) = x87_from_i32(e);
-    fpush(c, m);
-    c->fpu_sw &= ~0x0200u;   /* C1=0 */
+    c->fpu_sw &= ~X87_C1;
 }
 
-/* ---- host long double bridge (transcendentals only) --------------------- */
-static inline long double x87_to_ld(CPU *c, extFloat80_t v) {
-    (void)c;
-#if defined(__SIZEOF_LONG_DOUBLE__) && (__SIZEOF_LONG_DOUBLE__ == 16) \
-    && defined(__LDBL_MANT_DIG__) && (__LDBL_MANT_DIG__ == 113)
-    float128_t f = X87_EXTF80_TO_F128(c, v);
-    long double d;
-    memcpy(&d, f.v, sizeof d);
-    return d;
-#else
-    long double d;
-    memcpy(&d, &v, 10);
-    return d;
-#endif
+/* ---- transcendentals ---------------------------------------------------- */
+
+/* libm is the cold path; use the same one-check invalid rule as the arithmetic
+ * helpers so SNaN, Inf and out-of-domain inputs still surface as IE. */
+static inline x87_ext x87_unary_result(CPU *c, double r, double x) {
+    if (x87_invalid_result(r, x, x)) x87_raise_invalid(c);
+    return x87_from_f64(r);
 }
-static inline extFloat80_t x87_from_ld(CPU *c, long double d) {
-    (void)c;
-#if defined(__SIZEOF_LONG_DOUBLE__) && (__SIZEOF_LONG_DOUBLE__ == 16) \
-    && defined(__LDBL_MANT_DIG__) && (__LDBL_MANT_DIG__ == 113)
-    float128_t f;
-    memcpy(f.v, &d, sizeof d);
-    return X87_F128_TO_EXTF80(c, f);
-#else
-    extFloat80_t v;
-    memcpy(&v, &d, 10);
-    return v;
-#endif
+static inline x87_ext x87_binary_result(CPU *c, double r, double a, double b) {
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    return x87_from_f64(r);
+}
+static inline x87_ext x87_f2xm1(CPU *c, x87_ext x) {
+    return x87_unary_result(c, exp2(x.v.d) - 1.0, x.v.d);
+}
+static inline x87_ext x87_fsin(CPU *c, x87_ext x) {
+    return x87_unary_result(c, sin(x.v.d), x.v.d);
+}
+static inline x87_ext x87_fcos(CPU *c, x87_ext x) {
+    return x87_unary_result(c, cos(x.v.d), x.v.d);
+}
+static inline x87_ext x87_fptan(CPU *c, x87_ext x) {
+    return x87_unary_result(c, tan(x.v.d), x.v.d);
+}
+static inline x87_ext x87_fpatan(CPU *c, x87_ext y, x87_ext x) {
+    return x87_binary_result(c, atan2(y.v.d, x.v.d), y.v.d, x.v.d);
+}
+static inline x87_ext x87_fyl2x(CPU *c, x87_ext x, x87_ext y) {
+    return x87_binary_result(c, y.v.d * log2(x.v.d), x.v.d, y.v.d);
+}
+static inline x87_ext x87_fyl2xp1(CPU *c, x87_ext x, x87_ext y) {
+    /* FYL2XP1 is defined only for x > -1.  At x == -1 log1p() returns -inf,
+     * which x87 reports as #IA with the indefinite result, not as a valid
+     * negative infinity. */
+    if (x.v.d <= -1.0) {
+        x87_raise_invalid(c);
+        return x87_indefinite();
+    }
+    return x87_binary_result(c, y.v.d * log1p(x.v.d) * 0x1.71547652b82fep+0,
+                             x.v.d, y.v.d);
 }
 
-/* Transcendentals: host long-double placeholders.  game.dll and the Miles
- * plug-ins do reach these, so their flags and rounding remain an exactness gap
- * (O-58); the f128 conversion itself uses the owning CPU state. */
-static inline extFloat80_t x87_f2xm1(CPU *c, extFloat80_t x) {
-    return x87_from_ld(c, powl(2.0L, x87_to_ld(c, x)) - 1.0L);
-}
-static inline extFloat80_t x87_fsin(CPU *c, extFloat80_t x) {
-    return x87_from_ld(c, sinl(x87_to_ld(c, x)));
-}
-static inline extFloat80_t x87_fcos(CPU *c, extFloat80_t x) {
-    return x87_from_ld(c, cosl(x87_to_ld(c, x)));
-}
-static inline extFloat80_t x87_fptan(CPU *c, extFloat80_t x) {
-    return x87_from_ld(c, tanl(x87_to_ld(c, x)));
-}
-static inline extFloat80_t x87_fpatan(CPU *c, extFloat80_t y, extFloat80_t x) {
-    return x87_from_ld(c, atan2l(x87_to_ld(c, y), x87_to_ld(c, x)));
-}
-static inline extFloat80_t x87_fyl2x(CPU *c, extFloat80_t x, extFloat80_t y) {
-    return x87_from_ld(c, x87_to_ld(c, y) * log2l(x87_to_ld(c, x)));
-}
-static inline extFloat80_t x87_fyl2xp1(CPU *c, extFloat80_t x, extFloat80_t y) {
-    return x87_from_ld(c, x87_to_ld(c, y) * log2l(x87_to_ld(c, x) + 1.0L));
+/* ---- reset -------------------------------------------------------------- */
+
+/* Shared FNINIT/FNSAVE reset.  cpu_x87_init() and cpu_x87_init_thread() in
+ * cpu.h select the architectural and Windows default control words. */
+static inline void x87_init(CPU *c, uint16_t cw) {
+    memset(c->st, 0, sizeof c->st);
+    c->fpu_top = 0;
+    c->fpu_cw = cw;
+    c->fpu_tag = 0xFFFFu;
+    c->fpu_sw = 0;
+    c->fpu_ip = c->fpu_dp = 0;
+    c->fpu_cs = c->fpu_ds = 0;
+    c->x87_reserved = 0;
+    x87_clear_ftz();
+    x87_apply_rounding(c);
 }
 
 #endif /* PCRECOMP_X87_H */

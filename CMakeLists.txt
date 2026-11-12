@@ -30,16 +30,17 @@ set(WC3_LEGACY_ROOT "${WC3_UPSTREAM_ROOT}" CACHE PATH
     "Read-only legacy tree (pinned upstream.path, rev ${WC3_UPSTREAM_REV})")
 message(STATUS "pinned upstream: ${WC3_LEGACY_ROOT} @ ${WC3_UPSTREAM_REV}")
 
-# The boot link graph can consume either the pinned legacy corpus or the
-# relifted multi-module corpus produced by corpusclosure.  The relifted root
-# contains corpus_manifest.json and wc3_all_list.h; see cmake/Wc3ReliftedCorpus.cmake.
+# The product boot link graph consumes the relifted multi-module corpus
+# produced by corpusclosure.  The relifted root contains corpus_manifest.json
+# and wc3_all_list.h; see cmake/Wc3ReliftedCorpus.cmake.  The prebuilt legacy
+# corpus is not linkable after the SoftFloat removal.
 set(WC3_RELIFTED_CORPUS_ROOT "" CACHE PATH
-    "Generated multi-module corpus root (e.g. build/corpus-full); empty uses the legacy corpus")
+    "Generated multi-module corpus root (e.g. build/corpus-full)")
 
-# This default was computed but never used before, so a platform-only build
-# without the pinned corpus failed instead of skipping the boot link graph.
-if(WC3_RELIFTED_CORPUS_ROOT OR
-   EXISTS "${WC3_LEGACY_ROOT}/build/android/boot_probe/probe_list.h")
+# Keep platform-only builds usable without a corpus.  Enabling the boot graph
+# without a relifted root would reach the fatal legacy-corpus path in
+# cmake/Wc3LegacyBoot.cmake, so the default tracks only the relifted input.
+if(WC3_RELIFTED_CORPUS_ROOT)
     set(WC3_WITH_ASBUILT_HLE_DEFAULT ON)
 else()
     set(WC3_WITH_ASBUILT_HLE_DEFAULT OFF)
@@ -50,37 +51,22 @@ option(WC3_BUILD_APP "Build libwc3gameactivity.so" OFF)
 option(WC3_WITH_ASBUILT_HLE "Link the transitional lifted corpus and as-built HLE"
        ${WC3_WITH_ASBUILT_HLE_DEFAULT})
 # O-51/O-52: the NDK defaults to compiler-rt emulated TLS for the Android
-# target, so every x87/SoftFloat THREAD_LOCAL access becomes a call to
-# __emutls_get_address.  Native ELF TLS is supported by bionic on this
-# product's minSdk 26, but the legacy libsoftfloat.a is an emulated-TLS input:
-# enabling this option also rebuilds the same 302-object SoftFloat surface from
-# third_party/softfloat/android_sources.txt.  Product builds with the relifted
-# corpus use native TLS by default; the corpus-less legacy exact-baseline build
-# keeps the old emulated-TLS archive.
+# target, so host-thread-local runtime state becomes an __emutls_get_address
+# call.  Native ELF TLS is supported by bionic on this product's minSdk 26.
+# The lifted corpus and HLE use it by default; the legacy corpus is not a
+# supported product path after the SoftFloat removal.
 set(_wc3_native_tls_default OFF)
 if(ANDROID AND WC3_RELIFTED_CORPUS_ROOT)
     set(_wc3_native_tls_default ON)
 endif()
 option(WC3_NATIVE_TLS
-       "Use native ELF TLS and rebuild SoftFloat from the pinned source list"
+       "Use native ELF TLS for product code"
        ${_wc3_native_tls_default})
 # O-52: initial-exec is not deployable for a dlopen'ed Android app library.
 # Bionic only allocates a static TLS offset before the process starts; after
 # that, an IE relocation in a dlopen'ed module fails at load with
 # "using IE access model".  Keep the evidence in the audit, but never let a
 # build select the dead end.
-#
-# O-52: CPU-owned SoftFloat state is the product default whenever the relifted
-# corpus is present.  It is not an opt-in performance switch: a plain product
-# configure must not silently fall back to the older TLS path.  A corpus-less
-# legacy exact-baseline build is the only supported reason to leave it OFF.
-set(_wc3_softfloat_context_default OFF)
-if(ANDROID AND WC3_RELIFTED_CORPUS_ROOT)
-    set(_wc3_softfloat_context_default ON)
-endif()
-option(WC3_SOFTFLOAT_CONTEXT
-       "Pass CPU-owned SoftFloat state explicitly through the x87 hot path"
-       ${_wc3_softfloat_context_default})
 set(WC3_TLS_MODEL "global-dynamic" CACHE STRING
     "TLS model for native-TLS product code (only global-dynamic is valid)")
 set_property(CACHE WC3_TLS_MODEL PROPERTY STRINGS global-dynamic)
@@ -88,7 +74,7 @@ if(NOT WC3_TLS_MODEL STREQUAL "global-dynamic")
     message(FATAL_ERROR
         "WC3_TLS_MODEL='${WC3_TLS_MODEL}' is not supported: bionic rejects "
         "initial-exec TLS in a dlopen'ed Android app library (static_offset "
-        "== SIZE_MAX).  Use global-dynamic or WC3_SOFTFLOAT_CONTEXT=ON.")
+        "== SIZE_MAX).  Use global-dynamic.")
 endif()
 # O-55: hardening is the product default; this switch only makes the
 # unmeasured A/B possible without editing the build.  Turning it off removes
@@ -339,105 +325,13 @@ if(ANDROID AND NOT WC3_HOST_HARDENING AND NOT WC3_DEBUG)
         -U_FORTIFY_SOURCE
         -D_FORTIFY_SOURCE=0)
 endif()
-# O-52: no TLS in the x87 hot path.  Generate a SoftFloat source tree whose
-# reachable functions take CPU.sf explicitly.  The generated tree is a build
-# artifact; vendor source stays read-only.  The relifted corpus is required for
-# the same reason as WC3_NATIVE_TLS: prebuilt chunk objects already contain the
-# old inline x87 calls and cannot see the context entry points.
-if(WC3_SOFTFLOAT_CONTEXT)
-    if(NOT ANDROID)
-        message(FATAL_ERROR "WC3_SOFTFLOAT_CONTEXT requires the Android toolchain")
-    endif()
-    if(NOT WC3_RELIFTED_CORPUS_ROOT)
-        message(FATAL_ERROR
-            "WC3_SOFTFLOAT_CONTEXT=ON requires WC3_RELIFTED_CORPUS_ROOT: the "
-            "prebuilt legacy chunk objects keep their old x87/SoftFloat calls. "
-            "Product builds default to build/corpus-full; a corpus-less legacy "
-            "exact-baseline build must leave the option OFF.")
-    endif()
-    find_program(WC3_SOFTFLOAT_CONTEXT_GEN_EXE
-        NAMES softfloat_context_gen softfloat_context_gen.exe
-        HINTS "${WC3_ROOT}/build/lift-tools"
-        NO_DEFAULT_PATH)
-    if(NOT WC3_SOFTFLOAT_CONTEXT_GEN_EXE)
-        message(FATAL_ERROR
-            "softfloat_context_gen.exe missing; run "
-            "tools/lift/build_tools.ps1 before configuring")
-    endif()
-    set(WC3_SOFTFLOAT_CTX_DIR "${CMAKE_BINARY_DIR}/softfloat_ctx")
-    set(_wc3_ctx_manifest
-        "${WC3_ROOT}/third_party/softfloat/android_sources.txt")
-    file(STRINGS "${_wc3_ctx_manifest}" _wc3_ctx_rel)
-    set(_wc3_ctx_deps
-        "${WC3_SOFTFLOAT_CONTEXT_GEN_EXE}"
-        "${_wc3_ctx_manifest}")
-    foreach(_rel IN LISTS _wc3_ctx_rel)
-        string(STRIP "${_rel}" _rel)
-        if(_rel STREQUAL "" OR _rel MATCHES "^#")
-            continue()
-        endif()
-        string(REPLACE "\\" "/" _rel "${_rel}")
-        list(APPEND _wc3_ctx_deps
-            "${WC3_ROOT}/third_party/softfloat/${_rel}")
-    endforeach()
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        ${_wc3_ctx_deps})
-    set(_wc3_ctx_target "${CMAKE_C_COMPILER_TARGET}")
-    if(NOT _wc3_ctx_target)
-        set(_wc3_ctx_target "aarch64-linux-android26")
-    endif()
-    set(_wc3_ctx_stamp "${WC3_SOFTFLOAT_CTX_DIR}/.generated")
-    set(_wc3_ctx_stale FALSE)
-    if(NOT EXISTS "${WC3_SOFTFLOAT_CTX_DIR}/sources.cmake" OR
-       NOT EXISTS "${_wc3_ctx_stamp}")
-        set(_wc3_ctx_stale TRUE)
-    else()
-        foreach(_wc3_ctx_dep IN LISTS _wc3_ctx_deps)
-            if("${_wc3_ctx_dep}" IS_NEWER_THAN "${_wc3_ctx_stamp}")
-                set(_wc3_ctx_stale TRUE)
-                break()
-            endif()
-        endforeach()
-        if("${CMAKE_C_COMPILER}" IS_NEWER_THAN "${_wc3_ctx_stamp}")
-            set(_wc3_ctx_stale TRUE)
-        endif()
-    endif()
-    if(_wc3_ctx_stale)
-        execute_process(
-            COMMAND "${WC3_SOFTFLOAT_CONTEXT_GEN_EXE}"
-                --root "${WC3_ROOT}"
-                --out "${WC3_SOFTFLOAT_CTX_DIR}"
-                --clang "${CMAKE_C_COMPILER}"
-                --target "${_wc3_ctx_target}"
-                --jobs 8
-            RESULT_VARIABLE _wc3_ctx_result
-            OUTPUT_VARIABLE _wc3_ctx_stdout
-            ERROR_VARIABLE _wc3_ctx_stderr)
-        if(NOT _wc3_ctx_result EQUAL 0)
-            message(FATAL_ERROR
-                "SoftFloat context generation failed (${_wc3_ctx_result}):\n"
-                "${_wc3_ctx_stdout}\n${_wc3_ctx_stderr}")
-        endif()
-        file(TOUCH "${_wc3_ctx_stamp}")
-    endif()
-    include("${WC3_SOFTFLOAT_CTX_DIR}/sources.cmake")
-    if(NOT WC3_SOFTFLOAT_CTX_SOURCES)
-        message(FATAL_ERROR "SoftFloat context source list is empty")
-    endif()
-    add_compile_definitions(WC3_SOFTFLOAT_CONTEXT=1)
-    include_directories("${WC3_SOFTFLOAT_CTX_DIR}")
-    message(STATUS
-        "O-52: explicit SoftFloat state in CPU; ${_wc3_ctx_stdout}")
-endif()
-
 set(WC3_INCLUDES
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/runtime/boot"
     "${WC3_ROOT}/runtime/hle"
     "${WC3_ROOT}/runtime/platform"
-    "${WC3_ROOT}/runtime/platform/android"
-    "${WC3_ROOT}/third_party/softfloat/source/include")
+    "${WC3_ROOT}/runtime/platform/android")
 
 add_library(wc3_platform STATIC
     "${WC3_ROOT}/runtime/platform/platform.c"
@@ -588,6 +482,19 @@ if(WC3_BUILD_APP)
     # path needs it; a platform-only build can set WC3_WITH_ASBUILT_HLE=OFF.
     if(WC3_WITH_ASBUILT_HLE)
         include("${WC3_ROOT}/cmake/Wc3LegacyBoot.cmake")
+
+        # SoftFloat removal is a product invariant, not a source-review
+        # convention.  Check the final shared object after the link so a stale
+        # prebuilt object or a vendored archive cannot silently reintroduce it.
+        if(CMAKE_NM)
+            add_custom_command(TARGET wc3gameactivity POST_BUILD
+                COMMAND "${CMAKE_COMMAND}"
+                    -DWC3_NM=${CMAKE_NM}
+                    -DWC3_SO=$<TARGET_FILE:wc3gameactivity>
+                    -P "${WC3_ROOT}/cmake/CheckNoSoftFloat.cmake"
+                COMMENT "Auditing the product for SoftFloat symbols"
+                VERBATIM)
+        endif()
     endif()
 
     # O-51/O-52: the TLS A/B is meaningful only if the final .so is audited.

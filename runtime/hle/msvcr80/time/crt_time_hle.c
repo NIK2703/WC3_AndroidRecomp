@@ -29,11 +29,11 @@
 static const Wc3TimeApi *g_time;
 /* Guest VA of this guest thread's asctime buffer.  The HLE call runs on the
  * guest thread's host thread, so host TLS is the correct lifetime boundary. */
-static THREAD_LOCAL uint32_t g_ctime_buffer;
+static _Thread_local uint32_t g_ctime_buffer;
 /* gmtime and localtime use separate per-thread results, matching the CRT's
  * thread-local static struct tm objects. */
-static THREAD_LOCAL uint32_t g_gmtime_buffer;
-static THREAD_LOCAL uint32_t g_localtime_buffer;
+static _Thread_local uint32_t g_gmtime_buffer;
+static _Thread_local uint32_t g_localtime_buffer;
 
 static int64_t days_from_civil(int64_t y, unsigned m, unsigned d)
 {

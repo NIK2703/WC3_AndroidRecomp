@@ -19,24 +19,23 @@
 #ifndef PCRECOMP_CPU_H
 #define PCRECOMP_CPU_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Exact x87 arithmetic. The SoftFloat headers are C, and the configuration
- * macros must match the SoftFloat objects in third_party/softfloat. */
-#ifndef LITTLEENDIAN
-#define LITTLEENDIAN 1
-#endif
-#ifndef SOFTFLOAT_FAST_INT64
-#define SOFTFLOAT_FAST_INT64 1
-#endif
-#ifndef THREAD_LOCAL
-#define THREAD_LOCAL _Thread_local
-#endif
-#include "softfloat.h"
-#include "softfloat_state.h"
-typedef extFloat80_t x87_ext;
+/* x87/MMX register slot.  The low 64 bits are the x87 double or the MMX
+ * integer register; the upper 64 bits are padding so the slot keeps the
+ * 16-byte stride the frozen CPU layout expects.  See x87.h. */
+typedef struct {
+    union {
+        double   d;
+        uint64_t mm;
+    } v;
+    uint64_t reserved;
+} x87_ext;
+
+_Static_assert(sizeof(x87_ext) == 16, "x87 slot must stay 16 bytes");
 
 #if defined(_MSC_VER)
 #include <intrin.h>   /* __readfsdword/__writefsdword: TIB-relative (fs:) access for SEH */
@@ -89,9 +88,9 @@ typedef struct {
     uint32_t eip;
     /* flags as discrete bits (0/1) */
     uint32_t cf, zf, sf, of, pf, af;
-    /* x87: register-stack of 80-bit extended values. st0 == st[fpu_top];
-     * push pre-decrements. The old `double` model is forbidden: it rounds at
-     * 53 bits and hides x87's 64-bit significand. See x87.h. */
+    /* x87/MMX register stack.  Each slot is 16 bytes; x87 stores a native
+     * double in the low 64 bits, MMX uses the same bits as an integer register.
+     * st0 == st[fpu_top]; push pre-decrements.  See x87.h. */
     x87_ext  st[8];
     int      fpu_top;
     uint16_t fpu_cw;   /* control word: rounding, precision, exception masks */
@@ -135,11 +134,10 @@ typedef struct {
     uint32_t disp_pending_kind;
     uintptr_t disp_pending_target;
     uint32_t disp_draining;
-    /* Per-thread SoftFloat state (rounding mode, tininess, exception flags,
-     * extF80 precision).  WC3_SOFTFLOAT_CONTEXT passes this object explicitly
-     * to the x87 arithmetic path instead of paying a TLS resolver per access.
-     * Appended after the frozen ABI fields; source-level ABI-safe. */
-    softfloat_state sf_state;
+    /* Reserved four-byte slot kept for layout stability.  Native x87 state is
+     * the st/fpu_* block above; this field is appended after the frozen ABI
+     * fields and is not read. */
+    uint32_t x87_reserved;
     /* HLE-owned per-thread state.  A guest thread already owns exactly one CPU,
      * so Win32 last-error and Tls* values belong here instead of in host
      * emutls.  This removes the resolver from every kernel32 HLE call without
@@ -148,6 +146,12 @@ typedef struct {
     uint32_t hle_tmp_guest;      /* guest VA of cr_qsort's 256-byte scratch */
     uint32_t hle_tls[64];        /* Win32 TLS slots; index allocation is global */
 } CPU;
+
+/* Frozen source-level layout.  Generated C names fields, but these two offsets
+ * are also used by the MMX alias and by hand-written paths; drift is a build
+ * error, not a reason to regenerate the corpus. */
+_Static_assert(offsetof(CPU, st) == 64, "CPU.st offset changed");
+_Static_assert(offsetof(CPU, xmm) == 216, "CPU.xmm offset changed");
 
 /* direct_call.h uses this to require the complete CPU definition. */
 #define WC3_CPU_DEFINED 1
@@ -703,26 +707,18 @@ static inline uint8_t shr8(CPU *c, uint8_t v, uint32_t cnt) {
 }
 
 /* ---- x87 FPU ----
- * The exact 80-bit model lives in x87.h. It must be included after CPU is
- * complete, and its helpers replace the old `double st[8]` API completely. */
+ * The native double model lives in x87.h.  It must be included after CPU is
+ * complete.  cpu_x87_init() is the architectural FNINIT/FNSAVE reset;
+ * cpu_x87_init_thread() is the Windows/MSVC default used when the runtime
+ * creates a guest thread. */
 static inline void cpu_x87_init(CPU *c);
 #include "x87.h"
 
 static inline void cpu_x87_init(CPU *c) {
-    memset(c->st, 0, sizeof c->st);
-    c->fpu_top = 0;
-    c->fpu_cw  = 0x037F;   /* round nearest, 64-bit precision, all masked */
-    c->fpu_tag = 0xFFFF;   /* all empty */
-    c->fpu_sw  = 0;
-    c->fpu_ip = c->fpu_dp = 0;
-    c->fpu_cs = c->fpu_ds = 0;
-    c->sf_state.roundingMode = softfloat_round_near_even;
-    c->sf_state.detectTininess = softfloat_tininess_afterRounding;
-    c->sf_state.exceptionFlags = 0;
-    c->sf_state.extF80RoundingPrecision = 80;
-    /* Cold fallback state; in a context build this maps to the TLS wrapper
-     * instance, not to CPU.sf_state.  One write per guest thread is free. */
-    softfloat_exceptionFlags = 0;
+    x87_init(c, 0x037F);   /* round nearest, 64-bit precision, all masked */
+}
+static inline void cpu_x87_init_thread(CPU *c) {
+    x87_init(c, 0x027F);   /* Windows/MSVC default control word */
 }
 
 /* Double-precision helpers for SSE/scalar code. These are NOT x87 helpers:
@@ -742,9 +738,10 @@ static inline void   wri64(uint32_t a, double v) { int64_t i = (int64_t)nearbyin
  *
  * MMX registers are the low 64 bits of the eight physical x87 registers, not a
  * separate array. `mm_get` exposes that alias without repeating the 16-byte
- * stride of extFloat80_t. MMX writes leave the x87 sign/exponent half alone,
- * and mark the physical register valid; EMMS empties all tags. This is the
- * architectural aliasing, so interleaved MMX/x87 code sees one register file.
+ * stride of x87_ext. MMX writes share the low 64 bits with the native x87
+ * double and mark the physical register valid; EMMS empties all tags. This is
+ * the architectural aliasing, so interleaved MMX/x87 code sees one register
+ * file.
  */
 #define MM_W(v, i)  ((int16_t)((uint64_t)(v) >> ((i) * 16)))
 #define MM_D(v, i)  ((int32_t)((uint64_t)(v) >> ((i) * 32)))
@@ -757,7 +754,7 @@ static inline void   wri64(uint32_t a, double v) { int64_t i = (int64_t)nearbyin
 #define MMX_LANES(n, put, expr) do { for (int i = 0; i < (n); i++) r |= put(i, (expr)); } while (0)
 
 static inline uint64_t *mm_get(CPU *c, int i) {
-    return &c->st[i & 7].signif;
+    return &c->st[i & 7].v.mm;
 }
 static inline void mmx_mark(CPU *c, int i) {
     /* MMX writes make the physical register valid, independently of TOP. */
@@ -930,8 +927,8 @@ static inline uint64_t mmx_packsswb(uint64_t a, uint64_t b) {
 }
 
 
-/* fcom/fcomi are in x87.h: the comparison must inspect the exact extF80
- * values, not a double view. */
+/* fcom/fcomi are in x87.h: the comparison uses the shared double slot and the
+ * guest C0-C3 status bits. */
 /* sahf: load AH into CF,PF,AF,ZF,SF */
 static inline void do_sahf(CPU *c, uint8_t ah) {
     c->cf = ah & 1; c->pf = (ah >> 2) & 1; c->af = (ah >> 4) & 1;

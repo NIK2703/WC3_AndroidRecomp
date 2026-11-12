@@ -50,108 +50,14 @@ if(WC3_RELIFTED_CORPUS_ROOT)
     endif()
     message(STATUS "relifted corpus: ${_wc3_merged_entries} definitions, list sha256 ${_wc3_list_sha}")
 else()
-    set(_wc3_corpus_kind "legacy")
-    set(_wc3_save_list_sites 13)
-    set(WC3_BOOT_LIST "${WC3_LEGACY_ROOT}/build/android/boot_probe/probe_list.h")
-    if(NOT EXISTS "${WC3_BOOT_LIST}")
-        message(FATAL_ERROR "legacy corpus manifest missing: ${WC3_BOOT_LIST}")
-    endif()
-endif()
-if(NOT WC3_NATIVE_TLS AND NOT WC3_SOFTFLOAT_CONTEXT AND
-   NOT EXISTS "${WC3_LEGACY_ROOT}/build/android/libsoftfloat.a")
     message(FATAL_ERROR
-        "legacy softfloat archive missing: ${WC3_LEGACY_ROOT}/build/android/libsoftfloat.a")
+        "SoftFloat was removed from the product.  The prebuilt legacy corpus "
+        "contains SoftFloat calls and cannot be linked; configure with "
+        "-DWC3_RELIFTED_CORPUS_ROOT=build/corpus-full after relifting with the "
+        "native x87 lifter.")
 endif()
-
-# O-52: the legacy archive defines __emutls_v.* variables, so compiling the
-# corpus with -fno-emulated-tls while still linking that archive produces
-# undefined native-TLS symbols.  When native TLS is requested, rebuild exactly
-# the archive's 302-source surface from the target-tree vendor input.  The
-# manifest is pinned next to the sources; no file is discovered by globbing.
-#
-# The legacy corpus is a second, independent emulated-TLS input: its prebuilt
-# chunk objects were compiled before this tree existed and contain the hot
-# x87/SoftFloat __emutls_get_address calls.  Rebuilding just libsoftfloat does
-# not touch them, so a legacy-corpus native-TLS build would show a partial
-# change and could be mistaken for a product measurement.  Require the
-# relifted corpus, where the same generated C is compiled under the directory
-# -fno-emulated-tls option.
-if((WC3_NATIVE_TLS OR WC3_SOFTFLOAT_CONTEXT) AND NOT WC3_RELIFTED_CORPUS_ROOT)
-    message(FATAL_ERROR
-        "WC3_NATIVE_TLS/WC3_SOFTFLOAT_CONTEXT require WC3_RELIFTED_CORPUS_ROOT: "
-        "the prebuilt legacy chunk objects keep their old x87/SoftFloat calls. "
-        "Use -CorpusRoot build/corpus-full for the TLS/context A/B.")
-endif()
-if(WC3_NATIVE_TLS OR WC3_SOFTFLOAT_CONTEXT)
-    if(NOT ANDROID)
-        message(FATAL_ERROR
-            "WC3_NATIVE_TLS/WC3_SOFTFLOAT_CONTEXT require the Android toolchain")
-    endif()
-    set(_wc3_softfloat_manifest
-        "${WC3_ROOT}/third_party/softfloat/android_sources.txt")
-    if(NOT EXISTS "${_wc3_softfloat_manifest}")
-        message(FATAL_ERROR
-            "SoftFloat source manifest missing: ${_wc3_softfloat_manifest}")
-    endif()
-    file(STRINGS "${_wc3_softfloat_manifest}" _wc3_softfloat_rel)
-    set(_wc3_softfloat_sources)
-    foreach(_rel IN LISTS _wc3_softfloat_rel)
-        string(STRIP "${_rel}" _rel)
-        if(_rel STREQUAL "" OR _rel MATCHES "^#")
-            continue()
-        endif()
-        string(REPLACE "\\" "/" _rel "${_rel}")
-        list(APPEND _wc3_softfloat_sources
-            "${WC3_ROOT}/third_party/softfloat/${_rel}")
-    endforeach()
-    if(NOT _wc3_softfloat_sources)
-        message(FATAL_ERROR "SoftFloat source manifest is empty")
-    endif()
-    # The legacy archive has exactly 302 members; keep the replacement pinned
-    # to that surface so a manifest edit is a deliberate ABI decision, not a
-    # silent source-set change.
-    list(LENGTH _wc3_softfloat_sources _wc3_softfloat_count)
-    if(NOT _wc3_softfloat_count EQUAL 302)
-        message(FATAL_ERROR
-            "SoftFloat manifest has ${_wc3_softfloat_count} sources, expected 302")
-    endif()
-    if(WC3_SOFTFLOAT_CONTEXT)
-        if(NOT WC3_SOFTFLOAT_CTX_SOURCES)
-            message(FATAL_ERROR
-                "WC3_SOFTFLOAT_CONTEXT sources were not generated")
-        endif()
-        set(_wc3_softfloat_sources ${WC3_SOFTFLOAT_CTX_SOURCES})
-    endif()
-    add_library(wc3_softfloat STATIC ${_wc3_softfloat_sources})
-    target_include_directories(wc3_softfloat PRIVATE
-        "${WC3_ROOT}/third_party/softfloat"
-        "${WC3_ROOT}/third_party/softfloat/source/include"
-        "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
-    target_compile_definitions(wc3_softfloat PRIVATE
-        SOFTFLOAT_FAST_INT64
-        LITTLEENDIAN
-        THREAD_LOCAL=_Thread_local)
-    if(WC3_SOFTFLOAT_CONTEXT)
-        target_include_directories(wc3_softfloat PRIVATE
-            "${WC3_ROOT}/runtime/cpu"
-            "${WC3_SOFTFLOAT_CTX_DIR}")
-        target_compile_definitions(wc3_softfloat PRIVATE
-            WC3_SOFTFLOAT_CONTEXT=1
-            INLINE_LEVEL=2)
-    endif()
-    target_compile_options(wc3_softfloat PRIVATE
-        -O2
-        -fno-strict-aliasing
-        -fwrapv
-        -ffp-contract=off
-        -Wno-unused-parameter)
-    set_target_properties(wc3_softfloat PROPERTIES
-        POSITION_INDEPENDENT_CODE ON)
-else()
-    add_library(wc3_softfloat STATIC IMPORTED)
-    set_target_properties(wc3_softfloat PROPERTIES
-        IMPORTED_LOCATION
-            "${WC3_LEGACY_ROOT}/build/android/libsoftfloat.a")
+if(NOT ANDROID)
+    message(FATAL_ERROR "the product corpus requires the Android toolchain")
 endif()
 
 # The legacy boot path uses the C gen_boot_dispatch tool; it has no Python
@@ -179,16 +85,10 @@ file(MAKE_DIRECTORY "${WC3_BOOT_GEN_DIR}")
 
 set(_wc3_prefix_args)
 set(_wc3_expect_args)
-if(WC3_RELIFTED_CORPUS_ROOT)
-    foreach(_p IN LISTS WC3_RELIFTED_PREFIXES)
-        list(APPEND _wc3_prefix_args --prefix "${_p}")
-    endforeach()
-    list(APPEND _wc3_expect_args --expect-count "${_wc3_merged_entries}")
-else()
-    list(APPEND _wc3_prefix_args
-         --prefix 004 --prefix 350 --prefix 351 --prefix 352
-         --prefix 353 --prefix 600 --prefix 6F)
-endif()
+foreach(_p IN LISTS WC3_RELIFTED_PREFIXES)
+    list(APPEND _wc3_prefix_args --prefix "${_p}")
+endforeach()
+list(APPEND _wc3_expect_args --expect-count "${_wc3_merged_entries}")
 
 add_custom_command(
     OUTPUT
@@ -255,13 +155,8 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/dsound"
     "${WC3_ROOT}/runtime/hle/win32/ws2_32"
     "${WC3_ROOT}/runtime/cpu"
-    "${WC3_ROOT}/runtime/guest"
-    "${WC3_ROOT}/third_party/softfloat/source/include"
-    "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
+    "${WC3_ROOT}/runtime/guest")
 target_compile_definitions(wc3_boot PRIVATE
-    SOFTFLOAT_FAST_INT64
-    LITTLEENDIAN
-    THREAD_LOCAL=_Thread_local
     GVA_DELTA=0
     WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE})
 if(WC3_DEBUG)
@@ -285,13 +180,8 @@ target_include_directories(wc3_hle_bridge PRIVATE
     "${WC3_ROOT}/runtime/hle/android"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
-    "${WC3_ROOT}/runtime/platform"
-    "${WC3_ROOT}/third_party/softfloat/source/include"
-    "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
+    "${WC3_ROOT}/runtime/platform")
 target_compile_definitions(wc3_hle_bridge PRIVATE
-    SOFTFLOAT_FAST_INT64
-    LITTLEENDIAN
-    THREAD_LOCAL=_Thread_local
     WC3_DEBUG=${WC3_DEBUG_DEFINE})
 target_compile_options(wc3_hle_bridge PRIVATE
     -fno-strict-aliasing
@@ -311,13 +201,8 @@ if(WC3_W3L_COMPAT)
     target_include_directories(wc3_compat PRIVATE
         "${WC3_ROOT}/runtime/compat"
         "${WC3_ROOT}/runtime/cpu"
-        "${WC3_ROOT}/runtime/guest"
-        "${WC3_ROOT}/third_party/softfloat/source/include"
-        "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
+        "${WC3_ROOT}/runtime/guest")
     target_compile_definitions(wc3_compat PRIVATE
-        SOFTFLOAT_FAST_INT64
-        LITTLEENDIAN
-        THREAD_LOCAL=_Thread_local
         GVA_DELTA=0
         WC3_W3L_LATENCY=${WC3_W3L_LATENCY}
         WC3_DEBUG=${WC3_DEBUG_DEFINE})
@@ -419,13 +304,8 @@ target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/ws2_32"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
-    "${WC3_ROOT}/runtime/platform"
-    "${WC3_ROOT}/third_party/softfloat/source/include"
-    "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
+    "${WC3_ROOT}/runtime/platform")
 target_compile_definitions(wc3_hle_modules PRIVATE
-    SOFTFLOAT_FAST_INT64
-    LITTLEENDIAN
-    THREAD_LOCAL=_Thread_local
     GVA_DELTA=0
     WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE})
 if(WC3_DEBUG)
@@ -454,13 +334,8 @@ add_library(wc3_hle_android STATIC
 target_include_directories(wc3_hle_android PRIVATE
     "${WC3_ROOT}/runtime/hle/android"
     "${WC3_ROOT}/runtime/diag"
-    "${WC3_ROOT}/runtime/cpu"
-    "${WC3_ROOT}/third_party/softfloat/source/include"
-    "${WC3_ROOT}/third_party/softfloat/source/8086-SSE")
+    "${WC3_ROOT}/runtime/cpu")
 target_compile_definitions(wc3_hle_android PRIVATE
-    SOFTFLOAT_FAST_INT64
-    LITTLEENDIAN
-    THREAD_LOCAL=_Thread_local
     GVA_DELTA=0
     WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
     WC3_NO_MAIN=1)
@@ -498,8 +373,6 @@ target_include_directories(wc3_hle_d3d9 PRIVATE
     "${WC3_ROOT}/runtime/diag"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
-    "${WC3_ROOT}/third_party/softfloat/source/include"
-    "${WC3_ROOT}/third_party/softfloat/source/8086-SSE"
     "${WC3_ROOT}/third_party/dxvk/shim"
     "${WC3_ROOT}/third_party/dxvk/3.1.1/include/native/directx")
 target_compile_features(wc3_hle_d3d9 PRIVATE cxx_std_17)
@@ -576,34 +449,11 @@ set_target_properties(wc3_linkernsbypass PROPERTIES
     IMPORTED_LOCATION "${WC3_LINKERNSBYPASS_ARCHIVE}")
 
 # --- lifted corpus and the thin D3D9 -> DXVK bridge ------------------------
-set(WC3_CORPUS_OBJECTS)
 set(WC3_CORPUS_LIBS)
-if(WC3_RELIFTED_CORPUS_ROOT)
-    include("${WC3_ROOT}/cmake/Wc3ReliftedCorpus.cmake")
-    list(APPEND WC3_CORPUS_LIBS wc3_corpus_relifted)
-else()
-    set(WC3_CORPUS_DIRS
-        war3 war3_closure storm_a35
-        game game_extra game_vt game_vtc
-        ijl mss_a35 mssfast_a35 mp3dec_a35)
-    foreach(dir IN LISTS WC3_CORPUS_DIRS)
-        file(GLOB _chunk_objects
-            "${WC3_LEGACY_ROOT}/build/android/chunks/${dir}/*.o")
-        if(dir STREQUAL "game_extra")
-            # Replaced below by the patched source build.  Keeping the
-            # prebuilt object would define the same L_* symbols and the
-            # linker could pick the unpatched copy.
-            list(FILTER _chunk_objects EXCLUDE REGEX
-                 "/game_extra_0012\\.o$")
-        endif()
-        list(APPEND WC3_CORPUS_OBJECTS ${_chunk_objects})
-    endforeach()
-    list(APPEND WC3_CORPUS_OBJECTS
-        "${WC3_LEGACY_ROOT}/build/android/boot_probe/war3_27_extra2.o"
-        "${WC3_LEGACY_ROOT}/build/android/boot_probe/storm_27_extra2_a35.o")
-    include("${WC3_ROOT}/cmake/Wc3LegacyCorpusFixes.cmake")
-    list(APPEND WC3_CORPUS_LIBS wc3_legacy_fix_save_list)
-endif()
+include("${WC3_ROOT}/cmake/Wc3ReliftedCorpus.cmake")
+list(APPEND WC3_CORPUS_LIBS wc3_corpus_relifted)
+# The relifted corpus is source-built, so it has no prebuilt object list.
+set(WC3_CORPUS_OBJECTS)
 
 # V10/T2-save: the overlapped-file and thread-handle fixes are part of the
 # product, not an experiment.  A source revert used to reach an APK silently;
@@ -679,7 +529,6 @@ target_link_libraries(wc3gameactivity PRIVATE
     wc3_dxvk_entry
     wc3_adrenotools
     wc3_linkernsbypass
-    wc3_softfloat
     -Wl,--whole-archive
     ${WC3_DXVK_ARCHIVES}
     -Wl,--no-whole-archive
