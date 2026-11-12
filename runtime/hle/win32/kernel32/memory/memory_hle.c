@@ -206,9 +206,13 @@ int wc3_hle_kernel32_memory_install(void)
                                     g_overrides[i].impl) != 0)
             return -1;
     }
+    /* KERNEL32 exports are __stdcall: the callee pops the arguments.  With
+     * cdecl_abi=1 the thunk leaves argc dwords on the guest stack; the Warden
+     * module loader then pops its leftover FlushInstructionCache arguments and
+     * SEH cookie into edi/esi/ebx and dereferences the cookie. */
     for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
         if (wc3_legacy_hle_add("KERNEL32.dll", g_additions[i].name,
-                               (int)g_additions[i].argc, 1,
+                               (int)g_additions[i].argc, 0,
                                g_additions[i].impl) != 0)
             return -1;
     }

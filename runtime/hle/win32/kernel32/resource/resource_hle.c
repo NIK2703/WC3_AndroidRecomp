@@ -371,7 +371,7 @@ int wc3_hle_kernel32_resource_install(void)
 {
     for (unsigned i = 0; i < sizeof g_additions / sizeof g_additions[0]; i++) {
         if (wc3_legacy_hle_add("KERNEL32.dll", g_additions[i].name,
-                               (int)g_additions[i].argc, 1,
+                               (int)g_additions[i].argc, 0, /* __stdcall */
                                g_additions[i].impl) != 0)
             return -1;
     }
