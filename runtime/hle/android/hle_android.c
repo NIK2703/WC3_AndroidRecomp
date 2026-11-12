@@ -2634,6 +2634,8 @@ static uint32_t ev_new(int manual, int initial)
     return gh_new_sync();
 }
 
+#if WC3_DEBUG && WC3_DEBUG_HLE_SYNC
+/* Only the WC3_SYNC_TRACE probe classifies a handle by its object table. */
 static GEvent *ev_get(uint32_t h)
 {
     if (h < SYNC_MID || h >= SYNC_END) return NULL;
@@ -2641,6 +2643,7 @@ static GEvent *ev_get(uint32_t h)
     if (i >= EV_MAX || !g_events[i].used) return NULL;
     return &g_events[i];
 }
+#endif
 
 /*
  * A guest CloseHandle may race with another guest thread blocked in
@@ -2726,6 +2729,8 @@ typedef struct {
 static GMutex g_mutexes[MUTEX_MAX];
 static pthread_mutex_t g_mutex_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#if WC3_DEBUG && WC3_DEBUG_HLE_SYNC
+/* Only the WC3_SYNC_TRACE probe classifies a handle by its object table. */
 static GMutex *mutex_get(uint32_t h)
 {
     if (h < MUTEX_BASE || h >= MUTEX_END) return NULL;
@@ -2733,6 +2738,7 @@ static GMutex *mutex_get(uint32_t h)
     if (i >= MUTEX_MAX || !g_mutexes[i].used) return NULL;
     return &g_mutexes[i];
 }
+#endif
 
 /* Same lifetime rule as ev_ref: a waiter may still be inside the mutex when
  * CloseHandle arrives, so destroy only after the last reference leaves. */

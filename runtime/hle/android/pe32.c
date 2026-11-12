@@ -1,5 +1,6 @@
 /* Minimal PE32 mapper and import/export reader. */
 #include "host.h"
+#include "wc3_debug.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,8 +99,10 @@ int pe_load(const char *path, uint32_t preferred_base, pe_image *out, int allow_
     out->stamp = nt->FileHeader.TimeDateStamp;
     out->path = path;
     free(file);
+#if WC3_DEBUG && WC3_DEBUG_MEMORY
     fprintf(stderr, "[pe] %s -> %08X, entry %08X, span %X\n",
             path, base, out->entry, span);
+#endif
     return 0;
 }
 
@@ -264,6 +267,8 @@ int pe_bind_imports(const pe_image *img,
             *iat = va;
         }
     }
+#if WC3_DEBUG && WC3_DEBUG_MEMORY
     fprintf(stderr, "[pe] %s: bound %u imports, %u unresolved\n", img->path, bound, missing);
+#endif
     return (int)missing;
 }

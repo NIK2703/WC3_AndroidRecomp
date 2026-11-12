@@ -64,12 +64,10 @@ static void probe_own_path(pe_image *m, int index, const char *path)
     m->path = g_probe_mod_paths[index];
 }
 
-/* The `release-debug` profile is -O2 with WC3_RELEASE_DEBUG defined and
- * WC3_DEBUG left undefined, so the image still behaves like release.  These
- * diagnostics only observe the module table; they must not change a decision.
- * The feature name is WC3_RELEASE-DEBUG; the C identifier cannot contain a
- * hyphen, so the build defines WC3_RELEASE_DEBUG. */
-#ifdef WC3_RELEASE_DEBUG
+/* These diagnostics only observe the module table; they must not change a
+ * decision.  They are part of the boot probe, so the boot tag controls them
+ * even when the rest of the HLE is built release-like. */
+#if WC3_DEBUG && WC3_DEBUG_BOOT
 static int g_rdbg_mss_lookups;
 static int g_rdbg_ijl_lookups;
 
@@ -90,7 +88,7 @@ static void rdbg_dump_mods(const char *name, int *calls)
 
 static pe_image *probe_mod_by_name(const char *name)
 {
-#ifdef WC3_RELEASE_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     int rdbg_track = name && (!strcasecmp(name, "Mss32.dll") ||
                               !strcasecmp(name, "ijl15.dll"));
     if (rdbg_track)
@@ -103,7 +101,7 @@ static pe_image *probe_mod_by_name(const char *name)
         const char *leaf = strrchr(p, '/');
         leaf = leaf ? leaf + 1 : p;
         if (!strcasecmp(leaf, name)) {
-#ifdef WC3_RELEASE_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
             if (rdbg_track)
                 fprintf(stderr, "[rdbg] lookup %s -> idx=%d base=%08X "
                         "path=%p '%s'\n",
@@ -129,7 +127,7 @@ static uint32_t resolve_import(const char *dll, const char *name,
     if (m) {
         uint32_t va = name ? pe_export(m, name) : pe_export_ordinal(m, ordinal);
         if (va) {
-#ifdef WC3_RELEASE_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
             if (name && !strcasecmp(dll, "Mss32.dll") &&
                 strstr(name, "AIL_startup"))
                 fprintf(stderr, "[rdbg] export Mss32!%s -> %08X via base=%08X "
@@ -143,7 +141,7 @@ static uint32_t resolve_import(const char *dll, const char *name,
              * the real lifted export. */
             if (name && !strcasecmp(dll, "Mss32.dll") &&
                 strstr(name, "AIL_startup")) {
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
                 fprintf(stderr, "[mss] hooking AIL_startup real=%08X\n", va);
 #endif
                 return hle_mss_hook_ail_startup(va);
@@ -154,7 +152,7 @@ static uint32_t resolve_import(const char *dll, const char *name,
             }
             return va;
         }
-#ifdef WC3_RELEASE_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
         if (name && !strcasecmp(dll, "Mss32.dll") &&
             strstr(name, "AIL_startup"))
             fprintf(stderr, "[rdbg] export Mss32!%s -> MISS via base=%08X "
@@ -225,7 +223,7 @@ static void wc3_mss_after_d3d9(void *cpu_ptr)
     if (!g_mss_image || g_mss_entered)
         return;
     g_mss_entered = 1;
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     printf("android boot probe: calling deferred Mss32 entry %08X\n",
            g_mss_image->entry);
     fflush(stdout);
@@ -234,7 +232,7 @@ static void wc3_mss_after_d3d9(void *cpu_ptr)
     WC3_TRACE_BEGIN("wc3.dll.mss32");
     call_dll_entry(cpu, g_mss_image, 0x7EFFFFFDu, 0);
     WC3_TRACE_END();
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     printf("android boot probe: deferred Mss32 entry returned eax=%08X\n",
            cpu->eax);
     fflush(stdout);
@@ -402,7 +400,7 @@ static int probe_load_dll(const char *name, uint32_t *out_base, const void **out
         return -1;
     }
     probe_own_path(m, g_probe_mod_count, path);
-#ifdef WC3_RELEASE_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     fprintf(stderr, "[rdbg] dynamic %s loaded: path_buffer=%p '%s' "
             "image=%p base=%08X path_ptr=%p '%s'\n",
             name, (const void *)path, path, (const void *)m, m->base,
@@ -411,7 +409,7 @@ static int probe_load_dll(const char *name, uint32_t *out_base, const void **out
     int missing = pe_bind_imports(m, resolve_import, NULL);
     /* pe_load/pe_bind_imports already log the module; only the entry call and
      * the unresolved count are worth a second line. */
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     printf("[pe] %s: %d unresolved\n", path, missing);
     fflush(stdout);
 #else
@@ -426,12 +424,12 @@ static int probe_load_dll(const char *name, uint32_t *out_base, const void **out
     *out_img = m;
 
     if (g_cpu) {
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
         printf("android boot probe: calling %s DllMain %08X\n", name, m->entry);
         fflush(stdout);
 #endif
         call_dll_entry(g_cpu, m, 0x7EFFFFFDu, 0);
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
         printf("android boot probe: %s DllMain returned eax=%08X\n", name, g_cpu->eax);
         fflush(stdout);
 #endif
@@ -514,14 +512,14 @@ int wc3_boot_probe_main(int argc, char **argv)
         g_probe_mod_count++;
         pe_bind_imports(storm, resolve_import, NULL);
         hle_register_module("Storm.dll", storm->base, storm);
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
         printf("android boot probe: calling Storm entry %08X\n", storm->entry);
         fflush(stdout);
 #endif
         WC3_TRACE_BEGIN("wc3.dll.storm");
         call_dll_entry(&c, storm, 0x7EFFFFFEu, 1);
         WC3_TRACE_END();
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
         printf("android boot probe: Storm entry returned eax=%08X\n", c.eax);
         fflush(stdout);
 #endif
@@ -562,14 +560,14 @@ int wc3_boot_probe_main(int argc, char **argv)
                 g_probe_mod_count++;
                 int imiss = pe_bind_imports(m, resolve_import, NULL);
                 hle_register_module("ijl15.dll", m->base, m);
-#ifdef WC3_RELEASE_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
                 fprintf(stderr, "[rdbg] ijl15 loaded: path_buffer=%p '%s' "
                         "image=%p base=%08X path_ptr=%p '%s'\n",
                         (const void *)ijl_path, ijl_path, (const void *)m,
                         m->base, (const void *)m->path,
                         m->path ? m->path : "(null)");
 #endif
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
                 printf("android boot probe: ijl15 base=%08X entry=%08X "
                        "unresolved=%d\n", m->base, m->entry, imiss);
                 fflush(stdout);
@@ -587,7 +585,7 @@ int wc3_boot_probe_main(int argc, char **argv)
      * Android puts it at 0x35100000 (ART owns the PE ImageBase range), so the
      * loaded copy is relocated and the linked corpus was lifted at that base. */
     pe_image *mss = NULL;
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     if (want_game && !getenv("WC3_SKIP_MSS")) {
 #else
     if (want_game) {
@@ -606,14 +604,14 @@ int wc3_boot_probe_main(int argc, char **argv)
                 g_probe_mod_count++;
                 int mmiss = pe_bind_imports(m, resolve_import, NULL);
                 hle_register_module("Mss32.dll", m->base, m);
-#ifdef WC3_RELEASE_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
                 fprintf(stderr, "[rdbg] Mss32 loaded: path_buffer=%p '%s' "
                         "image=%p base=%08X path_ptr=%p '%s'\n",
                         (const void *)mss_path, mss_path, (const void *)m,
                         m->base, (const void *)m->path,
                         m->path ? m->path : "(null)");
 #endif
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
                 printf("android boot probe: Mss32 base=%08X entry=%08X "
                        "unresolved=%d\n", m->base, m->entry, mmiss);
                 fflush(stdout);
@@ -628,7 +626,7 @@ int wc3_boot_probe_main(int argc, char **argv)
     }
 
     int missing = pe_bind_imports(&img, resolve_import, &ctx);
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     printf("android boot probe: base=%08X entry=%08X stack=%08X fs=%08X "
            "unresolved=%d\n", img.base, img.entry, c.esp, c.fs_base, missing);
     fflush(stdout);
@@ -642,14 +640,14 @@ int wc3_boot_probe_main(int argc, char **argv)
      * used, and ijlInit dereferences that state - skipping it leaves the
      * decoder faulting inside the CRT rather than returning an error. */
     if (ijl) {
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
         printf("android boot probe: calling ijl15 entry %08X\n", ijl->entry);
         fflush(stdout);
 #endif
         WC3_TRACE_BEGIN("wc3.dll.ijl15");
         call_dll_entry(&c, ijl, 0x7EFFFFFDu, 1);
         WC3_TRACE_END();
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
         printf("android boot probe: ijl15 entry returned eax=%08X\n", c.eax);
         fflush(stdout);
 #endif
@@ -660,7 +658,7 @@ int wc3_boot_probe_main(int argc, char **argv)
      * (or, if Miles starts earlier, from the AIL_startup hook) so the
      * renderer exists before Miles touches the audio stack. */
     if (mss) {
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
         printf("android boot probe: Mss32 entry %08X deferred until first "
                "audio/renderer use\n", mss->entry);
         fflush(stdout);
@@ -670,19 +668,19 @@ int wc3_boot_probe_main(int argc, char **argv)
     /* The launcher's CRT entry point is cdecl: [esp] is its return address. */
     if (want_game) {
         hle_stop_on_game_dll(0);
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
         printf("android boot probe: WC3_LOAD_GAME=1, game.dll will be mapped\n");
 #endif
     }
     push32(&c, 0x7EFFFFFFu);
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     printf("android boot probe: entering %08X\n", img.entry);
     fflush(stdout);
 #endif
     WC3_TRACE_BEGIN("wc3.launcher.entry");
     dispatch(&c, img.entry);
     WC3_TRACE_END();
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     printf("android boot probe: entry returned eax=%08X esp=%08X eip=%08X\n",
            c.eax, c.esp, c.eip);
     fflush(stdout);
@@ -694,7 +692,7 @@ int wc3_boot_probe_main(int argc, char **argv)
      * about Direct3D at all.  WC3_WAIT_SEC keeps the harness alive after the
      * entry returns so those threads can reach the device; it is a wait, not a
      * hang: the harness still kills the run on its own timeout. */
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     const char *wait_s = getenv("WC3_WAIT_SEC");
     if (wait_s && *wait_s) {
         int secs = atoi(wait_s);
@@ -710,7 +708,7 @@ int wc3_boot_probe_main(int argc, char **argv)
     wc3_dispatch_shutdown();
 
     const int ok = hle_reached_game_dll();
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     printf(ok ? "android boot probe: PASS\n" : "android boot probe: entry returned early\n");
 #endif
     return ok ? 0 : 1;

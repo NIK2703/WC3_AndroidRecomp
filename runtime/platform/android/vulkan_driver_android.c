@@ -31,8 +31,8 @@ extern void *adrenotools_open_libvulkan(
 
 enum { ADRENOTOOLS_DRIVER_CUSTOM = 1 << 0 };
 
-#define DRV_LOG_TAG "GPU_DRIVERS"
 #if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
+#define DRV_LOG_TAG "GPU_DRIVERS"
 #define DRV_LOG(...) \
     __android_log_print(ANDROID_LOG_INFO, DRV_LOG_TAG, __VA_ARGS__)
 #else
@@ -226,13 +226,6 @@ static void log_missing_required_features(
                 storage8.storagePushConstant8);
     }
     DRV_LOG("required feature check missing=%u", missing);
-}
-#else
-static void log_missing_required_features(
-    VkPhysicalDevice device, PFN_vkGetPhysicalDeviceFeatures2 get_features2)
-{
-    (void)device;
-    (void)get_features2;
 }
 #endif
 

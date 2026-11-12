@@ -29,10 +29,6 @@
 #define MSS_TIMER_MAX         32u
 #define MSS_DISPATCH_RETURN   0x7EFFFFF1u
 
-/* Mss32.dll is corpus_fixed at 0x35100000. */
-#define MSS_IMAGE_BASE        0x35100000u
-#define MSS_IMAGE_LIMIT       0x35400000u
-
 typedef struct {
     int used;
     uint32_t hwnd, id, elapse, callback;
@@ -75,6 +71,10 @@ static uint32_t mss_now_ms(void)
 }
 
 #if WC3_DEBUG && WC3_DEBUG_AUDIO
+/* Mss32.dll is corpus_fixed at 0x35100000; only the mixer-callback probe
+ * needs these bounds. */
+#define MSS_IMAGE_BASE        0x35100000u
+#define MSS_IMAGE_LIMIT       0x35400000u
 #define MSS_LOG(...) do { \
     fprintf(stderr, "[mss] " __VA_ARGS__); \
     fputc('\n', stderr); \

@@ -1,5 +1,6 @@
 /* Fixed low-address guest mappings. See host.h. */
 #include "host.h"
+#include "wc3_debug.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -156,6 +157,7 @@ int guest_commit(uint32_t base, uint32_t size) {
  * (where the runtime has already placed something there), which is exactly the
  * difference that made the guest fail to start inside the APK. */
 void guest_describe_conflict(uint32_t base, uint32_t size) {
+#if WC3_DEBUG && WC3_DEBUG_MEMORY
     FILE *f = fopen("/proc/self/maps", "r");
     if (!f) return;
     char line[512];
@@ -167,6 +169,10 @@ void guest_describe_conflict(uint32_t base, uint32_t size) {
         fprintf(stderr, "[mem]   occupied: %s", line);
     }
     fclose(f);
+#else
+    (void)base;
+    (void)size;
+#endif
 }
 
 void *guest_map(uint32_t base, uint32_t size) {
