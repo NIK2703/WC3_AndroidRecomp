@@ -9,19 +9,21 @@ the target build.
 | Tree | Android/static patch | WC3 compatibility | Android debug | WC3 low-memory | Android pacing | Android present |
 |---|---|---|---|---|---|---|
 | `3.1.1/` | `dxvk-3.1.1-android.patch` (includes `dxvk-3.1.1-static.patch`) | `dxvk-3.1.1-wc3-d3d9.patch` | `dxvk-3.1.1-android-debug.patch` | `dxvk-3.1.1-lowmem-placed.patch` | `dxvk-3.1.1-android-pacing.patch` | `dxvk-3.1.1-android-present.patch` |
-| `1.10.3/` | `dxvk-1.10.3-android.patch` (includes `dxvk-1.10.3-static.patch`) | none | none | `dxvk-1.10.3-lowmem-placed.patch` | `dxvk-1.10.3-android-pacing.patch` | none |
+| `1.10.3/` | `dxvk-1.10.3-android.patch` (includes `dxvk-1.10.3-static.patch`) | none | none | `dxvk-1.10.3-lowmem-placed.patch` | `dxvk-1.10.3-android-pacing.patch` | `dxvk-1.10.3-android-present.patch` |
 
 The pacing snapshots are deltas on top of the already-patched vendored trees,
 not on the upstream revisions; they are not replayed by the build.  They make
 Android use an absolute `clock_nanosleep` deadline instead of DXVK's Windows
 busy-wait timer branch.  The rationale is in `../../VENDOR_PATCHES.md`.
 
-The present snapshot is also a delta on the already-patched 3.1.1 tree.  It
-keeps the swap chain when Android reports `VK_SUBOPTIMAL_KHR` from
+The present snapshots are deltas on the already-patched trees.  They keep the
+swap chain when Android reports `VK_SUBOPTIMAL_KHR` from
 `vkQueuePresentKHR`; that result means the frame was presented but the surface
-is not pre-rotated.  The unpatched presenter treats any non-`VK_SUCCESS` result
-as a reason to destroy and recreate every swap chain image, which at 60 FPS
-reallocates the whole buffer queue every frame.  The rationale is in
+is not pre-rotated.  In 3.1.1 the unpatched presenter treats any
+non-`VK_SUCCESS` result as a reason to destroy and recreate every swap chain
+image.  1.10.3's presenter already accepted the result, but its D3D9 layer
+still recreated the swap chain from `SynchronizePresent`.  Both paths now
+recreate only for a real error.  The rationale is in
 `../../VENDOR_PATCHES.md`.
 
 The Android patches add the Vulkan loader/WSI changes and the static-library

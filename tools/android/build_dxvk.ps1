@@ -220,12 +220,29 @@ if (-not (Select-String -LiteralPath $sleepHeader3 -SimpleMatch -Pattern 'define
 
 # Android's WSI reports VK_SUBOPTIMAL_KHR from vkQueuePresentKHR whenever the
 # swap chain is not pre-rotated.  DXVK 3.1.1 treated every non-success result
-# as dirty and recreated the whole swap chain per frame; 1.10.3 already keeps
-# it.  Fail early if a vendor refresh restores the 3.1.1 behaviour.
+# as dirty and recreated the whole swap chain per frame.  1.10.3's presenter
+# accepted the result, but its D3D9 layer still recreated the swap chain from
+# SynchronizePresent on the next frame.  Fail early if either path regresses.
 $presenter3 = Join-Path $dxvk3 'src\dxvk\dxvk_presenter.cpp'
 if (-not (Select-String -LiteralPath $presenter3 -SimpleMatch -Pattern 'if (m_acquireStatus < 0 || !m_swapchain)' -Quiet) -or
     -not (Select-String -LiteralPath $presenter3 -SimpleMatch -Pattern 'Presenter: VK_SUBOPTIMAL_KHR (surface is not pre-rotated), keeping swapchain' -Quiet)) {
     throw "DXVK 3.1.1 source does not contain the Android suboptimal-present patch"
+}
+
+# 3.1.1 has no D3D9-level present-status wait: DxvkDevice::presentImage is
+# void and the D3D9 swapchain only inspects acquireNextImage status.  A
+# SynchronizePresent-style check here would reintroduce the 1.10.3 bug, so
+# fail the vendor refresh if one appears.
+$swapchain3 = Join-Path $dxvk3 'src\d3d9\d3d9_swapchain.cpp'
+if ((Select-String -LiteralPath $swapchain3 -SimpleMatch -Pattern 'SynchronizePresent' -Quiet) -or
+    (Select-String -LiteralPath $swapchain3 -SimpleMatch -Pattern 'm_presentStatus' -Quiet)) {
+    throw "DXVK 3.1.1 D3D9 layer contains a present-status recreation check"
+}
+
+$swapchain1 = Join-Path $dxvk1 'src\d3d9\d3d9_swapchain.cpp'
+if (-not (Select-String -LiteralPath $swapchain1 -SimpleMatch -Pattern 'if (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR)' -Quiet) -or
+    -not (Select-String -LiteralPath $swapchain1 -SimpleMatch -Pattern 'the frame was displayed, so that result must not destroy' -Quiet)) {
+    throw "DXVK 1.10.3 source does not contain the Android suboptimal-present fix"
 }
 
 $buildRoot = Join-Path $root 'build\android\dxvk'

@@ -7,12 +7,12 @@ final link.
 
 | Path | Contents |
 |---|---|
-| `1.10.3/` | DXVK 1.10.3 source at `e4fd5e9` (tag `v1.10.3`) with the old tree's Android/static patches already applied |
-| `3.1.1/` | DXVK 3.1.1 source at `23b07e9` with the same Android/static patches, the WC3 D3D9 compatibility patch and the Android debug patch |
+| `1.10.3/` | DXVK 1.10.3 source at `e4fd5e9` (tag `v1.10.3`) with the old tree's Android/static patches plus the low-memory placed and Android present patches |
+| `3.1.1/` | DXVK 3.1.1 source at `23b07e9` with the same Android/static patches, the WC3 D3D9 compatibility patch, the Android debug/pacing/present patches and the low-memory placed patch |
 | `3.1.1/build-win64-ucrt/` | `compile_commands.json`, Meson-generated headers and `pnp-id-table.c`; the build recipe, not build output |
 | `1.10.3/build-win64-ucrt/` | the same recipe for the legacy backend |
 | `shim/` | the POSIX Win32 surface (`dxvk_shim/*.h` + `dxvk_win32.cpp`) used by both trees, the shared low-memory window, and the 1.10.3 Vulkan fallback header |
-| `patches/` | provenance snapshots of the upstream diffs, the WC3 compatibility and Android debug patches, and both WC3 low-memory placed mapping patches |
+| `patches/` | provenance snapshots of the upstream diffs, the WC3 compatibility and Android debug/pacing/present patches, and both WC3 low-memory placed mapping patches |
 | `VENDOR_COMMIT` | exact upstream and submodule revisions |
 
 The source trees are snapshots of the working trees used by the old build, so

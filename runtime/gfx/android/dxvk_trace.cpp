@@ -347,6 +347,7 @@ std::atomic<uint64_t> g_draw_count{0};
 std::atomic<uint64_t> g_clear_count{0};
 std::atomic<uint64_t> g_pass_count{0};
 std::atomic<uint32_t> g_current_image{0xFFFFFFFFu};
+std::atomic<uint32_t> g_suboptimal_log_count{0};
 
 std::atomic<uint32_t> g_draw_log_budget{8};
 std::atomic<uint32_t> g_pass_log_budget{16};
@@ -1667,7 +1668,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL trace_vkQueuePresentKHR(
         }
     }
 
-    if (frame < 5 || (frame % 300) == 0 || r != VK_SUCCESS ||
+    const bool present_failed = r < 0;
+
+    if (frame < 5 || (frame % 300) == 0 || present_failed ||
         (draws == 0 && clears == 0 && (frame % 60) == 0)) {
         trace_log("present #%llu result=%s image=%u/%u swapchain=%p "
                   "format=%d (%s) colorSpace=%d (%s) extent=%ux%u mode=%d (%s) "
@@ -1682,9 +1685,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL trace_vkQueuePresentKHR(
                   (unsigned long long)clears,
                   (unsigned long long)passes);
     }
-    if (r != VK_SUCCESS)
+    if (present_failed)
         trace_log("present failed: result=%s (surface/device lost or "
                   "out-of-date)", result_name(r));
+    else if (r == VK_SUBOPTIMAL_KHR &&
+             g_suboptimal_log_count.fetch_add(1) == 0)
+        trace_log("present suboptimal: result=%s (surface is not pre-rotated); "
+                  "frame was presented", result_name(r));
 
     g_acquire_count.store(0);
     g_submit_count.store(0);

@@ -72,8 +72,19 @@ revision, the patch snapshot and the reason.
     allocator.  Vulkan 1.3.217 headers lack both extensions, so
     `third_party/dxvk/shim/wc3_vulkan_lowmem.h` supplies the missing
     definitions.  `dxvk.lowMemoryPlaced` (default true) is the kill switch.
+  * `third_party/dxvk/patches/dxvk-1.10.3-android-present.patch` — treats
+    `VK_SUBOPTIMAL_KHR` as success in `D3D9SwapChainEx::SynchronizePresent`.
+    The 1.10.3 presenter already kept its swap chain after a suboptimal
+    present, but the D3D9 layer checked the previous present result and
+    recreated the swap chain on the next frame.  On a forced-1.10.3 session
+    with a landscape activity on a portrait-natural display, Android returned
+    `VK_SUBOPTIMAL_KHR` from every present because `preTransform` was
+    `IDENTITY` while `currentTransform` was `ROTATE_180`; the log showed a
+    destroy/create pair between every two presents.  Accepting the result is
+    correct per Vulkan: the frame was displayed, and only negative results
+    require a new swap chain.
 * No WC3 feature-requirement change; 1.10.3 remains the fallback path, now
-  also carrying the low-memory placed patch.
+  also carrying the low-memory placed and Android present patches.
 
 ## dxvk_win32 shim
 

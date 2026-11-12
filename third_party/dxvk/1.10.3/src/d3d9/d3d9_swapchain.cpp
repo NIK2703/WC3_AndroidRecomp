@@ -962,10 +962,13 @@ namespace dxvk {
 
 
   void D3D9SwapChainEx::SynchronizePresent() {
-    // Recreate swap chain if the previous present call failed
+    // Recreate the swap chain only for a real failure.  Android WSI returns
+    // VK_SUBOPTIMAL_KHR after a successful present while the surface is not
+    // pre-rotated; the frame was displayed, so that result must not destroy
+    // and recreate every swap-chain image on the next frame.
     VkResult status = m_device->waitForSubmission(&m_presentStatus);
 
-    if (status != VK_SUCCESS)
+    if (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR)
       RecreateSwapChain(m_vsync);
   }
 
