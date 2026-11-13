@@ -352,7 +352,11 @@ static int low_buffer_usable(void *ptr, uint32_t off, uint32_t size,
 /* ------------------------------------------------------------------ */
 
 #define THIN_SHADOW_MAX 4096
+#define THIN_SHADOW_BUCKETS 8192
 #define THIN_LOCK_STACK 4
+
+static_assert((THIN_SHADOW_BUCKETS & (THIN_SHADOW_BUCKETS - 1)) == 0,
+              "THIN_SHADOW_BUCKETS must be a power of two");
 
 struct ThinFrame {
     uint32_t off;      /* byte offset of the guest pointer inside staging */
@@ -390,22 +394,42 @@ struct ThinShadow {
     uint32_t dim_w, dim_h, dim_d;
     D3DFORMAT dim_fmt;
     int      dims_valid;
+    uint32_t hash_next;    /* 1-based index of the next shadow in bucket */
+    uint32_t hash_bucket;  /* bucket that owns this shadow */
     int      used;
 };
 
 static ThinShadow g_shadow[THIN_SHADOW_MAX];
+/* Bucket heads store index + 1 so the zero-initialized table is empty
+ * without a separate initialization pass.  A chain is walked through the
+ * 1-based hash_next links, with zero terminating it. */
+static uint32_t g_shadow_bucket[THIN_SHADOW_BUCKETS];
 static uint32_t g_shadow_hint;
+
+static inline uint32_t shadow_bucket_index(void *host, int kind, uint32_t sub)
+{
+    uint64_t h = (uint64_t)(uintptr_t)host;
+    h ^= (uint64_t)(uint32_t)kind * 0x9E3779B97F4A7C15ull;
+    h ^= (uint64_t)sub * 0xC2B2AE3D27D4EB4Full;
+    h ^= h >> 33;
+    h *= 0xFF51AFD7ED558CCDull;
+    h ^= h >> 33;
+    h *= 0xC4CEB9FE1A85EC53ull;
+    h ^= h >> 33;
+    return (uint32_t)h & (THIN_SHADOW_BUCKETS - 1u);
+}
 
 static ThinShadow *shadow_find(void *host, int kind, uint32_t sub, int create)
 {
-    for (int i = 0; i < THIN_SHADOW_MAX; i++) {
-        ThinShadow *s = &g_shadow[i];
-        if (!s->used) continue;
+    uint32_t bucket = shadow_bucket_index(host, kind, sub);
+    for (uint32_t link = g_shadow_bucket[bucket]; link;
+         link = g_shadow[link - 1u].hash_next) {
+        ThinShadow *s = &g_shadow[link - 1u];
         if (s->host == host && s->kind == kind && s->sub == sub) return s;
     }
     if (!create) return NULL;
-    for (int n = 0; n < THIN_SHADOW_MAX; n++) {
-        uint32_t i = (g_shadow_hint + (uint32_t)n) % THIN_SHADOW_MAX;
+    for (uint32_t n = 0; n < THIN_SHADOW_MAX; n++) {
+        uint32_t i = (g_shadow_hint + n) % THIN_SHADOW_MAX;
         if (!g_shadow[i].used) {
             g_shadow_hint = (i + 1u) % THIN_SHADOW_MAX;
             memset(&g_shadow[i], 0, sizeof g_shadow[i]);
@@ -413,11 +437,27 @@ static ThinShadow *shadow_find(void *host, int kind, uint32_t sub, int create)
             g_shadow[i].host = host;
             g_shadow[i].kind = kind;
             g_shadow[i].sub = sub;
+            g_shadow[i].hash_bucket = bucket;
+            g_shadow[i].hash_next = g_shadow_bucket[bucket];
+            g_shadow_bucket[bucket] = i + 1u;
             return &g_shadow[i];
         }
     }
     THIN_LOG("shadow table full");
     return NULL;
+}
+
+static void shadow_unlink(uint32_t index)
+{
+    ThinShadow *s = &g_shadow[index];
+    uint32_t *link = &g_shadow_bucket[s->hash_bucket];
+    while (*link) {
+        if (*link == index + 1u) {
+            *link = s->hash_next;
+            return;
+        }
+        link = &g_shadow[*link - 1u].hash_next;
+    }
 }
 
 static uint32_t format_bpp(D3DFORMAT fmt)
@@ -1023,9 +1063,10 @@ uint32_t thin_lock_buffer(CPU *c, ThinObj *o, uint32_t off, uint32_t size,
 void thin_lock_forget(void *host)
 {
     if (!host) return;
-    for (int i = 0; i < THIN_SHADOW_MAX; i++) {
+    for (uint32_t i = 0; i < THIN_SHADOW_MAX; i++) {
         ThinShadow *s = &g_shadow[i];
         if (!s->used || s->host != host) continue;
+        shadow_unlink(i);
         if (s->staging) low_free(s->staging, s->bytes);
         memset(s, 0, sizeof *s);
     }
@@ -1034,12 +1075,13 @@ void thin_lock_forget(void *host)
 void thin_lock_reset(void)
 {
     thin_lock_stats_dump("reset");
-    for (int i = 0; i < THIN_SHADOW_MAX; i++) {
+    for (uint32_t i = 0; i < THIN_SHADOW_MAX; i++) {
         ThinShadow *s = &g_shadow[i];
         if (!s->used) continue;
         if (s->staging) low_free(s->staging, s->bytes);
         memset(s, 0, sizeof *s);
     }
+    memset(g_shadow_bucket, 0, sizeof g_shadow_bucket);
     g_shadow_hint = 0;
 }
 
