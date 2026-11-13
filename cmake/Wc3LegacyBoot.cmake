@@ -48,6 +48,18 @@ if(WC3_RELIFTED_CORPUS_ROOT)
     if(NOT WC3_RELIFTED_PREFIXES)
         message(FATAL_ERROR "relifted corpus manifest has no dispatch prefixes")
     endif()
+    # ver-IX86-3.dll is downloaded at Battle.net login, but its DllMain and
+    # CheckRevision are lifted code.  A corpus built without the 0x354 module
+    # makes probe_load_dll call dispatch_unknown(0x3540287F) and abort the
+    # process.  The module used to be added out-of-band and was lost by a
+    # relift; fail configure instead of building a product that cannot log in
+    # (docs/VER_IX86_DLLMAIN_CRASH.md).
+    if(NOT "354" IN_LIST WC3_RELIFTED_PREFIXES)
+        message(FATAL_ERROR
+            "relifted corpus has no 354 prefix: ver-IX86-3 is missing from the "
+            "declared lift inputs. Add it to config/corpus.1.27b.json, relift, "
+            "and rebuild the corpus (docs/VER_IX86_DLLMAIN_CRASH.md).")
+    endif()
     message(STATUS "relifted corpus: ${_wc3_merged_entries} definitions, list sha256 ${_wc3_list_sha}")
 else()
     message(FATAL_ERROR
