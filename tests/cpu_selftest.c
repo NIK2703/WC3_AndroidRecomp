@@ -53,7 +53,7 @@ static void eq(const char *what, uint32_t got, uint32_t want)
     }
 }
 
-static x87_ext ext_bits(uint64_t bits)
+static double ext_bits(uint64_t bits)
 {
     return x87_from_f64(x87_from_bits(bits));
 }
@@ -133,6 +133,26 @@ int main(void)
     eq("shrd F0F0F0F0 <- 0F0F0F0F, 4",
        op_shrd(&c, 0xF0F0F0F0u, 0x0F0F0F0Fu, 4, 4), 0xFF0F0F0Fu);
     eq("shld by 0 is identity", op_shld(&c, 0xAAAAAAAAu, 0u, 0, 4), 0xAAAAAAAAu);
+
+    /* shifts with count >= width: result 0 (shl/shr) or sign-replicated (sar),
+     * CF undefined (we pin it to 0). 8/16-bit operands used to index a
+     * negative C shift here; the guard is what keeps this defined. */
+    eq("shl 8-bit by 8 -> 0", op_shl(&c, 0x12u, 8, 1), 0x00u);
+    eq("shl 8-bit by 9 -> 0", op_shl(&c, 0x12u, 9, 1), 0x00u);
+    eq("shl 16-bit by 16 -> 0", op_shl(&c, 0x1234u, 16, 2), 0x0000u);
+    eq("shl 16-bit by 17 -> 0", op_shl(&c, 0x1234u, 17, 2), 0x0000u);
+    eq("shr 8-bit by 8 -> 0", op_shr(&c, 0x80u, 8, 1), 0x00u);
+    eq("shr 16-bit by 16 -> 0", op_shr(&c, 0x8000u, 16, 2), 0x0000u);
+    eq("sar 8-bit by 8 negative -> FF", op_sar(&c, 0x80u, 8, 1), 0xFFu);
+    eq("sar 8-bit by 8 positive -> 0", op_sar(&c, 0x7Fu, 8, 1), 0x00u);
+    eq("sar 16-bit by 20 negative -> FFFF", op_sar(&c, 0x8000u, 20, 2), 0xFFFFu);
+    eq("shl by 8 sets ZF/SF/PF", (op_shl(&c, 0x12u, 8, 1), c.zf), 1u);
+    eq("shl by 8 clears SF", c.sf, 0u);
+    eq("shl by 8 sets PF", c.pf, 1u);
+    eq("sar by 8 negative sets SF", (op_sar(&c, 0x80u, 8, 1), c.sf), 1u);
+    eq("shl 8-bit by 7 -> 0 (CF 0)", op_shl(&c, 0x80u, 7, 1), 0x00u);
+    eq("shr 8-bit by 7 -> 1", op_shr(&c, 0x80u, 7, 1), 0x01u);
+    eq("sar 8-bit by 7 -> FF", op_sar(&c, 0x80u, 7, 1), 0xFFu);
 
     /* bit scans. The flag is the whole interface - ZF says whether there was
      * a set bit at all - and with a zero source the destination is
@@ -274,9 +294,9 @@ int main(void)
      * the ordered answers makes a game take the wrong branch exactly when a
      * value has already gone wrong. The status-word bits are C3|C2|C0 of a
      * 0x4700 mask; the EFLAGS mapping is not the integer one. */
-    x87_ext one80 = x87_from_i32(1);
-    x87_ext two80 = x87_from_i32(2);
-    x87_ext nan80 = x87_div(&c, x87_zero(), x87_zero());
+    double one80 = x87_from_i32(1);
+    double two80 = x87_from_i32(2);
+    double nan80 = x87_div(&c, x87_zero(), x87_zero());
     x87_compare(&c, two80, one80, 1);  eq("fcom greater  -> sw", c.fpu_sw & 0x4700u, 0x0000u);
     x87_compare(&c, one80, two80, 1);  eq("fcom less     -> C0", c.fpu_sw & 0x4700u, 0x0100u);
     x87_compare(&c, one80, one80, 1);  eq("fcom equal    -> C3", c.fpu_sw & 0x4700u, 0x4000u);
@@ -295,11 +315,11 @@ int main(void)
 
     /* ---- native x87 semantics ---- */
     {
-        x87_ext qnan = ext_bits(UINT64_C(0x7FF8000000000000));
-        x87_ext snan = ext_bits(UINT64_C(0x7FF0000000000001));
-        x87_ext inf  = ext_bits(UINT64_C(0x7FF0000000000000));
-        x87_ext ninf = ext_bits(UINT64_C(0xFFF0000000000000));
-        x87_ext r;
+        double qnan = ext_bits(UINT64_C(0x7FF8000000000000));
+        double snan = ext_bits(UINT64_C(0x7FF0000000000001));
+        double inf  = ext_bits(UINT64_C(0x7FF0000000000000));
+        double ninf = ext_bits(UINT64_C(0xFFF0000000000000));
+        double r;
 
         c.fpu_sw = 0;
         (void)x87_add(&c, qnan, one80);
@@ -310,26 +330,26 @@ int main(void)
         c.fpu_sw = 0;
         r = x87_add(&c, inf, ninf);
         eq("inf + -inf raises IE", c.fpu_sw & X87_IE, X87_IE);
-        eq("inf + -inf is NaN", x87_is_nan_bits(x87_bits(r.v.d)), 1u);
+        eq("inf + -inf is NaN", x87_is_nan_bits(x87_bits(r)), 1u);
         c.fpu_sw = 0;
         r = x87_mul(&c, x87_zero(), inf);
         eq("0 * inf raises IE", c.fpu_sw & X87_IE, X87_IE);
-        eq("0 * inf is NaN", x87_is_nan_bits(x87_bits(r.v.d)), 1u);
+        eq("0 * inf is NaN", x87_is_nan_bits(x87_bits(r)), 1u);
         c.fpu_sw = 0;
         r = x87_div(&c, x87_zero(), x87_zero());
         eq("0 / 0 raises IE", c.fpu_sw & X87_IE, X87_IE);
-        eq("0 / 0 is NaN", x87_is_nan_bits(x87_bits(r.v.d)), 1u);
+        eq("0 / 0 is NaN", x87_is_nan_bits(x87_bits(r)), 1u);
         c.fpu_sw = 0;
         r = x87_div(&c, one80, x87_zero());
         eq("1 / 0 keeps IE clear", c.fpu_sw & X87_IE, 0u);
-        eq("1 / 0 is Inf", x87_is_inf_bits(x87_bits(r.v.d)), 1u);
+        eq("1 / 0 is Inf", x87_is_inf_bits(x87_bits(r)), 1u);
         c.fpu_sw = 0;
         r = x87_sqrt(&c, x87_from_i32(-1));
         eq("sqrt(-1) raises IE", c.fpu_sw & X87_IE, X87_IE);
-        eq("sqrt(-1) is NaN", x87_is_nan_bits(x87_bits(r.v.d)), 1u);
+        eq("sqrt(-1) is NaN", x87_is_nan_bits(x87_bits(r)), 1u);
         c.fpu_sw = 0;
         r = x87_fprem1(&c, x87_from_i32(5), x87_from_i32(2));
-        eqd("fprem1 5,2", r.v.d, 1.0);
+        eqd("fprem1 5,2", r, 1.0);
         (void)x87_fprem1(&c, x87_from_i32(5), x87_zero());
         eq("fprem1 x,0 raises IE", c.fpu_sw & X87_IE, X87_IE);
 
@@ -340,27 +360,27 @@ int main(void)
         x87_fscale(&c);
         eq("fscale qnan keeps IE clear", c.fpu_sw & X87_IE, 0u);
         eq("fscale qnan result is NaN",
-           x87_is_nan_bits(x87_bits(fst(&c, 0)->v.d)), 1u);
+           x87_is_nan_bits(x87_bits(*fst(&c, 0))), 1u);
         cpu_x87_init(&c);
         fpush(&c, ext_bits(UINT64_C(0x7FF0000000000123)));
         fpush(&c, x87_from_i32(2));
         x87_fscale(&c);
         eq("fscale snan raises IE", c.fpu_sw & X87_IE, X87_IE);
         eq("fscale snan result is quiet",
-           x87_is_snan_bits(x87_bits(fst(&c, 0)->v.d)), 0u);
+           x87_is_snan_bits(x87_bits(*fst(&c, 0))), 0u);
 
         cpu_x87_init(&c);
         fpush(&c, x87_from_i32(8));
         x87_fxtract(&c);
         eq("fxtract 8 keeps IE clear", c.fpu_sw & X87_IE, 0u);
-        eqd("fxtract 8 significand", fst(&c, 0)->v.d, 1.0);
-        eqd("fxtract 8 exponent", fst(&c, 1)->v.d, 3.0);
+        eqd("fxtract 8 significand", *fst(&c, 0), 1.0);
+        eqd("fxtract 8 exponent", *fst(&c, 1), 3.0);
         cpu_x87_init(&c);
         fpush(&c, x87_zero());
         x87_fxtract(&c);
         eq("fxtract 0 keeps IE clear", c.fpu_sw & X87_IE, 0u);
-        eqd("fxtract 0 significand", fst(&c, 0)->v.d, 0.0);
-        eqd("fxtract 0 exponent", fst(&c, 1)->v.d, -INFINITY);
+        eqd("fxtract 0 significand", *fst(&c, 0), 0.0);
+        eqd("fxtract 0 exponent", *fst(&c, 1), -INFINITY);
 
         cpu_x87_init(&c);
         fpush(&c, one80);
@@ -374,9 +394,9 @@ int main(void)
 
         eq("x87 slot is 16 bytes", (uint32_t)sizeof(x87_ext), 16u);
         eq("CPU x87 stack is 128 bytes", (uint32_t)sizeof c.st, 128u);
-        c.st[0] = one80;
+        c.st[0].v.d = one80;
         eq("mm aliases x87 low word", (uint32_t)(*mm_get(&c, 0) ==
-                                                 x87_bits(one80.v.d)), 1u);
+                                                 x87_bits(one80)), 1u);
         mmx_emms(&c);
         c.fpu_cw = 0;
         cpu_x87_init(&c);
@@ -411,13 +431,13 @@ int main(void)
         for (k = 0; k < sizeof(x87) / sizeof(x87[0]); k++) {
             memcpy(buf,     &x87[k].sig, 8);
             memcpy(buf + 8, &x87[k].se,  2);
-            x87_ext v = x87_ld_f80((uint32_t)(uintptr_t)buf);
-            eqd("fld tbyte -> double", v.v.d, x87[k].want);
+            double v = x87_ld_f80((uint32_t)(uintptr_t)buf);
+            eqd("fld tbyte -> double", v, x87[k].want);
 
             memset(buf, 0xCC, 16);
             x87_st_f80((uint32_t)(uintptr_t)buf, v);
-            x87_ext back = x87_ld_f80((uint32_t)(uintptr_t)buf);
-            eqd("f80 round-trip double", back.v.d, v.v.d);
+            double back = x87_ld_f80((uint32_t)(uintptr_t)buf);
+            eqd("f80 round-trip double", back, v);
         }
 
         /* low 11 bits of the source significand are not preserved */
@@ -427,7 +447,7 @@ int main(void)
             uint64_t stored;
             memcpy(buf, &sig, 8);
             memcpy(buf + 8, &se, 2);
-            x87_ext v = x87_ld_f80((uint32_t)(uintptr_t)buf);
+            double v = x87_ld_f80((uint32_t)(uintptr_t)buf);
             memset(buf, 0xCC, 16);
             x87_st_f80((uint32_t)(uintptr_t)buf, v);
             memcpy(&stored, buf, 8);
@@ -454,11 +474,11 @@ int main(void)
         /* packed BCD uses its own integer codec */
         {
             unsigned char *bcd = buf;
-            x87_ext v;
+            double v;
             memset(bcd, 0, 10);
             bcd[0] = 0x23; bcd[1] = 0x01;   /* 123 */
             v = x87_ld_bcd(&c, (uint32_t)(uintptr_t)bcd);
-            eqd("fbld 123", v.v.d, 123.0);
+            eqd("fbld 123", v, 123.0);
             memset(bcd, 0, 10);
             x87_st_bcd(&c, (uint32_t)(uintptr_t)bcd, v);
             eq("fbstp low digit pair", bcd[0], 0x23u);
@@ -473,7 +493,7 @@ int main(void)
             c.fpu_sw = 0;
             v = x87_ld_bcd(&c, (uint32_t)(uintptr_t)bcd);
             eq("fbld invalid digits keep IE clear", c.fpu_sw & X87_IE, 0u);
-            eqd("fbld masks invalid digits", v.v.d, 111.0);
+            eqd("fbld masks invalid digits", v, 111.0);
             c.fpu_sw = 0;
             memset(bcd, 0, 10);
             x87_st_bcd(&c, (uint32_t)(uintptr_t)bcd, x87_from_f64(INFINITY));
@@ -524,7 +544,7 @@ int main(void)
             eq("fnsave clears tags", c.fpu_tag, 0xFFFFu);
             x87_frstor(&c, (uint32_t)(uintptr_t)buf);
             eq("frstor restores cw", c.fpu_cw, 0x037Fu);
-            eqd("frstor restores st0", fst(&c, 0)->v.d, 1.25);
+            eqd("frstor restores st0", *fst(&c, 0), 1.25);
         }
 
         unmap_low(buf, 4096);

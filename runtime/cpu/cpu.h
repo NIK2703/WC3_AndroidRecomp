@@ -349,6 +349,53 @@ static inline uint64_t atomic_cmpxchg64_aligned(uint32_t a, uint64_t cmp, uint64
 }
 #endif
 
+/* The remaining locked RMW forms. x86 LOCK is valid on ADD/ADC/AND/BTC/BTR/
+ * BTS/CMPXCHG/CMPXCHG8B/DEC/INC/NEG/NOT/OR/SBB/SUB/XADD/XCHG/XOR; the lifter
+ * covers the dword memory forms. `lock sub` uses fetch-sub; `lock adc/sbb`
+ * fold the carry into the value; `lock bts/btr/btc` use fetch-or/and/xor with
+ * a bit mask; `lock not` is xor with all ones; `lock neg` is a CAS loop. */
+#if defined(_MSC_VER)
+static inline uint32_t atomic_sub32(uint32_t a, uint32_t v) {
+    return (uint32_t)_InterlockedExchangeAdd((volatile long *)(uintptr_t)a, -(long)v);
+}
+static inline uint32_t atomic_and32(uint32_t a, uint32_t v) {
+    return (uint32_t)_InterlockedAnd((volatile long *)(uintptr_t)a, (long)v);
+}
+static inline uint32_t atomic_or32(uint32_t a, uint32_t v) {
+    return (uint32_t)_InterlockedOr((volatile long *)(uintptr_t)a, (long)v);
+}
+static inline uint32_t atomic_xor32(uint32_t a, uint32_t v) {
+    return (uint32_t)_InterlockedXor((volatile long *)(uintptr_t)a, (long)v);
+}
+static inline uint32_t atomic_neg32(uint32_t a) {
+    uint32_t old = rd32(a);
+    while ((uint32_t)_InterlockedCompareExchange((volatile long *)(uintptr_t)a,
+                                                 (long)(0u - old), (long)old) != old)
+        old = rd32(a);
+    return old;
+}
+#else
+static inline uint32_t atomic_sub32(uint32_t a, uint32_t v) {
+    return __sync_fetch_and_sub((volatile uint32_t *)(uintptr_t)a, v);
+}
+static inline uint32_t atomic_and32(uint32_t a, uint32_t v) {
+    return __sync_fetch_and_and((volatile uint32_t *)(uintptr_t)a, v);
+}
+static inline uint32_t atomic_or32(uint32_t a, uint32_t v) {
+    return __sync_fetch_and_or((volatile uint32_t *)(uintptr_t)a, v);
+}
+static inline uint32_t atomic_xor32(uint32_t a, uint32_t v) {
+    return __sync_fetch_and_xor((volatile uint32_t *)(uintptr_t)a, v);
+}
+static inline uint32_t atomic_neg32(uint32_t a) {
+    uint32_t old = rd32(a);
+    while (__sync_val_compare_and_swap((volatile uint32_t *)(uintptr_t)a, old,
+                                       0u - old) != old)
+        old = rd32(a);
+    return old;
+}
+#endif
+
 /* cmpxchg8b allows an unaligned operand. The host's 64-bit CAS may fault on
  * one; use the compiler/runtime atomic primitive instead of a project-owned
  * spinlock.  On x86 this is a locked cmpxchg8b; on ARM64 the compiler may route
@@ -523,18 +570,35 @@ static inline uint32_t flags_sbb(CPU *c, uint32_t a, uint32_t b, int sz) {
 
 static inline uint32_t op_shl(CPU *c, uint32_t v, uint32_t cnt, int sz) {
     uint32_t m = mask_sz(sz); cnt &= 31; if (!cnt) return v & m;
-    c->cf = (v >> (sz * 8 - cnt)) & 1; uint32_t r = (v << cnt) & m;
+    uint32_t w = (uint32_t)sz * 8u;
+    if (cnt >= w) {                 /* count >= width: result 0, CF undefined */
+        c->cf = 0; uint32_t r = 0;
+        c->zf = 1; c->sf = 0; WC3_SET_PF(c, parity8((uint8_t)r)); return r;
+    }
+    c->cf = (v >> (w - cnt)) & 1; uint32_t r = (v << cnt) & m;
     c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 static inline uint32_t op_shr(CPU *c, uint32_t v, uint32_t cnt, int sz) {
     uint32_t m = mask_sz(sz); v &= m; cnt &= 31; if (!cnt) return v;
+    uint32_t w = (uint32_t)sz * 8u;
+    if (cnt >= w) {                 /* count >= width: result 0, CF undefined */
+        c->cf = 0; uint32_t r = 0;
+        c->zf = 1; c->sf = 0; WC3_SET_PF(c, parity8((uint8_t)r)); return r;
+    }
     c->cf = (v >> (cnt - 1)) & 1; uint32_t r = v >> cnt;
     c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 static inline uint32_t op_sar(CPU *c, uint32_t v, uint32_t cnt, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz); v &= m; cnt &= 31; if (!cnt) return v;
-    uint32_t ext = (v & s) ? (m << (sz * 8 - cnt)) & m : 0;
-    c->cf = (v >> (cnt - 1)) & 1; uint32_t r = ((v >> cnt) | ext) & m;
+    uint32_t w = (uint32_t)sz * 8u, r;
+    if (cnt >= w) {                 /* count >= width: sign-replicated, CF undefined */
+        c->cf = 0;
+        r = (v & s) ? m : 0;
+    } else {
+        uint32_t ext = (v & s) ? (m << (w - cnt)) & m : 0;
+        c->cf = (v >> (cnt - 1)) & 1;
+        r = ((v >> cnt) | ext) & m;
+    }
     c->zf = (r == 0); c->sf = (r & s) != 0; WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
 

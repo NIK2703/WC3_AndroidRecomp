@@ -102,18 +102,62 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
                                 "flags_add(c, _old, %s, 4); }", a, v, v));
             return e;
         }
+        if (!strcmp(m, "sub") && nops > 1) {
+            char *v = lf_src(L, insn, OP(insn, 1));
+            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_sub32(%s, %s); "
+                                "flags_sub(c, _old, %s, 4); }", a, v, v));
+            return e;
+        }
+        if ((!strcmp(m, "and") || !strcmp(m, "or") || !strcmp(m, "xor")) && nops > 1) {
+            char *v = lf_src(L, insn, OP(insn, 1));
+            const char *op = !strcmp(m, "and") ? "&" : !strcmp(m, "or") ? "|" : "^";
+            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_%s32(%s, %s); "
+                                "flags_logicz(c, _old %s %s, 4); }", m, a, v, op, v));
+            return e;
+        }
+        if ((!strcmp(m, "adc") || !strcmp(m, "sbb")) && nops > 1) {
+            char *v = lf_src(L, insn, OP(insn, 1));
+            lf_push(&e, lf_afmt("{ uint32_t _old = %s(%s, %s + c->cf); "
+                                "flags_%s(c, _old, %s, 4); }",
+                                !strcmp(m, "adc") ? "atomic_xadd32" : "atomic_sub32",
+                                a, v, m, v));
+            return e;
+        }
+        if (!strcmp(m, "neg")) {
+            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_neg32(%s); "
+                                "flags_sub(c, 0, _old, 4); }", a));
+            return e;
+        }
+        if (!strcmp(m, "not")) {
+            lf_push(&e, lf_afmt("atomic_xor32(%s, 0xFFFFFFFFu);", a));
+            return e;
+        }
     }
 
     /* ---- bit test ---- */
     if (LST(m, "bt", "bts", "btr", "btc")) {
         int opnum = !strcmp(m, "bt") ? 0 : !strcmp(m, "bts") ? 1 : !strcmp(m, "btr") ? 2 : 3;
         char *idx = lf_src(L, insn, OP(insn, 1));
-        if (OP(insn, 0)->type == X86_OP_MEM)
-            lf_push(&e, lf_afmt("bit_string_op(c, %s, (int32_t)(%s), %d);",
-                                lf_addr_expr(L, insn, OP(insn, 0)), idx, opnum));
-        else
-            lf_push(&e, lf_afmt("bit_reg_op(c, &c->%s, %s, %d);",
-                                lf_reg_name(L, (unsigned)OP(insn, 0)->reg), idx, opnum));
+        if (OP(insn, 0)->type == X86_OP_MEM) {
+            if (locked && OP(insn, 0)->size == 4 && strcmp(m, "bt") != 0) {
+                const char *fn = !strcmp(m, "bts") ? "atomic_or32" :
+                                 !strcmp(m, "btr") ? "atomic_and32" : "atomic_xor32";
+                const char *arg = !strcmp(m, "btr") ? "(~_m)" : "_m";
+                lf_push(&e, lf_afmt("{ uint32_t _a = (%s) + 4u * (uint32_t)((int32_t)(%s) >> 5); "
+                                    "uint32_t _m = 1u << ((int32_t)(%s) & 31); "
+                                    "uint32_t _old = %s(_a, %s); "
+                                    "c->cf = (_old >> ((int32_t)(%s) & 31)) & 1; }",
+                                    lf_addr_expr(L, insn, OP(insn, 0)), idx, idx, fn, arg, idx));
+            } else {
+                lf_push(&e, lf_afmt("bit_string_op(c, %s, (int32_t)(%s), %d);",
+                                    lf_addr_expr(L, insn, OP(insn, 0)), idx, opnum));
+            }
+        } else {
+            lf_push(&e, lf_dst_write(L, insn, OP(insn, 0),
+                    lf_afmt("op_bittest(c, %s, %s, %d, %d)",
+                            lf_read_dst(L, insn, OP(insn, 0)), idx,
+                            (int)OP(insn, 0)->size, opnum)));
+        }
         return e;
     }
 
@@ -485,10 +529,26 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
             rfn = esz == 1 ? "rd8" : esz == 2 ? "rd16" : "rd32";
             ar  = esz == 1 ? "R8L(c->eax)" : esz == 2 ? "R16(c->eax)" : "c->eax";
             if (!strncmp(base, "stos", 4)) {
+                if (rep && esz == 1) {
+                    lf_push(&e, lf_afmt("if (c->ecx) { memset((void *)(uintptr_t)c->edi, "
+                                        "(int)(uint8_t)(%s), (size_t)c->ecx); "
+                                        "c->edi += c->ecx; c->ecx = 0; }", ar));
+                    return e;
+                }
                 lf_push(&e, lf_afmt("%s(c->edi, %s); c->edi += %d;", wfn, ar, esz));
             } else if (!strncmp(base, "movs", 4)) {
-                lf_push(&e, lf_afmt("%s(c->edi, %s(c->esi)); c->esi += %d; c->edi += %d;",
-                                    wfn, rfn, esz, esz));
+                char *body = lf_afmt("%s(c->edi, %s(c->esi)); c->esi += %d; c->edi += %d;",
+                                     wfn, rfn, esz, esz);
+                if (rep) {
+                    lf_push(&e, lf_afmt("if (c->ecx) { uint64_t _n = (uint64_t)c->ecx * %dull; "
+                                        "if (c->esi + _n <= c->edi || c->edi + _n <= c->esi) "
+                                        "memcpy((void *)(uintptr_t)c->edi, (void *)(uintptr_t)c->esi, (size_t)_n); "
+                                        "else while (c->ecx) { %s c->ecx--; } "
+                                        "c->esi += (uint32_t)_n; c->edi += (uint32_t)_n; c->ecx = 0; }",
+                                        esz, body));
+                    return e;
+                }
+                lf_push(&e, body);
             } else if (!strncmp(base, "lods", 4)) {
                 if (esz == 1) lf_push(&e, lf_afmt("SET8L(c->eax,%s(c->esi)); c->esi += %d;", rfn, esz));
                 else if (esz == 2) lf_push(&e, lf_afmt("SET16(c->eax,%s(c->esi)); c->esi += %d;", rfn, esz));
@@ -581,14 +641,15 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
                     for (a = 0; a < L->jt[k].n; a++)
                         if (!n || seen[n - 1] != tmp[a]) seen[n++] = tmp[a];
                 }
+                lf_push(&e, "  switch (_jt) {");
                 for (j = 0; j < n; j++) {
                     if (label_has(labels, nlabels, seen[j]))
-                        lf_push(&e, lf_afmt("  if (_jt == GVA(0x%08X)) goto L_%08X;", seen[j], seen[j]));
+                        lf_push(&e, lf_afmt("  case GVA(0x%08X): goto L_%08X;", seen[j], seen[j]));
                     else
-                        lf_push(&e, lf_afmt("  if (_jt == GVA(0x%08X)) { dispatch_jmp(c, 0x%08Xu); return; }",
+                        lf_push(&e, lf_afmt("  case GVA(0x%08X): { dispatch_jmp(c, 0x%08Xu); return; }",
                                             seen[j], seen[j]));
                 }
-                lf_push(&e, "  dispatch_jmp(c, _jt); return; }");
+                lf_push(&e, "  default: dispatch_jmp(c, _jt); return; }");
                 return e;
             }
         }

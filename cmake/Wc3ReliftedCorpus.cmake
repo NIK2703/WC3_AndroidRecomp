@@ -445,6 +445,11 @@ target_compile_options(wc3_corpus_relifted PRIVATE
     -fno-strict-aliasing
     -fwrapv
     -ffp-contract=off
+    # SLP/vectorization reassociates FP: the x87 model is double-valued and
+    # must stay bit-exact (E4). Keep it off until a per-module FP/integer split
+    # is measured (A.16/PM-23).
+    -fno-vectorize
+    -fno-slp-vectorize
     -Wno-unused-parameter
     -Wno-sign-compare
     -Wno-parentheses-equality)

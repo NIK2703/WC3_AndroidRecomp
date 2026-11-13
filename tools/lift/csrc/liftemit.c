@@ -261,7 +261,7 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
     if (!strcmp(m, "fyl2xp1")) { lf_push(&e, "*fst(c, 1) = x87_fyl2xp1(c, *fst(c, 0), *fst(c, 1)); fpop(c);"); return e; }
     if (!strcmp(m, "f2xm1")) { lf_push(&e, "*fst(c, 0) = x87_f2xm1(c, *fst(c, 0));"); return e; }
     if (!strcmp(m, "fsincos")) {
-        lf_push(&e, "{ x87_ext _x = *fst(c, 0); *fst(c, 0) = x87_fsin(c, _x); fpush(c, x87_fcos(c, _x)); }");
+        lf_push(&e, "{ double _x = *fst(c, 0); *fst(c, 0) = x87_fsin(c, _x); fpush(c, x87_fcos(c, _x)); }");
         return e;
     }
 

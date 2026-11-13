@@ -12,7 +12,7 @@
  * deviations are recorded in docs/ADR.md (ADR-037) and docs/EXACTNESS.md E4.1.
  *
  * The generated code calls only the helpers below.  Keep that boundary:
- * generated C uses x87_ext, fst/fpush/fpop and these helpers, never the union
+ * generated C uses double, fst/fpush/fpop and these helpers, never the union
  * members directly.
  */
 #ifndef PCRECOMP_X87_H
@@ -159,29 +159,28 @@ static inline double x87_f80_to_d(uint64_t sig, uint16_t se) {
     }
 }
 
-static inline x87_ext x87_from_f64(double d) {
-    x87_ext v;
-    v.v.d = d;
-    v.reserved = 0;
+static inline double x87_from_f64(double d) {
+    double v;
+    v = d;
     return v;
 }
-static inline x87_ext x87_indefinite(void) {
+static inline double x87_indefinite(void) {
     return x87_from_f64(x87_from_bits(UINT64_C(0xFFF8000000000000)));
 }
 
 /* ---- constants ---------------------------------------------------------- */
 
-static inline x87_ext x87_zero(void) { return x87_from_f64(0.0); }
-static inline x87_ext x87_one(void)  { return x87_from_f64(1.0); }
-static inline x87_ext x87_pi(void)   { return x87_from_f64(0x1.921fb54442d18p+1); }
-static inline x87_ext x87_l2e(void)  { return x87_from_f64(0x1.71547652b82fep+0); }
-static inline x87_ext x87_l2t(void)  { return x87_from_f64(0x1.a934f0979a371p+1); }
-static inline x87_ext x87_lg2(void)  { return x87_from_f64(0x1.34413509f79ffp-2); }
-static inline x87_ext x87_ln2(void)  { return x87_from_f64(0x1.62e42fefa39efp-1); }
+static inline double x87_zero(void) { return x87_from_f64(0.0); }
+static inline double x87_one(void)  { return x87_from_f64(1.0); }
+static inline double x87_pi(void)   { return x87_from_f64(0x1.921fb54442d18p+1); }
+static inline double x87_l2e(void)  { return x87_from_f64(0x1.71547652b82fep+0); }
+static inline double x87_l2t(void)  { return x87_from_f64(0x1.a934f0979a371p+1); }
+static inline double x87_lg2(void)  { return x87_from_f64(0x1.34413509f79ffp-2); }
+static inline double x87_ln2(void)  { return x87_from_f64(0x1.62e42fefa39efp-1); }
 
-static inline x87_ext x87_from_i16(int16_t i) { return x87_from_f64((double)i); }
-static inline x87_ext x87_from_i32(int32_t i) { return x87_from_f64((double)i); }
-static inline x87_ext x87_from_i64(int64_t i) { return x87_from_f64((double)i); }
+static inline double x87_from_i16(int16_t i) { return x87_from_f64((double)i); }
+static inline double x87_from_i32(int32_t i) { return x87_from_f64((double)i); }
+static inline double x87_from_i64(int64_t i) { return x87_from_f64((double)i); }
 
 /* ---- control/status ----------------------------------------------------- */
 
@@ -224,8 +223,8 @@ static inline void x87_set_tag(CPU *c, int p, uint16_t t) {
     c->fpu_tag = (uint16_t)((c->fpu_tag & ~(3u << (p * 2)))
                           | ((t & 3u) << (p * 2)));
 }
-static inline uint16_t x87_tag_for(x87_ext v) {
-    const uint64_t b = x87_bits(v.v.d);
+static inline uint16_t x87_tag_for(double v) {
+    const uint64_t b = x87_bits(v);
     if (x87_is_zero_bits(b)) return 1;
     if ((b & UINT64_C(0x7FF0000000000000)) == UINT64_C(0x7FF0000000000000))
         return 2;
@@ -237,30 +236,30 @@ static inline uint16_t x87_tag_for(x87_ext v) {
 static inline void x87_refresh_tags(CPU *c) {
     for (int p = 0; p < 8; p++)
         if (x87_tag(c, p) != 3)
-            x87_set_tag(c, p, x87_tag_for(c->st[p]));
+            x87_set_tag(c, p, x87_tag_for(c->st[p].v.d));
 }
 
 /* ---- stack -------------------------------------------------------------- */
 
-static inline void fpush(CPU *c, x87_ext v) {
+static inline void fpush(CPU *c, double v) {
     const int p = (c->fpu_top - 1) & 7;
     if (x87_tag(c, p) != 3) x87_stack_fault(c);   /* stack overflow */
     c->fpu_top = p;
-    c->st[p] = v;
+    c->st[p].v.d = v;
     x87_set_tag(c, p, x87_tag_for(v));
     x87_set_top(c);
 }
-static inline x87_ext fpop(CPU *c) {
+static inline double fpop(CPU *c) {
     const int p = c->fpu_top;
-    const x87_ext v = c->st[p];
+    const double v = c->st[p].v.d;
     if (x87_tag(c, p) == 3) x87_stack_fault(c);   /* stack underflow */
     x87_set_tag(c, p, 3);
     c->fpu_top = (c->fpu_top + 1) & 7;
     x87_set_top(c);
     return v;
 }
-static inline x87_ext *fst(CPU *c, int i) {
-    return &c->st[(c->fpu_top + i) & 7];
+static inline double *fst(CPU *c, int i) {
+    return &c->st[(c->fpu_top + i) & 7].v.d;
 }
 /* FST ST(i), ST(0) writes the destination register and its tag.  A plain slot
  * assignment would leave an empty destination tag empty and make a later
@@ -268,15 +267,15 @@ static inline x87_ext *fst(CPU *c, int i) {
 static inline void x87_fst_reg(CPU *c, int i) {
     const int d = (c->fpu_top + i) & 7;
     const int s = c->fpu_top;
-    c->st[d] = c->st[s];
+    c->st[d].v.d = c->st[s].v.d;
     x87_set_tag(c, d, x87_tag(c, s));
 }
 static inline void x87_fxch(CPU *c, int i) {
     const int a = c->fpu_top, b = (c->fpu_top + i) & 7;
-    const x87_ext t = c->st[a];
+    const double t = c->st[a].v.d;
     const uint16_t tt = x87_tag(c, a);
-    c->st[a] = c->st[b]; x87_set_tag(c, a, x87_tag(c, b));
-    c->st[b] = t;        x87_set_tag(c, b, tt);
+    c->st[a].v.d = c->st[b].v.d; x87_set_tag(c, a, x87_tag(c, b));
+    c->st[b].v.d = t;        x87_set_tag(c, b, tt);
 }
 static inline void x87_ffree(CPU *c, int i) {
     x87_set_tag(c, (c->fpu_top + i) & 7, 3);
@@ -291,68 +290,70 @@ static inline void x87_fcmov(CPU *c, int cond, int i) {
     if (!cond) return;
     const int s = (c->fpu_top + i) & 7;
     if (x87_tag(c, s) == 3) { x87_stack_fault(c); return; }
-    c->st[c->fpu_top] = c->st[s];
+    c->st[c->fpu_top].v.d = c->st[s].v.d;
     x87_set_tag(c, c->fpu_top, x87_tag(c, s));
 }
 static inline void x87_fchs(CPU *c) {
-    (*fst(c, 0)).v.mm ^= UINT64_C(0x8000000000000000);
+    const double d = *fst(c, 0);
+    *fst(c, 0) = x87_from_bits(x87_bits(d) ^ UINT64_C(0x8000000000000000));
 }
 static inline void x87_fabs(CPU *c) {
-    (*fst(c, 0)).v.mm &= UINT64_C(0x7FFFFFFFFFFFFFFF);
+    const double d = *fst(c, 0);
+    *fst(c, 0) = x87_from_bits(x87_bits(d) & UINT64_C(0x7FFFFFFFFFFFFFFF));
 }
 
 /* ---- memory loads/stores ------------------------------------------------ */
 
-static inline x87_ext x87_ld_f32(uint32_t a) {
+static inline double x87_ld_f32(uint32_t a) {
     float f;
     memcpy(&f, (void *)(uintptr_t)a, 4);
     return x87_from_f64((double)f);
 }
-static inline x87_ext x87_ld_f64(uint32_t a) {
+static inline double x87_ld_f64(uint32_t a) {
     double d;
     memcpy(&d, (void *)(uintptr_t)a, 8);
     return x87_from_f64(d);
 }
-static inline x87_ext x87_ld_f80(uint32_t a) {
+static inline double x87_ld_f80(uint32_t a) {
     uint64_t sig;
     uint16_t se;
     memcpy(&sig, (void *)(uintptr_t)a, 8);
     memcpy(&se, (void *)((uintptr_t)a + 8), 2);
     return x87_from_f64(x87_f80_to_d(sig, se));
 }
-static inline x87_ext x87_ld_i16(uint32_t a) {
+static inline double x87_ld_i16(uint32_t a) {
     int16_t i; memcpy(&i, (void *)(uintptr_t)a, 2); return x87_from_i16(i);
 }
-static inline x87_ext x87_ld_i32(uint32_t a) {
+static inline double x87_ld_i32(uint32_t a) {
     int32_t i; memcpy(&i, (void *)(uintptr_t)a, 4); return x87_from_i32(i);
 }
-static inline x87_ext x87_ld_i64(uint32_t a) {
+static inline double x87_ld_i64(uint32_t a) {
     int64_t i; memcpy(&i, (void *)(uintptr_t)a, 8); return x87_from_i64(i);
 }
-static inline void x87_st_f32(CPU *c, uint32_t a, x87_ext v) {
+static inline void x87_st_f32(CPU *c, uint32_t a, double v) {
     (void)c;   /* SNaN handling at the m32 boundary is accepted as a deviation */
-    float f = (float)v.v.d;
+    float f = (float)v;
     memcpy((void *)(uintptr_t)a, &f, 4);
 }
-static inline void x87_st_f64(CPU *c, uint32_t a, x87_ext v) {
+static inline void x87_st_f64(CPU *c, uint32_t a, double v) {
     (void)c;
-    memcpy((void *)(uintptr_t)a, &v.v.d, 8);
+    memcpy((void *)(uintptr_t)a, &v, 8);
 }
-static inline void x87_st_f80(uint32_t a, x87_ext v) {
+static inline void x87_st_f80(uint32_t a, double v) {
     uint64_t sig;
     uint16_t se;
-    x87_d_to_f80(v.v.d, &sig, &se);
+    x87_d_to_f80(v, &sig, &se);
     memcpy((void *)(uintptr_t)a, &sig, 8);
     memcpy((void *)((uintptr_t)a + 8), &se, 2);
 }
 
 #define X87_DEFINE_STORE_INT(fn, type, minv, maxv, indef, truncate)           \
-static inline void fn(CPU *c, uint32_t a, x87_ext v) {                        \
+static inline void fn(CPU *c, uint32_t a, double v) {                        \
     type i;                                                                    \
-    if (!x87_is_finite_bits(x87_bits(v.v.d))) {                                \
+    if (!x87_is_finite_bits(x87_bits(v))) {                                \
         x87_raise_invalid(c); i = (type)(indef);                               \
     } else {                                                                   \
-        const double r = (truncate) ? trunc(v.v.d) : nearbyint(v.v.d);         \
+        const double r = (truncate) ? trunc(v) : nearbyint(v);         \
         if (!(r >= (minv) && r < (maxv))) {                                    \
             x87_raise_invalid(c); i = (type)(indef);                           \
         } else i = (type)r;                                                    \
@@ -373,7 +374,7 @@ X87_DEFINE_STORE_INT(x87_st_i64_rz, int64_t, -9223372036854775808.0,
 
 /* ---- packed BCD --------------------------------------------------------- */
 
-static inline x87_ext x87_ld_bcd(CPU *c, uint32_t a) {
+static inline double x87_ld_bcd(CPU *c, uint32_t a) {
     uint8_t b[10];
     double value = 0.0;
     (void)c;
@@ -395,9 +396,9 @@ static inline void x87_bcd_indefinite(uint32_t a) {
     b[8] = b[9] = 0xFFu;
     memcpy((void *)(uintptr_t)a, b, sizeof b);
 }
-static inline void x87_st_bcd(CPU *c, uint32_t a, x87_ext v) {
+static inline void x87_st_bcd(CPU *c, uint32_t a, double v) {
     uint8_t b[10];
-    const double d = v.v.d;
+    const double d = v;
     double r;
     uint64_t n;
 
@@ -472,8 +473,8 @@ static inline void x87_frstor(CPU *c, uint32_t a) {
 /* FXAM: C3 C2 C0 = 000 unsupported, 001 NaN, 010 normal, 011 infinity,
  * 100 zero, 101 empty, 110 denormal. C1 carries the sign. */
 static inline void x87_fxam(CPU *c) {
-    const x87_ext v = *fst(c, 0);
-    const uint64_t b = x87_bits(v.v.d);
+    const double v = *fst(c, 0);
+    const uint64_t b = x87_bits(v);
     uint32_t sign = (uint32_t)(b >> 63);
     uint32_t c3 = 0, c2 = 0, c0 = 0;
 
@@ -497,98 +498,90 @@ static inline void x87_fxam(CPU *c) {
 
 /* ---- arithmetic --------------------------------------------------------- */
 
-static inline x87_ext x87_add(CPU *c, x87_ext a, x87_ext b) {
-    const double r = a.v.d + b.v.d;
-    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
-    a.v.d = r;
-    a.reserved = 0;
+static inline double x87_add(CPU *c, double a, double b) {
+    const double r = a + b;
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    a = r;
     return a;
 }
-static inline x87_ext x87_sub(CPU *c, x87_ext a, x87_ext b) {
-    const double r = a.v.d - b.v.d;
-    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
-    a.v.d = r;
-    a.reserved = 0;
+static inline double x87_sub(CPU *c, double a, double b) {
+    const double r = a - b;
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    a = r;
     return a;
 }
-static inline x87_ext x87_mul(CPU *c, x87_ext a, x87_ext b) {
-    const double r = a.v.d * b.v.d;
-    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
-    a.v.d = r;
-    a.reserved = 0;
+static inline double x87_mul(CPU *c, double a, double b) {
+    const double r = a * b;
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    a = r;
     return a;
 }
-static inline x87_ext x87_div(CPU *c, x87_ext a, x87_ext b) {
-    const double r = a.v.d / b.v.d;
-    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
-    a.v.d = r;
-    a.reserved = 0;
+static inline double x87_div(CPU *c, double a, double b) {
+    const double r = a / b;
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    a = r;
     return a;
 }
-static inline x87_ext x87_sqrt(CPU *c, x87_ext a) {
-    const double r = sqrt(a.v.d);
-    if (x87_invalid_result(r, a.v.d, a.v.d)) x87_raise_invalid(c);
-    a.v.d = r;
-    a.reserved = 0;
+static inline double x87_sqrt(CPU *c, double a) {
+    const double r = sqrt(a);
+    if (x87_invalid_result(r, a, a)) x87_raise_invalid(c);
+    a = r;
     return a;
 }
-static inline x87_ext x87_roundint(CPU *c, x87_ext a) {
-    const double r = nearbyint(a.v.d);
-    if (x87_invalid_result(r, a.v.d, a.v.d)) x87_raise_invalid(c);
-    a.v.d = r;
-    a.reserved = 0;
+static inline double x87_roundint(CPU *c, double a) {
+    const double r = nearbyint(a);
+    if (x87_invalid_result(r, a, a)) x87_raise_invalid(c);
+    a = r;
     return a;
 }
 
 /* x87 FPREM/FPREM1 are not the microcode partial-remainder loop.  C2 is
  * always zero (quotient complete) and the result is the IEEE remainder. */
-static inline x87_ext x87_fprem(CPU *c, x87_ext a, x87_ext b) {
-    const double r = fmod(a.v.d, b.v.d);
-    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
-    a.v.d = r;
-    a.reserved = 0;
+static inline double x87_fprem(CPU *c, double a, double b) {
+    const double r = fmod(a, b);
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    a = r;
     c->fpu_sw &= ~X87_C2;
     return a;
 }
-static inline x87_ext x87_fprem1(CPU *c, x87_ext a, x87_ext b) {
-    const double r = remainder(a.v.d, b.v.d);
-    if (x87_invalid_result(r, a.v.d, b.v.d)) x87_raise_invalid(c);
-    a.v.d = r;
-    a.reserved = 0;
+static inline double x87_fprem1(CPU *c, double a, double b) {
+    const double r = remainder(a, b);
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    a = r;
     c->fpu_sw &= ~X87_C2;
     return a;
 }
 
 /* ---- comparison --------------------------------------------------------- */
 
-static inline void x87_compare(CPU *c, x87_ext a, x87_ext b, int signaling) {
-    const uint64_t ab = x87_bits(a.v.d), bb = x87_bits(b.v.d);
+static inline void x87_compare(CPU *c, double a, double b, int signaling) {
+    const uint64_t ab = x87_bits(a), bb = x87_bits(b);
     const int an = x87_is_nan_bits(ab), bn = x87_is_nan_bits(bb);
     c->fpu_sw &= ~X87_C1;
     if (an || bn) {
         if (signaling || x87_is_snan_bits(ab) || x87_is_snan_bits(bb))
             x87_raise_invalid(c);
         x87_set_c(c, 1, 1, 1);
-    } else if (a.v.d < b.v.d) {
+    } else if (a < b) {
         x87_set_c(c, 0, 0, 1);
-    } else if (a.v.d == b.v.d) {
+    } else if (a == b) {
         x87_set_c(c, 1, 0, 0);
     } else {
         x87_set_c(c, 0, 0, 0);
     }
 }
-static inline void x87_compare_eflags(CPU *c, x87_ext a, x87_ext b,
+static inline void x87_compare_eflags(CPU *c, double a, double b,
                                       int signaling) {
-    const uint64_t ab = x87_bits(a.v.d), bb = x87_bits(b.v.d);
+    const uint64_t ab = x87_bits(a), bb = x87_bits(b);
     const int an = x87_is_nan_bits(ab), bn = x87_is_nan_bits(bb);
     c->fpu_sw &= ~X87_C1;
     if (an || bn) {
         if (signaling || x87_is_snan_bits(ab) || x87_is_snan_bits(bb))
             x87_raise_invalid(c);
         c->zf = c->pf = c->cf = 1;
-    } else if (a.v.d < b.v.d) {
+    } else if (a < b) {
         c->zf = 0; c->pf = 0; c->cf = 1;
-    } else if (a.v.d == b.v.d) {
+    } else if (a == b) {
         c->zf = 1; c->pf = 0; c->cf = 0;
     } else {
         c->zf = 0; c->pf = 0; c->cf = 0;
@@ -599,32 +592,30 @@ static inline void x87_compare_eflags(CPU *c, x87_ext a, x87_ext b,
 /* ---- integer/exponent helpers ------------------------------------------ */
 
 static inline void x87_fscale(CPU *c) {
-    const x87_ext x = *fst(c, 0);
-    const double y = fst(c, 1)->v.d;
+    const double x = *fst(c, 0);
+    const double y = *fst(c, 1);
     double r;
     int e;
     if (isnan(y)) {
         /* FSCALE with a NaN scale returns a NaN (Table 3-34).  Only an SNaN
          * source raises IE; the result is quieted like ordinary arithmetic. */
-        const int invalid = x87_invalid_result(y, x.v.d, y);
+        const int invalid = x87_invalid_result(y, x, y);
         r = invalid ? x87_quiet_nan(y) : y;
         if (invalid) x87_raise_invalid(c);
-        fst(c, 0)->v.d = r;
-        fst(c, 0)->reserved = 0;
-        c->fpu_sw &= ~X87_C1;
+        *fst(c, 0) = r;
+            c->fpu_sw &= ~X87_C1;
         return;
     } else if (y >= 2147483647.0) e = 2147483647;
     else if (y <= -2147483648.0) e = INT_MIN;
     else e = (int)trunc(y);
-    r = scalbn(x.v.d, e);
-    if (x87_invalid_result(r, x.v.d, y)) x87_raise_invalid(c);
-    fst(c, 0)->v.d = r;
-    fst(c, 0)->reserved = 0;
+    r = scalbn(x, e);
+    if (x87_invalid_result(r, x, y)) x87_raise_invalid(c);
+    *fst(c, 0) = r;
     c->fpu_sw &= ~X87_C1;
 }
 static inline void x87_fxtract(CPU *c) {
-    x87_ext x = *fst(c, 0);
-    const uint64_t b = x87_bits(x.v.d);
+    double x = *fst(c, 0);
+    const uint64_t b = x87_bits(x);
     if (x87_is_zero_bits(b)) {
         /* logb(+-0) is -inf, and the significand keeps the sign. */
         *fst(c, 0) = x87_from_f64(-INFINITY);
@@ -632,8 +623,7 @@ static inline void x87_fxtract(CPU *c) {
     } else if (x87_is_nan_bits(b)) {
         if (x87_is_snan_bits(b)) {
             x87_raise_invalid(c);
-            x.v.d = x87_quiet_nan(x.v.d);
-            x.reserved = 0;
+            x = x87_quiet_nan(x);
         }
         *fst(c, 0) = x;
         fpush(c, x);
@@ -643,7 +633,7 @@ static inline void x87_fxtract(CPU *c) {
         fpush(c, x87_indefinite());
     } else {
         int e = 0;
-        double f = frexp(x.v.d, &e);
+        double f = frexp(x, &e);
         f *= 2.0;
         e -= 1;
         *fst(c, 0) = x87_from_i32(e);
@@ -656,42 +646,42 @@ static inline void x87_fxtract(CPU *c) {
 
 /* libm is the cold path; use the same one-check invalid rule as the arithmetic
  * helpers so SNaN, Inf and out-of-domain inputs still surface as IE. */
-static inline x87_ext x87_unary_result(CPU *c, double r, double x) {
+static inline double x87_unary_result(CPU *c, double r, double x) {
     if (x87_invalid_result(r, x, x)) x87_raise_invalid(c);
     return x87_from_f64(r);
 }
-static inline x87_ext x87_binary_result(CPU *c, double r, double a, double b) {
+static inline double x87_binary_result(CPU *c, double r, double a, double b) {
     if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
     return x87_from_f64(r);
 }
-static inline x87_ext x87_f2xm1(CPU *c, x87_ext x) {
-    return x87_unary_result(c, exp2(x.v.d) - 1.0, x.v.d);
+static inline double x87_f2xm1(CPU *c, double x) {
+    return x87_unary_result(c, exp2(x) - 1.0, x);
 }
-static inline x87_ext x87_fsin(CPU *c, x87_ext x) {
-    return x87_unary_result(c, sin(x.v.d), x.v.d);
+static inline double x87_fsin(CPU *c, double x) {
+    return x87_unary_result(c, sin(x), x);
 }
-static inline x87_ext x87_fcos(CPU *c, x87_ext x) {
-    return x87_unary_result(c, cos(x.v.d), x.v.d);
+static inline double x87_fcos(CPU *c, double x) {
+    return x87_unary_result(c, cos(x), x);
 }
-static inline x87_ext x87_fptan(CPU *c, x87_ext x) {
-    return x87_unary_result(c, tan(x.v.d), x.v.d);
+static inline double x87_fptan(CPU *c, double x) {
+    return x87_unary_result(c, tan(x), x);
 }
-static inline x87_ext x87_fpatan(CPU *c, x87_ext y, x87_ext x) {
-    return x87_binary_result(c, atan2(y.v.d, x.v.d), y.v.d, x.v.d);
+static inline double x87_fpatan(CPU *c, double y, double x) {
+    return x87_binary_result(c, atan2(y, x), y, x);
 }
-static inline x87_ext x87_fyl2x(CPU *c, x87_ext x, x87_ext y) {
-    return x87_binary_result(c, y.v.d * log2(x.v.d), x.v.d, y.v.d);
+static inline double x87_fyl2x(CPU *c, double x, double y) {
+    return x87_binary_result(c, y * log2(x), x, y);
 }
-static inline x87_ext x87_fyl2xp1(CPU *c, x87_ext x, x87_ext y) {
+static inline double x87_fyl2xp1(CPU *c, double x, double y) {
     /* FYL2XP1 is defined only for x > -1.  At x == -1 log1p() returns -inf,
      * which x87 reports as #IA with the indefinite result, not as a valid
      * negative infinity. */
-    if (x.v.d <= -1.0) {
+    if (x <= -1.0) {
         x87_raise_invalid(c);
         return x87_indefinite();
     }
-    return x87_binary_result(c, y.v.d * log1p(x.v.d) * 0x1.71547652b82fep+0,
-                             x.v.d, y.v.d);
+    return x87_binary_result(c, y * log1p(x) * 0x1.71547652b82fep+0,
+                             x, y);
 }
 
 /* ---- reset -------------------------------------------------------------- */

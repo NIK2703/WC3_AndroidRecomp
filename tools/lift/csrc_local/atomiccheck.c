@@ -112,8 +112,10 @@ static Want classify(const char *ins)
         if (strncmp(m, "xchg", 4) == 0)
             return is_dword_mem(ins) ? WANT_XCHG32 : WANT_ANY;
         if (strncmp(m, "inc", 3) == 0 || strncmp(m, "dec", 3) == 0 ||
-            strncmp(m, "add", 3) == 0 || strncmp(m, "sub", 3) == 0)
+            strncmp(m, "add", 3) == 0)
             return is_dword_mem(ins) ? WANT_XADD32 : WANT_ANY;
+        if (strncmp(m, "sub", 3) == 0)
+            return is_dword_mem(ins) ? WANT_ANY : WANT_NONE;
         /* bts/btr/btc and any future locked memory RMW also need an
          * atomic helper; reject a plain lowering even if this checker does
          * not know the exact helper name yet. */
