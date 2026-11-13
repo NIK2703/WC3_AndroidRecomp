@@ -48,8 +48,13 @@ static int g_mouse_button_ex;
 static int g_mouse_wheel;
 static int g_key_vk, g_key_down;
 static int g_release_all;
-static void (*g_keyboard_show)(void);
+static void (*g_keyboard_show)(uint32_t field, const HleKeyboardRect *rect);
 static void (*g_keyboard_hide)(void);
+static uint32_t g_show_field;
+static int g_show_rect_valid;
+static Wc3LegacyKeyboardRect g_show_rect;
+static int g_show_calls;
+static int g_hide_calls;
 static int g_keyboard_visible;
 static uint32_t g_post_char;
 static int g_post_backspace;
@@ -215,7 +220,9 @@ void hle_android_release_all(void)
     g_release_all++;
 }
 
-void hle_android_set_keyboard_bridge(void (*show)(void), void (*hide)(void))
+void hle_android_set_keyboard_bridge(void (*show)(uint32_t field,
+                                                  const HleKeyboardRect *rect),
+                                     void (*hide)(void))
 {
     g_keyboard_show = show;
     g_keyboard_hide = hide;
@@ -241,8 +248,16 @@ void hle_android_post_enter(void)
     g_post_enter++;
 }
 
-static void fake_show(void) {}
-static void fake_hide(void) {}
+static void fake_show(uint32_t field, const Wc3LegacyKeyboardRect *rect)
+{
+    g_show_calls++;
+    g_show_field = field;
+    g_show_rect_valid = rect != NULL;
+    if (rect)
+        g_show_rect = *rect;
+}
+
+static void fake_hide(void) { g_hide_calls++; }
 
 static void fn_a(CPU *c) { c->eax = 0xAAAAu; }
 static void fn_b(CPU *c) { c->eax = 0xBBBBu; }
@@ -278,6 +293,12 @@ static void add_row(const char *dll, const char *name, HleFn fn)
             return 1;                                                     \
         }                                                                 \
     } while (0)
+
+static int close_to(float actual, float expected)
+{
+    const float delta = actual - expected;
+    return delta < 1e-4f && delta > -1e-4f;
+}
 
 int main(void)
 {
@@ -429,12 +450,70 @@ int main(void)
     wc3_legacy_post_char(0x20ACu);
     wc3_legacy_post_backspace();
     wc3_legacy_post_enter();
-    CHECK(g_keyboard_show == fake_show && g_keyboard_hide == fake_hide,
+    CHECK(g_keyboard_show != NULL && g_keyboard_hide == fake_hide,
           "keyboard bridge forwarding");
     CHECK(g_keyboard_visible == 1, "keyboard visibility forwarding");
     CHECK(g_post_char == 0x20ACu, "post char forwarding");
     CHECK(g_post_backspace == 1 && g_post_enter == 1,
           "post editing forwarding");
+
+    {
+        const HleKeyboardRect hle_rect = {0.125f, 0.25f, 0.5f, 0.75f};
+        g_keyboard_show(0x1234u, &hle_rect);
+        CHECK(g_show_calls == 1 && g_show_field == 0x1234u &&
+                  g_show_rect_valid,
+              "keyboard field passed to host");
+        CHECK(close_to(g_show_rect.left, 0.125f) &&
+                  close_to(g_show_rect.top, 0.25f) &&
+                  close_to(g_show_rect.right, 0.5f) &&
+                  close_to(g_show_rect.bottom, 0.75f),
+              "keyboard rect copied to host");
+        g_keyboard_show(0x5678u, NULL);
+        CHECK(g_show_calls == 2 && g_show_field == 0x5678u &&
+                  !g_show_rect_valid,
+              "missing keyboard rect stays NULL");
+        g_keyboard_hide();
+        CHECK(g_hide_calls == 1, "keyboard hide forwarded");
+        wc3_legacy_set_keyboard_bridge(NULL, NULL);
+        CHECK(g_keyboard_show == NULL && g_keyboard_hide == NULL,
+              "keyboard bridge unregisters");
+    }
+
+    {
+        HleKeyboardRect r = {0.0f, 0.0f, 0.0f, 0.0f};
+        CHECK(hle_keyboard_rect_from_ddc(0.0f, 0.0f, 0.6f, 0.8f, &r) == 1 &&
+                  r.left == 0.0f && r.top == 0.0f &&
+                  r.right == 1.0f && r.bottom == 1.0f,
+              "DDC full screen maps to surface");
+        CHECK(hle_keyboard_rect_from_ddc(0.15f, 0.2f, 0.45f, 0.4f, &r) == 1 &&
+                  close_to(r.left, 0.25f) &&
+                  close_to(r.top, 0.25f) &&
+                  close_to(r.right, 0.5f) &&
+                  close_to(r.bottom, 0.75f),
+              "DDC field maps to surface");
+        CHECK(hle_keyboard_rect_from_ddc(0.6f, 0.0f, 0.0f, 0.8f, &r) == 0,
+              "DDC inverted rect rejected");
+        CHECK(hle_keyboard_rect_from_ddc(0.0f, 0.0f, 0.6f, 0.8f, NULL) == 0,
+              "DDC NULL output rejected");
+    }
+
+    {
+        const Wc3LegacyKeyboardRect visible = {0.0f, 0.2f, 1.0f, 0.5f};
+        const Wc3LegacyKeyboardRect covered = {0.0f, 0.2f, 1.0f, 0.7f};
+        const Wc3LegacyKeyboardRect full = {0.0f, 0.0f, 1.0f, 1.0f};
+        CHECK(wc3_legacy_keyboard_pan_px(&visible, 400, 1000) == 0.0f,
+              "keyboard pan leaves visible field alone");
+        CHECK(close_to(wc3_legacy_keyboard_pan_px(&covered, 400, 1000), 100.0f),
+              "keyboard pan moves covered field to IME edge");
+        CHECK(wc3_legacy_keyboard_pan_px(&covered, 0, 1000) == 0.0f,
+              "keyboard pan ignores closed IME");
+        CHECK(wc3_legacy_keyboard_pan_px(&covered, 400, 0) == 0.0f,
+              "keyboard pan ignores empty surface");
+        CHECK(wc3_legacy_keyboard_pan_px(NULL, 400, 1000) == 0.0f,
+              "keyboard pan ignores missing rect");
+        CHECK(close_to(wc3_legacy_keyboard_pan_px(&full, 400, 1000), 400.0f),
+              "keyboard pan clamps full-screen field");
+    }
 
     {
         uint16_t unit = 0;

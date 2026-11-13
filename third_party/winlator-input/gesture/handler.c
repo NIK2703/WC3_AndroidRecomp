@@ -132,6 +132,53 @@ static bool check_confirm_dt_waiting(TouchFinger* restrict finger, TouchActionRe
     return true;
 }
 
+/*
+ * A main finger that has received UP and entered the double-tap window is
+ * still active only to own that window.  ts_up_main_finger() clears
+ * double_tap_original_id_set, so this flag distinguishes it from a main
+ * finger that is physically down.
+ */
+static bool is_lifted_dt_main(TouchFinger* main) {
+    return main && main->active
+        && !main->double_tap_original_id_set
+        && finger_ctx(main)->dt.waiting;
+}
+
+/*
+ * A different pointer landing outside the double-tap radius is a new first
+ * touch.  Cancel the old window, then retire its lifted owner before role
+ * assignment.  Leaving it active made every later pointer look like a second
+ * finger, so the cursor stopped moving and taps produced no first-finger
+ * action until another pointer reused the stale id.
+ */
+static void cancel_lifted_dt_main_for_new_down(TouchFinger* finger,
+        TouchActionResult* restrict result) {
+    TouchFinger* main = find_finger(g_state.gesture_main_ptr_id);
+    if (!main || main == finger || !is_lifted_dt_main(main)) return;
+    if (gesture_is_within_tap_distance(finger->x, finger->y)) return;
+
+    gesture_cancel_double_tap_wait(result);
+    g_state.gesture_main_ptr_id = INVALID_PTR_ID;
+    main->state = GESTURE_STATE_IDLE;
+    deactivate_finger(main);
+}
+
+/*
+ * The confirming double-tap pointer has finished.  If the owner of the
+ * resolved window was already lifted, release its slot now; it has no UP
+ * event left that could clean it up.
+ */
+static void retire_resolved_lifted_dt_main(TouchFinger* except) {
+    TouchFinger* main = find_finger(g_state.gesture_main_ptr_id);
+    if (!main || main == except) return;
+    if (main->double_tap_original_id_set) return;
+    if (finger_ctx(main)->dt.waiting) return;
+
+    g_state.gesture_main_ptr_id = INVALID_PTR_ID;
+    main->state = GESTURE_STATE_IDLE;
+    deactivate_finger(main);
+}
+
 static void save_pending_resume_action(TouchFinger* main_finger, TouchActionResult* restrict result) {
     if (!main_finger || !main_finger->active) return;
     main_finger->pending_resume_action_count = 0;
@@ -417,6 +464,8 @@ __attribute__((hot))
 void handle_gesture_down(TouchFinger* finger, float x, float y, uint64_t now_tick, TouchActionResult* restrict result) {
     finger->gesture_activated_in_touch = false;
     g_state.main_ptr_id = finger->ptr_id;
+
+    cancel_lifted_dt_main_for_new_down(finger, result);
 
     if (handle_gesture_down_element(finger, x, y, now_tick, result)) {
         return;
@@ -972,10 +1021,11 @@ static inline void ts_up_idle_double_tap(TouchFinger* finger, uint64_t now_tick,
         _mf2_ctx->dt.post_drag = false;
         release_held_actions(result, 0);
         deactivate_finger_to_idle(finger);
-        return;
+    } else {
+        gesture_branch(finger, finger_ctx(finger), result, now_tick, GESTURE_EVENT_UP, finger->x, finger->y);
+        deactivate_finger_to_idle(finger);
     }
-    gesture_branch(finger, finger_ctx(finger), result, now_tick, GESTURE_EVENT_UP, finger->x, finger->y);
-    deactivate_finger_to_idle(finger);
+    retire_resolved_lifted_dt_main(finger);
 }
 
 static void handle_ts_up(TouchFinger* finger, uint64_t now_tick, TouchActionResult* restrict result) {

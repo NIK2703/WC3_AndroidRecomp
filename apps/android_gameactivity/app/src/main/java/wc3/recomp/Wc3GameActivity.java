@@ -55,17 +55,43 @@ public class Wc3GameActivity extends GameActivity {
     private static native void nativeSetGameMode(String mode);
 
     /* JNI matches by name only; host_shell.c must keep the same parameter
-     * order (driver id before driver root, DXVK version and config path last).
-     * These values are strings, so a swap compiles and fails only at
-     * runtime. */
+     * order (driver id before driver root, DXVK version and config path, then
+     * the gesture flag and timers last).  These values are strings, so a swap
+     * compiles and fails only at runtime. */
     private static native void nativeApplyLaunchSettings(
             String gameDir, int width, int height, boolean sound,
             String extraArgs, String driverId, String driverRoot,
-            String hookDir, String dxvkVersion, String dxvkConfigPath);
+            String hookDir, String dxvkVersion, String dxvkConfigPath,
+            boolean doubleTapGestures, int doubleTapTimeoutMs,
+            int longPressTimeoutMs);
 
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
     private native void nativeClearOverlaySurface(Surface surface);
+
+    /* Current host-side IME translation in physical pixels.  The native input
+     * path adds it back before hit-testing, so this getter must return exactly
+     * the value that requestImePan() applies. */
+    private native float nativeImePan();
+
+    /**
+     * Applies the host-side IME pan on the UI thread.  Both full-screen
+     * SurfaceViews move together: the game surface and the touch overlay.
+     * Reading the value inside the runnable makes the newest pan win even when
+     * a guest-thread show races an inset update from the UI thread.
+     */
+    public void requestImePan() {
+        runOnUiThread(() -> {
+            final float pan = nativeImePan();
+            final float offset = pan > 0.0f ? -pan : 0.0f;
+            if (mSurfaceView != null) {
+                mSurfaceView.setTranslationY(offset);
+            }
+            if (overlayView != null) {
+                overlayView.setTranslationY(offset);
+            }
+        });
+    }
 
     protected static void setGameMode(final String mode) {
         nativeSetGameMode(mode);
@@ -132,7 +158,15 @@ public class Wc3GameActivity extends GameActivity {
                 settings.getInt(LaunchContract.KEY_HEIGHT, 0),
                 settings.getBoolean(LaunchContract.KEY_SOUND, true),
                 settings.getString(LaunchContract.KEY_EXTRA_ARGS),
-                driverId, driverRoot, hookDir, dxvkVersion, dxvkConfigPath);
+                driverId, driverRoot, hookDir, dxvkVersion, dxvkConfigPath,
+                settings.getBoolean(
+                        LaunchContract.KEY_DOUBLE_TAP_GESTURES, true),
+                settings.getInt(
+                        LaunchContract.KEY_DOUBLE_TAP_TIMEOUT_MS,
+                        LaunchContract.DEFAULT_DOUBLE_TAP_TIMEOUT_MS),
+                settings.getInt(
+                        LaunchContract.KEY_LONG_PRESS_TIMEOUT_MS,
+                        LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS));
     }
 
     /**

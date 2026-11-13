@@ -11,6 +11,10 @@
     <string name="launch_resolution_label">Разрешение</string>
 
     <string name="launch_sound_label">Звук</string>
+    <string name="launch_gesture_mode_label">Двойное нажатие</string>
+    <string name="launch_double_tap_delay_label">Задержка двойного нажатия</string>
+    <string name="launch_long_press_delay_label">Задержка долгого нажатия</string>
+    <string name="launch_gesture_delay_value">%1$d мс</string>
 
     <string name="launch_driver_label">Драйвер Vulkan</string>
     <string name="launch_driver_system">Системный драйвер Vulkan (рекомендуется)</string>

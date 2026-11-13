@@ -23,6 +23,7 @@
 #include "profile/bind.h"
 #include "profile/convert.h"
 #include "profile/loader.h"
+#include "profile_mode.h"
 
 /*
  * The vendored engine expects these three symbols.  g_current_finger_idx is
@@ -46,6 +47,9 @@ static int g_width;
 static int g_height;
 static uint64_t g_last_engine_tick;
 static bool g_initialized;
+static bool g_double_tap_enabled = true;
+static int g_double_tap_timeout_ms;
+static int g_long_press_timeout_ms;
 static char g_error[256];
 static bool g_key_down[256];
 static bool g_button_down[8];
@@ -239,7 +243,9 @@ static void apply_profile_labels(const ProfileData *profile,
 }
 
 static int controls_init_internal(const char *profile_json, int width,
-                                  int height) {
+                                  int height, bool double_tap_enabled,
+                                  int double_tap_timeout_ms,
+                                  int long_press_timeout_ms) {
     ProfileData *profile = NULL;
     TouchProcessorConfig *config = NULL;
     TouchElement *elements = NULL;
@@ -264,11 +270,16 @@ static int controls_init_internal(const char *profile_json, int width,
         goto out;
     }
 
+    wc3_profile_apply_gesture_mode(profile, double_tap_enabled);
+    wc3_profile_apply_gesture_timings(profile, double_tap_timeout_ms,
+                                      long_press_timeout_ms);
+
     g_timer_interval_ms = profile->timer_interval_ms > 0
                               ? profile->timer_interval_ms
                               : 16;
 
     profile_to_config(profile, width, height, 1.0f, config);
+    config->direct_gesture_mode = !double_tap_enabled;
     touch_processor_init(config);
     reset_action_filter();
 
@@ -317,7 +328,9 @@ out:
     return rc;
 }
 
-int controls_init(const char *profile_json, int width, int height) {
+int controls_init_ex(const char *profile_json, int width, int height,
+                     bool double_tap_enabled, int double_tap_timeout_ms,
+                     int long_press_timeout_ms) {
     if (!profile_json || width <= 0 || height <= 0) {
         set_error("invalid init arguments");
         return -1;
@@ -334,14 +347,23 @@ int controls_init(const char *profile_json, int width, int height) {
         controls_cancel_all();
     }
 
-    if (controls_init_internal(profile_json, width, height) != 0) {
+    if (controls_init_internal(profile_json, width, height,
+                               double_tap_enabled, double_tap_timeout_ms,
+                               long_press_timeout_ms) != 0) {
         free(copy);
         return -1;
     }
 
     free(g_profile_json);
     g_profile_json = copy;
+    g_double_tap_enabled = double_tap_enabled;
+    g_double_tap_timeout_ms = double_tap_timeout_ms;
+    g_long_press_timeout_ms = long_press_timeout_ms;
     return 0;
+}
+
+int controls_init(const char *profile_json, int width, int height) {
+    return controls_init_ex(profile_json, width, height, true, 0, 0);
 }
 
 void controls_set_action_sink(Wc3ActionSink sink, void *user) {
@@ -469,7 +491,9 @@ void controls_resize(int width, int height) {
     }
 
     controls_cancel_all();
-    if (controls_init_internal(g_profile_json, width, height) != 0) {
+    if (controls_init_internal(g_profile_json, width, height,
+                               g_double_tap_enabled, g_double_tap_timeout_ms,
+                               g_long_press_timeout_ms) != 0) {
         g_initialized = false;
     }
 }

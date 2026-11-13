@@ -404,7 +404,8 @@ if(WC3_BUILD_APP)
         "${WC3_ROOT}/runtime/platform/android/controls/overlay.c"
         "${WC3_ROOT}/runtime/platform/android/controls/overlay_android.c"
         "${WC3_ROOT}/runtime/platform/android/controls/overlay_canvas.c"
-        "${WC3_ROOT}/runtime/platform/android/controls/overlay_profile.c")
+        "${WC3_ROOT}/runtime/platform/android/controls/overlay_profile.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/profile_mode.c")
     target_include_directories(wc3_overlay PUBLIC
         "${WC3_ROOT}/runtime/platform/android/controls"
         "${WC3_ROOT}/runtime/diag"

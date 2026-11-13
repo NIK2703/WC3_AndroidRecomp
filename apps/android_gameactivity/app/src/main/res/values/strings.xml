@@ -21,6 +21,10 @@
     <string name="launch_resolution_option" translatable="false">%1$d × %2$d</string>
 
     <string name="launch_sound_label">Sound</string>
+    <string name="launch_gesture_mode_label">Double tap</string>
+    <string name="launch_double_tap_delay_label">Double-tap delay</string>
+    <string name="launch_long_press_delay_label">Long-press delay</string>
+    <string name="launch_gesture_delay_value">%1$d ms</string>
 
     <string name="launch_driver_label">Vulkan driver</string>
     <string name="launch_driver_system">System Vulkan driver (recommended)</string>

@@ -142,8 +142,26 @@ void wc3_legacy_release_all(void);
  * show/hide callbacks and turns GameActivity text-state edits into guest
  * WM_CHAR/WM_KEYDOWN messages.  The host installs the callbacks and forwards
  * the platform's IME events; it never reaches into runtime/hle/android directly.
+ *
+ * `rect` is the focused field's rectangle in surface fractions: (0,0) top-left,
+ * (1,1) bottom-right.  It is NULL when the guest layout is not valid.
  */
-void wc3_legacy_set_keyboard_bridge(void (*show)(void), void (*hide)(void));
+typedef struct Wc3LegacyKeyboardRect {
+    float left;
+    float top;
+    float right;
+    float bottom;
+} Wc3LegacyKeyboardRect;
+
+void wc3_legacy_set_keyboard_bridge(void (*show)(uint32_t field,
+                                                 const Wc3LegacyKeyboardRect *rect),
+                                    void (*hide)(void));
+/* Smallest upward translation that keeps the field's bottom edge above the
+ * IME, or 0 when the field is already visible.  `ime_inset_bottom` and
+ * `surface_height` are physical pixels from the same window. */
+float wc3_legacy_keyboard_pan_px(const Wc3LegacyKeyboardRect *rect,
+                                 int ime_inset_bottom,
+                                 uint32_t surface_height);
 void wc3_legacy_set_keyboard_visible(int visible);
 void wc3_legacy_post_char(uint32_t ch);
 void wc3_legacy_post_backspace(void);

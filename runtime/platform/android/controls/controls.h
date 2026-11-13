@@ -10,6 +10,7 @@
  * JNI.
  */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "overlay.h"
@@ -31,6 +32,18 @@ typedef void (*Wc3ActionSink)(const TouchAction *actions, int count,
 
 /* Profile JSON must stay valid only for the duration of this call. */
 int controls_init(const char *profile_json, int width, int height);
+
+/*
+ * Same as controls_init(), but applies the product gesture mode and timers
+ * before the profile is converted to the engine config.  A timer <= 0 keeps
+ * the authored .icp value.  The legacy controls_init() keeps the profile
+ * unchanged, which is also what a direct diagnostic launch without the
+ * settings bundle receives.
+ */
+int controls_init_ex(const char *profile_json, int width, int height,
+                     bool double_tap_enabled, int double_tap_timeout_ms,
+                     int long_press_timeout_ms);
+
 void controls_set_action_sink(Wc3ActionSink sink, void *user);
 
 int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,

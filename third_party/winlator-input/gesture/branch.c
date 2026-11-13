@@ -191,7 +191,10 @@ static TapPathResult tap_path_normal(
 
     // Dd/Dd2 scroll-only: no D/Dd package bindings, but scroll bindings exist.
     // Enter DT_WAITING/SDTW so the second tap can confirm and activate scroll mode.
-    if (g_state.cfg.caps_has_scroll_bindings
+    // Direct mode keeps the first-finger drag but skips this wait entirely, so
+    // a single tap is not held for a second tap that has no actions.
+    if (!g_state.cfg.direct_gesture_mode
+        && g_state.cfg.caps_has_scroll_bindings
         && gesture_has_scroll_bindings((GestureType)slot->bindings_drag)) {
         execute_if_not_held(result, params->non_drag, params->non_drag_count);
         enter_dt_waiting(f, now_tick, slot->is_second, NULL, 0, NULL, 0);

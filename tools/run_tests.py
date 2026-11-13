@@ -3159,6 +3159,91 @@ def test_controls_idle() -> int:
     return run([str(exe)])
 
 
+def test_gesture_lifetime() -> int:
+    """T0: a far pointer retires a lifted double-tap main finger."""
+    cc = gcc()
+    if not cc:
+        print("gesture_lifetime: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    vendor = ROOT / "third_party" / "winlator-input"
+    profile = (ROOT / "apps" / "android_gameactivity" / "app" / "src"
+               / "main" / "assets" / "Warcraft 3.icp")
+    sources = sorted(str(path) for path in vendor.rglob("*.c"))
+    sources.append(str(ROOT / "tests" / "host_shims" / "gesture_host.c"))
+    exe = BUILD / "gesture_lifetime_test.exe"
+    rc = run([
+        cc,
+        "-std=gnu11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+        "-Wno-unused-function",
+        "-Wno-unused-variable",
+        "-Wno-sign-compare",
+        "-Wno-switch",
+        "-I" + str(vendor),
+        "-I" + str(ROOT / "tests" / "host_shims"),
+        "-include", str(ROOT / "tests" / "host_shims" / "open_memstream.h"),
+        "-Dclock_gettime=wc3_test_clock_gettime",
+        "-Dopen_memstream=wc3_host_open_memstream",
+        *sources,
+        str(ROOT / "tests" / "gesture_lifetime_test.c"),
+        "-lpthread",
+        "-lm",
+        "-o",
+        str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe), str(profile)])
+
+
+def test_gesture_mode() -> int:
+    """T0: direct mode and timer overrides are applied after profile parsing."""
+    cc = gcc()
+    if not cc:
+        print("gesture_mode: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    vendor = ROOT / "third_party" / "winlator-input"
+    controls = ROOT / "runtime" / "platform" / "android" / "controls"
+    profile = (ROOT / "apps" / "android_gameactivity" / "app" / "src"
+               / "main" / "assets" / "Warcraft 3.icp")
+    sources = sorted(str(path) for path in vendor.rglob("*.c"))
+    sources.append(str(controls / "profile_mode.c"))
+    sources.append(str(ROOT / "tests" / "host_shims" / "gesture_host.c"))
+    exe = BUILD / "gesture_mode_test.exe"
+    rc = run([
+        cc,
+        "-std=gnu11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+        "-Wno-unused-function",
+        "-Wno-unused-variable",
+        "-Wno-sign-compare",
+        "-Wno-switch",
+        "-I" + str(vendor),
+        "-I" + str(controls),
+        "-I" + str(ROOT / "tests" / "host_shims"),
+        "-include", str(ROOT / "tests" / "host_shims" / "open_memstream.h"),
+        "-Dclock_gettime=wc3_test_clock_gettime",
+        "-Dopen_memstream=wc3_host_open_memstream",
+        *sources,
+        str(ROOT / "tests" / "gesture_mode_test.c"),
+        "-lpthread",
+        "-lm",
+        "-o",
+        str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe), str(profile)])
+
+
 def test_input_adapter() -> int:
     """T0: the input adapter ticks on a batch/fault or a due deadline only."""
     cc = gcc()
@@ -3287,6 +3372,8 @@ TESTS = {
     "hle_bridge": test_hle_bridge,
     "pass4_build": test_pass4_build,
     "controls_idle": test_controls_idle,
+    "gesture_lifetime": test_gesture_lifetime,
+    "gesture_mode": test_gesture_mode,
     "input_adapter": test_input_adapter,
     "overlay": test_overlay,
     "file_layout": test_file_layout,

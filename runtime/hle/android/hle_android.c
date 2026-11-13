@@ -72,10 +72,12 @@
  * so the pointers stay NULL and the guest runs exactly as before.  A function
  * pointer also keeps the call out of the same translation unit as the empty
  * definition, which a compiler would otherwise be free to inline away. */
-static void (*g_keyboard_show)(void);
+static void (*g_keyboard_show)(uint32_t field, const HleKeyboardRect *rect);
 static void (*g_keyboard_hide)(void);
 
-void hle_android_set_keyboard_bridge(void (*show)(void), void (*hide)(void))
+void hle_android_set_keyboard_bridge(void (*show)(uint32_t field,
+                                                  const HleKeyboardRect *rect),
+                                     void (*hide)(void))
 {
     g_keyboard_show = show;
     g_keyboard_hide = hide;
@@ -466,13 +468,14 @@ static int guest_ok(uint32_t addr, uint32_t size)
 {
     uint64_t lo = addr, hi = (uint64_t)addr + size;
     if (hi > 0x100000000ull) return 0;
+    /* The layout table is seeded into guest_range_* at start, so the page
+     * index answers the common case without walking all arenas. */
+    if (guest_range_ok(addr, size)) return 1;
+    /* Keep the exact layout check as the fallback if a partial page was not
+     * marked by the index, or if seeding ever failed. */
     for (unsigned i = 0; i < sizeof g_arenas / sizeof g_arenas[0]; i++)
         if (lo >= g_arenas[i].lo && hi <= g_arenas[i].hi) return 1;
-    /* Ranges committed after startup are guest memory too, and they are not in
-     * the layout table: the D3D9 staging arena lives in the gap immediately
-     * above game.dll.  Without this, every guest copy into a locked buffer was
-     * refused and the caller was told it had succeeded. */
-    return guest_range_ok(addr, size);
+    return 0;
 }
 
 /* The experimental thin D3D9 COM bridge (runtime/host/hle_d3d9_thin.cpp)
@@ -6674,6 +6677,12 @@ static void u_register_class(CPU *c)
  * button press: if ImmGetContext arrives, the click was a text field and the
  * soft keyboard stays up; otherwise the click was a button and it hides. */
 static volatile int g_ime_click_pending;
+/* Host-side session bit: set when we request a show, cleared when we request
+ * a hide.  Platform visible=false must not clear it: the callback can be
+ * missed after a Back dismissal, and a delayed false can arrive while the IME
+ * is still usable.  Leaving it set at worst causes one redundant hide on the
+ * next non-text click; clearing it early can leave the IME on screen after a
+ * button click. */
 static volatile int g_ime_shown;
 /* Defined next to the virtual mouse below; the dispatcher needs them earlier. */
 static volatile int32_t g_mouse_x, g_mouse_y;
@@ -6687,6 +6696,10 @@ static HleKeyState g_key_state;
  * not inside the window procedure.  Remember when the last click happened so
  * ImmGetContext can still recognise it as a text-field focus. */
 static volatile uint32_t g_ime_click_ms;
+/* One show request per new left click.  A click number is enough here: the
+ * visibility hint can lie, but the click stream cannot. */
+static volatile uint32_t g_ime_click_seq;
+static volatile uint32_t g_ime_focus_seq;
 static volatile int g_ime_hide_pending;
 
 typedef struct {
@@ -6953,6 +6966,7 @@ static void u_dispatch_message(CPU *c)
         g_mouse_dispatched_down = 1;
         g_ime_click_pending = 1;
         g_ime_click_ms = hle_now_ms();
+        g_ime_click_seq++;
         g_ime_hide_pending = 0;
     } else if (msg == WM_LBUTTONUP) {
         g_mouse_buttons &= ~0x1;
@@ -7057,16 +7071,15 @@ static void keyboard_service(void)
     }
 }
 
-/* Called by the Android front end when the IME window really appears or
- * disappears.  Without the hide side a keyboard dismissed with Back would
- * leave g_ime_shown set and the next text-field click would not show it. */
+/* Called by the Android front end when the IME window appears or disappears.
+ * visible=true arms the deferred hide if the platform opened the IME on its
+ * own.  visible=false is ignored: the callback can be missed after a Back
+ * dismissal and can also be delayed while the IME is still usable, so it must
+ * not drive either the show request or the input lifetime.  Showing is driven
+ * per text-field click. */
 void hle_android_set_keyboard_visible(int visible)
 {
-    g_ime_shown = visible ? 1 : 0;
-    if (!visible) {
-        g_ime_click_pending = 0;
-        g_ime_hide_pending = 0;
-    }
+    if (visible) g_ime_shown = 1;
 }
 
 static void u_translate_message(CPU *c) { (void)c; c->eax = 0; }
@@ -7465,31 +7478,81 @@ static void u_set_cursor(CPU *c)
  * stubs.  The calls still tell us when the game enters or leaves one of its
  * own text fields, which is exactly the point where Android has to show or
  * hide the soft keyboard. */
+
+/* CEditBox embeds its CLayoutFrame at +0xB4; the frame's CRect is at +0x44
+ * and its valid flag at +0x54, so the field's absolute rectangle is at
+ * CEditBox+0xF8 and the flag at CEditBox+0x108.  CLayoutFrame::GetRect
+ * (0x6F110B70) copies the 16-byte CRect only after checking the flag, and
+ * CFrame::CalculateRect (0x6F0F5360) fills it with the absolute DDC
+ * rectangle.  CRect stores minY, minX, maxY, maxX. */
+static int keyboard_field_rect(uint32_t field, HleKeyboardRect *out)
+{
+    if (!out || field < 0x10000u ||
+        (uint64_t)field + 0x10Cu > 0x100000000ull)
+        return 0;
+    if (!hle_android_guest_ok(field + 0xF8u, 16u) ||
+        !hle_android_guest_ok(field + 0x108u, 4u))
+        return 0;
+    if (rd32g(field + 0x108u) == 0)
+        return 0;
+
+    float min_y = (float)rdf32(field + 0xF8u);
+    float min_x = (float)rdf32(field + 0xFCu);
+    float max_y = (float)rdf32(field + 0x100u);
+    float max_x = (float)rdf32(field + 0x104u);
+    return hle_keyboard_rect_from_ddc(min_y, min_x, max_y, max_x, out);
+}
+
 static void u_imm_get_context(CPU *c)
 {
     uint32_t hwnd = arg32(c, 0);
 #if WC3_DEBUG
-    fprintf(stderr, "[input] ImmGetContext(%08X) from %08X\n",
-            hwnd, rd32g(c->esp));
+    fprintf(stderr, "[input] ImmGetContext(%08X) from %08X field=%08X\n",
+            hwnd, rd32g(c->esp), c->esi);
 #endif
     /* The game asks for an IME context when a click focuses one of its edit
      * fields.  It can do that inside the window procedure or immediately
      * after DispatchMessage returns, so accept either the in-dispatch flag or
      * a click from the last second.  That is the only reliable "show the soft
      * keyboard" signal: WC3 draws its own caret, stores focus internally and
-     * never calls SetFocus or SetCursor for a text field. */
+     * never calls SetFocus or SetCursor for a text field.
+     *
+     * Request the show once per click instead of latching on g_ime_shown.  A
+     * keyboard dismissed with Back does not always produce a visibility
+     * callback, so a cached "shown" bit can stay set forever and swallow the
+     * next text-field tap.  The host's show path is idempotent and preserves
+     * the editor text, so repeating it for a new click is safe.
+     *
+     * The CEditBox::ImmGetContext wrapper (0x6F104EA7) keeps its `this` in
+     * ESI.  That pointer is the field identity the host uses to keep a
+     * separate text mirror for Login and Password. */
     uint32_t now = hle_now_ms();
     int recent_click = g_ime_click_ms != 0 &&
                        (uint32_t)(now - g_ime_click_ms) < 1000u;
     if (g_ime_click_pending || recent_click) {
+        uint32_t click_seq = g_ime_click_seq;
         g_ime_click_pending = 0;
         g_ime_hide_pending = 0;
-        if (!g_ime_shown) {
+        if (click_seq != g_ime_focus_seq) {
+            g_ime_focus_seq = click_seq;
             g_ime_shown = 1;
+            HleKeyboardRect rect;
+            int has_rect = keyboard_field_rect(c->esi, &rect);
 #if WC3_DEBUG
-            fprintf(stderr, "[input] text field focused; keyboard shown\n");
+            fprintf(stderr, "[input] text field %08X focused; keyboard shown\n",
+                    c->esi);
 #endif
-            if (g_keyboard_show) g_keyboard_show();
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+            if (has_rect)
+                fprintf(stderr,
+                        "[input] field %08X surface rect %.4f,%.4f..%.4f,%.4f\n",
+                        c->esi, rect.left, rect.top, rect.right, rect.bottom);
+            else
+                fprintf(stderr, "[input] field %08X surface rect unavailable\n",
+                        c->esi);
+#endif
+            if (g_keyboard_show)
+                g_keyboard_show(c->esi, has_rect ? &rect : NULL);
         }
     }
     c->eax = 0;
@@ -9452,6 +9515,17 @@ static int decorated_argc(const char *name)
 
 void hle_android_start(const char *exe_path, const char *cmdline)
 {
+    /* Turn the fixed layout into exact ranges plus page marks once.  Adjacent
+     * arenas may coalesce in the range table, but every byte in the resulting
+     * intervals is still backed by a fixed layout entry.  Doing it here keeps
+     * later probes on the page path instead of walking all arenas. */
+    static int layout_seeded;
+    if (!layout_seeded) {
+        layout_seeded = 1;
+        for (unsigned i = 0; i < sizeof g_arenas / sizeof g_arenas[0]; i++)
+            guest_range_add(g_arenas[i].lo, g_arenas[i].hi - g_arenas[i].lo);
+    }
+
     if (exe_path && *exe_path) g_exe_path = exe_path;
     /* The launcher takes its data directory from its own image path, so that
      * path has to be absolute before it is handed back as "Z:\...".  The caller
@@ -9632,15 +9706,22 @@ void hle_call(uint32_t thunk, CPU *c)
     e->calls++;
     g_last_cpu = c;
 
-    uint32_t ra = rd32g(c->esp);
+    /* The ring is debug evidence.  Release does not pay its stores on every
+     * import and leaves the ring empty; a missing import still reads ra for
+     * the one-shot diagnostic below. */
+    uint32_t ra = 0;
+#if WC3_DEBUG
+    ra = rd32g(c->esp);
     g_ring[g_ring_pos].ra = ra;
     g_ring[g_ring_pos].name = e->name[0] ? e->name : e->dll;
     g_ring[g_ring_pos].esp = c->esp;
     g_ring_pos = (g_ring_pos + 1) % HLE_RING;
     if (g_ring_len < HLE_RING) g_ring_len++;
+#endif
 
     if (e->fn == hle_stub) {
         note_missing(e);
+        if (!ra) ra = rd32g(c->esp);
         if (e->calls <= 3) {
             fprintf(stderr, "[hle] missing %s!%s ord=%u ra=%08X argc=%u"
                             " stk=%08X %08X %08X %08X %08X %08X -> 0\n",

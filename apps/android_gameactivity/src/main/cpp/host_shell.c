@@ -69,6 +69,16 @@
 #define LOGE(...) ((void)0)
 #endif
 
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+#define IME_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "wc3ime", __VA_ARGS__)
+#define IME_LOGE(...) \
+    __android_log_print(ANDROID_LOG_ERROR, "wc3ime", __VA_ARGS__)
+#else
+#define IME_LOG(...) ((void)0)
+#define IME_LOGE(...) ((void)0)
+#endif
+
 #if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
 #define GPU_LOG(...) \
     __android_log_print(ANDROID_LOG_INFO, "GPU_DRIVERS", __VA_ARGS__)
@@ -198,6 +208,28 @@ static char *g_ime_text;
 static int g_ime_text_len;
 static int g_ime_text_cap;
 static int g_ime_active;
+/* The guest's CEditBox object is stable for the lifetime of a text field.
+ * Keep the mirrored text per field so switching Login -> Password -> Login
+ * restores the exact tail that the guest field still owns.  Without this the
+ * diff would either delete the wrong characters or lose Backspace after a
+ * field switch. */
+#define IME_FIELD_SLOTS 8
+typedef struct {
+    uint32_t id;
+    uint32_t used;
+    char *text;
+    int length;
+} ImeFieldText;
+static ImeFieldText g_ime_fields[IME_FIELD_SLOTS];
+static uint32_t g_ime_field_id;
+static uint32_t g_ime_field_clock;
+/* The IME inset and focused-field rectangle decide whether the game surface
+ * has to move.  g_ime_pan_px is the translation applied by Java; input adds it
+ * back so a screen tap still lands on the same guest point. */
+static int g_ime_rect_valid;
+static Wc3LegacyKeyboardRect g_ime_rect;
+static int g_ime_inset_bottom;
+static float g_ime_pan_px;
 
 static int g_haptics_ready;
 
@@ -266,6 +298,11 @@ static char g_game_mode[8] = "tft";
 static char g_vulkan_driver_root[1024];
 static char g_vulkan_driver_id[WC3_VULKAN_DRIVER_ID_MAX];
 static char g_vulkan_driver_hook_dir[1024];
+/* Settings default.  A direct diagnostic launch keeps the authored profile;
+ * zero here means "do not override the .icp timer". */
+static int g_double_tap_gestures = 1;
+static int g_double_tap_timeout_ms;
+static int g_long_press_timeout_ms;
 
 #define SHARED_DATA_DIR_NAME "Warcraft 3"
 
@@ -966,6 +1003,17 @@ Java_wc3_recomp_Wc3GameActivity_nativeClearOverlaySurface(
     native_clear_overlay_surface(env, thiz, surface);
 }
 
+JNIEXPORT jfloat JNICALL
+Java_wc3_recomp_Wc3GameActivity_nativeImePan(JNIEnv *env, jobject thiz)
+{
+    (void)env;
+    (void)thiz;
+    pthread_mutex_lock(&g_ime_lock);
+    const float pan = g_ime_pan_px;
+    pthread_mutex_unlock(&g_ime_lock);
+    return (jfloat)pan;
+}
+
 JNIEXPORT void JNICALL
 Java_wc3_recomp_Wc3GameActivity_nativeSetGameMode(
     JNIEnv *env, jclass clazz, jstring mode)
@@ -1007,13 +1055,19 @@ JNIEXPORT void JNICALL
 Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     JNIEnv *env, jclass clazz, jstring game_dir, jint width, jint height,
     jboolean sound, jstring extra_args, jstring driver_id, jstring driver_root,
-    jstring hook_dir, jstring dxvk_version, jstring dxvk_config_path)
+    jstring hook_dir, jstring dxvk_version, jstring dxvk_config_path,
+    jboolean double_tap_gestures, jint double_tap_timeout_ms,
+    jint long_press_timeout_ms)
 {
     /* JNI has no type checking between two jstring parameters.  Keep this
      * order identical to Wc3GameActivity.nativeApplyLaunchSettings: id before
-     * root, DXVK version and config path last, or values are copied into the
-     * wrong slot. */
+     * root, DXVK version and config path, then the gesture flag and timers
+     * last, or values are copied into the wrong slot. */
     (void)clazz;
+    g_double_tap_gestures = double_tap_gestures ? 1 : 0;
+    g_double_tap_timeout_ms = (int)double_tap_timeout_ms;
+    g_long_press_timeout_ms = (int)long_press_timeout_ms;
+
     const char *dir = NULL;
     const char *user_args = NULL;
     const char *vulkan_root = NULL;
@@ -1187,6 +1241,21 @@ static void ime_clear_locked(void)
     if (g_ime_text) g_ime_text[0] = '\0';
 }
 
+/* Selection offsets in GameTextInputState are UTF-16 code units, while the
+ * text is modified UTF-8.  Count decoded units, not bytes. */
+static int ime_text_units(const char *text, int length)
+{
+    int units = 0;
+    int pos = 0;
+    while (text && pos < length) {
+        int step = wc3_legacy_mutf8_next(text, length, pos, NULL);
+        if (step <= 0) break;
+        pos += step;
+        units++;
+    }
+    return units;
+}
+
 static int ime_reserve_locked(int length)
 {
     if (length < 0) return 0;
@@ -1207,43 +1276,295 @@ static int ime_reserve_locked(int length)
     return 1;
 }
 
-/* Called from the guest thread when the game focuses a text field. */
-static void ime_show(void)
+static ImeFieldText *ime_field_lookup_locked(uint32_t id)
+{
+    if (!id) return NULL;
+    for (int i = 0; i < IME_FIELD_SLOTS; i++) {
+        if (g_ime_fields[i].id == id) return &g_ime_fields[i];
+    }
+    return NULL;
+}
+
+static ImeFieldText *ime_field_claim_locked(uint32_t id)
+{
+    ImeFieldText *free_slot = NULL;
+    ImeFieldText *oldest = NULL;
+    for (int i = 0; i < IME_FIELD_SLOTS; i++) {
+        ImeFieldText *entry = &g_ime_fields[i];
+        if (entry->id == id) return entry;
+        if (!entry->id) {
+            if (!free_slot) free_slot = entry;
+        } else if (!oldest || entry->used < oldest->used) {
+            oldest = entry;
+        }
+    }
+
+    ImeFieldText *entry = free_slot ? free_slot : oldest;
+    if (!entry) return NULL;
+    free(entry->text);
+    entry->text = NULL;
+    entry->length = 0;
+    entry->id = id;
+    entry->used = 0;
+    return entry;
+}
+
+/* Park the current field's mirror before another field replaces it. */
+static void ime_field_save_locked(void)
+{
+    if (!g_ime_field_id) return;
+
+    char *copy = NULL;
+    if (g_ime_text_len > 0) {
+        copy = (char *)malloc((size_t)g_ime_text_len + 1u);
+        if (!copy) return;
+        memcpy(copy, g_ime_text, (size_t)g_ime_text_len);
+        copy[g_ime_text_len] = '\0';
+    }
+
+    ImeFieldText *entry = ime_field_claim_locked(g_ime_field_id);
+    if (!entry) {
+        free(copy);
+        return;
+    }
+    free(entry->text);
+    entry->text = copy;
+    entry->length = g_ime_text_len;
+    entry->used = ++g_ime_field_clock;
+}
+
+static void ime_field_load_locked(uint32_t id)
+{
+    g_ime_field_id = id;
+    ImeFieldText *entry = ime_field_lookup_locked(id);
+    if (!entry) {
+        ime_clear_locked();
+        return;
+    }
+
+    if (ime_reserve_locked(entry->length)) {
+        if (entry->length > 0)
+            memcpy(g_ime_text, entry->text, (size_t)entry->length);
+        g_ime_text[entry->length] = '\0';
+        g_ime_text_len = entry->length;
+    } else {
+        ime_clear_locked();
+    }
+    entry->used = ++g_ime_field_clock;
+}
+
+static void ime_fields_clear_locked(void)
+{
+    for (int i = 0; i < IME_FIELD_SLOTS; i++) {
+        free(g_ime_fields[i].text);
+        memset(&g_ime_fields[i], 0, sizeof g_ime_fields[i]);
+    }
+    g_ime_field_id = 0;
+    g_ime_field_clock = 0;
+}
+
+static float ime_input_pan(void)
+{
+    pthread_mutex_lock(&g_ime_lock);
+    const float pan = g_ime_pan_px;
+    pthread_mutex_unlock(&g_ime_lock);
+    return pan;
+}
+
+/* Apply the current pan on the UI thread.  The runnable asks the native side
+ * for the value when it runs, so a show from the guest thread and an inset
+ * update from the UI thread cannot overwrite a newer translation with an
+ * older one. */
+static void ime_request_pan_refresh(GameActivity *activity)
+{
+    if (!activity || !activity->vm || !activity->javaGameActivity)
+        return;
+
+    JavaVM *vm = activity->vm;
+    JNIEnv *env = NULL;
+    int attached = 0;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) {
+            IME_LOGE("IME pan: cannot attach thread");
+            return;
+        }
+        attached = 1;
+    }
+
+    jclass cls = (*env)->GetObjectClass(env, activity->javaGameActivity);
+    jmethodID method = cls
+        ? (*env)->GetMethodID(env, cls, "requestImePan", "()V")
+        : NULL;
+    if (method) {
+        (*env)->CallVoidMethod(env, activity->javaGameActivity, method);
+    } else {
+        IME_LOGE("IME pan: requestImePan missing");
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    if (attached) (*vm)->DetachCurrentThread(vm);
+}
+
+static void ime_pan_update(GameActivity *activity)
+{
+    pthread_mutex_lock(&g_window_lock);
+    const uint32_t surface_h = g_surface_h;
+    pthread_mutex_unlock(&g_window_lock);
+
+    float previous;
+    float desired;
+    int inset;
+    int rect_valid;
+    Wc3LegacyKeyboardRect rect;
+
+    pthread_mutex_lock(&g_ime_lock);
+    previous = g_ime_pan_px;
+    inset = g_ime_inset_bottom;
+    rect_valid = g_ime_rect_valid;
+    rect = g_ime_rect;
+    if (g_ime_active && rect_valid)
+        desired = wc3_legacy_keyboard_pan_px(&rect, inset, surface_h);
+    else
+        desired = 0.0f;
+    g_ime_pan_px = desired;
+    pthread_mutex_unlock(&g_ime_lock);
+
+    if (desired == previous)
+        return;
+
+    if (rect_valid) {
+        IME_LOG("pan %.1f -> %.1f inset=%d surface=%u field=%.3f,%.3f..%.3f,%.3f",
+                previous, desired, inset, (unsigned)surface_h,
+                rect.left, rect.top, rect.right, rect.bottom);
+    } else {
+        IME_LOG("pan %.1f -> %.1f inset=%d surface=%u field=none",
+                previous, desired, inset, (unsigned)surface_h);
+    }
+    ime_request_pan_refresh(activity);
+}
+
+/* The IME inset is the only reliable keyboard height: the native window stays
+ * full-screen and the swap chain keeps its extent while the IME is open. */
+static void ime_read_insets(GameActivity *activity)
+{
+    if (!activity) return;
+
+    ARect insets;
+    memset(&insets, 0, sizeof insets);
+    GameActivity_getWindowInsets(activity, GAMECOMMON_INSETS_TYPE_IME,
+                                 &insets);
+    const int bottom = insets.bottom > 0 ? (int)insets.bottom : 0;
+
+    pthread_mutex_lock(&g_ime_lock);
+    g_ime_inset_bottom = bottom;
+    pthread_mutex_unlock(&g_ime_lock);
+
+    IME_LOG("inset bottom=%d", bottom);
+    ime_pan_update(activity);
+}
+
+static void ime_window_insets(GameActivity *activity)
+{
+    ime_read_insets(activity);
+}
+
+/* Called from the guest thread when the game focuses a text field.  The field
+ * identity comes from the guest's CEditBox object, so a hide/show of the same
+ * field keeps its mirror while switching to another field restores that
+ * field's own mirror.  The editor buffer deliberately survives a hide/show
+ * cycle: it is the only record of the text this bridge has already delivered
+ * to the guest.  Clearing it while the game keeps its field contents makes
+ * Backspace unable to remove anything that was typed before the keyboard was
+ * dismissed. */
+static void ime_show(uint32_t field_id, const Wc3LegacyKeyboardRect *rect)
 {
     GameActivity *activity = host_activity();
     if (!activity) return;
 
     pthread_mutex_lock(&g_ime_lock);
     g_ime_active = 1;
-    ime_clear_locked();
+    g_ime_rect_valid = rect != NULL;
+    if (rect) g_ime_rect = *rect;
+    if (field_id && field_id != g_ime_field_id) {
+        ime_field_save_locked();
+        ime_field_load_locked(field_id);
+    }
+    const int length = g_ime_text_len;
+    char *text = NULL;
+    if (length > 0) {
+        text = (char *)malloc((size_t)length + 1u);
+        if (text) {
+            memcpy(text, g_ime_text, (size_t)length);
+            text[length] = '\0';
+        }
+    }
     pthread_mutex_unlock(&g_ime_lock);
 
-    GameTextInputState empty;
-    memset(&empty, 0, sizeof empty);
-    empty.text_UTF8 = "";
-    empty.text_length = 0;
-    empty.selection.start = 0;
-    empty.selection.end = 0;
-    empty.composingRegion.start = SPAN_UNDEFINED;
-    empty.composingRegion.end = SPAN_UNDEFINED;
-    GameActivity_setTextInputState(activity, &empty);
+    /* Show first: setSoftKeyboardActive() creates the input connection and
+     * gives the surface focus.  Restoring the state after that keeps the
+     * editor mirror identical to the guest field and puts the cursor at the
+     * end.  Doing it in the opposite order restarts an inactive connection,
+     * which some IMEs do not recover from on the next show. */
     GameActivity_showSoftInput(activity,
                                GAMEACTIVITY_SHOW_SOFT_INPUT_IMPLICIT);
-    LOGI("IME show requested");
+
+    if (length > 0 && text) {
+        GameTextInputState state;
+        memset(&state, 0, sizeof state);
+        const int cursor = ime_text_units(text, length);
+        state.text_UTF8 = text;
+        state.text_length = length;
+        state.selection.start = cursor;
+        state.selection.end = cursor;
+        state.composingRegion.start = SPAN_UNDEFINED;
+        state.composingRegion.end = SPAN_UNDEFINED;
+        GameActivity_setTextInputState(activity, &state);
+    } else if (length == 0) {
+        GameTextInputState empty;
+        memset(&empty, 0, sizeof empty);
+        empty.text_UTF8 = "";
+        empty.text_length = 0;
+        empty.selection.start = 0;
+        empty.selection.end = 0;
+        empty.composingRegion.start = SPAN_UNDEFINED;
+        empty.composingRegion.end = SPAN_UNDEFINED;
+        GameActivity_setTextInputState(activity, &empty);
+    } else {
+        IME_LOGE("IME show: cannot mirror %d text bytes", length);
+    }
+    free(text);
+
+    if (rect) {
+        IME_LOG("show field=%08X text=%d rect=%.3f,%.3f..%.3f,%.3f",
+                field_id, length, rect->left, rect->top, rect->right,
+                rect->bottom);
+    } else {
+        IME_LOG("show field=%08X text=%d rect=none", field_id, length);
+    }
+    LOGI("IME show field=%08X text=%d", field_id, length);
+    ime_pan_update(activity);
 }
 
 static void ime_hide(void)
 {
     GameActivity *activity = host_activity();
-    if (!activity) return;
 
-    GameActivity_hideSoftInput(activity,
-                               GAMEACTIVITY_HIDE_SOFT_INPUT_NOT_ALWAYS);
     pthread_mutex_lock(&g_ime_lock);
     g_ime_active = 0;
-    ime_clear_locked();
+    g_ime_rect_valid = 0;
+    const int length = g_ime_text_len;
     pthread_mutex_unlock(&g_ime_lock);
-    LOGI("IME hide requested");
+
+    if (activity) {
+        GameActivity_hideSoftInput(activity,
+                                   GAMEACTIVITY_HIDE_SOFT_INPUT_NOT_ALWAYS);
+    }
+    IME_LOG("hide text=%d kept", length);
+    LOGI("IME hide requested (text=%d kept)", length);
+    ime_pan_update(activity);
 }
 
 static void ime_text_changed(GameActivity *activity,
@@ -1262,8 +1583,11 @@ static void ime_text_changed(GameActivity *activity,
 
     pthread_mutex_lock(&g_ime_lock);
     if (!g_ime_active) {
-        ime_clear_locked();
+        /* Ignore a late event from a hidden editor, but keep the baseline:
+         * the next show restores the same state into the editor and any edit
+         * must still diff against what the guest has actually received. */
         pthread_mutex_unlock(&g_ime_lock);
+        IME_LOG("text ignored inactive len=%d", length);
         return;
     }
 
@@ -1306,15 +1630,17 @@ static bool ime_editor_action(GameActivity *activity, int action)
     return false;
 }
 
+/* Insets-based visibility is advisory only.  GameTextInput propagates text
+ * changes even when this callback says the IME is invisible, because the
+ * platform's keyboard-visibility state is unreliable.  The bridge therefore
+ * tracks its own show/hide lifetime and never clears the text baseline here:
+ * doing so dropped keystrokes while the IME was actually up and made the next
+ * state diff replay text the guest had already received. */
 static void ime_visibility(GameActivity *activity, bool visible)
 {
-    (void)activity;
     wc3_legacy_set_keyboard_visible(visible ? 1 : 0);
-    pthread_mutex_lock(&g_ime_lock);
-    g_ime_active = visible ? 1 : 0;
-    ime_clear_locked();
-    pthread_mutex_unlock(&g_ime_lock);
     LOGI("IME visibility %d", visible ? 1 : 0);
+    ime_read_insets(activity);
 }
 
 static void ime_install(struct android_app *app)
@@ -1328,6 +1654,7 @@ static void ime_install(struct android_app *app)
     callbacks->onTextInputEvent = ime_text_changed;
     callbacks->onEditorAction = ime_editor_action;
     callbacks->onSoftwareKeyboardVisibilityChanged = ime_visibility;
+    callbacks->onWindowInsetsChanged = ime_window_insets;
     wc3_legacy_set_keyboard_bridge(ime_show, ime_hide);
     LOGI("IME callbacks installed");
 }
@@ -1342,15 +1669,24 @@ static void ime_shutdown(struct android_app *app)
         callbacks->onTextInputEvent = NULL;
         callbacks->onEditorAction = NULL;
         callbacks->onSoftwareKeyboardVisibilityChanged = NULL;
+        callbacks->onWindowInsetsChanged = NULL;
     }
 
     pthread_mutex_lock(&g_ime_lock);
+    ime_clear_locked();
+    ime_fields_clear_locked();
     free(g_ime_text);
     g_ime_text = NULL;
     g_ime_text_len = 0;
     g_ime_text_cap = 0;
     g_ime_active = 0;
+    g_ime_rect_valid = 0;
+    g_ime_inset_bottom = 0;
+    g_ime_pan_px = 0.0f;
     pthread_mutex_unlock(&g_ime_lock);
+
+    if (app && app->activity)
+        ime_request_pan_refresh(app->activity);
 }
 
 static void haptics_init(struct android_app *app)
@@ -1452,7 +1788,10 @@ static int overlay_input_start(int width, int height)
     controls_set_action_sink(NULL, NULL);
 #endif
 
-    if (controls_init(profile, width, height) != 0) {
+    if (controls_init_ex(profile, width, height,
+                         g_double_tap_gestures != 0,
+                         g_double_tap_timeout_ms,
+                         g_long_press_timeout_ms) != 0) {
         OVERLAY_LOGE("controls init failed: %s", controls_last_error());
         free(profile);
         controls_set_action_sink(NULL, NULL);
@@ -1644,6 +1983,7 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
 #endif
             LOGI("window %ux%u", width, height);
             overlay_input_start((int)width, (int)height);
+            ime_pan_update(app->activity);
 #if WC3_WITH_ASBUILT_HLE
             if (!g_boot_started && g_data_dir[0]) {
                 g_boot_started = 1;
@@ -1707,6 +2047,7 @@ static void on_app_cmd(struct android_app *app, int32_t cmd)
             }
             overlay_input_start((int)width, (int)height);
             LOGI("window resized %ux%u", width, height);
+            ime_pan_update(app->activity);
         }
         break;
     case APP_CMD_DESTROY: {
@@ -1778,14 +2119,21 @@ static void push_pointer(uint32_t kind, const GameActivityPointerAxes *pointer,
                          uint32_t modifiers, uint64_t time_ns)
 {
     if (!pointer) return;
+    const float x = GameActivityPointerAxes_getX(pointer);
+    /* The surface itself is translated up while the IME covers a field.
+     * GameActivity hands us window coordinates, so undo that translation
+     * before the guest hit-tests the point. */
+    const float y = GameActivityPointerAxes_getY(pointer) + ime_input_pan();
     Wc3InputEvent event;
     memset(&event, 0, sizeof event);
     event.kind = kind;
     event.pointer_id = (uint32_t)pointer->id;
-    event.x = pointer_coord(GameActivityPointerAxes_getX(pointer));
-    event.y = pointer_coord(GameActivityPointerAxes_getY(pointer));
+    event.x = pointer_coord(x);
+    event.y = pointer_coord(y);
     event.modifiers = modifiers;
     event.time_ns = time_ns;
+    if (kind == WC3_INPUT_POINTER_DOWN)
+        IME_LOG("pointer down x=%d y=%d", event.x, event.y);
     push_input(&event);
 
 #if WC3_WITH_ASBUILT_HLE
@@ -1793,8 +2141,6 @@ static void push_pointer(uint32_t kind, const GameActivityPointerAxes *pointer,
      * physical surface is the same fraction of DXVK's scaled client image, so
      * no display-mode conversion is needed here. */
     if (pointer->id == 0) {
-        float x = GameActivityPointerAxes_getX(pointer);
-        float y = GameActivityPointerAxes_getY(pointer);
         float nx = g_surface_w ? x / (float)g_surface_w : 0.5f;
         float ny = g_surface_h ? y / (float)g_surface_h : 0.5f;
         wc3_legacy_mouse_move(nx, ny);
@@ -1821,8 +2167,8 @@ static void queue_pointer(Wc3TouchPhase phase,
                           uint64_t event_time_ms)
 {
     if (!pointer) return;
-    queue_touch(phase, pointer->id, pointer_x(pointer), pointer_y(pointer),
-                event_time_ms);
+    queue_touch(phase, pointer->id, pointer_x(pointer),
+                pointer_y(pointer) + ime_input_pan(), event_time_ms);
 }
 
 static void queue_overlay_motion(const GameActivityMotionEvent *motion)

@@ -17,6 +17,7 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -48,6 +49,11 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var folderStatus: TextView
     private lateinit var resolutionSpinner: Spinner
     private lateinit var soundSwitch: SwitchCompat
+    private lateinit var doubleTapSwitch: SwitchCompat
+    private lateinit var doubleTapDelaySlider: SeekBar
+    private lateinit var doubleTapDelayValue: TextView
+    private lateinit var longPressDelaySlider: SeekBar
+    private lateinit var longPressDelayValue: TextView
     private lateinit var argsInput: EditText
     private lateinit var driverStore: VulkanDriverStore
     private lateinit var driverSpinner: Spinner
@@ -157,6 +163,11 @@ class LaunchSettingsActivity : AppCompatActivity() {
         folderStatus = findViewById(R.id.folder_status)
         resolutionSpinner = findViewById(R.id.resolution_spinner)
         soundSwitch = findViewById(R.id.sound_switch)
+        doubleTapSwitch = findViewById(R.id.double_tap_switch)
+        doubleTapDelaySlider = findViewById(R.id.double_tap_delay_slider)
+        doubleTapDelayValue = findViewById(R.id.double_tap_delay_value)
+        longPressDelaySlider = findViewById(R.id.long_press_delay_slider)
+        longPressDelayValue = findViewById(R.id.long_press_delay_value)
         argsInput = findViewById(R.id.args_input)
         driverSpinner = findViewById(R.id.driver_spinner)
         driverStatus = findViewById(R.id.driver_status)
@@ -220,6 +231,17 @@ class LaunchSettingsActivity : AppCompatActivity() {
         )
 
         soundSwitch.isChecked = settings.sound
+        doubleTapSwitch.isChecked = settings.doubleTapGestures
+        bindDelaySlider(
+            doubleTapDelaySlider,
+            doubleTapDelayValue,
+            settings.doubleTapTimeoutMs
+        )
+        bindDelaySlider(
+            longPressDelaySlider,
+            longPressDelayValue,
+            settings.longPressTimeoutMs
+        )
         argsInput.setText(settings.extraArgs)
         rebuildDriverOptions(settings.driverId)
         updateDriverStatus()
@@ -250,6 +272,16 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 saveIfValid()
             }
         }
+
+        doubleTapSwitch.setOnCheckedChangeListener { _, _ ->
+            if (!binding) {
+                refreshValidation()
+                saveIfValid()
+            }
+        }
+
+        wireDelaySlider(doubleTapDelaySlider, doubleTapDelayValue)
+        wireDelaySlider(longPressDelaySlider, longPressDelayValue)
 
         resolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -778,7 +810,10 @@ class LaunchSettingsActivity : AppCompatActivity() {
             extraArgs = argsInput.text.toString().trim(),
             driverId = currentDriverId(),
             dxvkVersion = currentDxvkVersion(),
-            dxvkConfig = readDxvkConfig()
+            dxvkConfig = readDxvkConfig(),
+            doubleTapGestures = doubleTapSwitch.isChecked,
+            doubleTapTimeoutMs = progressToDelay(doubleTapDelaySlider.progress),
+            longPressTimeoutMs = progressToDelay(longPressDelaySlider.progress)
         )
     }
 
@@ -828,6 +863,50 @@ class LaunchSettingsActivity : AppCompatActivity() {
         )
     }
 
+    private fun bindDelaySlider(slider: SeekBar, valueView: TextView, ms: Int) {
+        val progress = delayToProgress(ms)
+        slider.progress = progress
+        valueView.text = getString(
+            R.string.launch_gesture_delay_value,
+            progressToDelay(progress)
+        )
+    }
+
+    private fun wireDelaySlider(slider: SeekBar, valueView: TextView) {
+        slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(
+                seekBar: SeekBar?,
+                progress: Int,
+                fromUser: Boolean
+            ) {
+                valueView.text = getString(
+                    R.string.launch_gesture_delay_value,
+                    progressToDelay(progress)
+                )
+                if (fromUser && !binding) {
+                    refreshValidation()
+                    saveIfValid()
+                }
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+        })
+    }
+
+    /* The slider is an index, not milliseconds: max = 10 maps 100..200 ms in
+     * exact 10 ms steps on every Android version. */
+    private fun delayToProgress(ms: Int): Int {
+        val clamped = ms.coerceIn(MIN_GESTURE_DELAY_MS, MAX_GESTURE_DELAY_MS)
+        return ((clamped - MIN_GESTURE_DELAY_MS + GESTURE_DELAY_STEP_MS / 2) /
+            GESTURE_DELAY_STEP_MS).coerceIn(0, GESTURE_DELAY_STEPS)
+    }
+
+    private fun progressToDelay(progress: Int): Int =
+        MIN_GESTURE_DELAY_MS +
+            progress.coerceIn(0, GESTURE_DELAY_STEPS) * GESTURE_DELAY_STEP_MS
+
     private fun EditText.afterTextChanged(block: () -> Unit) {
         addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(
@@ -870,6 +949,11 @@ class LaunchSettingsActivity : AppCompatActivity() {
         const val RESOLUTION_HEIGHT_STEP = 180
         const val DEFAULT_SCREEN_WIDTH = 1280
         const val DEFAULT_SCREEN_HEIGHT = 720
+        const val MIN_GESTURE_DELAY_MS = 100
+        const val MAX_GESTURE_DELAY_MS = 200
+        const val GESTURE_DELAY_STEP_MS = 10
+        const val GESTURE_DELAY_STEPS =
+            (MAX_GESTURE_DELAY_MS - MIN_GESTURE_DELAY_MS) / GESTURE_DELAY_STEP_MS
         const val DXVK_VERSION_1_10 = "1"
         const val DXVK_VERSION_3_1_1 = "3"
     }

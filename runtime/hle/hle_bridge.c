@@ -489,9 +489,53 @@ void wc3_legacy_release_all(void)
     hle_android_release_all();
 }
 
-void wc3_legacy_set_keyboard_bridge(void (*show)(void), void (*hide)(void))
+static void (*g_keyboard_show)(uint32_t field,
+                               const Wc3LegacyKeyboardRect *rect);
+
+static void keyboard_show_adapter(uint32_t field, const HleKeyboardRect *rect)
 {
-    hle_android_set_keyboard_bridge(show, hide);
+    if (!g_keyboard_show)
+        return;
+    if (!rect) {
+        g_keyboard_show(field, NULL);
+        return;
+    }
+    Wc3LegacyKeyboardRect out;
+    out.left = rect->left;
+    out.top = rect->top;
+    out.right = rect->right;
+    out.bottom = rect->bottom;
+    g_keyboard_show(field, &out);
+}
+
+void wc3_legacy_set_keyboard_bridge(void (*show)(uint32_t field,
+                                                 const Wc3LegacyKeyboardRect *rect),
+                                    void (*hide)(void))
+{
+    g_keyboard_show = show;
+    hle_android_set_keyboard_bridge(show ? keyboard_show_adapter : NULL, hide);
+}
+
+float wc3_legacy_keyboard_pan_px(const Wc3LegacyKeyboardRect *rect,
+                                 int ime_inset_bottom,
+                                 uint32_t surface_height)
+{
+    if (!rect || ime_inset_bottom <= 0 || surface_height == 0)
+        return 0.0f;
+
+    float bottom_fraction = rect->bottom;
+    if (!(bottom_fraction > 0.0f))
+        return 0.0f;
+    if (bottom_fraction > 1.0f)
+        bottom_fraction = 1.0f;
+
+    const float height = (float)surface_height;
+    float ime_top = height - (float)ime_inset_bottom;
+    if (ime_top < 0.0f)
+        ime_top = 0.0f;
+
+    const float field_bottom = bottom_fraction * height;
+    return field_bottom > ime_top ? field_bottom - ime_top : 0.0f;
 }
 
 void wc3_legacy_set_keyboard_visible(int visible)

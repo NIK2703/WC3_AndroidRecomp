@@ -14,13 +14,42 @@
  * these ranges are RW and mapped, so accepting them is not a loosening.
  *
  * The direct D3D9 path registers each buffer DXVK placed below 4 GB, so the
- * table also holds one entry per distinct dynamic buffer.  The buffer ranges
- * coalesce when they are adjacent, but 96 entries was sized for the staging
- * arena alone; 512 keeps a game with many small buffers from silently falling
- * back to the shadow copy. */
-#define GUEST_EXTRA_MAX 512
+ * table also holds one entry per distinct dynamic buffer and texture level.
+ * Ranges coalesce when adjacent; 4096 entries leave room for a map-load burst
+ * without falling back to the shadow copy, and the page index keeps validation
+ * independent of the table size. */
+#define GUEST_EXTRA_MAX 4096
+#define GUEST_PAGE_SHIFT 12u
+#define GUEST_PAGE_SIZE (1u << GUEST_PAGE_SHIFT)
+#define GUEST_PAGE_COUNT (1u << (32u - GUEST_PAGE_SHIFT))
+/* A large probe is cheaper as one exact-range compare than as a page walk;
+ * this keeps a 64 MiB guest copy from touching 16 K index bytes. */
+#define GUEST_PAGE_FAST_MAX (1u << 20)
+
 static struct { uint32_t lo, hi; } g_extra[GUEST_EXTRA_MAX];
 static int g_extra_n;   /* claimed slots; may run ahead of the filled ones */
+
+/* One byte per 4 KiB page for observed ranges.  A set byte means the union of
+ * ranges passed to guest_range_add() covers that page completely, so every
+ * byte inside the page is mapped.  The exact range table stays authoritative
+ * for pointers that touch a partial page or extend beyond one page; this index
+ * only removes the linear 4096-entry scan from the common case.  Full-surface
+ * texture locks add many distinct DXVK mappings, and they are page aligned, so
+ * the page path matters there too. */
+static uint8_t g_extra_page[GUEST_PAGE_COUNT];
+
+static void guest_pages_mark(uint32_t base, uint32_t hi)
+{
+    uint64_t first = ((uint64_t)base + GUEST_PAGE_SIZE - 1u) >> GUEST_PAGE_SHIFT;
+    uint64_t last = (uint64_t)hi >> GUEST_PAGE_SHIFT;
+    for (uint64_t p = first; p < last; p++)
+        __atomic_store_n(&g_extra_page[p], 1, __ATOMIC_RELEASE);
+}
+
+static int guest_page_marked(uint32_t page)
+{
+    return __atomic_load_n(&g_extra_page[page], __ATOMIC_ACQUIRE) != 0;
+}
 
 /* The direct D3D9 path appends entries from a guest (render) thread while
  * cr_memcpy() reads the table on other guest threads, and a lazy guest arena
@@ -58,6 +87,7 @@ void guest_range_add(uint32_t base, uint32_t size)
         if (hi >= g_extra[i].lo && base <= g_extra[i].hi) {
             if (base < g_extra[i].lo) g_extra[i].lo = base;
             if (hi > g_extra[i].hi) g_extra[i].hi = hi;
+            guest_pages_mark(g_extra[i].lo, g_extra[i].hi);
             return;
         }
     }
@@ -65,18 +95,20 @@ void guest_range_add(uint32_t base, uint32_t size)
     if (slot < GUEST_EXTRA_MAX) {
         g_extra[slot].lo = base;
         g_extra[slot].hi = hi;
+        guest_pages_mark(base, hi);
     } else {
         /* Dropping a range here makes guest_ok() refuse real, mapped memory,
          * and the caller is told the copy succeeded - the exact failure mode
-         * that made the staging arena unusable in the first place.  The
-         * staging arena is a monotonic bump allocator, but the direct buffer
-         * path can fill the table with many distinct ranges; either way a
-         * drop must never be quiet. */
+         * that made the staging arena unusable in the first place.  Mark the
+         * pages anyway so a small access fully inside one covered page still
+         * passes; the exact table remains authoritative for larger or partial
+         * queries, which then take the shadow/fallback path. */
+        guest_pages_mark(base, hi);
         static int warned;
         if (!warned) {
             warned = 1;
             fprintf(stderr, "[mem] range table full (%d): %08X+%X not recorded; "
-                            "guest_ok() will refuse it\n",
+                            "page index only\n",
                     GUEST_EXTRA_MAX, base, size);
         }
     }
@@ -86,6 +118,18 @@ int guest_range_ok(uint32_t base, uint32_t size)
 {
     uint64_t lo = base, hi = (uint64_t)base + size;
     if (hi > 0x100000000ull) return 0;
+
+    /* Common case: a small access inside one fully covered page.  The fast
+     * path only accepts bytes inside that single page, and a marked page is
+     * mapped end to end, so a hit is safe.  A zero-size query keeps the exact
+     * table path because it may start in a partial page that the index
+     * deliberately does not mark. */
+    if (size && size <= GUEST_PAGE_SIZE &&
+        (base & (GUEST_PAGE_SIZE - 1u)) + size <= GUEST_PAGE_SIZE) {
+        uint32_t page = base >> GUEST_PAGE_SHIFT;
+        if (page < GUEST_PAGE_COUNT && guest_page_marked(page)) return 1;
+    }
+
     int n = guest_extra_count();
     for (int i = 0; i < n; i++) {
         uint32_t elo = g_extra[i].lo, ehi = g_extra[i].hi;
@@ -110,10 +154,30 @@ int guest_range_register(uint32_t base, uint32_t size)
     return guest_range_ok(base, size);
 }
 
-/* How much of [base, base+n) one recorded range can vouch for.  Same contract
- * as the layout-table clamp in hle_android.c. */
+/* How much of [base, base+n) the validator can vouch for.  Same contract as
+ * the layout-table clamp in hle_android.c. */
 uint32_t guest_range_clamp(uint32_t base, uint32_t n)
 {
+    if (!n) return 0;
+
+    /* Extend across fully covered pages first, but stop at the requested end:
+     * a small access inside a large mapped arena must not walk every page in
+     * that arena.  The exact table may describe a longer run; under-reporting
+     * is safe. */
+    uint32_t page = base >> GUEST_PAGE_SHIFT;
+    if (n <= GUEST_PAGE_FAST_MAX &&
+        page < GUEST_PAGE_COUNT && guest_page_marked(page)) {
+        uint64_t want = (uint64_t)base + n;
+        uint64_t end = ((uint64_t)page + 1u) << GUEST_PAGE_SHIFT;
+        uint32_t p = page + 1u;
+        while (end < want && p < GUEST_PAGE_COUNT && guest_page_marked(p)) {
+            end += GUEST_PAGE_SIZE;
+            p++;
+        }
+        uint64_t avail = end - base;
+        return (uint32_t)(avail < n ? avail : n);
+    }
+
     int count = guest_extra_count();
     for (int i = 0; i < count; i++) {
         uint32_t lo = g_extra[i].lo, hi = g_extra[i].hi;

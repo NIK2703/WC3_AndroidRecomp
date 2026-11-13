@@ -28,7 +28,17 @@ class LaunchSettingsStore(context: Context) {
          * default.  A present empty string is an explicit "no overrides" and
          * must stay empty. */
         dxvkConfig = prefs.getString(KEY_DXVK_CONFIG, null)
-            ?: LaunchContract.DEFAULT_DXVK_CONFIG
+            ?: LaunchContract.DEFAULT_DXVK_CONFIG,
+        /* An absent preference is the existing double-tap scheme. */
+        doubleTapGestures = prefs.getBoolean(KEY_DOUBLE_TAP_GESTURES, true),
+        doubleTapTimeoutMs = prefs.getInt(
+            KEY_DOUBLE_TAP_TIMEOUT_MS,
+            LaunchContract.DEFAULT_DOUBLE_TAP_TIMEOUT_MS
+        ),
+        longPressTimeoutMs = prefs.getInt(
+            KEY_LONG_PRESS_TIMEOUT_MS,
+            LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS
+        )
     )
 
     fun save(settings: LaunchSettings): Boolean =
@@ -41,6 +51,9 @@ class LaunchSettingsStore(context: Context) {
             .putString(KEY_DRIVER_ID, settings.driverId)
             .putString(KEY_DXVK_VERSION, settings.dxvkVersion)
             .putString(KEY_DXVK_CONFIG, settings.dxvkConfig)
+            .putBoolean(KEY_DOUBLE_TAP_GESTURES, settings.doubleTapGestures)
+            .putInt(KEY_DOUBLE_TAP_TIMEOUT_MS, settings.doubleTapTimeoutMs)
+            .putInt(KEY_LONG_PRESS_TIMEOUT_MS, settings.longPressTimeoutMs)
             .commit()
 
     private companion object {
@@ -53,5 +66,8 @@ class LaunchSettingsStore(context: Context) {
         const val KEY_DRIVER_ID = "vulkan_driver_id"
         const val KEY_DXVK_VERSION = "dxvk_version"
         const val KEY_DXVK_CONFIG = "dxvk_config"
+        const val KEY_DOUBLE_TAP_GESTURES = "double_tap_gestures"
+        const val KEY_DOUBLE_TAP_TIMEOUT_MS = "double_tap_timeout_ms"
+        const val KEY_LONG_PRESS_TIMEOUT_MS = "long_press_timeout_ms"
     }
 }

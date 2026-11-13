@@ -56,15 +56,24 @@
  * Counters answer the questions the copy plan needs answered and nothing
  * else: which lock kind, which flags, how many bytes moved in each direction,
  * whether the lock used the native pointer, and how often the descriptor
- * caches hit.  They are read periodically and at thin_lock_reset().
+ * caches hit.  Buffer and rect copy bytes are split so a map-load run can
+ * distinguish buffer traffic from texture traffic.  They are read
+ * periodically and at thin_lock_reset().
  */
 #if WC3_DEBUG && WC3_DEBUG_PERF
 struct ThinLockStats {
     unsigned long long buffer_locks, buffer_unlocks;
     unsigned long long rect_locks, rect_unlocks;
+    unsigned long long buffer_outer_locks, rect_outer_locks;
+    unsigned long long rect_nested_locks;
+    unsigned long long buffer_shadow_locks, rect_fallback_locks;
     unsigned long long copy_in_bytes, copy_out_bytes;
+    unsigned long long buffer_copy_in_bytes, buffer_copy_out_bytes;
+    unsigned long long rect_copy_in_bytes, rect_copy_out_bytes;
     unsigned long long direct_locks;
     unsigned long long discard_locks;
+    unsigned long long buffer_discard_locks, rect_discard_locks;
+    unsigned long long buffer_readonly_locks, rect_readonly_locks;
     unsigned long long wo_locks;
     unsigned long long wo_copyin_skipped;
     unsigned long long getdesc_calls, getdesc_hits;
@@ -82,7 +91,10 @@ static void thin_lock_stats_dump(const char *why)
     fprintf(stderr,
             "[thin-lock] %s buf=%llu/%llu rect=%llu/%llu copyin=%llu "
             "copyout=%llu direct=%llu discard=%llu wo=%llu wo_skip=%llu "
-            "getdesc=%llu/%llu dims=%llu/%llu staging_grow=%llu low_fail=%llu\n",
+            "getdesc=%llu/%llu dims=%llu/%llu staging_grow=%llu low_fail=%llu "
+            "bouter=%llu router=%llu rnested=%llu bshadow=%llu rfallback=%llu "
+            "bcopyin=%llu bcopyout=%llu rcopyin=%llu rcopyout=%llu "
+            "bdiscard=%llu rdiscard=%llu breadonly=%llu rreadonly=%llu\n",
             why,
             g_lk.buffer_locks, g_lk.buffer_unlocks,
             g_lk.rect_locks, g_lk.rect_unlocks,
@@ -91,12 +103,27 @@ static void thin_lock_stats_dump(const char *why)
             g_lk.wo_locks, g_lk.wo_copyin_skipped,
             g_lk.getdesc_calls, g_lk.getdesc_hits,
             g_lk.dims_calls, g_lk.dims_hits,
-            g_lk.staging_grows, g_lk.low_register_fail);
+            g_lk.staging_grows, g_lk.low_register_fail,
+            g_lk.buffer_outer_locks, g_lk.rect_outer_locks,
+            g_lk.rect_nested_locks,
+            g_lk.buffer_shadow_locks, g_lk.rect_fallback_locks,
+            g_lk.buffer_copy_in_bytes, g_lk.buffer_copy_out_bytes,
+            g_lk.rect_copy_in_bytes, g_lk.rect_copy_out_bytes,
+            g_lk.buffer_discard_locks, g_lk.rect_discard_locks,
+            g_lk.buffer_readonly_locks, g_lk.rect_readonly_locks);
+}
+
+static void thin_lock_stats_maybe_dump(void)
+{
+    unsigned long long n = g_lk.buffer_outer_locks + g_lk.rect_outer_locks;
+    if (n && (n & 255ull) == 0)
+        thin_lock_stats_dump("periodic");
 }
 #else
 #define LK_INC(f) ((void)0)
 #define LK_ADD(f, n) ((void)0)
 #define thin_lock_stats_dump(why) ((void)0)
+#define thin_lock_stats_maybe_dump() ((void)0)
 #endif
 
 /* A/B switch for "a D3DUSAGE_WRITEONLY buffer does not need the copy-in".
@@ -353,10 +380,13 @@ static int low_buffer_usable(void *ptr, uint32_t off, uint32_t size,
 
 #define THIN_SHADOW_MAX 4096
 #define THIN_SHADOW_BUCKETS 8192
+#define THIN_HOST_BUCKETS 1024
 #define THIN_LOCK_STACK 4
 
 static_assert((THIN_SHADOW_BUCKETS & (THIN_SHADOW_BUCKETS - 1)) == 0,
               "THIN_SHADOW_BUCKETS must be a power of two");
+static_assert((THIN_HOST_BUCKETS & (THIN_HOST_BUCKETS - 1)) == 0,
+              "THIN_HOST_BUCKETS must be a power of two");
 
 struct ThinFrame {
     uint32_t off;      /* byte offset of the guest pointer inside staging */
@@ -382,11 +412,20 @@ struct ThinShadow {
     uint32_t rx, ry, rz;  /* outermost rect/box origin */
     uint32_t rw, rh, rd;  /* outermost rect/box extent */
     void    *native;      /* outermost native pointer */
+    /* Last low pointer accepted by low_buffer_usable().  Direct ranges are
+     * permanent for the lifetime of the process, so a repeated lock at the
+     * same pointer and no larger than the validated run can skip the
+     * validator walk.  A changed size or pointer falls back to the exact
+     * check. */
+    void    *low_ptr;
+    uint32_t low_size;
     int      nframes;
     ThinFrame frame[THIN_LOCK_STACK];
     /* D3D9 resource descriptors do not change while the object exists, so
      * the descriptor is fetched once per shadow instead of once per lock.
-     * The shadow is rebuilt when the host object is released. */
+     * The shadow is rebuilt when the host object is released.  Buffers use
+     * desc_valid/desc_size; textures and surfaces use desc_usage/desc_pool
+     * from their level descriptor. */
     uint32_t desc_size;
     uint32_t desc_usage;
     uint32_t desc_pool;
@@ -396,14 +435,31 @@ struct ThinShadow {
     int      dims_valid;
     uint32_t hash_next;    /* 1-based index of the next shadow in bucket */
     uint32_t hash_bucket;  /* bucket that owns this shadow */
+    uint32_t host_next;    /* 1-based index of the next shadow for this host */
+    uint32_t host_bucket;  /* host bucket that owns this shadow */
     int      used;
 };
 
 static ThinShadow g_shadow[THIN_SHADOW_MAX];
+
+/* A recorded direct range is never removed while the shadow is alive, so a
+ * hit is safe for any subset of the pointer/size pair that was validated. */
+static int low_cached(const ThinShadow *s, const void *ptr, uint32_t n)
+{
+    return s->low_ptr == ptr && n <= s->low_size;
+}
+
+static void low_cache(ThinShadow *s, void *ptr, uint32_t n)
+{
+    s->low_ptr = ptr;
+    s->low_size = n;
+}
+
 /* Bucket heads store index + 1 so the zero-initialized table is empty
  * without a separate initialization pass.  A chain is walked through the
  * 1-based hash_next links, with zero terminating it. */
 static uint32_t g_shadow_bucket[THIN_SHADOW_BUCKETS];
+static uint32_t g_host_bucket[THIN_HOST_BUCKETS];
 static uint32_t g_shadow_hint;
 
 static inline uint32_t shadow_bucket_index(void *host, int kind, uint32_t sub)
@@ -417,6 +473,15 @@ static inline uint32_t shadow_bucket_index(void *host, int kind, uint32_t sub)
     h *= 0xC4CEB9FE1A85EC53ull;
     h ^= h >> 33;
     return (uint32_t)h & (THIN_SHADOW_BUCKETS - 1u);
+}
+
+static inline uint32_t host_bucket_index(void *host)
+{
+    uint64_t h = (uint64_t)(uintptr_t)host;
+    h ^= h >> 33;
+    h *= 0xFF51AFD7ED558CCDull;
+    h ^= h >> 33;
+    return (uint32_t)h & (THIN_HOST_BUCKETS - 1u);
 }
 
 static ThinShadow *shadow_find(void *host, int kind, uint32_t sub, int create)
@@ -440,6 +505,10 @@ static ThinShadow *shadow_find(void *host, int kind, uint32_t sub, int create)
             g_shadow[i].hash_bucket = bucket;
             g_shadow[i].hash_next = g_shadow_bucket[bucket];
             g_shadow_bucket[bucket] = i + 1u;
+            uint32_t host_bucket = host_bucket_index(host);
+            g_shadow[i].host_bucket = host_bucket;
+            g_shadow[i].host_next = g_host_bucket[host_bucket];
+            g_host_bucket[host_bucket] = i + 1u;
             return &g_shadow[i];
         }
     }
@@ -454,9 +523,17 @@ static void shadow_unlink(uint32_t index)
     while (*link) {
         if (*link == index + 1u) {
             *link = s->hash_next;
-            return;
+            break;
         }
         link = &g_shadow[*link - 1u].hash_next;
+    }
+    link = &g_host_bucket[s->host_bucket];
+    while (*link) {
+        if (*link == index + 1u) {
+            *link = s->host_next;
+            break;
+        }
+        link = &g_shadow[*link - 1u].host_next;
     }
 }
 
@@ -508,6 +585,7 @@ static int surface_dims_query(ThinShadow *s, uint32_t *w, uint32_t *h,
             s->sub & 0xFFFF, &desc);
         if (FAILED(hr)) return 0;
         *w = desc.Width; *h = desc.Height; *fmt = desc.Format;
+        s->desc_usage = desc.Usage; s->desc_pool = desc.Pool;
         return 1;
     }
     case THIN_LK_CUBE: {
@@ -517,6 +595,7 @@ static int surface_dims_query(ThinShadow *s, uint32_t *w, uint32_t *h,
             s->sub & 0xFFFF, &desc);
         if (FAILED(hr)) return 0;
         *w = desc.Width; *h = desc.Height; *fmt = desc.Format;
+        s->desc_usage = desc.Usage; s->desc_pool = desc.Pool;
         return 1;
     }
     case THIN_LK_SURFACE: {
@@ -525,6 +604,7 @@ static int surface_dims_query(ThinShadow *s, uint32_t *w, uint32_t *h,
         HRESULT hr = ((IDirect3DSurface9 *)s->host)->GetDesc(&desc);
         if (FAILED(hr)) return 0;
         *w = desc.Width; *h = desc.Height; *fmt = desc.Format;
+        s->desc_usage = desc.Usage; s->desc_pool = desc.Pool;
         return 1;
     }
     case THIN_LK_VOLTEX: {
@@ -534,6 +614,7 @@ static int surface_dims_query(ThinShadow *s, uint32_t *w, uint32_t *h,
             s->sub & 0xFFFF, &desc);
         if (FAILED(hr)) return 0;
         *w = desc.Width; *h = desc.Height; *d = desc.Depth; *fmt = desc.Format;
+        s->desc_usage = desc.Usage; s->desc_pool = desc.Pool;
         return 1;
     }
     case THIN_LK_VOLUME: {
@@ -542,11 +623,27 @@ static int surface_dims_query(ThinShadow *s, uint32_t *w, uint32_t *h,
         HRESULT hr = ((IDirect3DVolume9 *)s->host)->GetDesc(&desc);
         if (FAILED(hr)) return 0;
         *w = desc.Width; *h = desc.Height; *d = desc.Depth; *fmt = desc.Format;
+        s->desc_usage = desc.Usage; s->desc_pool = desc.Pool;
         return 1;
     }
     default:
         return 0;
     }
+}
+
+/* DXVK keeps the mapped staging buffer after Unlock for managed, sysmem and
+ * dynamic resources.  For a backed, non-managed, non-dynamic default texture
+ * or offscreen surface, UnlockImage() calls DestroyBuffer(), so the pointer
+ * returned by LockRect is only valid until Unlock.  Handing it to the guest
+ * would therefore create a dangling pointer outside the lock contract; those
+ * resources keep using the bridge's persistent shadow. */
+static int direct_persists(const ThinShadow *s)
+{
+    if (s->desc_pool == D3DPOOL_MANAGED ||
+        s->desc_pool == D3DPOOL_SYSTEMMEM ||
+        s->desc_pool == D3DPOOL_SCRATCH)
+        return 1;
+    return (s->desc_usage & D3DUSAGE_DYNAMIC) != 0;
 }
 
 /* Descriptors are immutable per (object, subresource); the old layer asked
@@ -610,6 +707,27 @@ static int box_span(const D3DBOX *b, uint32_t w, uint32_t h, uint32_t d,
 /* lock / unlock                                                      */
 /* ------------------------------------------------------------------ */
 
+static HRESULT thin_unlock_native_rect(ThinObj *o, int kind, uint32_t sub,
+                                       int is_box)
+{
+    if (is_box) {
+        if (kind == THIN_LK_VOLTEX)
+            return ((IDirect3DVolumeTexture9 *)o->host)->UnlockBox(
+                sub & 0xFFFF);
+        if (kind == THIN_LK_VOLUME)
+            return ((IDirect3DVolume9 *)o->host)->UnlockBox();
+        return D3DERR_INVALIDCALL;
+    }
+    if (kind == THIN_LK_TEXTURE)
+        return ((IDirect3DTexture9 *)o->host)->UnlockRect(sub & 0xFFFF);
+    if (kind == THIN_LK_CUBE)
+        return ((IDirect3DCubeTexture9 *)o->host)->UnlockRect(
+            (D3DCUBEMAP_FACES)((sub >> 16) & 0xFFFF), sub & 0xFFFF);
+    if (kind == THIN_LK_SURFACE)
+        return ((IDirect3DSurface9 *)o->host)->UnlockRect();
+    return D3DERR_INVALIDCALL;
+}
+
 uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
                         uint32_t flags, uint32_t guest_rect,
                         uint32_t guest_out, int is_box)
@@ -652,6 +770,7 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
      * permits this; DXVK's LockRect does not. */
     if (s->nframes > 0) {
         if (s->nframes >= THIN_LOCK_STACK) return D3DERR_INVALIDCALL;
+        LK_INC(rect_nested_locks);
         ThinFrame *f = &s->frame[s->nframes++];
         f->used = 1;
         f->flags = flags;
@@ -659,7 +778,11 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
             ? rz * s->slice_pitch + ry * s->pitch + rx * bpp
             : ry * s->pitch + rx * bpp;
         f->bytes = is_box ? rd * s->slice_pitch : rh * s->pitch;
-        uint32_t p = (uint32_t)(uintptr_t)(s->staging + f->off);
+        f->direct = s->frame[0].direct;
+        uint8_t *base = f->direct
+            ? (uint8_t *)s->native - s->lock_off
+            : s->staging;
+        uint32_t p = (uint32_t)(uintptr_t)(base + f->off);
         if (is_box) {
             LockedBox32 lb;
             lb.RowPitch = s->pitch;
@@ -675,6 +798,13 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
         return D3D_OK;
     }
 
+    LK_INC(rect_outer_locks);
+    if (flags & D3DLOCK_DISCARD) {
+        LK_INC(discard_locks);
+        LK_INC(rect_discard_locks);
+    }
+    if (flags & D3DLOCK_READONLY) LK_INC(rect_readonly_locks);
+    thin_lock_stats_maybe_dump();
     DWORD dflags = 0;
     if (flags & D3DLOCK_DISCARD) dflags |= D3DLOCK_DISCARD;
     if (flags & D3DLOCK_NOOVERWRITE) dflags |= D3DLOCK_NOOVERWRITE;
@@ -729,19 +859,80 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
     s->slice_pitch = slice ? slice : pitch * h;
     uint32_t need = is_box ? s->slice_pitch * d : pitch * h;
     if (need < pitch) need = pitch;
+
+    uint32_t lock_off = is_box
+        ? rz * s->slice_pitch + ry * pitch + rx * bpp
+        : ry * pitch + rx * bpp;
+    uint32_t lock_bytes = is_box ? rd * s->slice_pitch : rh * pitch;
+    int full = is_box
+        ? (rx == 0 && ry == 0 && rz == 0 && rw == w && rh == h && rd == d)
+        : (rx == 0 && ry == 0 && rw == w && rh == h);
+
+    s->native = native;
+    s->rx = rx; s->ry = ry; s->rz = rz;
+    s->rw = rw; s->rh = rh; s->rd = rd;
+    s->lock_off = lock_off;
+    s->lock_bytes = lock_bytes;
+
+    /* Full-surface textures are the common upload path.  If DXVK's placed
+     * allocation is below 4 GB and survives Unlock, the guest can write the
+     * same bytes the old shadow copied at Unlock, so skip both copies and both
+     * staging pages.  Partial locks, high mappings and resources whose DXVK
+     * buffer is destroyed on Unlock keep the shadow path.  The range stays
+     * registered: a game may keep using pBits after Unlock, which is exactly
+     * why removal is not done here. */
+    int direct = 0;
+    if (full && !lock_off && lock_bytes && direct_persists(s)) {
+        direct = low_cached(s, native, lock_bytes);
+        if (!direct) {
+            direct = low_buffer_usable(native, 0, lock_bytes, lock_bytes);
+            if (direct) low_cache(s, native, lock_bytes);
+        }
+    }
+    if (direct) {
+        LK_INC(direct_locks);
+        ThinFrame *f = &s->frame[0];
+        f->used = 1;
+        f->flags = flags;
+        f->off = 0;
+        f->bytes = lock_bytes;
+        f->direct = 1;
+        s->nframes = 1;
+
+        uint32_t p = (uint32_t)(uintptr_t)native;
+        if (is_box) {
+            LockedBox32 lb;
+            lb.RowPitch = pitch;
+            lb.SlicePitch = s->slice_pitch;
+            lb.pBits = p;
+            if (guest_out) *(LockedBox32 *)(uintptr_t)guest_out = lb;
+        } else {
+            LockedRect32 lr;
+            lr.Pitch = pitch;
+            lr.pBits = p;
+            if (guest_out) *(LockedRect32 *)(uintptr_t)guest_out = lr;
+        }
+        thin_count(THIN_STAT_LOCK);
+        THIN_LOG("lock kind=%d sub=%u flags=%08X pitch=%u bpp=%u ptr=%08X "
+                 "direct", kind, sub, flags, pitch, bpp, p);
+        return D3D_OK;
+    }
+
     if (!s->staging || s->bytes < need) {
         if (s->staging) low_free(s->staging, s->bytes);
         s->staging = (uint8_t *)low_alloc(need);
         s->bytes = s->staging ? need : 0;
     }
-    if (!s->staging) return D3DERR_INVALIDCALL;
+    if (!s->staging) {
+        /* Keep DXVK's lock accounting balanced if the low arena is full, and
+         * do not leave a pointer that has already been unlocked in the shadow. */
+        s->native = NULL;
+        s->nframes = 0;
+        thin_unlock_native_rect(o, kind, sub, is_box);
+        return D3DERR_INVALIDCALL;
+    }
 
-    s->native = native;
-    s->rx = rx; s->ry = ry; s->rz = rz;
-    s->rw = rw; s->rh = rh; s->rd = rd;
-    s->lock_off = is_box ? rz * s->slice_pitch + ry * pitch + rx * bpp
-                         : ry * pitch + rx * bpp;
-    s->lock_bytes = is_box ? rd * s->slice_pitch : rh * pitch;
+    LK_INC(rect_fallback_locks);
 
     /* Copy-in.  DISCARD means the previous contents are undefined. */
     if (!(flags & D3DLOCK_DISCARD)) {
@@ -755,9 +946,11 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
                 }
             }
             LK_ADD(copy_in_bytes, (unsigned long long)rw * bpp * rh * rd);
+            LK_ADD(rect_copy_in_bytes, (unsigned long long)rw * bpp * rh * rd);
         } else {
             memcpy(s->staging + s->lock_off, native, s->lock_bytes);
             LK_ADD(copy_in_bytes, s->lock_bytes);
+            LK_ADD(rect_copy_in_bytes, s->lock_bytes);
         }
     }
 
@@ -873,9 +1066,9 @@ uint32_t thin_unlock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub)
     ThinFrame *f = &s->frame[0];
     int readonly = (f->flags & D3DLOCK_READONLY) != 0;
 
-    if (!readonly) tex_alpha_log(s);
+    if (!f->direct && !readonly) tex_alpha_log(s);
 
-    if (!readonly && s->native && s->staging) {
+    if (!f->direct && !readonly && s->native && s->staging) {
         if (s->bpp && s->pitch) {
             uint32_t copy_w = s->rw * s->bpp;
             if (copy_w > s->pitch) copy_w = s->pitch;
@@ -890,24 +1083,17 @@ uint32_t thin_unlock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub)
             }
             LK_ADD(copy_out_bytes,
                    (unsigned long long)copy_w * s->rh * s->rd);
+            LK_ADD(rect_copy_out_bytes,
+                   (unsigned long long)copy_w * s->rh * s->rd);
         } else {
             memcpy(s->native, s->staging + s->lock_off, s->lock_bytes);
             LK_ADD(copy_out_bytes, s->lock_bytes);
+            LK_ADD(rect_copy_out_bytes, s->lock_bytes);
         }
     }
 
-    HRESULT hr;
-    if (kind == THIN_LK_VOLTEX)
-        hr = ((IDirect3DVolumeTexture9 *)o->host)->UnlockBox(sub & 0xFFFF);
-    else if (kind == THIN_LK_VOLUME)
-        hr = ((IDirect3DVolume9 *)o->host)->UnlockBox();
-    else if (kind == THIN_LK_TEXTURE)
-        hr = ((IDirect3DTexture9 *)o->host)->UnlockRect(sub & 0xFFFF);
-    else if (kind == THIN_LK_CUBE)
-        hr = ((IDirect3DCubeTexture9 *)o->host)->UnlockRect(
-            (D3DCUBEMAP_FACES)((sub >> 16) & 0xFFFF), sub & 0xFFFF);
-    else
-        hr = ((IDirect3DSurface9 *)o->host)->UnlockRect();
+    HRESULT hr = thin_unlock_native_rect(
+        o, kind, sub, kind == THIN_LK_VOLTEX || kind == THIN_LK_VOLUME);
 
     s->nframes = 0;
     s->native = NULL;
@@ -961,10 +1147,6 @@ uint32_t thin_lock_buffer(CPU *c, ThinObj *o, uint32_t off, uint32_t size,
     if (n > total - off) return D3DERR_INVALIDCALL;
 
     LK_INC(buffer_locks);
-#if WC3_DEBUG && WC3_DEBUG_PERF
-    if ((g_lk.buffer_locks & 8191ull) == 0)
-        thin_lock_stats_dump("periodic");
-#endif
 
     if (s->nframes > 0) {
         if (s->nframes >= THIN_LOCK_STACK) return D3DERR_INVALIDCALL;
@@ -985,6 +1167,8 @@ uint32_t thin_lock_buffer(CPU *c, ThinObj *o, uint32_t off, uint32_t size,
         return D3D_OK;
     }
 
+    LK_INC(buffer_outer_locks);
+    thin_lock_stats_maybe_dump();
     void *ptr = NULL;
     DWORD dflags = 0;
     if (flags & D3DLOCK_DISCARD) dflags |= D3DLOCK_DISCARD;
@@ -1006,8 +1190,13 @@ uint32_t thin_lock_buffer(CPU *c, ThinObj *o, uint32_t off, uint32_t size,
 
     /* Direct path: DXVK's pointer is already guest addressable.  The guest
      * writes straight into the buffer DXVK will read; Unlock has no copy. */
-    int direct = low_buffer_usable(ptr, off, n, total);
+    int direct = low_cached(s, ptr, n);
+    if (!direct) {
+        direct = low_buffer_usable(ptr, off, n, total);
+        if (direct) low_cache(s, ptr, n);
+    }
     if (direct) LK_INC(direct_locks);
+    if (flags & D3DLOCK_READONLY) LK_INC(buffer_readonly_locks);
 
     if (!direct) {
         if (!s->staging || s->bytes < total) {
@@ -1026,6 +1215,7 @@ uint32_t thin_lock_buffer(CPU *c, ThinObj *o, uint32_t off, uint32_t size,
             return D3DERR_INVALIDCALL;
         }
 
+        LK_INC(buffer_shadow_locks);
         if (!(flags & D3DLOCK_DISCARD)) {
             int wo = (s->desc_usage & D3DUSAGE_WRITEONLY) != 0;
             if (wo) LK_INC(wo_locks);
@@ -1034,10 +1224,14 @@ uint32_t thin_lock_buffer(CPU *c, ThinObj *o, uint32_t off, uint32_t size,
             if (!skip) {
                 memcpy(s->staging + off, ptr, n);
                 LK_ADD(copy_in_bytes, n);
+                LK_ADD(buffer_copy_in_bytes, n);
             }
         }
     }
-    if (flags & D3DLOCK_DISCARD) LK_INC(discard_locks);
+    if (flags & D3DLOCK_DISCARD) {
+        LK_INC(discard_locks);
+        LK_INC(buffer_discard_locks);
+    }
 
     s->native = ptr;
     s->lock_off = off;
@@ -1063,12 +1257,17 @@ uint32_t thin_lock_buffer(CPU *c, ThinObj *o, uint32_t off, uint32_t size,
 void thin_lock_forget(void *host)
 {
     if (!host) return;
-    for (uint32_t i = 0; i < THIN_SHADOW_MAX; i++) {
+    uint32_t link = g_host_bucket[host_bucket_index(host)];
+    while (link) {
+        uint32_t i = link - 1u;
         ThinShadow *s = &g_shadow[i];
-        if (!s->used || s->host != host) continue;
-        shadow_unlink(i);
-        if (s->staging) low_free(s->staging, s->bytes);
-        memset(s, 0, sizeof *s);
+        uint32_t next = s->host_next;   /* memset() below clears the link */
+        if (s->used && s->host == host) {
+            shadow_unlink(i);
+            if (s->staging) low_free(s->staging, s->bytes);
+            memset(s, 0, sizeof *s);
+        }
+        link = next;
     }
 }
 
@@ -1082,6 +1281,7 @@ void thin_lock_reset(void)
         memset(s, 0, sizeof *s);
     }
     memset(g_shadow_bucket, 0, sizeof g_shadow_bucket);
+    memset(g_host_bucket, 0, sizeof g_host_bucket);
     g_shadow_hint = 0;
 }
 
@@ -1100,6 +1300,7 @@ uint32_t thin_unlock_buffer(CPU *c, ThinObj *o)
         s->native && s->staging) {
         memcpy(s->native, s->staging + f->off, f->bytes);
         LK_ADD(copy_out_bytes, f->bytes);
+        LK_ADD(buffer_copy_out_bytes, f->bytes);
     }
 
     HRESULT hr;

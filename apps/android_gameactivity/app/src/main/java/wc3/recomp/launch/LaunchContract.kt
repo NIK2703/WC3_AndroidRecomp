@@ -18,6 +18,14 @@ object LaunchContract {
     const val KEY_DRIVER_ID = "vulkan_driver_id"
     const val KEY_DXVK_VERSION = "dxvk_version"
     const val KEY_DXVK_CONFIG = "dxvk_config"
+    const val KEY_DOUBLE_TAP_GESTURES = "double_tap_gestures"
+    const val KEY_DOUBLE_TAP_TIMEOUT_MS = "double_tap_timeout_ms"
+    const val KEY_LONG_PRESS_TIMEOUT_MS = "long_press_timeout_ms"
+
+    /* The authored .icp profile uses 120 ms for both gesture timers.  The
+     * settings screen exposes only the product range 100..200 ms, step 10. */
+    const val DEFAULT_DOUBLE_TAP_TIMEOUT_MS = 120
+    const val DEFAULT_LONG_PRESS_TIMEOUT_MS = 120
 
     /* The product default is DXVK 1.10.3 ("1").  An empty version is the
      * explicit "Auto" choice and keeps the driver-based compatibility gate. */

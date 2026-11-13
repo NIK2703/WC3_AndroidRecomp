@@ -10,6 +10,7 @@
 #ifndef WC3_HLE_ANDROID_H
 #define WC3_HLE_ANDROID_H
 
+#include <math.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -147,14 +148,69 @@ void hle_android_release_all(void);
  * it never sends UP before the game saw DOWN. */
 int hle_android_wait_mouse(int down, int timeout_ms);
 
+/* Focused edit field rectangle in surface fractions: (0,0) is the top-left
+ * corner and (1,1) the bottom-right.  The HLE converts it from the absolute
+ * DDC rectangle stored in the guest CEditBox.  The front end uses it to pan
+ * the game surface only when the IME would cover the field. */
+typedef struct HleKeyboardRect {
+    float left;
+    float top;
+    float right;
+    float bottom;
+} HleKeyboardRect;
+
+/* Convert an absolute UI rectangle from 1.27b's fixed 0.8 x 0.6 DDC space
+ * into surface fractions.  game.dll creates the root UI frame at width 0.8
+ * (0x6F39D8B7) and height 0.6 (0x6F39D8CD) and builds the UI orthographic
+ * projection over 0..0.8 x 0..0.6 (0x6F193546), so no aspect-dependent scale
+ * applies.  CLayoutFrame stores a CRect as minY, minX, maxY, maxX; UI Y grows
+ * upwards from the bottom of the root frame, so the screen top comes from
+ * maxY.  Returns 0 for an empty or non-finite rectangle. */
+static inline int hle_keyboard_rect_from_ddc(float min_y, float min_x,
+                                             float max_y, float max_x,
+                                             HleKeyboardRect *out)
+{
+    if (!out)
+        return 0;
+    if (!isfinite(min_y) || !isfinite(min_x) ||
+        !isfinite(max_y) || !isfinite(max_x))
+        return 0;
+    if (!(min_y < max_y) || !(min_x < max_x))
+        return 0;
+
+    float left = min_x / 0.8f;
+    float right = max_x / 0.8f;
+    float top = 1.0f - max_y / 0.6f;
+    float bottom = 1.0f - min_y / 0.6f;
+    if (left < 0.0f) left = 0.0f;
+    if (top < 0.0f) top = 0.0f;
+    if (right > 1.0f) right = 1.0f;
+    if (bottom > 1.0f) bottom = 1.0f;
+    if (!(left < right) || !(top < bottom))
+        return 0;
+
+    out->left = left;
+    out->top = top;
+    out->right = right;
+    out->bottom = bottom;
+    return 1;
+}
+
 /* Soft-keyboard bridge.  The Java activity owns the invisible EditText; the
  * HLE shows/hides it from the guest's IMM calls and turns its edits into
  * WM_CHAR/WM_KEYDOWN messages in the same queue the mouse uses.  The APK
- * front end installs the callbacks; the shell leaves them NULL. */
-void hle_android_set_keyboard_bridge(void (*show)(void), void (*hide)(void));
-/* The platform reports the real IME visibility.  A keyboard dismissed by the
- * system/Back button must clear the HLE's shown flag or the next text-field
- * focus will not request it again. */
+ * front end installs the callbacks; the shell leaves them NULL.  show()
+ * receives the guest CEditBox identity so the front end can keep a separate
+ * editor mirror for each field and restore the correct text on a field
+ * switch.  `rect` is non-NULL only when the focused field's CLayoutFrame is
+ * valid; it is the field's surface-space rectangle. */
+void hle_android_set_keyboard_bridge(void (*show)(uint32_t field,
+                                                  const HleKeyboardRect *rect),
+                                     void (*hide)(void));
+/* Advisory platform IME visibility.  visible=true arms the deferred-hide path
+ * if the platform opened the IME by itself.  visible=false is ignored: Back
+ * dismissals can miss the callback and delayed false values can arrive while
+ * the IME is still usable.  Showing is driven per text-field click instead. */
 void hle_android_set_keyboard_visible(int visible);
 void wc3_android_show_keyboard(void);
 void wc3_android_hide_keyboard(void);

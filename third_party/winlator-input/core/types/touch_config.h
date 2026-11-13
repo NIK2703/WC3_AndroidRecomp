@@ -98,6 +98,9 @@ typedef struct {
     bool caps_has_mouse_left_element;
     bool caps_has_passthrough_elements;
     bool caps_has_scroll_bindings;
+    /* Product direct-tap mode: keep scroll bindings for first-finger drags,
+     * but never enter the scroll-only double-tap window on a tap. */
+    bool direct_gesture_mode;
     GestureModeBindings cached_mode_bindings;
 } TouchProcessorConfig;
 
