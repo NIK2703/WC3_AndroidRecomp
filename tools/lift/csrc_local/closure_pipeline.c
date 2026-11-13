@@ -1252,9 +1252,14 @@ int main(int argc, char **argv)
     }
 
     /* entry.exe drops an address-taken function that begins immediately after
-     * a six-byte jmp thunk because it is not 16-byte aligned.  Recover exactly
-     * that class here; thunkseeds.exe scans all sections for an in-image dword
-     * pointing at such a tail and writes the same seed format. */
+     * a six-byte jmp thunk because it is not 16-byte aligned.  thunkseeds.exe
+     * recovers that class and, from the PE base-relocation table, every other
+     * fixed-up code pointer the static heuristics cannot place on a padding
+     * boundary.  Prologue/import/direct-jump targets become seeds; remaining
+     * plausible relocated targets become strict-block edges, so they are
+     * lifted by closure2 instead of surfacing as unknown targets later.
+     * Relative, reverse and LEA-addressed code-stub tables are followed so
+     * their arms are added as real entries too. */
     join(thunk_seeds, sizeof thunk_seeds,
          "%s/entry_seeds_thunks.txt", o.out_dir);
     join(combined_seeds, sizeof combined_seeds,
@@ -1332,9 +1337,10 @@ int main(int argc, char **argv)
 
     /* 4. Closure to a fixed point (closure2.exe loops internally).  The local
      * build gives every target a strict block extent; see closure2.c.  Jump-
-     * table arms found in code-resident pointer tables are injected as
-     * synthetic edges, so they go through closure2's strict extent instead of
-     * the seed lift's whole-function heuristic. */
+     * table arms found in code-resident pointer tables and non-function
+     * relocated code targets are injected as synthetic edges, so they go
+     * through closure2's strict extent instead of the seed lift's whole-
+     * function heuristic. */
     remove(closed_c);
     remove(closed_list);
     remove(closure_seed_c);

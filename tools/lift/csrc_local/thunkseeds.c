@@ -5,7 +5,7 @@
  * immediately after a six-byte `jmp dword ptr [imm32]` thunk and are therefore
  * unaligned; entry.exe drops them even though a dword in the image points at
  * them.  Widening entry.exe to --align 1 would also admit every accidental
- * terminator byte inside an instruction, so this tool isolates two classes
+ * terminator byte inside an instruction, so this tool isolates these classes
  * with direct evidence:
  *
  *   - a 4-byte value in any section points into an executable section and the
@@ -20,9 +20,29 @@
  * EH and switch continuations stored in .rdata.  The target must not already
  * be in the --known seed list.
  *
+ * A third class is found through the PE base-relocation table.  A relocated
+ * dword that points into executable memory is an address the image itself
+ * fixes up, not a coincidental instruction constant.  For that class the
+ * padding/ret heuristics are not evidence of a function boundary: an
+ * address-taken direct-jump thunk such as 0x6F2DFB80 (`E9` to an import
+ * thunk) and an address-taken function with a standard prologue can both
+ * start immediately after an instruction or inside a vtable.  Those become
+ * seeds.  Every other relocated, plausible code target becomes a synthetic
+ * jump edge, so closure2 lifts at least its first block instead of leaving an
+ * unknown target for a later probe round.  A target whose first 12 bytes are
+ * three in-image code pointers is a data jump table, not code, and its entries
+ * are recovered from their own relocations.  A byte/index switch table begins
+ * with 00 and is likewise data; its code-pointer arms are covered by the
+ * pointer table or by the relocated entries.  A source operand of the form
+ * `jmp/call [index*4 + table]` is a table base, not an address-taken function;
+ * relative-offset, reverse and code-stub tables are followed explicitly so
+ * their arms become seeds/edges too.  `lea reg, [index*scale + table]` is
+ * followed as a code-stub table when its base is a real entry (ijl15
+ * 0x6002D1C7).
+ *
  * The result is a seed file in the same `0xVA 512 name` format used by
- * closure_pipeline.  A target whose first 12 bytes are three in-image code
- * pointers is a jump-table base, not a function, and is skipped.
+ * closure_pipeline.  The edge file uses the same format as the existing
+ * jump-table edge output.
  *
  *   thunkseeds --module image --known seeds.txt --out extra.txt
  */
@@ -163,6 +183,97 @@ static int code_run_at(Pe *pe, const uint8_t *buf, uint32_t i,
 static int plausible_start(uint8_t b)
 {
     return b != 0xCC && b != 0x90 && b != 0x00;
+}
+
+/* Read the PE base-relocation directory.  `images` in this corpus are linked
+ * at their preferred base but still carry a HIGHLOW entry for every absolute
+ * address they contain.  The table is therefore a precise "this dword is an
+ * address, not an arbitrary instruction constant" oracle.  Keep it sorted so
+ * the hot scan can binary-search a source VA. */
+static void load_relocations(Pe *pe, U32Vec *out)
+{
+    uint8_t b[8];
+    uint32_t lfanew, nrva, rva, size, off, pos;
+    uint8_t *data;
+
+    if (!pe_read_at(pe, 0x3C, b, 4)) return;
+    lfanew = pe_rd32(b);
+    if (!pe_read_at(pe, (long long)lfanew + 24 + 92, b, 4)) return;
+    nrva = pe_rd32(b);
+    if (nrva <= 5) return;
+    /* PE32 optional header: data directories start at offset 96; index 5 is
+     * IMAGE_DIRECTORY_ENTRY_BASERELOC. */
+    if (!pe_read_at(pe, (long long)lfanew + 24 + 96 + 5 * 8, b, 8)) return;
+    rva = pe_rd32(b);
+    size = pe_rd32(b + 4);
+    if (!rva || !size) return;
+    if (!pe_va_to_off(pe, pe->base + rva, &off)) return;
+    if (size > 64u * 1024u * 1024u) return;
+    data = (uint8_t *)malloc(size);
+    if (!data) return;
+    if (!pe_read_at(pe, off, data, size)) { free(data); return; }
+
+    for (pos = 0; pos + 8 <= size; ) {
+        uint32_t page = pe_rd32(data + pos);
+        uint32_t block = pe_rd32(data + pos + 4);
+        uint32_t k;
+        if (block < 8 || block > size - pos) break;
+        for (k = 8; k + 2 <= block; k += 2) {
+            uint16_t e = pe_rd16(data + pos + k);
+            if ((e >> 12) != 3) continue;              /* IMAGE_REL_BASED_HIGHLOW */
+            u32_add(out, pe->base + page + (e & 0xFFFu));
+        }
+        pos += block;
+    }
+    free(data);
+    u32_sort_unique(out);
+}
+
+/* An address-taken direct jump thunk is a callable code entry even when the
+ * preceding bytes are not a ret or padding.  6F2DFB80 is exactly that: the
+ * image stores its address in a service object and the guest later calls it;
+ * the body is `E9` to the lifted GetTickCount import thunk.  Verify the
+ * relative target is code so an `E9` byte in a data table is not accepted. */
+static int direct_jump_thunk_start(Pe *pe, uint32_t va, long long off)
+{
+    uint8_t b[6];
+    uint32_t target;
+    int32_t rel;
+
+    if (!pe_read_at(pe, off, b, sizeof b)) return 0;
+    if (b[0] == 0xE9) {
+        rel = (int32_t)pe_rd32(b + 1);
+        target = (uint32_t)((int64_t)va + 5 + rel);
+        return target != va && is_code_target(pe, target);
+    }
+    if (b[0] == 0xEB) {
+        rel = (int8_t)b[1];
+        target = (uint32_t)((int64_t)va + 2 + rel);
+        return target != va && is_code_target(pe, target);
+    }
+    if (b[0] == 0xFF && b[1] == 0x25) return 1;  /* jmp dword ptr [imm32] */
+    return 0;
+}
+
+/* A standard frame/exception prologue is strong evidence that an address-
+ * taken relocated target is a function entry rather than a mid-function
+ * switch/EH label.  The first three bytes are deliberately conservative:
+ * these are the prologues emitted by the 1.27b modules and by MSVC's
+ * hot-patch and exception-handler stubs. */
+static int strong_prologue_start(Pe *pe, long long off)
+{
+    uint8_t b[5];
+    if (!pe_read_at(pe, off, b, sizeof b)) return 0;
+    if (b[0] == 0x55 && b[1] == 0x8B && b[2] == 0xEC) return 1; /* push ebp; mov ebp, esp */
+    if (b[0] == 0x55 && b[1] == 0x89 && b[2] == 0xE5) return 1; /* push ebp; mov ebp, esp */
+    if (b[0] == 0x53 && b[1] == 0x8B && b[2] == 0xDC) return 1; /* push ebx; mov ebx, esp */
+    if (b[0] == 0x56 && b[1] == 0x8B && b[2] == 0xF4) return 1; /* push esi; mov esi, esp */
+    if (b[0] == 0x57 && b[1] == 0x8B && b[2] == 0xFC) return 1; /* push edi; mov edi, esp */
+    if (b[0] == 0x6A && b[1] == 0xFF && b[2] == 0x68) return 1; /* push -1; push imm32 */
+    if (b[0] == 0x8B && b[1] == 0xFF &&
+        b[2] == 0x55 && b[3] == 0x8B && b[4] == 0xEC)
+        return 1;                                                /* hot-patch nop + frame */
+    return 0;
 }
 
 /* A cold block inside a function often uses the caller's frame without ever
@@ -434,32 +545,200 @@ static int looks_like_table(Pe *pe, uint32_t va)
 
 /* A dword in an executable section can be a real immediate function address
  * (`mov [global], imm32`, `push imm32`) or the base of a switch/jump table.
- * Only the latter is an instruction operand of the form
+ * The interesting forms are
  *   FF 24/14 <SIB> disp32      (jmp/call [index*4 + table])
- *   8B/8D <SIB> disp32         (mov/lea reg, [index*4 + table])
+ *   8B/8D 04 <SIB> disp32      (mov/lea reg, [index*scale + table])
  * A table base is data, not a function entry, so reject it before the
- * alignment/padding rule.  This keeps genuine address-taken immediates such
- * as ijl15's `mov [0x60053cd4], 0x600048e0`. */
+ * alignment/padding rule.  The SIB byte also tells the table stride and
+ * whether the operand is a LEA: `lea eax, [eax*8 + table]; jmp eax` can point
+ * at a table of code stubs (ijl15 0x6002D1C7), not at data.  The caller uses
+ * that distinction to follow the table instead of blindly dropping it. */
+static int text_table_info(const uint8_t *buf, uint32_t i, int *stride,
+                           int *is_lea)
+{
+    uint8_t op, modrm, sib, index;
+    if (i < 3) return 0;
+    op = buf[i - 3];
+    modrm = buf[i - 2];
+    sib = buf[i - 1];
+    if (op != 0xFF && op != 0x8B && op != 0x8D) return 0;
+    if ((modrm & 0xC7) != 0x04) return 0;
+    if ((sib & 0x07) != 0x05) return 0;
+    index = (uint8_t)((sib >> 3) & 0x07);
+    if (index == 4) return 0;              /* no index: absolute [disp32] */
+    *stride = 1 << ((sib >> 6) & 0x03);
+    *is_lea = (op == 0x8D);
+    return 1;
+}
+
 static int text_table_base(const uint8_t *buf, uint32_t i)
 {
-    if (i < 3) return 0;
-    /* FF 24 <sib> disp32 / FF 14 <sib> disp32: jmp/call [index*4+table].
-     * 8B/8D 04 <sib> disp32: mov/lea reg, [index*4+table].
-     * The dword at `i` is the disp32, so the three opcode bytes precede it. */
-    if ((buf[i - 3] == 0xFF || buf[i - 3] == 0x8B ||
-         buf[i - 3] == 0x8D) &&
-        (buf[i - 2] & 0xC7) == 0x04 &&
-        (buf[i - 1] & 0xC7) == 0x85)
-        return 1;
+    int stride, is_lea;
+    return text_table_info(buf, i, &stride, &is_lea);
+}
+
+static int read_va_u32(Pe *pe, uint32_t va, uint32_t *value)
+{
+    uint32_t off;
+    uint8_t raw[4];
+    if (!pe_va_to_off(pe, va, &off)) return 0;
+    if (!pe_read_at(pe, off, raw, sizeof raw)) return 0;
+    *value = pe_rd32(raw);
+    return 1;
+}
+
+/* Classify one code address.  Known starts are accepted without adding a
+ * second seed/edge.  A jump-table base is data and is rejected here; callers
+ * that are walking a table use the return value as an end-of-table signal. */
+static int classify_static_target(Pe *pe, uint32_t va, const U32Vec *known,
+                                  U32Vec *seeds, U32Vec *edges,
+                                  int strong_only)
+{
+    long long off;
+    uint8_t first;
+    int strong;
+    if (!va) return 0;
+    if (known && u32_contains(known, va)) return 1;
+    off = pe_code_off(pe, va);
+    if (off < 0) return 0;
+    if (!pe_read_at(pe, off, &first, 1) || !plausible_start(first)) return 0;
+    if (looks_like_table(pe, va)) return 0;
+    strong = direct_jump_thunk_start(pe, va, off) ||
+             strong_prologue_start(pe, off) ||
+             adjustor_thunk_start(pe, va, off);
+    if (strong_only && !strong) return 0;
+    if (strong)
+        u32_add(seeds, va);
+    else
+        u32_add(edges, va);
+    return 1;
+}
+
+/* Read a table entry and resolve the form the compiler used.  A normal switch
+ * stores an absolute VA; some hand-written modules store an offset relative to
+ * either the table or the next instruction, and a few store an RVA.  Accept all
+ * three only when the resulting address is executable. */
+static int table_arm_value(Pe *pe, uint32_t table_va, uint32_t entry_va,
+                           uint32_t value, uint32_t *arm)
+{
+    uint32_t candidates[4];
+    int n = 0, i;
+    uint32_t v;
+    if (!value) return 0;
+    if (is_code_target(pe, value)) candidates[n++] = value;
+    v = (uint32_t)(table_va + value);
+    if (is_code_target(pe, v)) candidates[n++] = v;
+    v = (uint32_t)(entry_va + value);
+    if (is_code_target(pe, v)) candidates[n++] = v;
+    v = (uint32_t)(pe->base + value);
+    if (is_code_target(pe, v)) candidates[n++] = v;
+    for (i = 0; i < n; i++) {
+        int j, seen = 0;
+        for (j = 0; j < i; j++) if (candidates[j] == candidates[i]) seen = 1;
+        if (!seen) { *arm = candidates[i]; return 1; }
+    }
     return 0;
 }
 
+/* One entry of a LEA-addressed code table.  These are normally jump thunks
+ * (`E9`/`EB`/`FF25`), not whole functions: lift them as strict blocks so a
+ * 512-byte seed extent cannot run across the neighbouring table entries.  A
+ * real prologue is still a function and is seeded normally. */
+static int classify_code_table_entry(Pe *pe, uint32_t va,
+                                     const U32Vec *known, U32Vec *seeds,
+                                     U32Vec *edges)
+{
+    long long off;
+    uint8_t first;
+    if (!va) return 0;
+    if (known && u32_contains(known, va)) return 1;
+    off = pe_code_off(pe, va);
+    if (off < 0) return 0;
+    if (!pe_read_at(pe, off, &first, 1) || !plausible_start(first)) return 0;
+    if (looks_like_table(pe, va)) return 0;
+    if (strong_prologue_start(pe, off))
+        u32_add(seeds, va);
+    else if (direct_jump_thunk_start(pe, va, off) ||
+             adjustor_thunk_start(pe, va, off))
+        u32_add(edges, va);
+    else
+        return 0;
+    return 1;
+}
+
+/* `lea reg, [index*stride + base]; jmp reg` points at executable bytes, not a
+ * dword table: ijl15 0x6002D1C7 is a sequence of `E9` thunks eight bytes
+ * apart.  Emit the base and every contiguous entry so the computed jump has
+ * real dispatch entries in the corpus.  Returns non-zero when `base` was a
+ * code entry; a zero result lets the caller try the same base as a data table
+ * (relative-offset tables can also be addressed through LEA). */
+static int follow_code_table(Pe *pe, uint32_t table_va, int stride,
+                             const U32Vec *known, U32Vec *seeds,
+                             U32Vec *edges)
+{
+    int k;
+    if (stride < 4) return 0;
+    if (!classify_code_table_entry(pe, table_va, known, seeds, edges)) return 0;
+    for (k = 1; k < 256; k++) {
+        uint64_t ea = (uint64_t)table_va + (uint64_t)stride * (uint64_t)k;
+        if (ea > 0xFFFFFFFFu) break;
+        if (!classify_code_table_entry(pe, (uint32_t)ea, known, seeds, edges))
+            break;
+    }
+    return 1;
+}
+
+/* `jmp/call [index*4 + base]` points at a dword table.  Absolute code-pointer
+ * tables are already covered by scanning each relocated entry; this pass adds
+ * the relative-offset and reverse-table forms.  Reverse tables occur in the
+ * old audio decoders: the operand points just past the last entry and the
+ * index is negative.  Walk forward first; if there is no valid arm there, walk
+ * backward from the base. */
+static void follow_memory_table(Pe *pe, uint32_t table_va, int stride,
+                                const U32Vec *known, U32Vec *seeds,
+                                U32Vec *edges)
+{
+    int k, found = 0;
+    if (stride < 4) return;
+
+    for (k = 0; k < 256; k++) {
+        uint64_t ea = (uint64_t)table_va + (uint64_t)stride * (uint64_t)k;
+        uint32_t value, arm;
+        if (ea > 0xFFFFFFFFu) break;
+        if (!read_va_u32(pe, (uint32_t)ea, &value)) break;
+        if (!table_arm_value(pe, table_va, (uint32_t)ea, value, &arm)) break;
+        if (!classify_static_target(pe, arm, known, seeds, edges, 0)) break;
+        found = 1;
+    }
+    if (found) return;
+
+    /* Only try the reverse form when the base itself is executable code: the
+     * audio tables point just past their last entry inside .text.  A data
+     * table in .rdata must not cause a walk backwards through unrelated
+     * pointers that happen to look executable. */
+    {
+        long long off = pe_code_off(pe, table_va);
+        uint8_t first;
+        if (off < 0) return;
+        if (!pe_read_at(pe, off, &first, 1) || !plausible_start(first)) return;
+    }
+    for (k = 1; k < 256; k++) {
+        uint64_t ea = (uint64_t)table_va - (uint64_t)stride * (uint64_t)k;
+        uint32_t value, arm;
+        if ((uint64_t)table_va < (uint64_t)stride * (uint64_t)k) break;
+        if (!read_va_u32(pe, (uint32_t)ea, &value)) break;
+        if (!table_arm_value(pe, table_va, (uint32_t)ea, value, &arm)) break;
+        if (!classify_static_target(pe, arm, known, seeds, edges, 0)) break;
+    }
+}
+
 static int scan_section(Pe *pe, const PeSec *sec, U32Vec *out, U32Vec *edges,
-                        const U32Vec *known)
+                        const U32Vec *known, const U32Vec *relocs)
 {
     uint8_t *buf;
-    uint32_t i;
+    uint32_t i, sec_va;
     if (sec->rawsize < 4) return 0;
+    sec_va = pe->base + sec->va;
     buf = (uint8_t *)malloc(sec->rawsize);
     if (!buf) die("out of memory (section scan)");
     if (!pe_read_at(pe, sec->rawptr, buf, sec->rawsize)) {
@@ -503,6 +782,41 @@ static int scan_section(Pe *pe, const PeSec *sec, U32Vec *out, U32Vec *edges,
                 printf("\n");
             }
             continue;
+        }
+        /* A relocated dword is a fixed-up absolute address.  This is the
+         * strongest static evidence available without executing the image:
+         * it catches `mov reg, imm32`, `push imm32`, struct-field callbacks
+         * and vtable slots even when there is no ret/padding boundary.  Seed
+         * functions and thunks, and give every other plausible target a
+         * strict first-block edge.  A jump-table base is data, not a target,
+         * but the table itself is still evidence: absolute pointer tables are
+         * covered by their relocated entries, while relative, reverse and
+         * LEA-addressed code-stub tables are followed here. */
+        if (relocs && relocs->n && u32_contains(relocs, sec_va + i)) {
+            int table_source = 0, table_stride = 0, table_is_lea = 0;
+            if (source_exec)
+                table_source = text_table_info(buf, i, &table_stride,
+                                               &table_is_lea);
+            if (!table_source) {
+                if (classify_static_target(pe, v, known, out, edges, 0))
+                    continue;
+            } else if (table_is_lea) {
+                if (!follow_code_table(pe, v, table_stride, known, out, edges) &&
+                    !looks_like_table(pe, v))
+                    follow_memory_table(pe, v, table_stride, known, out, edges);
+                continue;
+            } else {
+                /* A three-byte operand window can coincide with a real
+                 * instruction.  If the relocated target is itself a strong
+                 * entry, keep it as a function instead of treating it as a
+                 * table base. */
+                if (!looks_like_table(pe, v) &&
+                    classify_static_target(pe, v, known, out, edges, 1))
+                    continue;
+                if (!looks_like_table(pe, v))
+                    follow_memory_table(pe, v, table_stride, known, out, edges);
+                continue;
+            }
         }
         off = pe_code_off(pe, v);
         if (off < 0) continue;
@@ -569,7 +883,8 @@ int main(int argc, char **argv)
     const char *module = NULL, *out_path = NULL, *known_path = NULL;
     const char *exclude_path = NULL, *edges_path = NULL;
     char edges_default[1024];
-    U32Vec found = { 0 }, edges = { 0 }, known = { 0 }, exclude = { 0 };
+    U32Vec found = { 0 }, edges = { 0 }, known = { 0 }, exclude = { 0 },
+           relocs = { 0 };
     FILE *f;
     Pe pe;
     int i;
@@ -592,9 +907,16 @@ int main(int argc, char **argv)
     if (!pe_open(&pe, module)) die("cannot open module as PE32");
     if (known_path) load_known(known_path, &known);
     if (exclude_path) load_known(exclude_path, &exclude);
+    load_relocations(&pe, &relocs);
+    if (relocs.n)
+        printf("thunkseeds: %s: %zu relocation site(s)\n", module, relocs.n);
+    else
+        fprintf(stderr,
+                "thunkseeds: warning: %s has no base relocations; "
+                "relocated address-taken coverage unavailable\n", module);
 
     for (i = 0; i < pe.nsec; i++)
-        scan_section(&pe, &pe.sec[i], &found, &edges, &known);
+        scan_section(&pe, &pe.sec[i], &found, &edges, &known, &relocs);
     u32_sort_unique(&found);
     u32_sort_unique(&edges);
 
@@ -604,6 +926,7 @@ int main(int argc, char **argv)
         free(edges.v);
         free(known.v);
         free(exclude.v);
+        free(relocs.v);
         pe_close(&pe);
         return 0;
     }
@@ -625,22 +948,27 @@ int main(int argc, char **argv)
     if (!f) { pe_close(&pe); die("cannot open --edges-out"); }
     {
         size_t n = 0;
-        fprintf(f, "/* AUTO-GENERATED jump-table edges; scanned by closure2, "
+        fprintf(f, "/* AUTO-GENERATED static target edges; scanned by closure2, "
                    "not compiled. */\n#include \"cpu.h\"\n\n"
                    "void L_EDGES(CPU *c)\n{\n");
         for (i = 0; i < (int)edges.n; i++) {
             if (u32_contains(&exclude, edges.v[i])) continue;
+            /* A target can be discovered as a strong table arm by one source
+             * and as a strict edge by another.  The whole-function seed wins;
+             * emitting both would make closure2 process it twice. */
+            if (u32_contains(&found, edges.v[i])) continue;
             fprintf(f, "    dispatch_jmp(c, 0x%08Xu); return;\n", edges.v[i]);
             n++;
         }
         fprintf(f, "}\n");
-        printf("thunkseeds: %s: %zu jump-table edge(s)\n", module, n);
+        printf("thunkseeds: %s: %zu static edge(s)\n", module, n);
     }
     fclose(f);
     free(found.v);
     free(edges.v);
     free(known.v);
     free(exclude.v);
+    free(relocs.v);
     pe_close(&pe);
     return 0;
 }

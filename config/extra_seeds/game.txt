@@ -15,3 +15,14 @@
 # entry has no int3 padding and entry.exe does not see it; without this seed
 # the dispatcher aborts with `unknown guest target 6F3C7FF0`.
 0x6F3C7FF0  vtable slot +0x6C reached from 0x6F3DA8DB during main-building selection
+#
+# 0x6F2DFB80 is a linker jump thunk (`jmp 0x6F092A10`) registered by
+# L_6F2C6C10 through L_6F927BE0 at [service + 0xE4].  The service magic is
+# 0x52530A0A and L_6F926270 calls the slot indirectly (`call [esi + 0xE4]`).
+# entry.exe does not see the data reference.  thunkseeds.exe now discovers it
+# from the PE base-relocation table; the explicit entry is kept as a
+# regression baseline and as a fallback for images with stripped relocations.
+# Without it the login path aborts with `unknown guest target 6F2DFB80`; the
+# crash frame has eax=6F2DFB80, esi=635000C0 and [esi]=52530A0A.  The thunk
+# targets L_6F092A10, the lifted KERNEL32.dll!GetTickCount import thunk.
+0x6F2DFB80  GetTickCount thunk stored at service+0xE4 by L_6F2C6C10
