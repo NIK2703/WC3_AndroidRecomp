@@ -2329,6 +2329,33 @@ static void dyn_register_exec(uint32_t base, uint32_t size, uint32_t prot)
         wc3_dyn_x86_register(base, size);
 }
 
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+/* The Warden loader copies a PE image into a PAGE_READWRITE VirtualAlloc and
+ * then calls VirtualProtect on each section.  The entry point is only known
+ * after that copy, so this is the first point where the module can be dumped
+ * for offline disassembly.  One dump per process; the image is small. */
+static uint32_t g_warden_base, g_warden_size;
+static int g_warden_dumped;
+
+static void warden_dump_exec(uint32_t base, uint32_t size)
+{
+    if (g_warden_dumped || !g_warden_base || !g_warden_size) return;
+    if (base < g_warden_base ||
+        (uint64_t)base >= (uint64_t)g_warden_base + g_warden_size)
+        return;
+    g_warden_dumped = 1;
+    fprintf(stderr, "[warden] image base=%08X size=%08X text=%08X+%08X\n",
+            g_warden_base, g_warden_size, base, size);
+    for (uint32_t off = 0; off < g_warden_size; off += 16) {
+        fprintf(stderr, "[warden] %08X:", g_warden_base + off);
+        for (unsigned i = 0; i < 16 && off + i < g_warden_size; i++)
+            fprintf(stderr, " %02X", rd8(g_warden_base + off + i));
+        fputc('\n', stderr);
+    }
+    fflush(stderr);
+}
+#endif
+
 static void h_virtual_alloc(CPU *c)
 {
     uint32_t addr = arg32(c, 0), size = arg32(c, 1), type = arg32(c, 2), prot = arg32(c, 3);
@@ -2428,9 +2455,14 @@ static void h_virtual_alloc(CPU *c)
     /* L_6F9AF000 allocates the Warden module image and stores the result in
      * the connection slot.  This is the exact allocation behind the login
      * crash: log the caller, the size and the returned base. */
-    if (guest_ok(c->esp, 4) && rd32g(c->esp) == 0x6F9AF05Eu)
+    if (guest_ok(c->esp, 4) && rd32g(c->esp) == 0x6F9AF05Eu) {
         fprintf(stderr, "[warden] VirtualAlloc size=%08X type=%08X -> %08X\n",
                 size, type, c->eax);
+        if (c->eax) {
+            g_warden_base = c->eax;
+            g_warden_size = size;
+        }
+    }
 #endif
     /* Storm's SMemAlloc turns a NULL here into SErrSetLastError(8), so every
      * failure has to be visible: the guest just returns 0 from the open. */
@@ -2479,7 +2511,37 @@ static void h_virtual_free(CPU *c)
     c->eax = 1;
 }
 
-static void h_virtual_protect(CPU *c) { (void)c; c->eax = 1; }
+/* The HLE keeps every guest page mapped for the life of the allocation; a
+ * protection change never changes host permissions.  The one guest-visible
+ * effect that matters for execution is the transition of a live dynamic
+ * allocation to an executable protection.  Warden's loader allocates the
+ * module PAGE_READWRITE, copies the image, then calls VirtualProtect per
+ * section.  Without registering .text here the dispatcher has neither a
+ * lifted body nor a dynamic range for the module entry, and the first call
+ * into Warden is a fatal unknown target (the SIGABRT observed at
+ * L_6F9AE990's `call eax` with eax=40042532). */
+static void h_virtual_protect(CPU *c)
+{
+    uint32_t addr = arg32(c, 0), size = arg32(c, 1);
+    uint32_t prot = arg32(c, 2), oldp = arg32(c, 3);
+
+    if (addr && size && (prot & 0x00F0u) && va_live_covers(addr, size)) {
+        wc3_dyn_x86_register(addr, size);
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+        fprintf(stderr, "[warden] VirtualProtect %08X+%08X prot=%08X\n",
+                addr, size, prot);
+        warden_dump_exec(addr, size);
+#endif
+    }
+
+    /* Protection is not tracked per page: VirtualQuery already reports
+     * PAGE_READWRITE for every live guest page.  Return that same value as the
+     * previous protection, so a caller that restores it observes the model it
+     * already got from VirtualQuery. */
+    if (oldp && guest_ok(oldp, 4))
+        wr32g(oldp, 0x04u);
+    c->eax = 1;
+}
 
 /* MEMORY_BASIC_INFORMATION (32-bit) is 28 bytes: BaseAddress, AllocationBase,
  * AllocationProtect, RegionSize, State, Protect, Type.  The crash reporter and
@@ -3949,7 +4011,10 @@ static void h_load_library(CPU *c)
     if (g_dll_load && strstr(n, ".")) {
         uint32_t base = 0;
         const void *img = NULL;
-        if (g_dll_load(n, &base, &img) == 0) {
+        /* Pass the importing thread's CPU: the loader runs the module's
+         * DllMain on it.  Using a process-wide "main" CPU here races with the
+         * main thread's render loop and corrupts its guest registers/stack. */
+        if (g_dll_load(c, n, &base, &img) == 0) {
             hle_register_module(n, base, img);
             c->eax = base;
             return;

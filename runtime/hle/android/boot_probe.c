@@ -206,10 +206,6 @@ static void call_dll_entry(CPU *c, const pe_image *img, uint32_t sentinel,
     c->esp = saved;
 }
 
-/* The HLE calls this from inside a guest dispatch, so it needs the CPU that is
- * already running - the probe stashes it once in main(). */
-static CPU *g_cpu;
-
 /* Mss32 is mapped before the game, but its DllMain is deliberately deferred
  * until the D3D9 device exists.  Running it during boot made DXVK abort with
  * a destroyed pthread mutex inside CreateDevice; the game does not call Miles
@@ -351,7 +347,13 @@ static int probe_resolve_dll(const char *name, char *out, size_t cap)
     return -1;
 }
 
-static int probe_load_dll(const char *name, uint32_t *out_base, const void **out_img)
+/* The HLE calls this from inside a guest dispatch and passes the CPU of the
+ * thread that called LoadLibraryA.  Win32 runs DllMain on that thread, with
+ * that thread's stack; the hook must do the same.  (A process-wide "main" CPU
+ * here used to let a Battle.net worker thread run DllMain on the main thread's
+ * guest CPU and stack while the renderer was still using them.) */
+static int probe_load_dll(CPU *c, const char *name, uint32_t *out_base,
+                          const void **out_img)
 {
     /* A module may be requested by a full Windows path after it was already
      * loaded (Mss32 is mapped before the game starts).  Re-mapping it at the
@@ -423,14 +425,14 @@ static int probe_load_dll(const char *name, uint32_t *out_base, const void **out
     *out_base = m->base;
     *out_img = m;
 
-    if (g_cpu) {
+    if (c) {
 #if WC3_DEBUG && WC3_DEBUG_BOOT
         printf("android boot probe: calling %s DllMain %08X\n", name, m->entry);
         fflush(stdout);
 #endif
-        call_dll_entry(g_cpu, m, 0x7EFFFFFDu, 0);
+        call_dll_entry(c, m, 0x7EFFFFFDu, 0);
 #if WC3_DEBUG && WC3_DEBUG_BOOT
-        printf("android boot probe: %s DllMain returned eax=%08X\n", name, g_cpu->eax);
+        printf("android boot probe: %s DllMain returned eax=%08X\n", name, c->eax);
         fflush(stdout);
 #endif
     }
@@ -497,7 +499,6 @@ int wc3_boot_probe_main(int argc, char **argv)
     hle_android_start(exe, exe);
     wc3_dispatch_init();
 
-    g_cpu = &c;
     hle_set_dll_hooks(probe_load_dll, probe_export);
     hle_register_module("war3.exe", img.base, &img);
 
@@ -545,8 +546,8 @@ int wc3_boot_probe_main(int argc, char **argv)
      * Only mapped when the game is being loaded: without game.dll nothing
      * dispatches into it, and its corpus is 40 MB of objects.
      *
-     * The entry point is NOT called here - it needs g_cpu, and it must run
-     * after Storm's DllMain, exactly as the Windows loader orders it. */
+     * The entry point is NOT called here - it needs the boot CPU, and it must
+     * run after Storm's DllMain, exactly as the Windows loader orders it. */
     pe_image *ijl = NULL;
     if (want_game) {
         char ijl_path[512];

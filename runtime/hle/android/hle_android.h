@@ -91,9 +91,14 @@ int  hle_reached_game_dll(void);
  *
  * Without these, LoadLibraryA of anything but a system DLL fails and
  * GetProcAddress only answers for the HLE thunks - which is fine for the
- * launcher-only milestone but not for running game.dll. */
-typedef int      (*hle_dll_loader)(const char *name, uint32_t *out_base,
-                                   const void **out_img);
+ * launcher-only milestone but not for running game.dll.
+ *
+ * `cpu` is the guest thread that called LoadLibraryA.  DllMain must run on
+ * that thread's CPU and stack, exactly as the Windows loader does; a loader
+ * that stashes one "main" CPU and reuses it from a worker thread corrupts the
+ * main thread's register file and guest stack while it renders. */
+typedef int      (*hle_dll_loader)(CPU *cpu, const char *name,
+                                   uint32_t *out_base, const void **out_img);
 typedef uint32_t (*hle_dll_export)(const void *img, const char *name,
                                    uint16_t ordinal);
 void hle_set_dll_hooks(hle_dll_loader load, hle_dll_export exp);
