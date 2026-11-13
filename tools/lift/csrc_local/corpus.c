@@ -286,7 +286,7 @@ int main(int argc, char **argv)
     const char *generator = "wc3lift", *layout_sha = "", *expected = NULL;
     const char *dir = NULL;
     char layout_hex[65] = "";
-    long lift_rev = 1;
+    long lift_rev = 2;
     int i;
 
     for (i = 2; i < argc; i++) {

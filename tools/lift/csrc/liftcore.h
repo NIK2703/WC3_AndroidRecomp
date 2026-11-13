@@ -20,6 +20,7 @@
 
 #include "pe.h"
 #include "csglue.h"
+#include "liftflags.h"
 
 #define LF_MAX_JT     64
 #define LF_MAX_JT_ENT 256
@@ -40,6 +41,12 @@ typedef struct {
     uint32_t *reloc;
     size_t nreloc;
     int block_mode;             /* WC3_LIFT_BLOCK=1 */
+    int x87_top;                /* compile-time virtual x87 top, 0..7 */
+    int flag_fusion;            /* WC3_LIFT_FLAG_FUSION != "0" */
+    const void *flag_ins;       /* InsnCopy array of the current extent */
+    int flag_current_index;     /* index of the instruction being translated */
+    const uint8_t *flag_role;   /* per instruction: 0 normal, 1 producer, 2 end */
+    const LfFlagFuse *flag_fuse;/* per instruction, valid for roles 1 and 2 */
 } Lifter;
 
 /* A translated instruction: one or more lines of C. */

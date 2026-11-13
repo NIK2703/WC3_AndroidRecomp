@@ -57,7 +57,7 @@ $compilerExe = if ($ccache) { $ccache } else { $Gcc }
 $compilerPrefix = if ($ccache) { @($Gcc.Replace('\', '/')) } else { @() }
 
 $common = @('-O2', '-Wall', '-Wextra', '-std=c11', '-static')
-$core   = @('liftcore.c', 'liftutil.c', 'liftemit.c', 'csglue.c')
+$core   = @('liftcore.c', 'liftutil.c', 'liftemit.c', 'liftflags.c', 'csglue.c')
 $closure2Src = @((Join-Path $csrcLocal 'closure2.c'), (Join-Path $csrc 'lift32.c')) +
     @($core | ForEach-Object { Join-Path $csrc $_ })
 

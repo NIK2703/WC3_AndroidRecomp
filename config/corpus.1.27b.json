@@ -2,7 +2,7 @@
   "schema": 1,
   "corpus": "1.27b",
   "generator": "wc3lift",
-  "lift_rev": 1,
+  "lift_rev": 2,
   "layout_file": "runtime/guest/guest_layout.h",
   "inputs_root": "build/corpus-inputs",
   "note": "BP-6 / V4.6: declarative lift inputs. Five modules are lifted from copies rebased to their Android bases (0x35xxxxxx), not from the installed originals. corpusinput.exe prepare generates build/corpus-inputs/ from the licensed files and verifies each rebase by a round trip; corpus.exe hash produces corpus.sha256 over those real files. The generated copies are build artefacts (R2/R3), never committed. ver_IX86_3_a35 is special: ver-IX86-3.dll is downloaded by the client at Battle.net login and is not part of the licensed install. Its raw bytes are a local build input (sha256 fe4d5460dce9cdb91e145a9a6a9819f9b323d987dcd3d79f91d9947603df8f3d), not a committed file; prepare fails loudly when it is missing. The 11.11 corpus had ver only out-of-band; the 12.11 relift from the declared inputs dropped it (docs/VER_IX86_DLLMAIN_CRASH.md).",

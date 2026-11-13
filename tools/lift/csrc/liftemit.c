@@ -52,12 +52,12 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
             return e;
         }
         if (!strcmp(m, "fbld"))
-            lf_push(&e, lf_afmt("vs_push(c, st, &x87_top, &x87_tag, x87_ld_bcd(c, %s));",
-                                lf_addr_expr(L, insn, memop)));
+            lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, x87_ld_bcd(c, %s));",
+                                L->x87_top, lf_addr_expr(L, insn, memop)));
         else {
-            lf_push(&e, lf_afmt("x87_st_bcd(c, %s, *vs_fst(st, x87_top, 0));",
-                                lf_addr_expr(L, insn, memop)));
-            lf_push(&e, "vs_pop(c, st, &x87_top, &x87_tag);");
+            lf_push(&e, lf_afmt("x87_st_bcd(c, %s, VS_FST(st, %d, 0));",
+                                lf_addr_expr(L, insn, memop), L->x87_top));
+            lf_push(&e, lf_afmt("VS_POP(c, x87_tag, %d);", L->x87_top));
         }
         return e;
     }
@@ -67,20 +67,21 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
                                 lf_afmt("%s without memory: %s", m, insn->op_str)));
             return e;
         }
-        lf_push(&e, "vs_flush(c, st, x87_top, x87_tag);");
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
         if (!strcmp(m, "fldenv") || !strcmp(m, "fnstenv"))
             lf_push(&e, lf_afmt("x87_%s(c, %s);", m, lf_addr_expr(L, insn, memop)));
         else if (!strcmp(m, "fsave") || !strcmp(m, "fnsave"))
             lf_push(&e, lf_afmt("x87_fnsave(c, %s);", lf_addr_expr(L, insn, memop)));
         else
             lf_push(&e, lf_afmt("x87_frstor(c, %s);", lf_addr_expr(L, insn, memop)));
-        lf_push(&e, "vs_load(c, st, &x87_top, &x87_tag);");
+        lf_push(&e, "VS_LOAD(c, st, x87_tag, x87_base);");
         return e;
     }
 
     if (!strcmp(m, "fld")) {
-        if (memop) { lf_push(&e, lf_afmt("vs_push(c, st, &x87_top, &x87_tag, %s);", fmem(L, insn, memop, 'f'))); return e; }
-        lf_push(&e, lf_afmt("vs_push(c, st, &x87_top, &x87_tag, *vs_fst(st, x87_top, %d));",
+        if (memop) { lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, %s);", L->x87_top, fmem(L, insn, memop, 'f'))); return e; }
+        lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, VS_FST(st, %d, %d));",
+                            L->x87_top, L->x87_top,
                             nops ? st_index(L, OP(insn, nops - 1)) : 0));
         return e;
     }
@@ -90,35 +91,38 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
                                 lf_afmt("fild without memory: %s", insn->op_str)));
             return e;
         }
-        lf_push(&e, lf_afmt("vs_push(c, st, &x87_top, &x87_tag, %s);", fmem(L, insn, memop, 'i')));
+        lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, %s);", L->x87_top, fmem(L, insn, memop, 'i')));
         return e;
     }
-    if (!strcmp(m, "fldz")) { lf_push(&e, "vs_push(c, st, &x87_top, &x87_tag, x87_zero());"); return e; }
-    if (!strcmp(m, "fld1")) { lf_push(&e, "vs_push(c, st, &x87_top, &x87_tag, x87_one());"); return e; }
-    if (!strcmp(m, "fldpi"))  { lf_push(&e, "vs_push(c, st, &x87_top, &x87_tag, x87_pi());"); return e; }
-    if (!strcmp(m, "fldl2e")) { lf_push(&e, "vs_push(c, st, &x87_top, &x87_tag, x87_l2e());"); return e; }
-    if (!strcmp(m, "fldl2t")) { lf_push(&e, "vs_push(c, st, &x87_top, &x87_tag, x87_l2t());"); return e; }
-    if (!strcmp(m, "fldlg2")) { lf_push(&e, "vs_push(c, st, &x87_top, &x87_tag, x87_lg2());"); return e; }
-    if (!strcmp(m, "fldln2")) { lf_push(&e, "vs_push(c, st, &x87_top, &x87_tag, x87_ln2());"); return e; }
+    if (!strcmp(m, "fldz")) { lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, x87_zero());", L->x87_top)); return e; }
+    if (!strcmp(m, "fld1")) { lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, x87_one());", L->x87_top)); return e; }
+    if (!strcmp(m, "fldpi"))  { lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, x87_pi());", L->x87_top)); return e; }
+    if (!strcmp(m, "fldl2e")) { lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, x87_l2e());", L->x87_top)); return e; }
+    if (!strcmp(m, "fldl2t")) { lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, x87_l2t());", L->x87_top)); return e; }
+    if (!strcmp(m, "fldlg2")) { lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, x87_lg2());", L->x87_top)); return e; }
+    if (!strcmp(m, "fldln2")) { lf_push(&e, lf_afmt("VS_PUSH(c, st, x87_tag, %d, x87_ln2());", L->x87_top)); return e; }
 
     if (!strcmp(m, "fst") || !strcmp(m, "fstp")) {
-        const char *pop = !strcmp(m, "fstp") ? " vs_pop(c, st, &x87_top, &x87_tag);" : "";
+        const char *pop = !strcmp(m, "fstp")
+                              ? lf_afmt(" VS_POP(c, x87_tag, %d);", L->x87_top) : "";
         if (memop) {
             int sz = memop->size;
             char *a = lf_addr_expr(L, insn, memop);
-            if (sz == 4)  { lf_push(&e, lf_afmt("x87_st_f32(c, %s, *vs_fst(st, x87_top, 0));%s", a, pop)); return e; }
-            if (sz == 8)  { lf_push(&e, lf_afmt("x87_st_f64(c, %s, *vs_fst(st, x87_top, 0));%s", a, pop)); return e; }
-            if (sz == 10) { lf_push(&e, lf_afmt("x87_st_f80(%s, *vs_fst(st, x87_top, 0));%s", a, pop)); return e; }
+            if (sz == 4)  { lf_push(&e, lf_afmt("x87_st_f32(c, %s, VS_FST(st, %d, 0));%s", a, L->x87_top, pop)); return e; }
+            if (sz == 8)  { lf_push(&e, lf_afmt("x87_st_f64(c, %s, VS_FST(st, %d, 0));%s", a, L->x87_top, pop)); return e; }
+            if (sz == 10) { lf_push(&e, lf_afmt("x87_st_f80(%s, VS_FST(st, %d, 0));%s", a, L->x87_top, pop)); return e; }
             lf_push(&e, lf_todo((uint32_t)insn->address,
                                 lf_afmt("fst m%d: %s", sz * 8, insn->op_str)));
             return e;
         }
-        lf_push(&e, lf_afmt("vs_fst_reg(st, x87_top, &x87_tag, %d);%s",
+        lf_push(&e, lf_afmt("VS_FST_REG(st, x87_tag, %d, %d);%s",
+                            L->x87_top,
                             nops ? st_index(L, OP(insn, nops - 1)) : 0, pop));
         return e;
     }
     if (LST(m, "fist", "fistp", "fisttp")) {
-        const char *pop = strcmp(m, "fist") ? " vs_pop(c, st, &x87_top, &x87_tag);" : "";
+        const char *pop = strcmp(m, "fist")
+                              ? lf_afmt(" VS_POP(c, x87_tag, %d);", L->x87_top) : "";
         const char *trunc = !strcmp(m, "fisttp") ? "_rz" : "";
         int sz;
         char *a;
@@ -129,36 +133,36 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
         }
         sz = memop->size;
         a = lf_addr_expr(L, insn, memop);
-        if (sz == 2) { lf_push(&e, lf_afmt("x87_st_i16%s(c, %s, *vs_fst(st, x87_top, 0));%s", trunc, a, pop)); return e; }
-        if (sz == 4) { lf_push(&e, lf_afmt("x87_st_i32%s(c, %s, *vs_fst(st, x87_top, 0));%s", trunc, a, pop)); return e; }
-        if (sz == 8) { lf_push(&e, lf_afmt("x87_st_i64%s(c, %s, *vs_fst(st, x87_top, 0));%s", trunc, a, pop)); return e; }
+        if (sz == 2) { lf_push(&e, lf_afmt("x87_st_i16%s(c, %s, VS_FST(st, %d, 0));%s", trunc, a, L->x87_top, pop)); return e; }
+        if (sz == 4) { lf_push(&e, lf_afmt("x87_st_i32%s(c, %s, VS_FST(st, %d, 0));%s", trunc, a, L->x87_top, pop)); return e; }
+        if (sz == 8) { lf_push(&e, lf_afmt("x87_st_i64%s(c, %s, VS_FST(st, %d, 0));%s", trunc, a, L->x87_top, pop)); return e; }
         lf_push(&e, lf_todo((uint32_t)insn->address, lf_afmt("fist m%d: %s", sz * 8, insn->op_str)));
         return e;
     }
 
     if (LST(m, "fprem", "fprem1")) {
-        lf_push(&e, "vs_flush(c, st, x87_top, x87_tag);");
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
         lf_push(&e, lf_afmt("*fst(c, 0) = %s(c, *fst(c, 0), *fst(c, 1));",
                             !strcmp(m, "fprem1") ? "x87_fprem1" : "x87_fprem"));
-        lf_push(&e, "vs_load(c, st, &x87_top, &x87_tag);");
+        lf_push(&e, "VS_LOAD(c, st, x87_tag, x87_base);");
         return e;
     }
     if (!strcmp(m, "frndint")) {
-        lf_push(&e, "vs_flush(c, st, x87_top, x87_tag);");
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
         lf_push(&e, "*fst(c, 0) = x87_roundint(c, *fst(c, 0));");
-        lf_push(&e, "vs_load(c, st, &x87_top, &x87_tag);");
+        lf_push(&e, "VS_LOAD(c, st, x87_tag, x87_base);");
         return e;
     }
     if (!strcmp(m, "fscale"))  {
-        lf_push(&e, "vs_flush(c, st, x87_top, x87_tag);");
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
         lf_push(&e, "x87_fscale(c);");
-        lf_push(&e, "vs_load(c, st, &x87_top, &x87_tag);");
+        lf_push(&e, "VS_LOAD(c, st, x87_tag, x87_base);");
         return e;
     }
     if (!strcmp(m, "fxtract")) {
-        lf_push(&e, "vs_flush(c, st, x87_top, x87_tag);");
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
         lf_push(&e, "x87_fxtract(c);");
-        lf_push(&e, "vs_load(c, st, &x87_top, &x87_tag);");
+        lf_push(&e, "VS_LOAD(c, st, x87_tag, x87_base);");
         return e;
     }
 
@@ -176,24 +180,39 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
             lf_push(&e, lf_todo((uint32_t)insn->address, lf_afmt("fcmov form: %s", insn->op_str)));
             return e;
         }
-        lf_push(&e, lf_afmt("vs_fcmov(c, st, x87_top, &x87_tag, (%s), %d);", cond,
+        lf_push(&e, lf_afmt("VS_FCMOV(c, st, x87_tag, %d, (%s), %d);",
+                            L->x87_top, cond,
                             nops ? st_index(L, OP(insn, nops - 1)) : 1));
         return e;
     }
-    if (!strcmp(m, "fchs")) { lf_push(&e, "vs_fchs(st, x87_top);"); return e; }
-    if (!strcmp(m, "fabs")) { lf_push(&e, "vs_fabs(st, x87_top);"); return e; }
+    if (!strcmp(m, "fchs")) { lf_push(&e, lf_afmt("VS_FCHS(st, %d);", L->x87_top)); return e; }
+    if (!strcmp(m, "fabs")) { lf_push(&e, lf_afmt("VS_FABS(st, %d);", L->x87_top)); return e; }
     if (!strcmp(m, "fxch")) {
-        lf_push(&e, lf_afmt("vs_fxch(st, x87_top, &x87_tag, %d);",
+        lf_push(&e, lf_afmt("VS_FXCH(st, x87_tag, %d, %d);",
+                            L->x87_top,
                             nops ? st_index(L, OP(insn, nops - 1)) : 1));
         return e;
     }
     if (!strcmp(m, "ffree")) {
-        lf_push(&e, lf_afmt("vs_ffree(&x87_tag, x87_top, %d);",
+        /* The plan lists ffree/fdecstp/fincstp as observation points.  The
+         * local tag/top are authoritative, but flush first so a guest-visible
+         * read after the instruction never sees stale c->st/c->fpu_tag. */
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
+        lf_push(&e, lf_afmt("VS_FFREE(x87_tag, %d, %d);",
+                            L->x87_top,
                             nops ? st_index(L, OP(insn, nops - 1)) : 0));
         return e;
     }
-    if (!strcmp(m, "fdecstp")) { lf_push(&e, "x87_top = (x87_top - 1) & 7;"); return e; }
-    if (!strcmp(m, "fincstp")) { lf_push(&e, "x87_top = (x87_top + 1) & 7;"); return e; }
+    if (!strcmp(m, "fdecstp")) {
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
+        lf_push(&e, "/* top updated at lift time */");
+        return e;
+    }
+    if (!strcmp(m, "fincstp")) {
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
+        lf_push(&e, "/* top updated at lift time */");
+        return e;
+    }
 
     if (LST(m, "fadd", "fsub", "fsubr", "fmul", "fdiv", "fdivr",
            "faddp", "fsubp", "fsubrp", "fmulp", "fdivp", "fdivrp")) {
@@ -212,18 +231,20 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
 
         if (memop) {
             char *src = fmem(L, insn, memop, 'f');
-            if (rev) call = lf_afmt("%s(c, %s, *vs_fst(st, x87_top, 0))", fn, src);
-            else     call = lf_afmt("%s(c, *vs_fst(st, x87_top, 0), %s)", fn, src);
-            lf_push(&e, lf_afmt("*vs_fst(st, x87_top, 0) = %s;", call));
+            if (rev) call = lf_afmt("%s(c, %s, VS_FST(st, %d, 0))", fn, src, L->x87_top);
+            else     call = lf_afmt("%s(c, VS_FST(st, %d, 0), %s)", fn, L->x87_top, src);
+            lf_push(&e, lf_afmt("VS_FST(st, %d, 0) = %s;", L->x87_top, call));
             return e;
         }
         if (nops == 2) { a = st_index(L, OP(insn, 0)); b = st_index(L, OP(insn, 1)); }
         else if (pops) { a = nops ? st_index(L, OP(insn, 0)) : 1; b = 0; }
         else { a = 0; b = nops ? st_index(L, OP(insn, 0)) : 1; }
-        if (rev) call = lf_afmt("%s(c, *vs_fst(st, x87_top, %d), *vs_fst(st, x87_top, %d))", fn, b, a);
-        else     call = lf_afmt("%s(c, *vs_fst(st, x87_top, %d), *vs_fst(st, x87_top, %d))", fn, a, b);
-        line = lf_afmt("*vs_fst(st, x87_top, %d) = %s;", a, call);
-        if (pops) line = lf_afmt("%s vs_pop(c, st, &x87_top, &x87_tag);", line);
+        if (rev) call = lf_afmt("%s(c, VS_FST(st, %d, %d), VS_FST(st, %d, %d))",
+                                fn, L->x87_top, b, L->x87_top, a);
+        else     call = lf_afmt("%s(c, VS_FST(st, %d, %d), VS_FST(st, %d, %d))",
+                                fn, L->x87_top, a, L->x87_top, b);
+        line = lf_afmt("VS_FST(st, %d, %d) = %s;", L->x87_top, a, call);
+        if (pops) line = lf_afmt("%s VS_POP(c, x87_tag, %d);", line, L->x87_top);
         lf_push(&e, line);
         return e;
     }
@@ -245,9 +266,9 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
         else if (!strcmp(core, "fsub") || !strcmp(core, "fsubr")) fn = "x87_sub";
         else if (!strcmp(core, "fmul")) fn = "x87_mul";
         else fn = "x87_div";
-        if (rev) call = lf_afmt("%s(c, %s, *vs_fst(st, x87_top, 0))", fn, src);
-        else     call = lf_afmt("%s(c, *vs_fst(st, x87_top, 0), %s)", fn, src);
-        lf_push(&e, lf_afmt("*vs_fst(st, x87_top, 0) = %s;", call));
+        if (rev) call = lf_afmt("%s(c, %s, VS_FST(st, %d, 0))", fn, src, L->x87_top);
+        else     call = lf_afmt("%s(c, VS_FST(st, %d, 0), %s)", fn, L->x87_top, src);
+        lf_push(&e, lf_afmt("VS_FST(st, %d, 0) = %s;", L->x87_top, call));
         return e;
     }
 
@@ -255,44 +276,66 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
         char *src;
         int signaling = !strncmp(m, "fcom", 4) || !strncmp(m, "ficom", 5);
         if (memop) src = fmem(L, insn, memop, (m[1] == 'c') ? 'f' : 'i');
-        else if (nops) src = lf_afmt("*vs_fst(st, x87_top, %d)", st_index(L, OP(insn, nops - 1)));
-        else src = (char *)"*vs_fst(st, x87_top, 1)";
-        lf_push(&e, lf_afmt("x87_compare(c, *vs_fst(st, x87_top, 0), %s, %d);", src, signaling));
+        else if (nops) src = lf_afmt("VS_FST(st, %d, %d)", L->x87_top, st_index(L, OP(insn, nops - 1)));
+        else src = lf_afmt("VS_FST(st, %d, 1)", L->x87_top);
+        lf_push(&e, lf_afmt("x87_compare(c, VS_FST(st, %d, 0), %s, %d);",
+                            L->x87_top, src, signaling));
         if (!strcmp(m, "fcomp") || !strcmp(m, "fucomp") || !strcmp(m, "ficomp"))
-            lf_push(&e, "vs_pop(c, st, &x87_top, &x87_tag);");
+            lf_push(&e, lf_afmt("VS_POP(c, x87_tag, %d);", L->x87_top));
         if (!strcmp(m, "fcompp") || !strcmp(m, "fucompp")) {
-            lf_push(&e, "vs_pop(c, st, &x87_top, &x87_tag);");
-            lf_push(&e, "vs_pop(c, st, &x87_top, &x87_tag);");
+            lf_push(&e, lf_afmt("VS_POP(c, x87_tag, %d);", L->x87_top));
+            lf_push(&e, lf_afmt("VS_POP(c, x87_tag, %d);", (L->x87_top + 1) & 7));
         }
         return e;
     }
     if (LST(m, "fcomi", "fucomi", "fcomip", "fucomip", "fcompi", "fucompi")) {
-        char *src = nops ? lf_afmt("*vs_fst(st, x87_top, %d)", st_index(L, OP(insn, nops - 1)))
-                         : (char *)"*vs_fst(st, x87_top, 1)";
+        char *src = nops ? lf_afmt("VS_FST(st, %d, %d)", L->x87_top, st_index(L, OP(insn, nops - 1)))
+                         : lf_afmt("VS_FST(st, %d, 1)", L->x87_top);
         int signaling = !strncmp(m, "fcom", 4);
-        lf_push(&e, lf_afmt("x87_compare_eflags(c, *vs_fst(st, x87_top, 0), %s, %d);", src, signaling));
-        if (strcmp(m, "fcomi") && strcmp(m, "fucomi")) lf_push(&e, "vs_pop(c, st, &x87_top, &x87_tag);");
+        lf_push(&e, lf_afmt("x87_compare_eflags(c, VS_FST(st, %d, 0), %s, %d);",
+                            L->x87_top, src, signaling));
+        if (strcmp(m, "fcomi") && strcmp(m, "fucomi"))
+            lf_push(&e, lf_afmt("VS_POP(c, x87_tag, %d);", L->x87_top));
         return e;
     }
-    if (!strcmp(m, "ftst")) { lf_push(&e, "x87_compare(c, *vs_fst(st, x87_top, 0), x87_zero(), 1);"); return e; }
+    if (!strcmp(m, "ftst")) {
+        lf_push(&e, lf_afmt("x87_compare(c, VS_FST(st, %d, 0), x87_zero(), 1);", L->x87_top));
+        return e;
+    }
 
-    if (!strcmp(m, "fsqrt")) { lf_push(&e, "*vs_fst(st, x87_top, 0) = x87_sqrt(c, *vs_fst(st, x87_top, 0));"); return e; }
-    if (!strcmp(m, "fsin"))  { lf_push(&e, "*vs_fst(st, x87_top, 0) = x87_fsin(c, *vs_fst(st, x87_top, 0));"); return e; }
-    if (!strcmp(m, "fcos"))  { lf_push(&e, "*vs_fst(st, x87_top, 0) = x87_fcos(c, *vs_fst(st, x87_top, 0));"); return e; }
-    if (!strcmp(m, "f2xm1")) { lf_push(&e, "*vs_fst(st, x87_top, 0) = x87_f2xm1(c, *vs_fst(st, x87_top, 0));"); return e; }
+    if (!strcmp(m, "fsqrt")) {
+        lf_push(&e, lf_afmt("VS_FST(st, %d, 0) = x87_sqrt(c, VS_FST(st, %d, 0));",
+                            L->x87_top, L->x87_top));
+        return e;
+    }
+    if (!strcmp(m, "fsin"))  {
+        lf_push(&e, lf_afmt("VS_FST(st, %d, 0) = x87_fsin(c, VS_FST(st, %d, 0));",
+                            L->x87_top, L->x87_top));
+        return e;
+    }
+    if (!strcmp(m, "fcos"))  {
+        lf_push(&e, lf_afmt("VS_FST(st, %d, 0) = x87_fcos(c, VS_FST(st, %d, 0));",
+                            L->x87_top, L->x87_top));
+        return e;
+    }
+    if (!strcmp(m, "f2xm1")) {
+        lf_push(&e, lf_afmt("VS_FST(st, %d, 0) = x87_f2xm1(c, VS_FST(st, %d, 0));",
+                            L->x87_top, L->x87_top));
+        return e;
+    }
     if (LST(m, "fptan", "fpatan", "fyl2x", "fyl2xp1", "fsincos")) {
-        lf_push(&e, "vs_flush(c, st, x87_top, x87_tag);");
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
         if (!strcmp(m, "fptan")) lf_push(&e, "*fst(c, 0) = x87_fptan(c, *fst(c, 0)); fpush(c, x87_one());");
         else if (!strcmp(m, "fpatan")) lf_push(&e, "*fst(c, 1) = x87_fpatan(c, *fst(c, 1), *fst(c, 0)); fpop(c);");
         else if (!strcmp(m, "fyl2x")) lf_push(&e, "*fst(c, 1) = x87_fyl2x(c, *fst(c, 0), *fst(c, 1)); fpop(c);");
         else if (!strcmp(m, "fyl2xp1")) lf_push(&e, "*fst(c, 1) = x87_fyl2xp1(c, *fst(c, 0), *fst(c, 1)); fpop(c);");
         else lf_push(&e, "{ double _x = *fst(c, 0); *fst(c, 0) = x87_fsin(c, _x); fpush(c, x87_fcos(c, _x)); }");
-        lf_push(&e, "vs_load(c, st, &x87_top, &x87_tag);");
+        lf_push(&e, "VS_LOAD(c, st, x87_tag, x87_base);");
         return e;
     }
 
     if (!strcmp(m, "fnstsw")) {
-        lf_push(&e, "vs_flush(c, st, x87_top, x87_tag);");
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
         if (nops && OP(insn, 0)->type == X86_OP_REG) {
             lf_push(&e, "SET16(c->eax, (uint16_t)c->fpu_sw);");
             return e;
@@ -300,7 +343,11 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
         lf_push(&e, lf_wr(L, insn, OP(insn, 0), "(uint16_t)c->fpu_sw"));
         return e;
     }
-    if (!strcmp(m, "fnstcw")) { lf_push(&e, lf_wr(L, insn, OP(insn, 0), "c->fpu_cw")); return e; }
+    if (!strcmp(m, "fnstcw")) {
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
+        lf_push(&e, lf_wr(L, insn, OP(insn, 0), "c->fpu_cw"));
+        return e;
+    }
     if (!strcmp(m, "fldcw")) {
         if (!memop) {
             lf_push(&e, lf_todo((uint32_t)insn->address,
@@ -316,12 +363,12 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
     }
     if (LST(m, "fninit", "finit")) {
         lf_push(&e, "cpu_x87_init(c);");
-        lf_push(&e, "vs_load(c, st, &x87_top, &x87_tag);");
+        lf_push(&e, "VS_LOAD(c, st, x87_tag, x87_base);");
         return e;
     }
     if (LST(m, "fwait", "wait", "fnop")) { lf_push(&e, "/* no-op */"); return e; }
     if (!strcmp(m, "fxam")) {
-        lf_push(&e, "vs_flush(c, st, x87_top, x87_tag);");
+        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
         lf_push(&e, "x87_fxam(c);");
         return e;
     }

@@ -483,6 +483,15 @@ extern uint32_t g_image_delta;   /* live_base - PE ImageBase */
 #define WC3_SET_AF(c, v) ((c)->af = (v))
 #endif
 
+/* PF as observed after a flag-producing operation.  With fast PF enabled the
+ * helpers deliberately leave the stored PF alone, so a fused jp/jnp condition
+ * must read the stored field rather than compute parity from the result. */
+#if WC3_FLAGS_FAST_PF_AF
+#define WC3_PF_VALUE(c, r) ((c)->pf)
+#else
+#define WC3_PF_VALUE(c, r) (parity8((uint8_t)(r)))
+#endif
+
 static inline uint32_t parity8(uint8_t v) {
     v ^= v >> 4; v ^= v >> 2; v ^= v >> 1; return (~v) & 1;
 }
@@ -857,6 +866,96 @@ static inline void vs_fabs(double *st, int top) {
     const double d = st[top];
     st[top] = x87_from_bits(x87_bits(d) & UINT64_C(0x7FFFFFFFFFFFFFFF));
 }
+
+/* Register-friendly virtual x87 stack (A.6 v2).
+ *
+ * The generated body normalizes the guest stack at a block entry: st[0] is
+ * ST(0) at that point and `base` is the physical TOP.  The tag word is
+ * rotated into the same virtual order, so every hot access uses a constant
+ * index and no pointer to st escapes.  The compiler can keep the eight
+ * doubles in registers; only block boundaries copy to/from CPU.  The old
+ * vs_* helpers above stay for the corpus lifted before this form. */
+static inline uint16_t vs_tag_ror(uint16_t tag, int top) {
+    uint32_t t = tag;
+    return (uint16_t)((t >> (2 * top)) | (t << (16 - 2 * top)));
+}
+static inline uint16_t vs_tag_rol(uint16_t tag, int top) {
+    uint32_t t = tag;
+    return (uint16_t)((t << (2 * top)) | (t >> (16 - 2 * top)));
+}
+#define VS_LOAD(_c, _st, _tag, _base) do { \
+    (_base) = (_c)->fpu_top; \
+    (_st)[0] = (_c)->st[((_base) + 0) & 7].v.d; \
+    (_st)[1] = (_c)->st[((_base) + 1) & 7].v.d; \
+    (_st)[2] = (_c)->st[((_base) + 2) & 7].v.d; \
+    (_st)[3] = (_c)->st[((_base) + 3) & 7].v.d; \
+    (_st)[4] = (_c)->st[((_base) + 4) & 7].v.d; \
+    (_st)[5] = (_c)->st[((_base) + 5) & 7].v.d; \
+    (_st)[6] = (_c)->st[((_base) + 6) & 7].v.d; \
+    (_st)[7] = (_c)->st[((_base) + 7) & 7].v.d; \
+    (_tag) = vs_tag_ror((_c)->fpu_tag, (_base)); \
+} while (0)
+#define VS_FLUSH(_c, _st, _tag, _base, _top) do { \
+    (_c)->st[((_base) + 0) & 7].v.d = (_st)[0]; \
+    (_c)->st[((_base) + 1) & 7].v.d = (_st)[1]; \
+    (_c)->st[((_base) + 2) & 7].v.d = (_st)[2]; \
+    (_c)->st[((_base) + 3) & 7].v.d = (_st)[3]; \
+    (_c)->st[((_base) + 4) & 7].v.d = (_st)[4]; \
+    (_c)->st[((_base) + 5) & 7].v.d = (_st)[5]; \
+    (_c)->st[((_base) + 6) & 7].v.d = (_st)[6]; \
+    (_c)->st[((_base) + 7) & 7].v.d = (_st)[7]; \
+    (_c)->fpu_top = ((_base) + (_top)) & 7; \
+    x87_set_top(_c); \
+    (_c)->fpu_tag = vs_tag_rol((_tag), (_base)); \
+} while (0)
+#define VS_FST(_st, _top, _i) ((_st)[(((_top) + (_i)) & 7)])
+#define VS_PUSH(_c, _st, _tag, _top, _val) do { \
+    const int _p = (((_top) - 1) & 7); \
+    const double _pushv = (_val); \
+    if (VS_TAG((_tag), _p) != 3) x87_stack_fault(_c); \
+    (_st)[_p] = _pushv; \
+    VS_SET_TAG((_tag), _p, x87_tag_for(_pushv)); \
+} while (0)
+#define VS_POP(_c, _tag, _top) do { \
+    const int _p = (_top); \
+    if (VS_TAG((_tag), _p) == 3) x87_stack_fault(_c); \
+    VS_SET_TAG((_tag), _p, 3); \
+} while (0)
+#define VS_FST_REG(_st, _tag, _top, _i) do { \
+    const int _d = (((_top) + (_i)) & 7), _s = (_top); \
+    (_st)[_d] = (_st)[_s]; \
+    VS_SET_TAG((_tag), _d, VS_TAG((_tag), _s)); \
+} while (0)
+#define VS_FXCH(_st, _tag, _top, _i) do { \
+    const int _a = (_top), _b = (((_top) + (_i)) & 7); \
+    const double _x = (_st)[_a]; \
+    const uint16_t _xt = VS_TAG((_tag), _a); \
+    (_st)[_a] = (_st)[_b]; \
+    VS_SET_TAG((_tag), _a, VS_TAG((_tag), _b)); \
+    (_st)[_b] = _x; \
+    VS_SET_TAG((_tag), _b, _xt); \
+} while (0)
+#define VS_FCMOV(_c, _st, _tag, _top, _cond, _i) do { \
+    if (_cond) { \
+        const int _d = (_top), _s = (((_top) + (_i)) & 7); \
+        if (VS_TAG((_tag), _s) == 3) { x87_stack_fault(_c); } \
+        else { \
+            (_st)[_d] = (_st)[_s]; \
+            VS_SET_TAG((_tag), _d, VS_TAG((_tag), _s)); \
+        } \
+    } \
+} while (0)
+#define VS_FFREE(_tag, _top, _i) do { \
+    VS_SET_TAG((_tag), (((_top) + (_i)) & 7), 3); \
+} while (0)
+#define VS_FCHS(_st, _top) do { \
+    const int _d = (_top); \
+    (_st)[_d] = x87_from_bits(x87_bits((_st)[_d]) ^ UINT64_C(0x8000000000000000)); \
+} while (0)
+#define VS_FABS(_st, _top) do { \
+    const int _d = (_top); \
+    (_st)[_d] = x87_from_bits(x87_bits((_st)[_d]) & UINT64_C(0x7FFFFFFFFFFFFFFF)); \
+} while (0)
 
 /* Double-precision helpers for SSE/scalar code. These are NOT x87 helpers:
  * x87 memory operands use x87_ld_f32/f64 and x87_st_f32/f64 in x87.h. */

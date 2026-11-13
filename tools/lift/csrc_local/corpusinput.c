@@ -274,6 +274,27 @@ static char *replace_once(const char *text, const char *from, const char *to)
     return out;
 }
 
+/* Replace when the marker exists; otherwise keep the buffer unchanged. */
+static char *replace_or_keep(char *text, const char *from, const char *to)
+{
+    char *n = replace_once(text, from, to);
+    if (!n) return text;
+    free(text);
+    return n;
+}
+
+/* Update an already-written JSON sha256 value in place. */
+static int update_json_sha(char *text, const char *hex)
+{
+    const char *p = strstr(text, "\"sha256\": \"");
+    char *v;
+    if (!p) return -1;
+    v = (char *)p + strlen("\"sha256\": \"");
+    if (strlen(v) < 64) return -1;
+    memcpy(v, hex, 64);
+    return 0;
+}
+
 /* ---- subcommands -------------------------------------------------------- */
 
 static int cmd_rebase(int argc, char **argv)
@@ -430,7 +451,7 @@ static int cmd_seal(int argc, char **argv)
 {
     const char *layout = NULL, *hashfile = NULL;
     int inputs = 0, force = 0, i;
-    char *text, *hash, *next;
+    char *text, *hash;
     char hex[65], ins[256], tmp[128];
     if (argc < 3) { fprintf(stderr, "usage: corpusinput seal --layout F --hash F --inputs N [--force]\n"); return 2; }
     for (i = 2; i < argc; i++) {
@@ -457,25 +478,25 @@ static int cmd_seal(int argc, char **argv)
     {
         char *corpus = strstr(text, "\"corpus_manifest\"");
         if (!corpus) { fprintf(stderr, "seal: no corpus_manifest object\n"); free(text); return 1; }
-        if (!force && !strstr(corpus, "\"sha256\": null")) {
+        if (strstr(corpus, "\"sha256\": null")) {
+            snprintf(tmp, sizeof tmp, "\"sha256\": \"%s\"", hex);
+            snprintf(ins, sizeof ins, "%s, \"inputs\": %d, \"generator\": \"wc3lift\"",
+                     tmp, inputs);
+            text = replace_or_keep(text, "\"sha256\": null", ins);
+        } else if (force) {
+            if (update_json_sha(text, hex) != 0) {
+                fprintf(stderr, "seal: cannot update corpus_manifest.sha256\n");
+                free(text); return 1;
+            }
+        } else {
             fprintf(stderr, "seal: corpus_manifest.sha256 is already set (use --force)\n");
             free(text); return 1;
         }
     }
+    text = replace_or_keep(text, "\"status\": \"not_generated\"",
+                           "\"status\": \"generated\"");
+    text = replace_or_keep(text, "\"lift_rev\": 0", "\"lift_rev\": 2");
     snprintf(tmp, sizeof tmp, "\"sha256\": \"%s\"", hex);
-    snprintf(ins, sizeof ins, "%s, \"inputs\": %d, \"generator\": \"wc3lift\"",
-             tmp, inputs);
-    next = replace_once(text, "\"sha256\": null", ins);
-    free(text); text = next;
-    if (text) {
-        next = replace_once(text, "\"status\": \"not_generated\"",
-                            "\"status\": \"generated\"");
-        free(text); text = next;
-    }
-    if (text) {
-        next = replace_once(text, "\"lift_rev\": 0", "\"lift_rev\": 1");
-        free(text); text = next;
-    }
     if (!text || !strstr(text, tmp) || !strstr(text, "\"status\": \"generated\"")) {
         fprintf(stderr, "seal: could not patch corpus_manifest\n");
         free(text); return 1;
