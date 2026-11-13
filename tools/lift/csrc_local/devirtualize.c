@@ -332,6 +332,11 @@ static int match_func_start(const char *s, size_t n, size_t pos,
     if (!skip_ws(s, n, &p)) return 0;
     if (!expect_bytes(s, n, &p, "*")) return 0;
     if (!skip_ws(s, n, &p)) return 0;
+    if (p + 8 <= n && memcmp(s + p, "restrict", 8) == 0 &&
+        p + 8 < n && isspace((unsigned char)s[p + 8])) {
+        p += 8;
+        if (!skip_ws(s, n, &p)) return 0;
+    }
     if (!expect_bytes(s, n, &p, "c")) return 0;
     if (!skip_ws(s, n, &p)) return 0;
     if (!expect_bytes(s, n, &p, ")")) return 0;
@@ -629,7 +634,7 @@ static int self_test(void)
 {
     static const char fixture[] =
         "#include \"cpu.h\"\n"
-        "void L_00401000(CPU *c) { dispatch(c, 0x00401010u); return; }\n"
+        "void L_00401000(CPU *restrict c) { dispatch(c, 0x00401010u); return; }\n"
         "void L_00401010(CPU *c) { dispatch_jmp(c, 0x00401020u); return; }\n"
         "void L_00401020(CPU *c) { dispatch(c, 0x7F000010u); return; }\n"
         "void L_00401030(CPU *c) { dispatch(c, 0xDEADBEEFu); return; }\n"

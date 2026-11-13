@@ -487,6 +487,9 @@ int wc3_boot_probe_main(int argc, char **argv)
 
     CPU c;
     memset(&c, 0, sizeof c);
+    /* `CPU *restrict` in the lifted functions: the guest lives below 4 GiB,
+     * so the host CPU object must not be reachable through a guest VA. */
+    if ((uintptr_t)&c < 0x100000000ull) abort();
     cpu_x87_init_thread(&c);
     c.esp = GUEST_STACK_BASE + GUEST_STACK_SIZE - 0x200;
     teb_init(&c, GUEST_TEB_BASE, GUEST_STACK_BASE, GUEST_STACK_SIZE, 5678);

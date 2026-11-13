@@ -301,6 +301,11 @@ static size_t function_header_at(const char *s, size_t n, size_t p,
     if (i >= n || s[i] != '*') return 0;
     i++;
     while (i < n && isspace((unsigned char)s[i])) i++;
+    if (i + 8 <= n && memcmp(s + i, "restrict", 8) == 0 &&
+        (i + 8 == n || isspace((unsigned char)s[i + 8]))) {
+        i += 8;
+        while (i < n && isspace((unsigned char)s[i])) i++;
+    }
     if (i >= n || s[i] != 'c') return 0;
     i++;
     while (i < n && isspace((unsigned char)s[i])) i++;
@@ -1255,7 +1260,7 @@ static int write_report(const char *path, FileReport **reports, size_t nreports)
 
 static const char SELF_TEST[] =
     "/* auto-generated fixture */\n"
-    "void L_00000001(CPU *c)\n"
+    "void L_00000001(CPU *restrict c)\n"
     "{\n"
     "    c->eax = flags_add(c, c->eax, 1u, 4);       /* 1: add eax, 1 */\n"
     "    c->edx = flags_add(c, c->edx, 2u, 4);       /* 2: add edx, 2 */\n"

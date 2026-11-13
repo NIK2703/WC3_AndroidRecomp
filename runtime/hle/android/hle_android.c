@@ -5563,10 +5563,9 @@ static void teb_init_local(CPU *c, uint32_t teb, uint32_t stack_base,
 }
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
-/* Live CPU pointer, published for the watchdog only.  The pointed-to CPU is
- * owned by the thread running it; the watchdog may read its transient eip to
- * catch a guest loop that never reaches another dispatch. */
-static CPU *g_main_cpu;
+/* Live CPU state is published as plain scalars for the watchdog.  Keeping a
+ * global `CPU *` here and dereferencing it from the watchdog thread would
+ * break the `restrict` contract of the lifted functions. */
 
 /* Called by the active boot dispatcher for every guest target.  Keep this
  * separate from wc3_dispatch_watch(), whose old-tree probes are far too heavy
@@ -5584,7 +5583,6 @@ void wc3_watch_dispatch(CPU *c, uint32_t target)
         g_self_thread->last_ebp = c->ebp;
         g_self_thread->dispatch_count++;
     } else {
-        g_main_cpu = c;
         g_main_wait_active = 0;
         g_main_last_target = target;
         g_main_last_eip = c->eip;
@@ -5663,11 +5661,6 @@ static int hang_watch_enabled(void)
     return access(trigger, F_OK) == 0;
 }
 
-static uint32_t cpu_live_eip(CPU *c)
-{
-    return c ? __atomic_load_n(&c->eip, __ATOMIC_RELAXED) : 0;
-}
-
 /* The last 64 HLE entries are a global ring, so a stall dump shows which host
  * calls the guest made immediately before it stopped dispatching.  This is
  * cheaper than hle_android_report() and does not reset the call counters. */
@@ -5690,34 +5683,32 @@ static void *hang_watch_proc(void *arg)
     int stalled = 0;
     for (int i = 0; i < 900; i++) {
         usleep(2000000);
-        CPU *mc = __atomic_load_n(&g_main_cpu, __ATOMIC_RELAXED);
         uint32_t mn = __atomic_load_n(&g_main_dispatch_count, __ATOMIC_RELAXED);
         if (mn == prev_main_n) stalled++; else { stalled = 0; prev_main_n = mn; }
         const char *mn_name = hle_describe(g_main_last_target);
         if (stalled == 5 && !g_main_wait_active) {
             fprintf(stderr, "[watch] STALL t=%u n=%u pc=%08X last=%08X(%s) "
                             "esp=%08X ebp=%08X\n",
-                    hle_now_ms(), mn, cpu_live_eip(mc), g_main_last_target,
+                    hle_now_ms(), mn, g_main_last_eip, g_main_last_target,
                     mn_name[0] ? mn_name : "-", g_main_last_esp, g_main_last_ebp);
             hle_dump_ring("main stall");
         }
         fprintf(stderr, "[watch] t=%u main last=%08X(%s) pc=%08X eip=%08X esp=%08X "
                         "ebp=%08X n=%u wait=%d ra=%08X h0=%08X h1=%08X stall=%d\n",
                 hle_now_ms(), g_main_last_target, mn_name[0] ? mn_name : "-",
-                cpu_live_eip(mc),
+                g_main_last_eip,
                 g_main_last_eip, g_main_last_esp, g_main_last_ebp, mn,
                 g_main_wait_active, g_main_wait_ra, g_main_wait_h0,
                 g_main_wait_h1, stalled);
         for (int j = 0; j < GUEST_THREAD_MAX; j++) {
             GThread *t = &g_threads[j];
             if (!t->used) continue;
-            CPU *tc = __atomic_load_n(&t->cpu, __ATOMIC_RELAXED);
             const char *tn = hle_describe(t->last_target);
             fprintf(stderr, "[watch] gid=%u run=%d last=%08X(%s) pc=%08X eip=%08X "
                             "esp=%08X ebp=%08X n=%u wait=%d ra=%08X "
                             "h0=%08X h1=%08X\n",
                     t->guest_id, t->running, t->last_target, tn[0] ? tn : "-",
-                    cpu_live_eip(tc),
+                    t->last_eip,
                     t->last_eip, t->last_esp, t->last_ebp, t->dispatch_count,
                     t->wait_active, t->wait_ra, t->wait_h0, t->wait_h1);
         }
@@ -5757,6 +5748,11 @@ static void *guest_thread_proc(void *p)
 
     CPU c;
     memset(&c, 0, sizeof c);
+    /* Lifted functions take `CPU *restrict c`.  Guest memory is
+     * identity-mapped below 4 GiB, so the host CPU object must live above
+     * that range; otherwise a guest write could alias it and the restrict
+     * promise would be false.  This is a startup invariant, not a hint. */
+    if ((uintptr_t)&c < 0x100000000ull) abort();
     cpu_x87_init_thread(&c);
     c.esp = t->stack_base + t->stack_size - 0x100;
     teb_init_local(&c, t->teb, t->stack_base, t->stack_size, t->guest_id);

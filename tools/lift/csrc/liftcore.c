@@ -650,6 +650,7 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
                                             seen[j], seen[j]));
                 }
                 lf_push(&e, "  default: dispatch_jmp(c, _jt); return; }");
+                lf_push(&e, "}");
                 return e;
             }
         }
@@ -840,9 +841,6 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
             if (last_word_is_term(ins[i].insn.mnemonic)) { n = i + 1; break; }
     }
 
-    for (i = 0; i < n; i++)
-        if (ins[i].insn.mnemonic[0] == 'f') { has_x87 = 1; break; }
-
     {
         /* Two very different things can be seeded here, and they need
          * different extents.
@@ -993,13 +991,20 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
         nlabels = w;
     }
 
+    /* The x87 prologue decision must see every instruction, including the
+     * ones decoded while growing the extent: a short seed extent can end
+     * before the first fpu instruction, and deciding early left functions
+     * using `st`/`x87_top` without declaring them. */
+    for (i = 0; i < n; i++)
+        if (ins[i].insn.mnemonic[0] == 'f') { has_x87 = 1; break; }
+
     /* ---- emit ---- */
     out_cap = 4096 + (size_t)n * 200;
     out = (char *)malloc(out_cap);
     out[0] = 0;
     {
         char hdr[64];
-        int hn = snprintf(hdr, sizeof hdr, "void L_%08X(CPU *c)\n{\n", start);
+        int hn = snprintf(hdr, sizeof hdr, "void L_%08X(CPU *restrict c)\n{\n", start);
         memcpy(out, hdr, (size_t)hn);
         out_len = (size_t)hn;
     }

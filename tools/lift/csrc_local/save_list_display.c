@@ -9,6 +9,7 @@
  *                     [--marker]
  *   save_list_display --self-test
  */
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -284,8 +285,25 @@ static int func_header_at(const char *s, size_t n, size_t p, Func *out)
     while (i < n && is_hex_upper((unsigned char)s[i])) i++;
     name_len = i - name_start;
     if (name_len == 0 || name_len > 15) return 0;
-    if (i + 7 > n || memcmp(s + i, "(CPU *c)", 8) != 0) return 0;
-    i += 8;
+    if (i >= n || s[i] != '(') return 0;
+    i++;
+    while (i < n && isspace((unsigned char)s[i])) i++;
+    if (i + 3 > n || memcmp(s + i, "CPU", 3) != 0) return 0;
+    i += 3;
+    while (i < n && isspace((unsigned char)s[i])) i++;
+    if (i >= n || s[i] != '*') return 0;
+    i++;
+    while (i < n && isspace((unsigned char)s[i])) i++;
+    if (i + 8 <= n && memcmp(s + i, "restrict", 8) == 0 &&
+        (i + 8 == n || isspace((unsigned char)s[i + 8]))) {
+        i += 8;
+        while (i < n && isspace((unsigned char)s[i])) i++;
+    }
+    if (i >= n || s[i] != 'c') return 0;
+    i++;
+    while (i < n && isspace((unsigned char)s[i])) i++;
+    if (i >= n || s[i] != ')') return 0;
+    i++;
     if (i < n && s[i] == '\r') i++;
     if (i >= n || s[i] != '\n') return 0;
     i++;
@@ -784,7 +802,7 @@ static int process_file(const char *src, const char *dst, const char *json,
 
 static const char SELF_TEST_FIXTURE[] =
     "/* header */\n"
-    "void L_6F2A950C(CPU *c)\n"
+    "void L_6F2A950C(CPU *restrict c)\n"
     "{\n"
     "    push32(c, 0x6F2A953Du); dispatch(c, 0x6F07C6DEu);\n"
     "    c->ebx = (uint32_t)(rd32((c->ebx + 0x000001ECu)));           /* 6F2A953D: mov ebx, dword ptr [ebx + 0x1ec] */\n"

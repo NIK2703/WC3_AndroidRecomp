@@ -351,6 +351,10 @@ static int parse_header(const char *line, char va[9], const char **after)
     if (*p != '*') return 0;
     p++;
     while (*p && isspace((unsigned char)*p)) p++;
+    if (strncmp(p, "restrict", 8) == 0 && isspace((unsigned char)p[8])) {
+        p += 8;
+        while (*p && isspace((unsigned char)*p)) p++;
+    }
     if (*p != 'c') return 0;
     p++;
     while (*p && isspace((unsigned char)*p)) p++;
@@ -426,7 +430,7 @@ static void report_free(report *r)
 static int self_test(void)
 {
     static const char *clean =
-        "void L_00000001(CPU *c)\n"
+        "void L_00000001(CPU *restrict c)\n"
         "{\n"
         "    c->eax = flags_add(c, c->eax, 1u, 4);\n"
         "    c->pf = 0; c->af = 1;\n"

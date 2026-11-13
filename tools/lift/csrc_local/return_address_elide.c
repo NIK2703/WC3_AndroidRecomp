@@ -255,6 +255,11 @@ static size_t function_header_at(const char *s, size_t n, size_t p,
     if (i >= n || s[i] != '*') return 0;
     i++;
     while (i < n && is_space((unsigned char)s[i])) i++;
+    if (i + 8 <= n && memcmp(s + i, "restrict", 8) == 0 &&
+        (i + 8 == n || is_space((unsigned char)s[i + 8]))) {
+        i += 8;
+        while (i < n && is_space((unsigned char)s[i])) i++;
+    }
     if (i >= n || s[i] != 'c') return 0;
     i++;
     while (i < n && is_space((unsigned char)s[i])) i++;
@@ -2268,7 +2273,7 @@ static int process_file(const char *src, const char *dst, Report *report)
 
 static const char SELF_TEST[] =
     "#include \"cpu.h\"\n"
-    "void L_00401000(CPU *c)\n"
+    "void L_00401000(CPU *restrict c)\n"
     "{\n"
     "    /* safe: no stack read */\n"
     "    c->eax = 1u;\n"

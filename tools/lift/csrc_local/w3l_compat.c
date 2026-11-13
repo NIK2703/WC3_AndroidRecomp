@@ -511,31 +511,38 @@ static const char *status_name(Status st)
 static int function_span(const char *text, size_t n, const char *name,
                          size_t *out_start, size_t *out_end, char **err)
 {
-    char *needle = fmt("void %s(CPU *c)", name);
-    size_t nn = strlen(needle);
-    size_t search = 0;
-    size_t pos;
+    static const char *const forms[] = {
+        "void %s(CPU *c)",
+        "void %s(CPU *restrict c)",
+    };
     size_t positions[2];
     size_t npos = 0;
     size_t brace;
     size_t start;
     size_t i;
     int depth;
+    size_t fi;
 
-    while ((pos = find_sub(text, n, needle, nn, search)) != NPOS) {
-        size_t ls = pos;
-        while (ls > 0 && text[ls - 1] != '\n') ls--;
-        if (pos == ls) {
-            size_t t = pos + nn;
-            if ((t + 5 <= n && memcmp(text + t, "\r\n{\r\n", 5) == 0) ||
-                (t + 3 <= n && memcmp(text + t, "\n{\n", 3) == 0)) {
-                if (npos < 2) positions[npos] = pos;
-                npos++;
+    for (fi = 0; fi < sizeof forms / sizeof forms[0]; fi++) {
+        char *needle = fmt(forms[fi], name);
+        size_t nn = strlen(needle);
+        size_t search = 0;
+        size_t pos;
+        while ((pos = find_sub(text, n, needle, nn, search)) != NPOS) {
+            size_t ls = pos;
+            while (ls > 0 && text[ls - 1] != '\n') ls--;
+            if (pos == ls) {
+                size_t t = pos + nn;
+                if ((t + 5 <= n && memcmp(text + t, "\r\n{\r\n", 5) == 0) ||
+                    (t + 3 <= n && memcmp(text + t, "\n{\n", 3) == 0)) {
+                    if (npos < 2) positions[npos] = pos;
+                    npos++;
+                }
             }
+            search = pos + 1;
         }
-        search = pos + 1;
+        free(needle);
     }
-    free(needle);
 
     if (npos == 0) return 0;
     if (npos != 1) {
@@ -1891,7 +1898,7 @@ done:
 
 static const char *SELF_TEST_FIXTURE =
 "/* self-test */\n"
-"void L_6F8DDC80(CPU *c)\n"
+"void L_6F8DDC80(CPU *restrict c)\n"
 "{\n"
 "    if (!c->zf) { dispatch_jmp(c, 0x6F8DDE5Fu); return; }        "
 "/* 6F8DDD94: jne 0x6f8dde5f */\n"
@@ -2045,7 +2052,7 @@ static int self_test(void)
     free(missing_fixture);
 
     require_fixture = replace_first(SELF_TEST_FIXTURE,
-                                    "void L_6F8DDC80(CPU *c)",
+                                    "void L_6F8DDC80(CPU *restrict c)",
                                     "void L_NOT_PRESENT(CPU *c)");
     {
         char *bad = NULL;
