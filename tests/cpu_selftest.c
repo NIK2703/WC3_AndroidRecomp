@@ -406,6 +406,53 @@ int main(void)
         cpu_x87_init(&c);
     }
 
+    /* ---- virtual x87 stack (L2) ---- */
+    {
+        CPU vc = {0};
+        double st[8];
+        int top;
+        uint16_t tag;
+
+        cpu_x87_init(&vc);
+        vs_load(&vc, st, &top, &tag);
+        vs_push(&vc, st, &top, &tag, 1.0);
+        vs_push(&vc, st, &top, &tag, 2.0);
+        eqd("vs top is last push", *vs_fst(st, top, 0), 2.0);
+        eqd("vs next is first push", *vs_fst(st, top, 1), 1.0);
+        eqd("vs pop returns top", vs_pop(&vc, st, &top, &tag), 2.0);
+        eqd("vs pop returns next", vs_pop(&vc, st, &top, &tag), 1.0);
+        (void)vs_pop(&vc, st, &top, &tag);
+        eq("vs pop empty raises IE", vc.fpu_sw & X87_IE, X87_IE);
+
+        cpu_x87_init(&vc);
+        vs_load(&vc, st, &top, &tag);
+        vs_push(&vc, st, &top, &tag, 3.0);
+        vs_flush(&vc, st, top, tag);
+        eqd("vs flush writes st", vc.st[vc.fpu_top].v.d, 3.0);
+        eq("vs flush writes top", (uint32_t)vc.fpu_top, (uint32_t)top);
+
+        cpu_x87_init(&vc);
+        vs_load(&vc, st, &top, &tag);
+        vs_push(&vc, st, &top, &tag, 1.0);
+        vs_push(&vc, st, &top, &tag, 2.0);
+        vs_fxch(st, top, &tag, 1);
+        eqd("vs fxch top", *vs_fst(st, top, 0), 1.0);
+        eqd("vs fxch next", *vs_fst(st, top, 1), 2.0);
+        vs_fst_reg(st, top, &tag, 1);
+        eqd("vs fst_reg copies", *vs_fst(st, top, 1), 1.0);
+        vc.cf = 1;
+        vs_fcmov(&vc, st, top, &tag, 1, 1);
+        eqd("vs fcmov copies", *vs_fst(st, top, 0), 1.0);
+        vs_ffree(&tag, top, 0);
+        eq("vs ffree marks empty", VS_TAG(tag, top), 3u);
+        vs_push(&vc, st, &top, &tag, -1.0);
+        vs_fchs(st, top);
+        eqd("vs fchs flips sign", *vs_fst(st, top, 0), 1.0);
+        vs_fabs(st, top);
+        eqd("vs fabs clears sign", *vs_fst(st, top, 0), 1.0);
+        cpu_x87_init(&vc);
+    }
+
     /* ---- x87 f80 memory codec ----
      *
      * The native register stores a double, so a 64-bit x87 significand cannot

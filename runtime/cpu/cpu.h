@@ -785,6 +785,79 @@ static inline void cpu_x87_init_thread(CPU *c) {
     x87_init(c, 0x027F);   /* Windows/MSVC default control word */
 }
 
+/* ---- virtual x87 stack (L2) ------------------------------------------- */
+/* The C lifter keeps the x87 stack in local st[8]/x87_top/x87_tag within a
+ * basic block and flushes to CPU at labels, branches, calls and observation
+ * points. These are the local-stack primitives; the generated C declares the
+ * locals and calls vs_load/vs_flush around the block. */
+#define VS_TAG(tag, i)   (((tag) >> (((i) & 7) * 2)) & 3u)
+#define VS_SET_TAG(tag, i, t) \
+    ((tag) = (uint16_t)(((tag) & ~(3u << (((i) & 7) * 2))) | \
+                        (((t) & 3u) << (((i) & 7) * 2))))
+
+static inline void vs_flush(CPU *c, double *st, int top, uint16_t tag) {
+    c->fpu_top = top;
+    x87_set_top(c);
+    c->fpu_tag = tag;
+    for (int i = 0; i < 8; i++)
+        c->st[i].v.d = st[i];
+}
+static inline void vs_load(CPU *c, double *st, int *top, uint16_t *tag) {
+    *top = c->fpu_top;
+    *tag = c->fpu_tag;
+    for (int i = 0; i < 8; i++)
+        st[i] = c->st[i].v.d;
+}
+static inline void vs_push(CPU *c, double *st, int *top, uint16_t *tag, double v) {
+    const int p = (*top - 1) & 7;
+    if (VS_TAG(*tag, p) != 3) x87_stack_fault(c);
+    *top = p;
+    st[p] = v;
+    VS_SET_TAG(*tag, p, x87_tag_for(v));
+}
+static inline double vs_pop(CPU *c, double *st, int *top, uint16_t *tag) {
+    const int p = *top;
+    const double v = st[p];
+    if (VS_TAG(*tag, p) == 3) x87_stack_fault(c);
+    VS_SET_TAG(*tag, p, 3);
+    *top = (*top + 1) & 7;
+    return v;
+}
+static inline double *vs_fst(double *st, int top, int i) {
+    return &st[(top + i) & 7];
+}
+static inline void vs_fst_reg(double *st, int top, uint16_t *tag, int i) {
+    const int d = (top + i) & 7, s = top;
+    st[d] = st[s];
+    VS_SET_TAG(*tag, d, VS_TAG(*tag, s));
+}
+static inline void vs_fxch(double *st, int top, uint16_t *tag, int i) {
+    const int a = top, b = (top + i) & 7;
+    const double t = st[a];
+    const uint16_t tt = VS_TAG(*tag, a);
+    st[a] = st[b]; VS_SET_TAG(*tag, a, VS_TAG(*tag, b));
+    st[b] = t;     VS_SET_TAG(*tag, b, tt);
+}
+static inline void vs_fcmov(CPU *c, double *st, int top, uint16_t *tag,
+                            int cond, int i) {
+    if (!cond) return;
+    const int s = (top + i) & 7;
+    if (VS_TAG(*tag, s) == 3) { x87_stack_fault(c); return; }
+    st[top] = st[s];
+    VS_SET_TAG(*tag, top, VS_TAG(*tag, s));
+}
+static inline void vs_ffree(uint16_t *tag, int top, int i) {
+    VS_SET_TAG(*tag, (top + i) & 7, 3);
+}
+static inline void vs_fchs(double *st, int top) {
+    const double d = st[top];
+    st[top] = x87_from_bits(x87_bits(d) ^ UINT64_C(0x8000000000000000));
+}
+static inline void vs_fabs(double *st, int top) {
+    const double d = st[top];
+    st[top] = x87_from_bits(x87_bits(d) & UINT64_C(0x7FFFFFFFFFFFFFFF));
+}
+
 /* Double-precision helpers for SSE/scalar code. These are NOT x87 helpers:
  * x87 memory operands use x87_ld_f32/f64 and x87_st_f32/f64 in x87.h. */
 static inline double rdf32(uint32_t a) { float  f; memcpy(&f, (void *)(uintptr_t)a, 4); return (double)f; }

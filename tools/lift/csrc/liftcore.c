@@ -778,6 +778,17 @@ static int decode_into(Lifter *L, const uint8_t *code, size_t len, uint32_t addr
     return 1;
 }
 
+static void append_str(char **out, size_t *len, size_t *cap, const char *s)
+{
+    size_t n = strlen(s);
+    if (*len + n + 1 > *cap) {
+        while (*len + n + 1 > *cap) *cap = *cap * 2 + 4096;
+        *out = (char *)realloc(*out, *cap);
+    }
+    memcpy(*out + *len, s, n);
+    *len += n;
+}
+
 char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
 {
     uint8_t *code;
@@ -791,6 +802,7 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
     char *out;
     size_t out_len = 0, out_cap = 0;
     int i;
+    int has_x87 = 0;
 
     code = (uint8_t *)malloc(size ? size : 1);
     if (!code) return NULL;
@@ -827,6 +839,9 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
         for (i = 0; i < n; i++)
             if (last_word_is_term(ins[i].insn.mnemonic)) { n = i + 1; break; }
     }
+
+    for (i = 0; i < n; i++)
+        if (ins[i].insn.mnemonic[0] == 'f') { has_x87 = 1; break; }
 
     {
         /* Two very different things can be seeded here, and they need
@@ -988,10 +1003,22 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
         memcpy(out, hdr, (size_t)hn);
         out_len = (size_t)hn;
     }
+    if (has_x87) {
+        append_str(&out, &out_len, &out_cap,
+                   "    double st[8]; int x87_top; uint16_t x87_tag;\n"
+                   "    vs_load(c, st, &x87_top, &x87_tag);\n");
+    }
     for (i = 0; i < n; i++) {
         cs_insn *in = &ins[i].insn;
         Emit em;
         int k;
+        int is_branch = (in->mnemonic[0] == 'j') ||
+                        !strcmp(in->mnemonic, "call") ||
+                        strstr(in->mnemonic, "ret") ||
+                        strstr(in->mnemonic, "iret") ||
+                        LST(in->mnemonic, "loop", "loope", "loopz", "loopne", "loopnz");
+        if (has_x87 && (is_branch || label_has(labels, nlabels, in->address)))
+            append_str(&out, &out_len, &out_cap, "    vs_flush(c, st, x87_top, x87_tag);\n");
         if (label_has(labels, nlabels, in->address)) {
             char lb[32];
             int ln = snprintf(lb, sizeof lb, "L_%08X:\n", (uint32_t)in->address);
@@ -1013,6 +1040,8 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
             memcpy(out + out_len, line, (size_t)ln);
             out_len += (size_t)ln;
         }
+        if (has_x87 && !strcmp(in->mnemonic, "call"))
+            append_str(&out, &out_len, &out_cap, "    vs_load(c, st, &x87_top, &x87_tag);\n");
     }
     /* An extent that decoded to nothing at all is still a body with no
      * transfer: Python emits the fall-through with the extent end, and a
@@ -1021,9 +1050,12 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
     if (n == 0 || !last_word_is_term(ins[n - 1].insn.mnemonic)) {
         uint32_t nxt = n ? (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size) : end;
         char tail[160];
-        int tn = snprintf(tail, sizeof tail,
-                          "    /* extent ends mid-function: fall through */\n"
-                          "    dispatch_jmp(c, 0x%08Xu); return;\n", nxt);
+        int tn;
+        if (has_x87)
+            append_str(&out, &out_len, &out_cap, "    vs_flush(c, st, x87_top, x87_tag);\n");
+        tn = snprintf(tail, sizeof tail,
+                      "    /* extent ends mid-function: fall through */\n"
+                      "    dispatch_jmp(c, 0x%08Xu); return;\n", nxt);
         if (out_len + (size_t)tn + 1 > out_cap) { out_cap += (size_t)tn + 4096; out = realloc(out, out_cap); }
         memcpy(out + out_len, tail, (size_t)tn);
         out_len += (size_t)tn;
