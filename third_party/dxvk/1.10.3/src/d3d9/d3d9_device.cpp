@@ -6693,13 +6693,26 @@ namespace dxvk {
         ctx->invalidateBuffer(cBuffer, cSlice);
       });
 
-      auto WorldView    = m_state.transforms[GetTransformIndex(D3DTS_VIEW)] * m_state.transforms[GetTransformIndex(D3DTS_WORLD)];
+      const auto& viewTransform = m_state.transforms[GetTransformIndex(D3DTS_VIEW)];
+
+      auto WorldView    = viewTransform * m_state.transforms[GetTransformIndex(D3DTS_WORLD)];
       auto NormalMatrix = inverse(WorldView);
+
+      /* The inverse view and the light transforms only depend on the view
+       * matrix and on the enabled lights.  The world matrix changes for
+       * every draw, so recomputing the view-derived data unconditionally
+       * is wasted work. */
+      if (!m_ffViewValid || !ffMatrixEquals(m_ffCachedView, viewTransform)) {
+        m_ffCachedView = viewTransform;
+        m_ffCachedInverseView = transpose(inverse(viewTransform));
+        m_ffViewValid = true;
+        m_ffLightsValid = false;
+      }
 
       D3D9FixedFunctionVS* data = reinterpret_cast<D3D9FixedFunctionVS*>(slice.mapPtr);
       data->WorldView    = WorldView;
       data->NormalMatrix = NormalMatrix;
-      data->InverseView  = transpose(inverse(m_state.transforms[GetTransformIndex(D3DTS_VIEW)]));
+      data->InverseView  = m_ffCachedInverseView;
       data->Projection   = m_state.transforms[GetTransformIndex(D3DTS_PROJECTION)];
 
       for (uint32_t i = 0; i < data->TexcoordMatrices.size(); i++)
@@ -6709,14 +6722,50 @@ namespace dxvk {
 
       DecodeD3DCOLOR(m_state.renderStates[D3DRS_AMBIENT], data->GlobalAmbient.data);
 
-      uint32_t lightIdx = 0;
+      uint32_t lightCount = 0;
       for (uint32_t i = 0; i < caps::MaxEnabledLights; i++) {
-        auto idx = m_state.enabledLightIndices[i];
-        if (idx == UINT32_MAX)
-          continue;
-
-        data->Lights[lightIdx++] = D3D9Light(m_state.lights[idx].value(), m_state.transforms[GetTransformIndex(D3DTS_VIEW)]);
+        if (m_state.enabledLightIndices[i] != UINT32_MAX)
+          lightCount++;
       }
+
+      bool lightsChanged = !m_ffLightsValid || m_ffCachedLightCount != lightCount;
+
+      if (!lightsChanged) {
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < caps::MaxEnabledLights; i++) {
+          auto idx = m_state.enabledLightIndices[i];
+          if (idx == UINT32_MAX)
+            continue;
+
+          const D3DLIGHT9& light = m_state.lights[idx].value();
+          if (m_ffCachedLightIndices[n] != idx ||
+              !ffLightEquals(m_ffCachedLightValues[n], light)) {
+            lightsChanged = true;
+            break;
+          }
+          n++;
+        }
+      }
+
+      if (lightsChanged) {
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < caps::MaxEnabledLights; i++) {
+          auto idx = m_state.enabledLightIndices[i];
+          if (idx == UINT32_MAX)
+            continue;
+
+          const D3DLIGHT9& light = m_state.lights[idx].value();
+          m_ffCachedLights[n] = D3D9Light(light, viewTransform);
+          m_ffCachedLightValues[n] = light;
+          m_ffCachedLightIndices[n] = idx;
+          n++;
+        }
+        m_ffCachedLightCount = lightCount;
+        m_ffLightsValid = true;
+      }
+
+      for (uint32_t i = 0; i < lightCount; i++)
+        data->Lights[i] = m_ffCachedLights[i];
 
       data->Material = m_state.material;
       data->TweenFactor = bit::cast<float>(m_state.renderStates[D3DRS_TWEENFACTOR]);

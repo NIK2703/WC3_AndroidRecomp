@@ -1260,6 +1260,19 @@ namespace dxvk {
 
     D3D9ViewportInfo                m_viewportInfo;
 
+    /* Fixed-function vertex data that depends only on the view matrix and
+     * on the enabled lights.  The world matrix changes for every draw, so
+     * the inverse view and the light transforms are cached instead of being
+     * rebuilt unconditionally. */
+    Matrix4                         m_ffCachedView;
+    Matrix4                         m_ffCachedInverseView;
+    std::array<D3D9Light, caps::MaxEnabledLights> m_ffCachedLights;
+    std::array<D3DLIGHT9, caps::MaxEnabledLights> m_ffCachedLightValues = {};
+    std::array<DWORD, caps::MaxEnabledLights>     m_ffCachedLightIndices = {};
+    uint32_t                        m_ffCachedLightCount = 0;
+    bool                            m_ffViewValid = false;
+    bool                            m_ffLightsValid = false;
+
     DxvkCsChunkPool                 m_csChunkPool;
     dxvk::high_resolution_clock::time_point m_lastFlush
       = dxvk::high_resolution_clock::now();

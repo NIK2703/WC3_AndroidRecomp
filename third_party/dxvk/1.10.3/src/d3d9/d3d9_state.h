@@ -12,6 +12,7 @@
 
 #include <array>
 #include <bitset>
+#include <cstring>
 #include <optional>
 
 namespace dxvk {
@@ -73,6 +74,12 @@ namespace dxvk {
   };
 
   struct D3D9Light {
+    D3D9Light()
+      : Diffuse(), Specular(), Ambient(), Position(), Direction(),
+        Type(D3DLIGHT_POINT), Range(0.0f), Falloff(0.0f),
+        Attenuation0(0.0f), Attenuation1(0.0f), Attenuation2(0.0f),
+        Theta(0.0f), Phi(0.0f) { }
+
     D3D9Light(const D3DLIGHT9& light, Matrix4 viewMtx) {
       Diffuse  = Vector4(light.Diffuse.r,  light.Diffuse.g,  light.Diffuse.b,  light.Diffuse.a);
       Specular = Vector4(light.Specular.r, light.Specular.g, light.Specular.b, light.Specular.a);
@@ -108,6 +115,18 @@ namespace dxvk {
     float Theta;
     float Phi;
   };
+
+
+  /* Bitwise equality for the cached fixed-function inputs.  Same bits in
+   * means same bits out, including the sign of zero, so a cache hit is
+   * indistinguishable from recomputing the dependent state. */
+  inline bool ffLightEquals(const D3DLIGHT9& a, const D3DLIGHT9& b) {
+    return std::memcmp(&a, &b, sizeof(a)) == 0;
+  }
+
+  inline bool ffMatrixEquals(const Matrix4& a, const Matrix4& b) {
+    return std::memcmp(&a, &b, sizeof(a)) == 0;
+  }
 
 
   struct D3D9FixedFunctionVS {

@@ -8113,14 +8113,27 @@ namespace dxvk {
     if (m_dirty.test(D3D9DeviceDirtyFlag::FFVertexData)) {
       m_dirty.clr(D3D9DeviceDirtyFlag::FFVertexData);
 
-      auto WorldView    = m_state.transforms[GetTransformIndex(D3DTS_VIEW)] * m_state.transforms[GetTransformIndex(D3DTS_WORLD)];
+      const auto& viewTransform = m_state.transforms[GetTransformIndex(D3DTS_VIEW)];
+
+      auto WorldView    = viewTransform * m_state.transforms[GetTransformIndex(D3DTS_WORLD)];
       auto NormalMatrix = tryInverse(WorldView).value_or(Matrix4(1.0f));
       auto Projection   = m_state.transforms[GetTransformIndex(D3DTS_PROJECTION)];
+
+      /* The inverse view and the light transforms only depend on the view
+       * matrix and on the enabled lights.  The world matrix changes for
+       * every draw, so recomputing the view-derived data unconditionally
+       * is wasted work. */
+      if (!m_ffViewValid || !ffMatrixEquals(m_ffCachedView, viewTransform)) {
+        m_ffCachedView = viewTransform;
+        m_ffCachedInverseView = transpose(inverse(viewTransform));
+        m_ffViewValid = true;
+        m_ffLightsValid = false;
+      }
 
       auto data = GetConstantBuffer(CbvIndex::VSFixedFunction).AllocTyped<D3D9FixedFunctionVS>(1u);
       data->WorldView    = WorldView;
       data->NormalMatrix = NormalMatrix;
-      data->InverseView  = transpose(inverse(m_state.transforms[GetTransformIndex(D3DTS_VIEW)]));
+      data->InverseView  = m_ffCachedInverseView;
       data->Projection   = Projection;
       data->WorldViewProj = Projection * WorldView;
 
@@ -8129,9 +8142,9 @@ namespace dxvk {
 
       data->ViewportInfo = m_viewportInfo;
 
-      uint32_t lightIdx = 0;
+      uint32_t lightCount = 0;
 
-      for (auto& light : m_state.lights) {
+      for (const auto& light : m_state.lights) {
         if (!light.isEnabled)
           continue;
 
@@ -8140,11 +8153,65 @@ namespace dxvk {
         if (unlikely(!light.light.Type || light.light.Type > D3DLIGHT_DIRECTIONAL))
           continue;
 
-        data->Lights[lightIdx++] = D3D9Light(light.light, m_state.transforms[GetTransformIndex(D3DTS_VIEW)]);
+        lightCount++;
 
-        if (lightIdx == caps::MaxEnabledLights)
+        if (lightCount == caps::MaxEnabledLights)
           break;
       }
+
+      bool lightsChanged = !m_ffLightsValid || m_ffCachedLightCount != lightCount;
+
+      if (!lightsChanged) {
+        uint32_t n = 0;
+
+        for (uint32_t i = 0; i < uint32_t(m_state.lights.size()); i++) {
+          const auto& light = m_state.lights[i];
+
+          if (!light.isEnabled)
+            continue;
+
+          if (unlikely(!light.light.Type || light.light.Type > D3DLIGHT_DIRECTIONAL))
+            continue;
+
+          if (m_ffCachedLightIndices[n] != i || !ffLightEquals(m_ffCachedLightValues[n], light.light)) {
+            lightsChanged = true;
+            break;
+          }
+
+          n++;
+
+          if (n == lightCount)
+            break;
+        }
+      }
+
+      if (lightsChanged) {
+        uint32_t n = 0;
+
+        for (uint32_t i = 0; i < uint32_t(m_state.lights.size()); i++) {
+          const auto& light = m_state.lights[i];
+
+          if (!light.isEnabled)
+            continue;
+
+          if (unlikely(!light.light.Type || light.light.Type > D3DLIGHT_DIRECTIONAL))
+            continue;
+
+          m_ffCachedLights[n] = D3D9Light(light.light, viewTransform);
+          m_ffCachedLightValues[n] = light.light;
+          m_ffCachedLightIndices[n] = i;
+          n++;
+
+          if (n == caps::MaxEnabledLights)
+            break;
+        }
+
+        m_ffCachedLightCount = lightCount;
+        m_ffLightsValid = true;
+      }
+
+      for (uint32_t i = 0; i < lightCount; i++)
+        data->Lights[i] = m_ffCachedLights[i];
 
       data->Material = m_state.material;
       data->GlobalAmbient = m_state.renderStates[D3DRS_AMBIENT];
@@ -8175,7 +8242,6 @@ namespace dxvk {
       data->SpecularSource   = m_state.renderStates[D3DRS_SPECULARMATERIALSOURCE] & mask;
       data->EmissiveSource   = m_state.renderStates[D3DRS_EMISSIVEMATERIALSOURCE] & mask;
 
-      uint32_t lightCount = lightIdx;
       data->LightCount       = lighting ? lightCount : 0;
 
       for (uint32_t i = 0; i < caps::MaxTextureBlendStages; i++) {

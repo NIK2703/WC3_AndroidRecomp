@@ -56,6 +56,16 @@ revision, the patch snapshot and the reason.
     copy; `dxvk.lowMemoryPlaced` (default true) is the kill switch.  The
     address window is project code in `third_party/dxvk/shim/wc3_lowmem.h`.
     See `docs/THIN_D3D9_COPY_PLAN.md`.
+  * `third_party/dxvk/patches/dxvk-3.1.1-ff-cache.patch` — caches the
+    fixed-function view-derived constants.  `transpose(inverse(View))` and
+    the per-light `D3D9Light` transforms (including the two `cosf` calls)
+    depend only on the view matrix and the enabled light values, but
+    `UpdateFixedFunctionVS()` rebuilt them for every dirty world matrix.
+    The cache compares the view matrix and the source `D3DLIGHT9` values
+    bitwise, so a hit produces exactly the same bytes as a recompute.
+    Profile `build/profiles/deep-render-20261112-2110`: the fixed-function
+    update was 15.91% of main-thread inclusive CPU, `inverse` 7.10% and
+    `D3D9Light` 4.27%.
 * Build: `tools/android/build_dxvk.ps1 -Variant <release|debug>`.
 
 ## DXVK 1.10.3
@@ -83,6 +93,10 @@ revision, the patch snapshot and the reason.
     destroy/create pair between every two presents.  Accepting the result is
     correct per Vulkan: the frame was displayed, and only negative results
     require a new swap chain.
+  * `third_party/dxvk/patches/dxvk-1.10.3-ff-cache.patch` — the same
+    fixed-function view/light cache as 3.1.1, adapted to this tree's
+    `D3D9Light` construction and `enabledLightIndices` list.  This is the
+    active backend in the measured configuration.
 * No WC3 feature-requirement change; 1.10.3 remains the fallback path, now
   also carrying the low-memory placed and Android present patches.
 

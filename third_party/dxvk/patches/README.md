@@ -6,10 +6,10 @@ the target build.
 
 ## Applied source state
 
-| Tree | Android/static patch | WC3 compatibility | Android debug | WC3 low-memory | Android pacing | Android present |
-|---|---|---|---|---|---|---|
-| `3.1.1/` | `dxvk-3.1.1-android.patch` (includes `dxvk-3.1.1-static.patch`) | `dxvk-3.1.1-wc3-d3d9.patch` | `dxvk-3.1.1-android-debug.patch` | `dxvk-3.1.1-lowmem-placed.patch` | `dxvk-3.1.1-android-pacing.patch` | `dxvk-3.1.1-android-present.patch` |
-| `1.10.3/` | `dxvk-1.10.3-android.patch` (includes `dxvk-1.10.3-static.patch`) | none | none | `dxvk-1.10.3-lowmem-placed.patch` | `dxvk-1.10.3-android-pacing.patch` | `dxvk-1.10.3-android-present.patch` |
+| Tree | Android/static patch | WC3 compatibility | Android debug | WC3 low-memory | Android pacing | Android present | Fixed-function cache |
+|---|---|---|---|---|---|---|---|
+| `3.1.1/` | `dxvk-3.1.1-android.patch` (includes `dxvk-3.1.1-static.patch`) | `dxvk-3.1.1-wc3-d3d9.patch` | `dxvk-3.1.1-android-debug.patch` | `dxvk-3.1.1-lowmem-placed.patch` | `dxvk-3.1.1-android-pacing.patch` | `dxvk-3.1.1-android-present.patch` | `dxvk-3.1.1-ff-cache.patch` |
+| `1.10.3/` | `dxvk-1.10.3-android.patch` (includes `dxvk-1.10.3-static.patch`) | none | none | `dxvk-1.10.3-lowmem-placed.patch` | `dxvk-1.10.3-android-pacing.patch` | `dxvk-1.10.3-android-present.patch` | `dxvk-1.10.3-ff-cache.patch` |
 
 The pacing snapshots are deltas on top of the already-patched vendored trees,
 not on the upstream revisions; they are not replayed by the build.  They make
@@ -25,6 +25,13 @@ image.  1.10.3's presenter already accepted the result, but its D3D9 layer
 still recreated the swap chain from `SynchronizePresent`.  Both paths now
 recreate only for a real error.  The rationale is in
 `../../VENDOR_PATCHES.md`.
+
+The fixed-function cache snapshots are deltas on the already-patched trees.
+`UpdateFixedFunctionVS()` used to rebuild `transpose(inverse(View))` and every
+enabled `D3D9Light` for each dirty world matrix; both depend only on the view
+matrix and the light values.  The cache compares those inputs bitwise, so a
+hit writes the same constants as a recompute.  The rationale and the measured
+profile are in `../../VENDOR_PATCHES.md`.
 
 The Android patches add the Vulkan loader/WSI changes and the static-library
 Meson shape; the static patches are included in them.  The WC3 patch makes

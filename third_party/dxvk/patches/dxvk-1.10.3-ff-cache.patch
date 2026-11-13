@@ -1,0 +1,158 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 734a7a0..faf991c 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -6693,13 +6693,26 @@ namespace dxvk {
+         ctx->invalidateBuffer(cBuffer, cSlice);
+       });
+ 
+-      auto WorldView    = m_state.transforms[GetTransformIndex(D3DTS_VIEW)] * m_state.transforms[GetTransformIndex(D3DTS_WORLD)];
++      const auto& viewTransform = m_state.transforms[GetTransformIndex(D3DTS_VIEW)];
++
++      auto WorldView    = viewTransform * m_state.transforms[GetTransformIndex(D3DTS_WORLD)];
+       auto NormalMatrix = inverse(WorldView);
+ 
++      /* The inverse view and the light transforms only depend on the view
++       * matrix and on the enabled lights.  The world matrix changes for
++       * every draw, so recomputing the view-derived data unconditionally
++       * is wasted work. */
++      if (!m_ffViewValid || !ffMatrixEquals(m_ffCachedView, viewTransform)) {
++        m_ffCachedView = viewTransform;
++        m_ffCachedInverseView = transpose(inverse(viewTransform));
++        m_ffViewValid = true;
++        m_ffLightsValid = false;
++      }
++
+       D3D9FixedFunctionVS* data = reinterpret_cast<D3D9FixedFunctionVS*>(slice.mapPtr);
+       data->WorldView    = WorldView;
+       data->NormalMatrix = NormalMatrix;
+-      data->InverseView  = transpose(inverse(m_state.transforms[GetTransformIndex(D3DTS_VIEW)]));
++      data->InverseView  = m_ffCachedInverseView;
+       data->Projection   = m_state.transforms[GetTransformIndex(D3DTS_PROJECTION)];
+ 
+       for (uint32_t i = 0; i < data->TexcoordMatrices.size(); i++)
+@@ -6709,15 +6722,51 @@ namespace dxvk {
+ 
+       DecodeD3DCOLOR(m_state.renderStates[D3DRS_AMBIENT], data->GlobalAmbient.data);
+ 
+-      uint32_t lightIdx = 0;
++      uint32_t lightCount = 0;
+       for (uint32_t i = 0; i < caps::MaxEnabledLights; i++) {
+-        auto idx = m_state.enabledLightIndices[i];
+-        if (idx == UINT32_MAX)
+-          continue;
++        if (m_state.enabledLightIndices[i] != UINT32_MAX)
++          lightCount++;
++      }
++
++      bool lightsChanged = !m_ffLightsValid || m_ffCachedLightCount != lightCount;
++
++      if (!lightsChanged) {
++        uint32_t n = 0;
++        for (uint32_t i = 0; i < caps::MaxEnabledLights; i++) {
++          auto idx = m_state.enabledLightIndices[i];
++          if (idx == UINT32_MAX)
++            continue;
++
++          const D3DLIGHT9& light = m_state.lights[idx].value();
++          if (m_ffCachedLightIndices[n] != idx ||
++              !ffLightEquals(m_ffCachedLightValues[n], light)) {
++            lightsChanged = true;
++            break;
++          }
++          n++;
++        }
++      }
+ 
+-        data->Lights[lightIdx++] = D3D9Light(m_state.lights[idx].value(), m_state.transforms[GetTransformIndex(D3DTS_VIEW)]);
++      if (lightsChanged) {
++        uint32_t n = 0;
++        for (uint32_t i = 0; i < caps::MaxEnabledLights; i++) {
++          auto idx = m_state.enabledLightIndices[i];
++          if (idx == UINT32_MAX)
++            continue;
++
++          const D3DLIGHT9& light = m_state.lights[idx].value();
++          m_ffCachedLights[n] = D3D9Light(light, viewTransform);
++          m_ffCachedLightValues[n] = light;
++          m_ffCachedLightIndices[n] = idx;
++          n++;
++        }
++        m_ffCachedLightCount = lightCount;
++        m_ffLightsValid = true;
+       }
+ 
++      for (uint32_t i = 0; i < lightCount; i++)
++        data->Lights[i] = m_ffCachedLights[i];
++
+       data->Material = m_state.material;
+       data->TweenFactor = bit::cast<float>(m_state.renderStates[D3DRS_TWEENFACTOR]);
+     }
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index cec4829..2134f29 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -1260,6 +1260,19 @@ namespace dxvk {
+ 
+     D3D9ViewportInfo                m_viewportInfo;
+ 
++    /* Fixed-function vertex data that depends only on the view matrix and
++     * on the enabled lights.  The world matrix changes for every draw, so
++     * the inverse view and the light transforms are cached instead of being
++     * rebuilt unconditionally. */
++    Matrix4                         m_ffCachedView;
++    Matrix4                         m_ffCachedInverseView;
++    std::array<D3D9Light, caps::MaxEnabledLights> m_ffCachedLights;
++    std::array<D3DLIGHT9, caps::MaxEnabledLights> m_ffCachedLightValues = {};
++    std::array<DWORD, caps::MaxEnabledLights>     m_ffCachedLightIndices = {};
++    uint32_t                        m_ffCachedLightCount = 0;
++    bool                            m_ffViewValid = false;
++    bool                            m_ffLightsValid = false;
++
+     DxvkCsChunkPool                 m_csChunkPool;
+     dxvk::high_resolution_clock::time_point m_lastFlush
+       = dxvk::high_resolution_clock::now();
+diff --git a/src/d3d9/d3d9_state.h b/src/d3d9/d3d9_state.h
+index d87b8f5..07132ab 100644
+--- a/src/d3d9/d3d9_state.h
++++ b/src/d3d9/d3d9_state.h
+@@ -12,6 +12,7 @@
+ 
+ #include <array>
+ #include <bitset>
++#include <cstring>
+ #include <optional>
+ 
+ namespace dxvk {
+@@ -73,6 +74,12 @@ namespace dxvk {
+   };
+ 
+   struct D3D9Light {
++    D3D9Light()
++      : Diffuse(), Specular(), Ambient(), Position(), Direction(),
++        Type(D3DLIGHT_POINT), Range(0.0f), Falloff(0.0f),
++        Attenuation0(0.0f), Attenuation1(0.0f), Attenuation2(0.0f),
++        Theta(0.0f), Phi(0.0f) { }
++
+     D3D9Light(const D3DLIGHT9& light, Matrix4 viewMtx) {
+       Diffuse  = Vector4(light.Diffuse.r,  light.Diffuse.g,  light.Diffuse.b,  light.Diffuse.a);
+       Specular = Vector4(light.Specular.r, light.Specular.g, light.Specular.b, light.Specular.a);
+@@ -110,6 +117,18 @@ namespace dxvk {
+   };
+ 
+ 
++  /* Bitwise equality for the cached fixed-function inputs.  Same bits in
++   * means same bits out, including the sign of zero, so a cache hit is
++   * indistinguishable from recomputing the dependent state. */
++  inline bool ffLightEquals(const D3DLIGHT9& a, const D3DLIGHT9& b) {
++    return std::memcmp(&a, &b, sizeof(a)) == 0;
++  }
++
++  inline bool ffMatrixEquals(const Matrix4& a, const Matrix4& b) {
++    return std::memcmp(&a, &b, sizeof(a)) == 0;
++  }
++
++
+   struct D3D9FixedFunctionVS {
+     Matrix4 WorldView;
+     Matrix4 NormalMatrix;
