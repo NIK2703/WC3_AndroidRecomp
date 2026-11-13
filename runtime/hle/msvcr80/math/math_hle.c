@@ -37,7 +37,7 @@
  * rounding step. */
 static double pop_f64(CPU *c)
 {
-    return fpop(c).v.d;
+    return fpop(c);
 }
 
 static void push_f64(CPU *c, double value)

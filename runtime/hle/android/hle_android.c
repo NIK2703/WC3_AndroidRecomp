@@ -5979,7 +5979,7 @@ static void cr_clearfp(CPU *c) { c->eax = 0; }
  * native double directly. */
 static double fpop_f64(CPU *c)
 {
-    return fpop(c).v.d;
+    return fpop(c);
 }
 
 static void cr_cisqrt(CPU *c)
