@@ -34,6 +34,20 @@
 static uint32_t g_dyn_base[WC3_DYN_RANGE_MAX];
 static uint32_t g_dyn_size[WC3_DYN_RANGE_MAX];
 
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+/* Bounded trace of the calls the generated code makes back into the lifted
+ * corpus.  Warden's entry is the first non-CheckRevision producer, so its
+ * first few call targets are the useful evidence when an interpreter
+ * instruction is still missing. */
+static unsigned g_dyn_call_trace;
+static void dyn_trace_call(uint32_t site, uint32_t target, uint32_t ret)
+{
+    if (g_dyn_call_trace++ < 128)
+        fprintf(stderr, "[dyn] call %08X -> %08X ret %08X\n",
+                site, target, ret);
+}
+#endif
+
 void wc3_dyn_x86_register(uint32_t base, uint32_t size)
 {
     if (!base || !size) return;
@@ -146,6 +160,33 @@ static void dyn_set(CPU *c, const DynRM *r, uint32_t v)
     else wr32(r->addr, v);
 }
 
+/* Byte registers use the 8-bit encoding, not the 32-bit one: 4..7 are
+ * AH/CH/DH/BH, i.e. the high byte of EAX/ECX/EDX/EBX. */
+static uint32_t dyn_reg8_get(CPU *c, int r)
+{
+    uint32_t v = *dyn_reg(c, r & 3);
+    return (r >= 4) ? ((v >> 8) & 0xFFu) : (v & 0xFFu);
+}
+
+static void dyn_reg8_set(CPU *c, int r, uint32_t v)
+{
+    uint32_t *d = dyn_reg(c, r & 3);
+    v &= 0xFFu;
+    if (r >= 4) *d = (*d & ~0xFF00u) | (v << 8);
+    else *d = (*d & ~0xFFu) | v;
+}
+
+static uint32_t dyn_get8(CPU *c, const DynRM *r)
+{
+    return r->is_reg ? dyn_reg8_get(c, r->reg) : rd8(r->addr);
+}
+
+static void dyn_set8(CPU *c, const DynRM *r, uint32_t v)
+{
+    if (r->is_reg) dyn_reg8_set(c, r->reg, v);
+    else wr8(r->addr, (uint8_t)v);
+}
+
 static int dyn_cc(CPU *c, int cc)
 {
     switch (cc & 0xF) {
@@ -245,6 +286,8 @@ void wc3_dyn_x86_run(CPU *c, uint32_t start)
             switch (subop) {
             case 0: v = flags_add(c, v, imm, 4); break;
             case 1: v = flags_logicz(c, v | imm, 4); break;
+            case 2: v = flags_adc(c, v, imm, 4); break;
+            case 3: v = flags_sbb(c, v, imm, 4); break;
             case 4: v = flags_logicz(c, v & imm, 4); break;
             case 5: v = flags_sub(c, v, imm, 4); break;
             case 6: v = flags_logicz(c, v ^ imm, 4); break;
@@ -268,6 +311,19 @@ void wc3_dyn_x86_run(CPU *c, uint32_t start)
             uint32_t v = dyn_get(c, &rm);
             if (subop == 0) { dyn_set(c, &rm, flags_incs(c, v, 4)); pc = p; }
             else if (subop == 1) { dyn_set(c, &rm, flags_decs(c, v, 4)); pc = p; }
+            else if (subop == 2) {
+                /* Near call through a register or memory operand.  The return
+                 * address is the instruction after the modrm/operand bytes; the
+                 * callee's ret/ret imm16 pops it from the guest stack.  The
+                 * dispatcher is synchronous, so after it returns the dynamic
+                 * code resumes at p. */
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+                dyn_trace_call(pc, v, p);
+#endif
+                push32(c, p);
+                dispatch(c, v);
+                pc = p;
+            }
             else if (subop == 4) { pc = v; }
             else if (subop == 6) { push32(c, v); pc = p; }
             else {
@@ -310,6 +366,17 @@ void wc3_dyn_x86_run(CPU *c, uint32_t start)
             pc = p;
             break;
         }
+        case 0xE8: {
+            uint32_t ret = pc + 5;
+            uint32_t target = ret + rd32(pc + 1);
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+            dyn_trace_call(pc, target, ret);
+#endif
+            push32(c, ret);
+            dispatch(c, target);
+            pc = ret;
+            break;
+        }
         case 0xE9:
             pc = pc + 5 + rd32(pc + 1);
             break;
@@ -341,6 +408,14 @@ void wc3_dyn_x86_run(CPU *c, uint32_t start)
         case 0x54: case 0x55: case 0x56: case 0x57:
             push32(c, *dyn_reg(c, op & 7));
             pc++;
+            break;
+        case 0x68:
+            push32(c, rd32(pc + 1));
+            pc += 5;
+            break;
+        case 0x6A:
+            push32(c, (uint32_t)(int32_t)(int8_t)rd8(pc + 1));
+            pc += 2;
             break;
         case 0x58: case 0x59: case 0x5A: case 0x5B:
         case 0x5C: case 0x5D: case 0x5E: case 0x5F:
@@ -377,6 +452,112 @@ void wc3_dyn_x86_run(CPU *c, uint32_t start)
                     n, ret, start);
 #endif
             return;
+        }
+        case 0xC1: {
+            /* Group 2, count imm8.  Warden's SHA-1 update uses
+             * `C1 EF 03` (shr edi, 3) and `C1 E1 03` (shl ecx, 3). */
+            uint8_t modrm = rd8(pc + 1);
+            uint32_t p = pc + 1;
+            DynRM rm = dyn_rm(c, &p);
+            uint32_t cnt = rd8(p++) & 31u;
+            int subop = (modrm >> 3) & 7;
+            uint32_t v = dyn_get(c, &rm);
+            switch (subop) {
+            case 4:
+            case 6:
+                v = op_shl(c, v, cnt, 4);
+                if (cnt == 1) c->of = ((v >> 31) & 1) ^ (c->cf & 1);
+                break;
+            case 5:
+                if (cnt == 1) c->of = (v >> 31) & 1;
+                v = op_shr(c, v, cnt, 4);
+                break;
+            case 7:
+                v = op_sar(c, v, cnt, 4);
+                if (cnt == 1) c->of = 0;
+                break;
+            default:
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+                fprintf(stderr, "[dyn] unsupported C1 /%d at %08X\n",
+                        subop, pc);
+#endif
+                abort();
+            }
+            dyn_set(c, &rm, v);
+            pc = p;
+            break;
+        }
+        case 0xD1: {
+            /* Group 2, count 1.  Warden's first reachable use is
+             * `D1 6D FC` = shr dword ptr [ebp-4], 1. */
+            uint8_t modrm = rd8(pc + 1);
+            uint32_t p = pc + 1;
+            DynRM rm = dyn_rm(c, &p);
+            int subop = (modrm >> 3) & 7;
+            uint32_t v = dyn_get(c, &rm);
+            switch (subop) {
+            case 4:
+            case 6:
+                v = op_shl(c, v, 1, 4);
+                c->of = ((v >> 31) & 1) ^ (c->cf & 1);
+                break;
+            case 5:
+                c->of = (v >> 31) & 1;
+                v = op_shr(c, v, 1, 4);
+                break;
+            case 7:
+                v = op_sar(c, v, 1, 4);
+                c->of = 0;
+                break;
+            default:
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+                fprintf(stderr, "[dyn] unsupported D1 /%d at %08X\n",
+                        subop, pc);
+#endif
+                abort();
+            }
+            dyn_set(c, &rm, v);
+            pc = p;
+            break;
+        }
+        case 0x88: {
+            /* MOV r/m8, r8. */
+            uint8_t modrm = rd8(pc + 1);
+            uint32_t p = pc + 1;
+            DynRM rm = dyn_rm(c, &p);
+            dyn_set8(c, &rm, dyn_reg8_get(c, (modrm >> 3) & 7));
+            pc = p;
+            break;
+        }
+        case 0x8A: {
+            /* MOV r8, r/m8. */
+            uint8_t modrm = rd8(pc + 1);
+            uint32_t p = pc + 1;
+            DynRM rm = dyn_rm(c, &p);
+            dyn_reg8_set(c, (modrm >> 3) & 7, dyn_get8(c, &rm));
+            pc = p;
+            break;
+        }
+        case 0xAB: {
+            /* STOSD.  Warden's SHA-1 context clears five dwords with DF=0. */
+            wr32(c->edi, c->eax);
+            c->edi += 4;
+            pc++;
+            break;
+        }
+        case 0x84: {
+            /* TEST r/m8, r8.  Warden executes `84 C0` (TEST AL, AL) after a
+             * virtual call that returns a boolean in AL.  The memory form must
+             * read one byte, not a dword: the operand can sit at the end of a
+             * page. */
+            uint8_t modrm = rd8(pc + 1);
+            uint32_t p = pc + 1;
+            DynRM rm = dyn_rm(c, &p);
+            uint32_t a = dyn_get8(c, &rm);
+            uint32_t b = dyn_reg8_get(c, (modrm >> 3) & 7);
+            flags_logicz(c, a & b, 1);
+            pc = p;
+            break;
         }
         case 0x85: {
             uint8_t modrm = rd8(pc + 1);
@@ -432,18 +613,35 @@ void wc3_dyn_x86_run(CPU *c, uint32_t start)
             pc = p;
             break;
         }
-        case 0x0F:
-            if (rd8(pc + 1) == 0x1F) {
+        case 0x0F: {
+            uint8_t op2 = rd8(pc + 1);
+            if (op2 == 0x1F) {
                 uint32_t p = pc + 2;
                 (void)dyn_rm(c, &p);
                 pc = p;
                 break;
             }
+            if (op2 == 0xAC || op2 == 0xAD) {
+                /* SHRD r/m32, r32, imm8 (AC) / CL (AD).  Warden's SHA-1
+                 * finalization uses `0F AC D0 08` = shrd eax, edx, 8. */
+                uint8_t modrm = rd8(pc + 2);
+                uint32_t p = pc + 2;
+                DynRM rm = dyn_rm(c, &p);
+                uint32_t d = dyn_get(c, &rm);
+                uint32_t s = *dyn_reg(c, (modrm >> 3) & 7);
+                uint32_t cnt = (op2 == 0xAC) ? rd8(p++) : (c->ecx & 31u);
+                uint32_t r = op_shrd(c, d, s, cnt, 4);
+                if (cnt == 1)
+                    c->of = ((d >> 31) & 1) ^ ((r >> 31) & 1);
+                dyn_set(c, &rm, r);
+                pc = p;
+                break;
+            }
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
-            fprintf(stderr, "[dyn] unsupported 0F %02X at %08X\n",
-                    rd8(pc + 1), pc);
+            fprintf(stderr, "[dyn] unsupported 0F %02X at %08X\n", op2, pc);
 #endif
             abort();
+        }
         default:
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
             fprintf(stderr,
