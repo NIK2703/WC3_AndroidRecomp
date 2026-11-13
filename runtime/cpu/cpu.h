@@ -304,6 +304,79 @@ static inline void wr32(uint32_t a, uint32_t v) { WC3_WR32_HOOK(a, v); *(uint32_
 static inline uint64_t rd64(uint32_t a) { uint64_t v; memcpy(&v, (void *)(uintptr_t)a, 8); return v; }
 static inline void wr64(uint32_t a, uint64_t v) { memcpy((void *)(uintptr_t)a, &v, 8); }
 
+/* ---- LSE atomics (C.6) ----
+ *
+ * ARMv8.1 LSE turns the LL/SC retry loops into one instruction.  The product
+ * baseline is arm64-v8a, which does not guarantee LSE, so this is a runtime
+ * choice: the test device has atomics, older devices keep the __sync path.
+ * The `al` suffixes provide acquire-release; the trailing dmb ish makes the
+ * operation a full barrier like the guest's x86 LOCK prefix.
+ */
+#if defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+
+static inline int wc3_cpu_has_lse(void) {
+    static int cached = -1;
+    int v = __atomic_load_n(&cached, __ATOMIC_RELAXED);
+    if (v < 0) {
+        v = (getauxval(AT_HWCAP) & (unsigned long)HWCAP_ATOMICS) != 0;
+        __atomic_store_n(&cached, v, __ATOMIC_RELAXED);
+    }
+    return v;
+}
+
+static inline uint32_t wc3_lse_xadd32(uint32_t a, uint32_t v) {
+    uint32_t old;
+    __asm__ volatile(".arch armv8.1-a\n\tldaddal %w1, %w0, [%2]\n\t.arch armv8-a\n\t"
+                     "dmb ish\n"
+                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)a) : "memory");
+    return old;
+}
+static inline uint32_t wc3_lse_cmpxchg32(uint32_t a, uint32_t cmp, uint32_t nv) {
+    uint32_t old = cmp;
+    __asm__ volatile(".arch armv8.1-a\n\tcasal %w0, %w1, [%2]\n\t.arch armv8-a\n\t"
+                     "dmb ish\n"
+                     : "+r"(old) : "r"(nv), "r"((uintptr_t)a) : "memory");
+    return old;
+}
+static inline uint32_t wc3_lse_xchg32(uint32_t a, uint32_t v) {
+    uint32_t old;
+    __asm__ volatile(".arch armv8.1-a\n\tswpal %w1, %w0, [%2]\n\t.arch armv8-a\n\t"
+                     "dmb ish\n"
+                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)a) : "memory");
+    return old;
+}
+static inline uint32_t wc3_lse_and32(uint32_t a, uint32_t v) {
+    uint32_t old, inv = ~v;
+    __asm__ volatile(".arch armv8.1-a\n\tldclral %w1, %w0, [%2]\n\t.arch armv8-a\n\t"
+                     "dmb ish\n"
+                     : "=&r"(old), "+r"(inv) : "r"((uintptr_t)a) : "memory");
+    return old;
+}
+static inline uint32_t wc3_lse_or32(uint32_t a, uint32_t v) {
+    uint32_t old;
+    __asm__ volatile(".arch armv8.1-a\n\tldsetal %w1, %w0, [%2]\n\t.arch armv8-a\n\t"
+                     "dmb ish\n"
+                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)a) : "memory");
+    return old;
+}
+static inline uint32_t wc3_lse_xor32(uint32_t a, uint32_t v) {
+    uint32_t old;
+    __asm__ volatile(".arch armv8.1-a\n\tldeoral %w1, %w0, [%2]\n\t.arch armv8-a\n\t"
+                     "dmb ish\n"
+                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)a) : "memory");
+    return old;
+}
+static inline uint64_t wc3_lse_cmpxchg64(uint32_t a, uint64_t cmp, uint64_t nv) {
+    uint64_t old = cmp;
+    __asm__ volatile(".arch armv8.1-a\n\tcasal %x0, %x1, [%2]\n\t.arch armv8-a\n\t"
+                     "dmb ish\n"
+                     : "+r"(old) : "r"(nv), "r"((uintptr_t)a) : "memory");
+    return old;
+}
+#endif
+
 /* ---- EFLAGS pack/unpack (modelled bits only) ---- */
 /* `lock`-prefixed read-modify-write.
  *
@@ -331,6 +404,23 @@ static inline uint32_t atomic_xchg32(uint32_t a, uint32_t v) {
 static inline uint64_t atomic_cmpxchg64_aligned(uint32_t a, uint64_t cmp, uint64_t nv) {
     return (uint64_t)_InterlockedCompareExchange64(
         (volatile __int64 *)(uintptr_t)a, (__int64)nv, (__int64)cmp);
+}
+#elif defined(__aarch64__) && defined(__linux__)
+static inline uint32_t atomic_xadd32(uint32_t a, uint32_t v) {
+    if (wc3_cpu_has_lse()) return wc3_lse_xadd32(a, v);
+    return __sync_fetch_and_add((volatile uint32_t *)(uintptr_t)a, v);
+}
+static inline uint32_t atomic_cmpxchg32(uint32_t a, uint32_t cmp, uint32_t nv) {
+    if (wc3_cpu_has_lse()) return wc3_lse_cmpxchg32(a, cmp, nv);
+    return __sync_val_compare_and_swap((volatile uint32_t *)(uintptr_t)a, cmp, nv);
+}
+static inline uint32_t atomic_xchg32(uint32_t a, uint32_t v) {
+    if (wc3_cpu_has_lse()) return wc3_lse_xchg32(a, v);
+    return __atomic_exchange_n((uint32_t *)(uintptr_t)a, v, __ATOMIC_SEQ_CST);
+}
+static inline uint64_t atomic_cmpxchg64_aligned(uint32_t a, uint64_t cmp, uint64_t nv) {
+    if (wc3_cpu_has_lse()) return wc3_lse_cmpxchg64(a, cmp, nv);
+    return __sync_val_compare_and_swap((volatile uint64_t *)(uintptr_t)a, cmp, nv);
 }
 #else
 static inline uint32_t atomic_xadd32(uint32_t a, uint32_t v) {
@@ -371,6 +461,29 @@ static inline uint32_t atomic_neg32(uint32_t a) {
     uint32_t old = rd32(a);
     while ((uint32_t)_InterlockedCompareExchange((volatile long *)(uintptr_t)a,
                                                  (long)(0u - old), (long)old) != old)
+        old = rd32(a);
+    return old;
+}
+#elif defined(__aarch64__) && defined(__linux__)
+static inline uint32_t atomic_sub32(uint32_t a, uint32_t v) {
+    if (wc3_cpu_has_lse()) return wc3_lse_xadd32(a, 0u - v);
+    return __sync_fetch_and_sub((volatile uint32_t *)(uintptr_t)a, v);
+}
+static inline uint32_t atomic_and32(uint32_t a, uint32_t v) {
+    if (wc3_cpu_has_lse()) return wc3_lse_and32(a, v);
+    return __sync_fetch_and_and((volatile uint32_t *)(uintptr_t)a, v);
+}
+static inline uint32_t atomic_or32(uint32_t a, uint32_t v) {
+    if (wc3_cpu_has_lse()) return wc3_lse_or32(a, v);
+    return __sync_fetch_and_or((volatile uint32_t *)(uintptr_t)a, v);
+}
+static inline uint32_t atomic_xor32(uint32_t a, uint32_t v) {
+    if (wc3_cpu_has_lse()) return wc3_lse_xor32(a, v);
+    return __sync_fetch_and_xor((volatile uint32_t *)(uintptr_t)a, v);
+}
+static inline uint32_t atomic_neg32(uint32_t a) {
+    uint32_t old = rd32(a);
+    while (atomic_cmpxchg32(a, old, 0u - old) != old)
         old = rd32(a);
     return old;
 }
@@ -536,6 +649,25 @@ static inline uint32_t flags_dec32(CPU *c, uint32_t a) {
 /* ---- width-generic flag helpers (sz in {1,2,4}); used by generated code ---- */
 static inline uint32_t mask_sz(int sz) { return sz == 1 ? 0xFFu : sz == 2 ? 0xFFFFu : 0xFFFFFFFFu; }
 static inline uint32_t sign_sz(int sz) { return sz == 1 ? 0x80u : sz == 2 ? 0x8000u : 0x80000000u; }
+
+/* Flagless arithmetic: used when the lifter proved every written flag dead.
+ * ADC/SBB still read CF because it is an input, not a flag they write. */
+static inline uint32_t add32(uint32_t a, uint32_t b, int sz) { return (a + b) & mask_sz(sz); }
+static inline uint32_t sub32(uint32_t a, uint32_t b, int sz) { return (a - b) & mask_sz(sz); }
+static inline uint32_t and32(uint32_t a, uint32_t b, int sz) { return (a & b) & mask_sz(sz); }
+static inline uint32_t or32(uint32_t a, uint32_t b, int sz) { return (a | b) & mask_sz(sz); }
+static inline uint32_t xor32(uint32_t a, uint32_t b, int sz) { return (a ^ b) & mask_sz(sz); }
+static inline uint32_t inc32(uint32_t a, int sz) { return (a + 1u) & mask_sz(sz); }
+static inline uint32_t dec32(uint32_t a, int sz) { return (a - 1u) & mask_sz(sz); }
+static inline uint32_t neg32(uint32_t a, int sz) { return (0u - a) & mask_sz(sz); }
+static inline uint32_t adc32(CPU *c, uint32_t a, uint32_t b, int sz) {
+    uint64_t full = (uint64_t)a + b + (c->cf & 1u);
+    return (uint32_t)full & mask_sz(sz);
+}
+static inline uint32_t sbb32(CPU *c, uint32_t a, uint32_t b, int sz) {
+    uint64_t full = (uint64_t)a - b - (c->cf & 1u);
+    return (uint32_t)full & mask_sz(sz);
+}
 
 static inline uint32_t flags_sub(CPU *c, uint32_t a, uint32_t b, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz);
@@ -754,6 +886,74 @@ static inline uint32_t op_shrd(CPU *c, uint32_t d, uint32_t s, uint32_t cnt, int
     c->cf = (d >> (cnt - 1)) & 1;
     c->zf = (r == 0); c->sf = (r & sign_sz(sz)) != 0; WC3_SET_PF(c, parity8((uint8_t)r));
     return r;
+}
+
+/* Flagless forms used by A.24 when liveness proves the written flags dead.
+ * RCL/RCR still read CF: it is an input to the rotate, not a result. */
+static inline uint32_t op_shld_nf(uint32_t d, uint32_t s, uint32_t cnt, int sz) {
+    uint32_t m = mask_sz(sz); int w = sz * 8;
+    d &= m; s &= m; cnt &= 31;
+    if (!cnt || cnt > (uint32_t)w) return d;
+    return ((d << cnt) | (s >> (w - cnt))) & m;
+}
+static inline uint32_t op_shrd_nf(uint32_t d, uint32_t s, uint32_t cnt, int sz) {
+    uint32_t m = mask_sz(sz); int w = sz * 8;
+    d &= m; s &= m; cnt &= 31;
+    if (!cnt || cnt > (uint32_t)w) return d;
+    return ((d >> cnt) | (s << (w - cnt))) & m;
+}
+static inline uint32_t op_bsf_nf(uint32_t d, uint32_t s, int sz) {
+    s &= mask_sz(sz);
+    if (s == 0) return d;
+#if defined(__GNUC__) || defined(__clang__)
+    return (uint32_t)__builtin_ctz(s);
+#else
+    uint32_t i, n = (uint32_t)sz * 8;
+    for (i = 0; i < n; i++) if (s & (1u << i)) return i;
+    return d;
+#endif
+}
+static inline uint32_t op_bsr_nf(uint32_t d, uint32_t s, int sz) {
+    s &= mask_sz(sz);
+    if (s == 0) return d;
+#if defined(__GNUC__) || defined(__clang__)
+    return 31u - (uint32_t)__builtin_clz(s);
+#else
+    uint32_t i, n = (uint32_t)sz * 8;
+    for (i = n; i-- > 0; ) if (s & (1u << i)) return i;
+    return d;
+#endif
+}
+static inline uint32_t op_bittest_nf(uint32_t d, uint32_t bit, int sz, int op) {
+    uint32_t mask = 1u << (bit & ((uint32_t)sz * 8 - 1));
+    switch (op) {
+        case 1: return d | mask;
+        case 2: return d & ~mask;
+        case 3: return d ^ mask;
+        default: return d;
+    }
+}
+static inline uint32_t op_rcl_nf(CPU *c, uint32_t d, uint32_t cnt, int sz) {
+    uint32_t n = (uint32_t)sz * 8u;
+    uint32_t mask = (n == 32u) ? 0xFFFFFFFFu : ((1u << n) - 1u);
+    uint64_t limit = ((uint64_t)1u << (n + 1u)) - 1u;
+    cnt &= 31u;
+    if (cnt == 0u) return d;
+    if (n < 32u) { cnt %= n + 1u; if (cnt == 0u) return d; }
+    uint64_t value = ((uint64_t)d & mask) | ((uint64_t)(c->cf & 1u) << n);
+    uint64_t rotated = ((value << cnt) | (value >> ((n + 1u) - cnt))) & limit;
+    return (uint32_t)rotated & mask;
+}
+static inline uint32_t op_rcr_nf(CPU *c, uint32_t d, uint32_t cnt, int sz) {
+    uint32_t n = (uint32_t)sz * 8u;
+    uint32_t mask = (n == 32u) ? 0xFFFFFFFFu : ((1u << n) - 1u);
+    uint64_t limit = ((uint64_t)1u << (n + 1u)) - 1u;
+    cnt &= 31u;
+    if (cnt == 0u) return d;
+    if (n < 32u) { cnt %= n + 1u; if (cnt == 0u) return d; }
+    uint64_t value = ((uint64_t)d & mask) | ((uint64_t)(c->cf & 1u) << n);
+    uint64_t rotated = ((value >> cnt) | (value << ((n + 1u) - cnt))) & limit;
+    return (uint32_t)rotated & mask;
 }
 
 /* ---- shifts (set flags like x86; count masked to 5 bits) ---- */
@@ -989,6 +1189,14 @@ static inline void   wri64(uint32_t a, double v) { int64_t i = (int64_t)nearbyin
 #define MM_PUT_B(i, x) ((uint64_t)(uint8_t)(x) << ((i) * 8))
 #define MMX_LANES(n, put, expr) do { for (int i = 0; i < (n); i++) r |= put(i, (expr)); } while (0)
 
+/* The arithmetic/compare helpers are lane loops in portable C.  AArch64 has
+ * direct SIMD instructions for all of them, so use those instead of hoping the
+ * compiler scalarises and re-vectorises each loop.  The bitwise MMX operations
+ * stay as C expressions: the compiler already maps them to one instruction. */
+#if defined(__aarch64__)
+#include "cpu_mmx_neon.h"
+#endif
+
 static inline uint64_t *mm_get(CPU *c, int i) {
     return &c->st[i & 7].v.mm;
 }
@@ -1002,6 +1210,7 @@ static inline void mmx_emms(CPU *c) {
 static inline int16_t mmx_sat16(int32_t v) {
     return (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
 }
+#if !defined(__aarch64__)
 static inline uint64_t mmx_paddw(uint64_t a, uint64_t b) {
     uint64_t r = 0;
     for (int i = 0; i < 4; i++) r |= MM_PUT_W(i, MM_W(a, i) + MM_W(b, i));
@@ -1161,6 +1370,7 @@ static inline uint64_t mmx_packsswb(uint64_t a, uint64_t b) {
     for (int i = 0; i < 4; i++) r |= MM_PUT_B(4 + i, mmx_clamp(MM_W(b,i), -128, 127));
     return r;
 }
+#endif /* !__aarch64__ */
 
 
 /* fcom/fcomi are in x87.h: the comparison uses the shared double slot and the
@@ -1206,6 +1416,16 @@ static inline void sse_compare(CPU *c, double a, double b) {
     else                  { c->zf = (a == b); c->pf = 0; c->cf = (a < b); }
 }
 
+/* A.8: LAHF after an SSE compare.  AH = SF<<7 | ZF<<6 | AF<<4 | PF<<2 |
+ * 1<<1 | CF; the compare clears SF/AF and sets the unordered triple. */
+static inline void sse_compare_lahf(CPU *c, double a, double b) {
+    uint32_t ah = 2u;
+    if (a != a || b != b) ah |= 0x45u;              /* PF|ZF|CF */
+    else if (a < b)       ah |= 1u;                /* CF */
+    else if (a == b)      ah |= 0x40u;             /* ZF */
+    SET8H(c->eax, ah);
+}
+
 /* MINSS/MAXSS are not fmin/fmax. The manual defines them as
  *     if (dst OP src) then dst else src
  * and that "else src" is load-bearing in two cases fmin gets the other way
@@ -1249,6 +1469,18 @@ static inline uint32_t bit_string_op(CPU *c, uint32_t addr, int32_t idx, int op)
     return c->cf;
 }
 
+/* A.24: same memory access and write, but CF is dead and not materialized. */
+static inline void bit_string_op_nf(uint32_t addr, int32_t idx, int op)
+{
+    uint32_t a = addr + 4u * (uint32_t)(idx >> 5);
+    unsigned b = (unsigned)(idx & 31);
+    uint32_t w = rd32(a);
+    if      (op == 1) w |=  (1u << b);
+    else if (op == 2) w &= ~(1u << b);
+    else if (op == 3) w ^=  (1u << b);
+    if (op) wr32(a, w);
+}
+
 /* The register form, where the index really is taken modulo the width. */
 static inline uint32_t bit_reg_op(CPU *c, uint32_t *r, uint32_t idx, int op)
 {
@@ -1270,5 +1502,9 @@ static inline int8_t   sse_sat_i8 (int32_t v) { return v >  127 ?  127 : v < -12
 static inline int16_t  sse_sat_i16(int32_t v) { return v >  32767 ?  32767 : v < -32768 ? -32768 : (int16_t)v; }
 static inline uint8_t  sse_sat_u8 (int32_t v) { return v >  255 ?  255 : v < 0 ? 0 : (uint8_t)v; }
 static inline uint16_t sse_sat_u16(int32_t v) { return v > 65535 ? 65535 : v < 0 ? 0 : (uint16_t)v; }
+
+/* Packed integer SSE: one ASIMD instruction on AArch64, scalar here. */
+#include "cpu_sse_int.h"
+#include "cpu_bulk.h"
 
 #endif /* PCRECOMP_CPU_H */

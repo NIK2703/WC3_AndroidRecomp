@@ -484,7 +484,11 @@ static int cmd_seal(int argc, char **argv)
                      tmp, inputs);
             text = replace_or_keep(text, "\"sha256\": null", ins);
         } else if (force) {
-            if (update_json_sha(text, hex) != 0) {
+            /* Start at corpus_manifest: update_json_sha() patches the first
+             * "sha256" it sees, and the layout also carries per-image hashes
+             * before this object.  Searching from text used to overwrite the
+             * first image's hash instead of the corpus manifest. */
+            if (update_json_sha(corpus, hex) != 0) {
                 fprintf(stderr, "seal: cannot update corpus_manifest.sha256\n");
                 free(text); return 1;
             }
@@ -495,11 +499,20 @@ static int cmd_seal(int argc, char **argv)
     }
     text = replace_or_keep(text, "\"status\": \"not_generated\"",
                            "\"status\": \"generated\"");
-    text = replace_or_keep(text, "\"lift_rev\": 0", "\"lift_rev\": 2");
+    text = replace_or_keep(text, "\"lift_rev\": 0", "\"lift_rev\": 4");
+    text = replace_or_keep(text, "\"lift_rev\": 2", "\"lift_rev\": 4");
+    text = replace_or_keep(text, "\"lift_rev\": 3", "\"lift_rev\": 4");
     snprintf(tmp, sizeof tmp, "\"sha256\": \"%s\"", hex);
-    if (!text || !strstr(text, tmp) || !strstr(text, "\"status\": \"generated\"")) {
-        fprintf(stderr, "seal: could not patch corpus_manifest\n");
-        free(text); return 1;
+    /* Re-find the object: replace_or_keep() may have reallocated text.  Check
+     * inside corpus_manifest, not merely anywhere in the file (the image
+     * entries carry their own sha256 values). */
+    {
+        char *sealed = text ? strstr(text, "\"corpus_manifest\"") : NULL;
+        if (!sealed || !strstr(sealed, tmp) ||
+            !strstr(sealed, "\"status\": \"generated\"")) {
+            fprintf(stderr, "seal: could not patch corpus_manifest\n");
+            free(text); return 1;
+        }
     }
     if (write_bytes(layout, (const uint8_t *)text, strlen(text)) != 0) {
         fprintf(stderr, "seal: cannot write %s\n", layout); free(text); return 1;

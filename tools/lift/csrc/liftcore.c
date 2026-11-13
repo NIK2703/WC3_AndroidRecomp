@@ -143,6 +143,18 @@ static Emit lf_fused_start(Lifter *L, cs_insn *p, const LfFlagFuse *f)
     flag_tmp_name(f->producer_addr, "full", ffull, sizeof ffull);
     flag_tmp_name(f->producer_addr, "cin", fcin, sizeof fcin);
 
+    /* A.8: evaluate both FP operands once at the compare, then select or
+     * materialize the flags at the consumer. */
+    if (f->kind == LF_FLAG_FP_CMP) {
+        int wide = !strcmp(p->mnemonic, "ucomisd") || !strcmp(p->mnemonic, "comisd");
+        const char *ctype = wide ? "double" : "float";
+        char *a = wide ? lf_sd(L, p, OP(p, 0)) : lf_ss(L, p, OP(p, 0));
+        char *b = wide ? lf_sd(L, p, OP(p, 1)) : lf_ss(L, p, OP(p, 1));
+        lf_push(&e, lf_afmt("{ %s %s = %s; %s %s = %s;",
+                            ctype, fa, a, ctype, fb, b));
+        return e;
+    }
+
     switch (f->kind) {
     case LF_FLAG_CMP:
     case LF_FLAG_TEST:
@@ -206,6 +218,44 @@ static Emit lf_fused_start(Lifter *L, cs_insn *p, const LfFlagFuse *f)
     return e;
 }
 
+/* A.8: direct condition for UCOMISS/COMISS/UCOMISD/COMISD.  The unordered
+ * case maps to CF=ZF=PF=1 exactly as sse_compare() stores it. */
+static int lf_fp_cond(char *buf, size_t cap, const char *cc,
+                      const char *fa, const char *fb)
+{
+    const char *expr;
+    if (!strcmp(cc, "a") || !strcmp(cc, "nbe")) expr = "(%s > %s)";
+    else if (!strcmp(cc, "ae") || !strcmp(cc, "nb") || !strcmp(cc, "nc"))
+        expr = "(%s >= %s)";
+    else if (!strcmp(cc, "b") || !strcmp(cc, "nae") || !strcmp(cc, "c"))
+        expr = "(!(%s >= %s))";
+    else if (!strcmp(cc, "be") || !strcmp(cc, "na")) expr = "(!(%s > %s))";
+    else if (!strcmp(cc, "e") || !strcmp(cc, "z"))
+        expr = "(!(%s < %s) && !(%s > %s))";
+    else if (!strcmp(cc, "ne") || !strcmp(cc, "nz"))
+        expr = "((%s < %s) || (%s > %s))";
+    else if (!strcmp(cc, "p") || !strcmp(cc, "pe"))
+        expr = "((%s != %s) || (%s != %s))";
+    else if (!strcmp(cc, "np") || !strcmp(cc, "po"))
+        expr = "((%s == %s) && (%s == %s))";
+    else if (!strcmp(cc, "s")) expr = "0";
+    else if (!strcmp(cc, "ns")) expr = "1";
+    else if (!strcmp(cc, "o")) expr = "0";
+    else if (!strcmp(cc, "no")) expr = "1";
+    else return -1;
+    if (!strcmp(cc, "e") || !strcmp(cc, "z") ||
+        !strcmp(cc, "ne") || !strcmp(cc, "nz") ||
+        !strcmp(cc, "p") || !strcmp(cc, "pe") ||
+        !strcmp(cc, "np") || !strcmp(cc, "po"))
+        snprintf(buf, cap, expr, fa, fb, fa, fb);
+    else if (!strcmp(cc, "s") || !strcmp(cc, "ns") ||
+             !strcmp(cc, "o") || !strcmp(cc, "no"))
+        snprintf(buf, cap, "%s", expr);
+    else
+        snprintf(buf, cap, expr, fa, fb);
+    return 0;
+}
+
 /* Close the fused region at the consumer.  jcc may run the original flag
  * helper on exactly one edge: the other edge has no live flag read before a
  * later flag write, so its state is unobservable. */
@@ -226,6 +276,17 @@ static Emit lf_fused_end(Lifter *L, const LfFlagFuse *f,
     flag_tmp_name(f->producer_addr, "full", ffull, sizeof ffull);
     flag_tmp_name(f->producer_addr, "cin", fcin, sizeof fcin);
 
+    if (!strcmp(m, "lahf")) {
+        if (f->kind == LF_FLAG_FP_CMP) {
+            /* AH = SF<<7 | ZF<<6 | AF<<4 | PF<<2 | 1<<1 | CF.  SSE compare
+             * clears SF/AF; unordered sets ZF/PF/CF together. */
+            lf_push(&e, lf_afmt("sse_compare_lahf(c, %s, %s);", fa, fb));
+            lf_push(&e, "}");
+            return e;
+        }
+        return e;
+    }
+
     if (m[0] == 'j' && strcmp(m, "jmp"))
         cc = m + 1;
     else if (!strncmp(m, "set", 3))
@@ -235,15 +296,25 @@ static Emit lf_fused_end(Lifter *L, const LfFlagFuse *f,
     else
         return e;
 
-    if (lf_flag_cond(cond, sizeof cond, cc, (LfFlagKind)f->kind, f->size,
-                     fa, fb, fr, ffull, fcin) != 0) {
+    if (f->kind == LF_FLAG_FP_CMP) {
+        if (lf_fp_cond(cond, sizeof cond, cc, fa, fb) != 0) {
+            lf_push(&e, lf_todo((uint32_t)c->address, "fused fp condition"));
+            lf_push(&e, "}");
+            return e;
+        }
+    } else if (lf_flag_cond(cond, sizeof cond, cc, (LfFlagKind)f->kind, f->size,
+                            fa, fb, fr, ffull, fcin) != 0) {
         lf_push(&e, lf_todo((uint32_t)c->address, "fused condition"));
         lf_push(&e, "}");
         return e;
     }
 
-    if (f->mat_taken || f->mat_fall)
+    if (f->kind == LF_FLAG_FP_CMP) {
+        if (f->mat_taken || f->mat_fall)
+            mat = lf_afmt("sse_compare(c, %s, %s);", fa, fb);
+    } else if (f->mat_taken || f->mat_fall) {
         mat = flag_mat_call(f->kind, f->size, f->producer_addr);
+    }
 
     if (!strncmp(m, "cmov", 4)) {
         char *src = lf_src(L, c, OP(c, 1));
@@ -278,6 +349,18 @@ static Emit lf_fused_end(Lifter *L, const LfFlagFuse *f,
 }
 
 /* ------------------------------------------------------------- translate */
+static int flag_dead(Lifter *L, const cs_insn *in, int *kind, int *sz);
+
+/* True when at least one flag in mask is observable after this instruction.
+ * The conservative answer outside the flagless path keeps the original
+ * helpers in place. */
+static int flag_live_any(Lifter *L, uint8_t mask)
+{
+    if (!L->flagless || !L->flag_live_out || L->flag_current_index < 0)
+        return 1;
+    return (L->flag_live_out[L->flag_current_index] & mask) != 0;
+}
+
 Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
 {
     Emit e = lf_emit();
@@ -329,45 +412,71 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
         cs_x86_op *d = OP(insn, 0);
         char *a = lf_addr_expr(L, insn, d);
         if (!strcmp(m, "inc")) {
-            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, 1u); "
-                                "flags_incs(c, _old, 4); }", a));
+            if (flag_live_any(L, LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF |
+                                  LF_FLAG_PF | LF_FLAG_AF))
+                lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, 1u); "
+                                    "flags_incs(c, _old, 4); }", a));
+            else
+                lf_push(&e, lf_afmt("atomic_xadd32(%s, 1u);", a));
             return e;
         }
         if (!strcmp(m, "dec")) {
-            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, 0xFFFFFFFFu); "
-                                "flags_decs(c, _old, 4); }", a));
+            if (flag_live_any(L, LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF |
+                                  LF_FLAG_PF | LF_FLAG_AF))
+                lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, 0xFFFFFFFFu); "
+                                    "flags_decs(c, _old, 4); }", a));
+            else
+                lf_push(&e, lf_afmt("atomic_xadd32(%s, 0xFFFFFFFFu);", a));
             return e;
         }
         if (!strcmp(m, "add") && nops > 1) {
             char *v = lf_src(L, insn, OP(insn, 1));
-            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, %s); "
-                                "flags_add(c, _old, %s, 4); }", a, v, v));
+            if (flag_live_any(L, LF_FLAG_ALL))
+                lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, %s); "
+                                    "flags_add(c, _old, %s, 4); }", a, v, v));
+            else
+                lf_push(&e, lf_afmt("atomic_xadd32(%s, %s);", a, v));
             return e;
         }
         if (!strcmp(m, "sub") && nops > 1) {
             char *v = lf_src(L, insn, OP(insn, 1));
-            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_sub32(%s, %s); "
-                                "flags_sub(c, _old, %s, 4); }", a, v, v));
+            if (flag_live_any(L, LF_FLAG_ALL))
+                lf_push(&e, lf_afmt("{ uint32_t _old = atomic_sub32(%s, %s); "
+                                    "flags_sub(c, _old, %s, 4); }", a, v, v));
+            else
+                lf_push(&e, lf_afmt("atomic_sub32(%s, %s);", a, v));
             return e;
         }
         if ((!strcmp(m, "and") || !strcmp(m, "or") || !strcmp(m, "xor")) && nops > 1) {
             char *v = lf_src(L, insn, OP(insn, 1));
             const char *op = !strcmp(m, "and") ? "&" : !strcmp(m, "or") ? "|" : "^";
-            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_%s32(%s, %s); "
-                                "flags_logicz(c, _old %s %s, 4); }", m, a, v, op, v));
+            if (flag_live_any(L, LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF |
+                                  LF_FLAG_OF | LF_FLAG_PF))
+                lf_push(&e, lf_afmt("{ uint32_t _old = atomic_%s32(%s, %s); "
+                                    "flags_logicz(c, _old %s %s, 4); }", m, a, v, op, v));
+            else
+                lf_push(&e, lf_afmt("atomic_%s32(%s, %s);", m, a, v));
             return e;
         }
         if ((!strcmp(m, "adc") || !strcmp(m, "sbb")) && nops > 1) {
             char *v = lf_src(L, insn, OP(insn, 1));
-            lf_push(&e, lf_afmt("{ uint32_t _old = %s(%s, %s + c->cf); "
-                                "flags_%s(c, _old, %s, 4); }",
-                                !strcmp(m, "adc") ? "atomic_xadd32" : "atomic_sub32",
-                                a, v, m, v));
+            if (flag_live_any(L, LF_FLAG_ALL))
+                lf_push(&e, lf_afmt("{ uint32_t _old = %s(%s, %s + c->cf); "
+                                    "flags_%s(c, _old, %s, 4); }",
+                                    !strcmp(m, "adc") ? "atomic_xadd32" : "atomic_sub32",
+                                    a, v, m, v));
+            else
+                lf_push(&e, lf_afmt("%s(%s, %s + c->cf);",
+                                    !strcmp(m, "adc") ? "atomic_xadd32" : "atomic_sub32",
+                                    a, v));
             return e;
         }
         if (!strcmp(m, "neg")) {
-            lf_push(&e, lf_afmt("{ uint32_t _old = atomic_neg32(%s); "
-                                "flags_sub(c, 0, _old, 4); }", a));
+            if (flag_live_any(L, LF_FLAG_ALL))
+                lf_push(&e, lf_afmt("{ uint32_t _old = atomic_neg32(%s); "
+                                    "flags_sub(c, 0, _old, 4); }", a));
+            else
+                lf_push(&e, lf_afmt("atomic_neg32(%s);", a));
             return e;
         }
         if (!strcmp(m, "not")) {
@@ -379,24 +488,38 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
     /* ---- bit test ---- */
     if (LST(m, "bt", "bts", "btr", "btc")) {
         int opnum = !strcmp(m, "bt") ? 0 : !strcmp(m, "bts") ? 1 : !strcmp(m, "btr") ? 2 : 3;
+        int keep_cf = flag_live_any(L, LF_FLAG_CF);
         char *idx = lf_src(L, insn, OP(insn, 1));
         if (OP(insn, 0)->type == X86_OP_MEM) {
             if (locked && OP(insn, 0)->size == 4 && strcmp(m, "bt") != 0) {
                 const char *fn = !strcmp(m, "bts") ? "atomic_or32" :
                                  !strcmp(m, "btr") ? "atomic_and32" : "atomic_xor32";
                 const char *arg = !strcmp(m, "btr") ? "(~_m)" : "_m";
-                lf_push(&e, lf_afmt("{ uint32_t _a = (%s) + 4u * (uint32_t)((int32_t)(%s) >> 5); "
-                                    "uint32_t _m = 1u << ((int32_t)(%s) & 31); "
-                                    "uint32_t _old = %s(_a, %s); "
-                                    "c->cf = (_old >> ((int32_t)(%s) & 31)) & 1; }",
-                                    lf_addr_expr(L, insn, OP(insn, 0)), idx, idx, fn, arg, idx));
-            } else {
+                if (keep_cf)
+                    lf_push(&e, lf_afmt("{ uint32_t _a = (%s) + 4u * (uint32_t)((int32_t)(%s) >> 5); "
+                                        "uint32_t _m = 1u << ((int32_t)(%s) & 31); "
+                                        "uint32_t _old = %s(_a, %s); "
+                                        "c->cf = (_old >> ((int32_t)(%s) & 31)) & 1; }",
+                                        lf_addr_expr(L, insn, OP(insn, 0)), idx, idx, fn, arg, idx));
+                else
+                    lf_push(&e, lf_afmt("{ uint32_t _a = (%s) + 4u * (uint32_t)((int32_t)(%s) >> 5); "
+                                        "uint32_t _m = 1u << ((int32_t)(%s) & 31); %s(_a, %s); }",
+                                        lf_addr_expr(L, insn, OP(insn, 0)), idx, idx, fn, arg));
+            } else if (keep_cf) {
                 lf_push(&e, lf_afmt("bit_string_op(c, %s, (int32_t)(%s), %d);",
                                     lf_addr_expr(L, insn, OP(insn, 0)), idx, opnum));
+            } else {
+                lf_push(&e, lf_afmt("bit_string_op_nf(%s, (int32_t)(%s), %d);",
+                                    lf_addr_expr(L, insn, OP(insn, 0)), idx, opnum));
             }
-        } else {
+        } else if (keep_cf) {
             lf_push(&e, lf_dst_write(L, insn, OP(insn, 0),
                     lf_afmt("op_bittest(c, %s, %s, %d, %d)",
+                            lf_read_dst(L, insn, OP(insn, 0)), idx,
+                            (int)OP(insn, 0)->size, opnum)));
+        } else if (opnum != 0) {
+            lf_push(&e, lf_dst_write(L, insn, OP(insn, 0),
+                    lf_afmt("op_bittest_nf(%s, %s, %d, %d)",
                             lf_read_dst(L, insn, OP(insn, 0)), idx,
                             (int)OP(insn, 0)->size, opnum)));
         }
@@ -446,6 +569,18 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
         int sz = d->size;
         char *a = lf_read_dst(L, insn, d), *b = lf_src(L, insn, s);
         char *r;
+        int kind, ksz = 0;
+        if (flag_dead(L, insn, &kind, &ksz)) {
+            if (!strcmp(m, "add")) r = lf_afmt("add32(%s, %s, %d)", a, b, sz);
+            else if (!strcmp(m, "sub")) r = lf_afmt("sub32(%s, %s, %d)", a, b, sz);
+            else if (!strcmp(m, "adc")) r = lf_afmt("adc32(c, %s, %s, %d)", a, b, sz);
+            else if (!strcmp(m, "sbb")) r = lf_afmt("sbb32(c, %s, %s, %d)", a, b, sz);
+            else if (!strcmp(m, "and")) r = lf_afmt("and32(%s, %s, %d)", a, b, sz);
+            else if (!strcmp(m, "or"))  r = lf_afmt("or32(%s, %s, %d)", a, b, sz);
+            else                        r = lf_afmt("xor32(%s, %s, %d)", a, b, sz);
+            lf_push(&e, lf_dst_write(L, insn, d, r));
+            return e;
+        }
         if (!strcmp(m, "add")) r = lf_afmt("flags_add(c, %s, %s, %d)", a, b, sz);
         else if (!strcmp(m, "sub")) r = lf_afmt("flags_sub(c, %s, %s, %d)", a, b, sz);
         else if (!strcmp(m, "adc")) r = lf_afmt("flags_adc(c, %s, %s, %d)", a, b, sz);
@@ -457,12 +592,16 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
         return e;
     }
     if (!strcmp(m, "cmp")) {
+        int kind, ksz = 0;
+        if (flag_dead(L, insn, &kind, &ksz)) return e;
         lf_push(&e, lf_afmt("flags_sub(c, %s, %s, %d);",
                             lf_read_dst(L, insn, OP(insn, 0)),
                             lf_src(L, insn, OP(insn, 1)), OP(insn, 0)->size));
         return e;
     }
     if (!strcmp(m, "test")) {
+        int kind, ksz = 0;
+        if (flag_dead(L, insn, &kind, &ksz)) return e;
         lf_push(&e, lf_afmt("flags_logicz(c, %s & %s, %d);",
                             lf_read_dst(L, insn, OP(insn, 0)),
                             lf_src(L, insn, OP(insn, 1)), OP(insn, 0)->size));
@@ -470,18 +609,36 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
     }
     if (!strcmp(m, "inc")) {
         cs_x86_op *d = OP(insn, 0);
+        int kind, ksz = 0;
+        if (flag_dead(L, insn, &kind, &ksz)) {
+            lf_push(&e, lf_dst_write(L, insn, d,
+                    lf_afmt("inc32(%s, %d)", lf_read_dst(L, insn, d), d->size)));
+            return e;
+        }
         lf_push(&e, lf_dst_write(L, insn, d,
                 lf_afmt("flags_incs(c, %s, %d)", lf_read_dst(L, insn, d), d->size)));
         return e;
     }
     if (!strcmp(m, "dec")) {
         cs_x86_op *d = OP(insn, 0);
+        int kind, ksz = 0;
+        if (flag_dead(L, insn, &kind, &ksz)) {
+            lf_push(&e, lf_dst_write(L, insn, d,
+                    lf_afmt("dec32(%s, %d)", lf_read_dst(L, insn, d), d->size)));
+            return e;
+        }
         lf_push(&e, lf_dst_write(L, insn, d,
                 lf_afmt("flags_decs(c, %s, %d)", lf_read_dst(L, insn, d), d->size)));
         return e;
     }
     if (!strcmp(m, "neg")) {
         cs_x86_op *d = OP(insn, 0);
+        int kind, ksz = 0;
+        if (flag_dead(L, insn, &kind, &ksz)) {
+            lf_push(&e, lf_dst_write(L, insn, d,
+                    lf_afmt("neg32(%s, %d)", lf_read_dst(L, insn, d), d->size)));
+            return e;
+        }
         lf_push(&e, lf_dst_write(L, insn, d,
                 lf_afmt("flags_sub(c, 0, %s, %d)", lf_read_dst(L, insn, d), d->size)));
         return e;
@@ -516,27 +673,35 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
     }
     if (LST(m, "bsf", "bsr")) {
         cs_x86_op *d = OP(insn, 0);
+        int keep_zf = flag_live_any(L, LF_FLAG_ZF);
         const char *fn = !strcmp(m, "bsf") ? "op_bsf" : "op_bsr";
         lf_push(&e, lf_dst_write(L, insn, d,
-                lf_afmt("%s(c, %s, %s, %d)", fn, lf_read_dst(L, insn, d),
-                        lf_src(L, insn, OP(insn, 1)), d->size)));
+                keep_zf ? lf_afmt("%s(c, %s, %s, %d)", fn, lf_read_dst(L, insn, d),
+                                  lf_src(L, insn, OP(insn, 1)), d->size)
+                        : lf_afmt("%s_nf(%s, %s, %d)", fn, lf_read_dst(L, insn, d),
+                                  lf_src(L, insn, OP(insn, 1)), d->size)));
         return e;
     }
     if (LST(m, "rcl", "rcr")) {
         cs_x86_op *d = OP(insn, 0);
         char *cnt = nops > 1 ? lf_src(L, insn, OP(insn, 1)) : (char *)"1";
+        int keep_flags = flag_live_any(L, LF_FLAG_CF | LF_FLAG_OF);
         const char *fn = !strcmp(m, "rcl") ? "op_rcl" : "op_rcr";
         lf_push(&e, lf_dst_write(L, insn, d,
-                lf_afmt("%s(c, %s, %s, %d)", fn, lf_read_dst(L, insn, d), cnt, d->size)));
+                keep_flags ? lf_afmt("%s(c, %s, %s, %d)", fn, lf_read_dst(L, insn, d), cnt, d->size)
+                           : lf_afmt("%s_nf(c, %s, %s, %d)", fn, lf_read_dst(L, insn, d), cnt, d->size)));
         return e;
     }
     if (LST(m, "shld", "shrd")) {
         cs_x86_op *d = OP(insn, 0);
         char *cnt = nops > 2 ? lf_src(L, insn, OP(insn, 2)) : (char *)"R8L(c->ecx)";
+        int keep_flags = flag_live_any(L, LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_PF);
         const char *fn = !strcmp(m, "shld") ? "op_shld" : "op_shrd";
         lf_push(&e, lf_dst_write(L, insn, d,
-                lf_afmt("%s(c, %s, %s, %s, %d)", fn, lf_read_dst(L, insn, d),
-                        lf_src(L, insn, OP(insn, 1)), cnt, d->size)));
+                keep_flags ? lf_afmt("%s(c, %s, %s, %s, %d)", fn, lf_read_dst(L, insn, d),
+                                     lf_src(L, insn, OP(insn, 1)), cnt, d->size)
+                           : lf_afmt("%s_nf(%s, %s, %s, %d)", fn, lf_read_dst(L, insn, d),
+                                     lf_src(L, insn, OP(insn, 1)), cnt, d->size)));
         return e;
     }
     if (LST(m, "lds", "les", "lfs", "lgs", "lss")) {
@@ -607,12 +772,19 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
                 lf_push(&e, lf_afmt("{ uint32_t _v = %s;", lf_src(L, insn, s)));
                 lf_push(&e, lf_afmt("  uint32_t _old = atomic_xadd32(%s, _v);", a));
                 lf_push(&e, lf_afmt("  %s", lf_dst_write(L, insn, s, "_old")));
-                lf_push(&e, "  flags_add(c, _old, _v, 4); }");
+                if (flag_live_any(L, LF_FLAG_ALL))
+                    lf_push(&e, "  flags_add(c, _old, _v, 4); }");
+                else
+                    lf_push(&e, "}");
                 return e;
             }
             lf_push(&e, lf_afmt("{ uint32_t _old = atomic_cmpxchg32(%s, c->eax, %s);",
                                 a, lf_src(L, insn, s)));
-            lf_push(&e, "  flags_sub(c, c->eax, _old, 4);");
+            if (flag_live_any(L, LF_FLAG_CF | LF_FLAG_SF | LF_FLAG_OF |
+                                  LF_FLAG_AF | LF_FLAG_PF))
+                lf_push(&e, "  flags_sub(c, c->eax, _old, 4);");
+            else if (flag_live_any(L, LF_FLAG_ZF))
+                lf_push(&e, "  c->zf = (_old == c->eax);");
             lf_push(&e, "  if (_old != c->eax) c->eax = _old; }");
             return e;
         }
@@ -622,9 +794,14 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
         lf_push(&e, "{ uint64_t _exp = ((uint64_t)c->edx << 32) | c->eax;");
         lf_push(&e, "  uint64_t _des = ((uint64_t)c->ecx << 32) | c->ebx;");
         lf_push(&e, lf_afmt("  uint64_t _old = atomic_cmpxchg64(%s, _exp, _des);", a));
-        lf_push(&e, "  if (_old == _exp) c->zf = 1;");
-        lf_push(&e, "  else { c->zf = 0; c->eax = (uint32_t)_old;");
-        lf_push(&e, "         c->edx = (uint32_t)(_old >> 32); } }");
+        if (flag_live_any(L, LF_FLAG_ZF)) {
+            lf_push(&e, "  if (_old == _exp) c->zf = 1;");
+            lf_push(&e, "  else { c->zf = 0; c->eax = (uint32_t)_old;");
+            lf_push(&e, "         c->edx = (uint32_t)(_old >> 32); } }");
+        } else {
+            lf_push(&e, "  if (_old != _exp) { c->eax = (uint32_t)_old;");
+            lf_push(&e, "         c->edx = (uint32_t)(_old >> 32); } }");
+        }
         return e;
     }
     if (!strcmp(m, "cpuid")) { lf_push(&e, "do_cpuid(c);"); return e; }
@@ -678,12 +855,16 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
         cs_x86_op *s = OP(insn, 0);
         int sz = s->size;
         char *v = lf_src(L, insn, s);
+        int keep = flag_live_any(L, LF_FLAG_CF | LF_FLAG_OF);
         if (sz == 4)
-            lf_push(&e, lf_afmt("{ uint64_t _p=(uint64_t)c->eax*(uint32_t)(%s); c->eax=(uint32_t)_p; c->edx=(uint32_t)(_p>>32); c->cf=c->of=(c->edx!=0); }", v));
+            lf_push(&e, lf_afmt("{ uint64_t _p=(uint64_t)c->eax*(uint32_t)(%s); c->eax=(uint32_t)_p; c->edx=(uint32_t)(_p>>32);%s }", v,
+                                keep ? " c->cf=c->of=(c->edx!=0);" : ""));
         else if (sz == 2)
-            lf_push(&e, lf_afmt("{ uint32_t _p=(uint32_t)R16(c->eax)*(uint16_t)(%s); SET16(c->eax,_p); SET16(c->edx,_p>>16); c->cf=c->of=((_p>>16)!=0); }", v));
+            lf_push(&e, lf_afmt("{ uint32_t _p=(uint32_t)R16(c->eax)*(uint16_t)(%s); SET16(c->eax,_p); SET16(c->edx,_p>>16);%s }", v,
+                                keep ? " c->cf=c->of=((_p>>16)!=0);" : ""));
         else
-            lf_push(&e, lf_afmt("{ uint16_t _p=(uint16_t)R8L(c->eax)*(uint8_t)(%s); SET16(c->eax,_p); c->cf=c->of=((_p>>8)!=0); }", v));
+            lf_push(&e, lf_afmt("{ uint16_t _p=(uint16_t)R8L(c->eax)*(uint8_t)(%s); SET16(c->eax,_p);%s }", v,
+                                keep ? " c->cf=c->of=((_p>>8)!=0);" : ""));
         return e;
     }
     if (!strcmp(m, "imul")) {
@@ -691,12 +872,16 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
             cs_x86_op *s = OP(insn, 0);
             int sz = s->size;
             char *v = lf_src(L, insn, s);
+            int keep = flag_live_any(L, LF_FLAG_CF | LF_FLAG_OF);
             if (sz == 4)
-                lf_push(&e, lf_afmt("{ int64_t _p=(int64_t)(int32_t)c->eax*(int32_t)(%s); c->eax=(uint32_t)_p; c->edx=(uint32_t)((uint64_t)_p>>32); c->cf=c->of=((int32_t)_p!=_p); }", v));
+                lf_push(&e, lf_afmt("{ int64_t _p=(int64_t)(int32_t)c->eax*(int32_t)(%s); c->eax=(uint32_t)_p; c->edx=(uint32_t)((uint64_t)_p>>32);%s }", v,
+                                    keep ? " c->cf=c->of=((int32_t)_p!=_p);" : ""));
             else if (sz == 2)
-                lf_push(&e, lf_afmt("{ int32_t _p=(int32_t)(int16_t)R16(c->eax)*(int16_t)(%s); SET16(c->eax,_p); SET16(c->edx,_p>>16); c->cf=c->of=((int16_t)_p!=_p); }", v));
+                lf_push(&e, lf_afmt("{ int32_t _p=(int32_t)(int16_t)R16(c->eax)*(int16_t)(%s); SET16(c->eax,_p); SET16(c->edx,_p>>16);%s }", v,
+                                    keep ? " c->cf=c->of=((int16_t)_p!=_p);" : ""));
             else
-                lf_push(&e, lf_afmt("{ int16_t _p=(int16_t)(int8_t)R8L(c->eax)*(int8_t)(%s); SET16(c->eax,_p); c->cf=c->of=((int8_t)_p!=_p); }", v));
+                lf_push(&e, lf_afmt("{ int16_t _p=(int16_t)(int8_t)R8L(c->eax)*(int8_t)(%s); SET16(c->eax,_p);%s }", v,
+                                    keep ? " c->cf=c->of=((int8_t)_p!=_p);" : ""));
             return e;
         }
         {
@@ -704,11 +889,14 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
             int sz = d->size;
             const char *cast = sz == 1 ? "int8_t" : sz == 2 ? "int16_t" : "int32_t";
             char *a, *b, *dw;
+            char fbuf[80];
             if (nops == 2) { a = lf_read_dst(L, insn, d); b = lf_src(L, insn, OP(insn, 1)); }
             else           { a = lf_src(L, insn, OP(insn, 1)); b = lf_src(L, insn, OP(insn, 2)); }
             dw = strip_semi(lf_dst_write(L, insn, d, "(uint32_t)_p"));
-            lf_push(&e, lf_afmt("{ int64_t _p=(int64_t)(%s)(%s)*(%s)(%s); %s; c->cf=c->of=((%s)_p!=_p); }",
-                                cast, a, cast, b, dw, cast));
+            snprintf(fbuf, sizeof fbuf, "c->cf=c->of=((%s)_p!=_p);", cast);
+            lf_push(&e, lf_afmt("{ int64_t _p=(int64_t)(%s)(%s)*(%s)(%s); %s;%s }",
+                                cast, a, cast, b, dw,
+                                flag_live_any(L, LF_FLAG_CF | LF_FLAG_OF) ? fbuf : ""));
             return e;
         }
     }
@@ -783,6 +971,16 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
                                         "else while (c->ecx) { wr8(c->edi, %s); "
                                         "c->edi++; c->ecx--; } c->ecx = 0; }",
                                         ar, ar));
+                    return e;
+                }
+                if (rep && esz > 1) {
+                    /* C.4.3: the wider REP STOS forms are a repeated scalar
+                     * pattern, not a byte fill.  A NEON broadcast/store is the
+                     * natural implementation; the scalar helper keeps the
+                     * host build exact. */
+                    lf_push(&e, lf_afmt("if (c->ecx) { rep_stos%s(c->edi, %s, c->ecx); "
+                                        "c->edi += c->ecx * %du; c->ecx = 0; }",
+                                        esz == 2 ? "w" : "d", ar, esz));
                     return e;
                 }
                 lf_push(&e, lf_afmt("%s(c->edi, %s); c->edi += %d;", wfn, ar, esz));
@@ -1087,6 +1285,13 @@ static LfFlagConsumer flag_consumer_of(Lifter *L, const cs_insn *in,
         if (*mask && NOPS(in) == 2) return LF_CONS_CMOV;
         return LF_CONS_NONE;
     }
+    if (!strcmp(m, "lahf")) {
+        /* LAHF is a flag reader but not a branch: it copies SF/ZF/AF/PF/CF
+         * into AH.  Folding an FP compare into it removes the flag stores and
+         * the separate LAHF read without changing the AH value. */
+        *mask = LF_FLAG_SF | LF_FLAG_ZF | LF_FLAG_AF | LF_FLAG_PF | LF_FLAG_CF;
+        return LF_CONS_LAHF;
+    }
     return LF_CONS_NONE;
 }
 
@@ -1098,6 +1303,14 @@ static LfFlagKind flag_producer_of(const cs_insn *in, int *sz)
 
     *sz = 0;
     if (!strncmp(m, "lock ", 5)) return LF_FLAG_NONE;
+    if (!strcmp(m, "ucomiss") || !strcmp(m, "comiss") ||
+        !strcmp(m, "ucomisd") || !strcmp(m, "comisd")) {
+        if (nops < 2) return LF_FLAG_NONE;
+        /* Capstone reports the XMM register as 16 bytes; the compare width is
+         * encoded in the mnemonic suffix, not in the operand size. */
+        *sz = (m[strlen(m) - 1] == 'd') ? 8 : 4;
+        return LF_FLAG_FP_CMP;
+    }
     if (!strcmp(m, "inc") || !strcmp(m, "dec") || !strcmp(m, "neg")) {
         if (nops < 1 || OP(in, 0)->type == X86_OP_IMM) return LF_FLAG_NONE;
         s = OP(in, 0)->size;
@@ -1207,7 +1420,7 @@ static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
         w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF | LF_FLAG_PF;
     } else if (!strcmp(m, "rcl") || !strcmp(m, "rcr")) {
         r |= LF_FLAG_CF;
-        w |= LF_FLAG_CF;
+        w |= LF_FLAG_CF | LF_FLAG_OF;
     } else if (!strcmp(m, "rol") || !strcmp(m, "ror")) {
         w |= LF_FLAG_CF | LF_FLAG_OF;
     } else if (!strcmp(m, "shl") || !strcmp(m, "sal") ||
@@ -1234,9 +1447,15 @@ static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
                !strcmp(m, "aaa") || !strcmp(m, "aas") ||
                !strcmp(m, "aam") || !strcmp(m, "aad")) {
         r |= LF_FLAG_ALL;
-    } else if (!strcmp(m, "mul") || !strcmp(m, "imul") ||
-               !strcmp(m, "div") || !strcmp(m, "idiv")) {
-        r |= LF_FLAG_ALL;
+    } else if (!strcmp(m, "mul") || !strcmp(m, "imul")) {
+        /* MUL/IMUL write CF/OF and read no flags.  A.24 drops the write when
+         * both are dead instead of treating the instruction as a full barrier. */
+        w |= LF_FLAG_CF | LF_FLAG_OF;
+    } else if (!strcmp(m, "div") || !strcmp(m, "idiv")) {
+        /* DIV leaves flags undefined.  Keep the existing helper behaviour
+         * (they are untouched), but kill the liveness state so an earlier
+         * producer is not kept alive across the division. */
+        w |= LF_FLAG_ALL;
     } else if (m[0] == 'f') {
         if (!strncmp(m, "fcmov", 5))
             r |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_PF;
@@ -1287,6 +1506,31 @@ static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
     *writes = w;
 }
 
+/* Can this producer drop its flag writes?  Only when every flag it writes is
+ * dead on every outgoing edge.  AF is not part of the liveness mask (producers
+ * never kill it conservatively), so it is added for the kinds whose helper
+ * writes it. */
+static int flag_dead(Lifter *L, const cs_insn *in, int *kind, int *sz)
+{
+    uint8_t reads, writes;
+    int k;
+    if (!L->flagless || !L->flag_live_out || L->flag_current_index < 0) return 0;
+    /* cmp/test with a memory operand is also a guest load.  Dropping it would
+     * hide a possible page fault, so only the register/immediate forms may be
+     * removed outright; memory forms fall back to the flags helper. */
+    if (!strcmp(in->mnemonic, "cmp") || !strcmp(in->mnemonic, "test")) {
+        for (k = 0; k < NOPS(in); k++)
+            if (OP(in, k)->type == X86_OP_MEM) return 0;
+    }
+    *kind = flag_producer_of(in, sz);
+    if (*kind == LF_FLAG_NONE) return 0;
+    flag_use(L, in, &reads, &writes);
+    if (L->flag_live_out[L->flag_current_index] &
+        (writes | (lf_flag_producer_af(*kind) ? LF_FLAG_AF : 0)))
+        return 0;
+    return 1;
+}
+
 static int flag_insn_index(const InsnCopy *ins, int n, uint64_t addr)
 {
     int lo = 0, hi = n - 1;
@@ -1302,21 +1546,25 @@ static int flag_insn_index(const InsnCopy *ins, int n, uint64_t addr)
 
 static int build_flag_plan(Lifter *L, const InsnCopy *ins, int n,
                            const uint32_t *labels, int nlabels,
-                           uint8_t **role_out, LfFlagFuse **fuse_out)
+                           uint8_t **role_out, LfFlagFuse **fuse_out,
+                           uint8_t **live_out_out)
 {
     LfFlagInsn *d;
     LfFlagFuse *pairs, *fuse;
-    uint8_t *role;
+    uint8_t *role, *live_out;
     int i, nf;
 
     *role_out = NULL;
     *fuse_out = NULL;
+    *live_out_out = NULL;
     if (n <= 1) return 0;
     d = (LfFlagInsn *)calloc((size_t)n, sizeof *d);
     pairs = (LfFlagFuse *)calloc((size_t)n, sizeof *pairs);
-    if (!d || !pairs) {
+    live_out = (uint8_t *)calloc((size_t)n, 1);
+    if (!d || !pairs || !live_out) {
         free(d);
         free(pairs);
+        free(live_out);
         return -1;
     }
     for (i = 0; i < n; i++) {
@@ -1365,11 +1613,17 @@ static int build_flag_plan(Lifter *L, const InsnCopy *ins, int n,
             d[i].succ1 = (i + 1 < n) ? i + 1 : -1;
         }
     }
-    nf = lf_flag_plan(d, n, pairs, n);
+    nf = lf_flag_plan_ex(d, n, pairs, n, live_out);
     free(d);
-    if (nf <= 0) {
+    if (nf < 0) {
         free(pairs);
-        return nf < 0 ? -1 : 0;
+        free(live_out);
+        return -1;
+    }
+    if (nf == 0) {
+        free(pairs);
+        *live_out_out = live_out;
+        return 0;
     }
     role = (uint8_t *)calloc((size_t)n, 1);
     fuse = (LfFlagFuse *)calloc((size_t)n, sizeof *fuse);
@@ -1377,6 +1631,7 @@ static int build_flag_plan(Lifter *L, const InsnCopy *ins, int n,
         free(role);
         free(fuse);
         free(pairs);
+        free(live_out);
         return -1;
     }
     for (i = 0; i < nf; i++) {
@@ -1391,7 +1646,395 @@ static int build_flag_plan(Lifter *L, const InsnCopy *ins, int n,
     free(pairs);
     *role_out = role;
     *fuse_out = fuse;
+    *live_out_out = live_out;
     return nf;
+}
+
+/* ---- optional lifter-level GPR cache (A.4 prototype) ----
+ *
+ * The generated C reads and writes guest registers through c->eax and friends.
+ * Within a straight-line run (no label, branch, call or implicit-clobber
+ * instruction) those accesses can be redirected to local variables, with a
+ * load at the run start and a flush at the run end.  The cache does not cross
+ * barriers, so calls, returns, string ops and other implicit register users
+ * observe the canonical c-> fields.  This is the cheap lifter-level half of
+ * A.4; the CFG/LIR version is CGP-6.
+ */
+static const char *const gpr_cache_regs[7] = {
+    "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp"
+};
+
+static char *gpr_cache_strdup(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *p = (char *)malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
+static char **gpr_cache_split(const char *s, size_t *n)
+{
+    size_t cap = 16, cnt = 0;
+    char **v = (char **)malloc(cap * sizeof(char *));
+    const char *p = s;
+    if (!v) return NULL;
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        char *line = (char *)malloc(len + 1);
+        if (!line) break;
+        memcpy(line, p, len);
+        line[len] = 0;
+        if (cnt == cap) {
+            cap *= 2;
+            v = (char **)realloc(v, cap * sizeof(char *));
+            if (!v) break;
+        }
+        v[cnt++] = line;
+        if (!e) break;
+        p = e + 1;
+    }
+    *n = cnt;
+    return v;
+}
+
+static char *gpr_cache_join(char **v, size_t n, size_t *len)
+{
+    size_t total = 1, i, k = 0;
+    char *s;
+    for (i = 0; i < n; i++) total += strlen(v[i]) + 1;
+    s = (char *)malloc(total);
+    if (!s) return NULL;
+    for (i = 0; i < n; i++) {
+        size_t l = strlen(v[i]);
+        memcpy(s + k, v[i], l);
+        k += l;
+        if (i + 1 < n) s[k++] = '\n';
+    }
+    s[k] = 0;
+    *len = k;
+    return s;
+}
+
+static const char *gpr_cache_find_before(const char *s, const char *pat,
+                                         const char *end)
+{
+    size_t plen = strlen(pat);
+    const char *p = s;
+    while (p < end && *p) {
+        if (!strncmp(p, pat, plen)) return p;
+        p++;
+    }
+    return NULL;
+}
+
+static char *gpr_cache_replace_line(const char *line, const int *used)
+{
+    const char *cm = strstr(line, "/*");
+    size_t code_len = cm ? (size_t)(cm - line) : strlen(line);
+    size_t cap = strlen(line) + 64, o = 0, i = 0;
+    char *out = (char *)malloc(cap);
+    int r;
+    if (!out) return NULL;
+    while (i < code_len) {
+        int replaced = 0;
+        for (r = 0; r < 7; r++) {
+            char pat[16], local[16];
+            size_t plen, llen;
+            if (!used[r]) continue;
+            snprintf(pat, sizeof pat, "c->%s", gpr_cache_regs[r]);
+            plen = strlen(pat);
+            if (i + plen <= code_len && !strncmp(line + i, pat, plen)) {
+                snprintf(local, sizeof local, "gpr_%s", gpr_cache_regs[r]);
+                llen = strlen(local);
+                if (o + llen + 1 > cap) {
+                    cap = cap * 2 + llen + 1;
+                    out = (char *)realloc(out, cap);
+                    if (!out) return NULL;
+                }
+                memcpy(out + o, local, llen);
+                o += llen;
+                i += plen;
+                replaced = 1;
+                break;
+            }
+        }
+        if (!replaced) {
+            if (o + 2 > cap) {
+                cap = cap * 2 + 2;
+                out = (char *)realloc(out, cap);
+                if (!out) return NULL;
+            }
+            out[o++] = line[i++];
+        }
+    }
+    {
+        size_t rest = strlen(line) - code_len;
+        if (o + rest + 1 > cap) {
+            cap = o + rest + 1;
+            out = (char *)realloc(out, cap);
+            if (!out) return NULL;
+        }
+        memcpy(out + o, line + code_len, rest);
+        o += rest;
+    }
+    out[o] = 0;
+    return out;
+}
+
+static int gpr_cache_clobber_mnemonic(const char *mn)
+{
+    static const char *const clobber[] = {
+        "call", "ret", "retf", "hlt", "iret", "iretw", "iretd", "iretq",
+        "mul", "imul", "div", "idiv", "pusha", "popa", "pushad", "popad",
+        "cpuid", "rdtsc", "rdtscp", "xlat", "xlatb", "cmpxchg", "cmpxchg8b",
+        "cmpxchg16b", "xadd", "movs", "movsb", "movsw", "movsd", "movsq",
+        "stos", "stosb", "stosw", "stosd", "stosq", "lods", "lodsb",
+        "lodsw", "lodsd", "lodsq", "scas", "scasb", "scasw", "scasd",
+        "scasq", "cmps", "cmpsb", "cmpsw", "cmpsd", "cmpsq", "rep",
+        "repe", "repz", "repne", "repnz", "ins", "insb", "insw", "insd",
+        "outs", "outsb", "outsw", "outsd", "in", "inb", "inw", "ind",
+        "out", "outb", "outw", "outd", "int", "int1", "int3", "into",
+        "syscall", "sysenter", "sysexit", "sysret", "rdmsr", "wrmsr",
+        "rdpmc", "xgetbv", "xsetbv", "xbegin", "xabort", "xend",
+        "invlpg", "invpcid", "invd", "wbinvd", "clts", "lmsw", "smsw",
+        "ltr", "str", "lldt", "sldt", "verr", "verw", "lar", "lsl",
+        "arpl", "clgi", "stgi", "skinit", "vmload", "vmmrun", "vmmsave",
+        "vmrun", "invlpga", "rdpkru", "wrpkru", "pconfig", "wrmsrns",
+        "urmsr", "umsr", "uiret", "testui", "clui", "stui", "senduipi",
+        "hreset", "seamops", "seamret", "seamcall", "tdcall", "tdret",
+        "encls", "enclu", "getsec", "vmread", "vmwrite", "vmlaunch",
+        "vmresume", "vmxoff", "vmcall", "vmfunc", "ud0", "ud1", "ud2"
+    };
+    size_t i;
+    for (i = 0; i < sizeof(clobber) / sizeof(clobber[0]); i++)
+        if (!strcmp(mn, clobber[i])) return 1;
+    if (mn[0] == 'j' && mn[1]) return 1;   /* jmp and every jcc */
+    if (!strncmp(mn, "loop", 4)) return 1;
+    return 0;
+}
+
+static int gpr_cache_barrier_line(const char *line)
+{
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p[0] == 'L' && p[1] == '_' && strchr(p, ':')) return 1;
+    if (strstr(p, "goto ") || strstr(p, "return") ||
+        strstr(p, "dispatch") || strstr(p, "RECOMP_TODO") ||
+        strstr(p, "HLE_") || strstr(p, "switch") ||
+        strstr(p, "case ") || strstr(p, "default:") ||
+        strstr(p, "break;") || strstr(p, "continue;") ||
+        strstr(p, "do {") || strstr(p, "while (") ||
+        strstr(p, "for (") || strstr(p, "else") ||
+        p[0] == '{' || p[0] == '}' || p[0] == '#')
+        return 1;
+    {
+        const char *cm = strstr(p, "/* ");
+        if (cm) {
+            const char *q = cm + 3;
+            while (*q && *q != ':') q++;
+            if (*q == ':') q++;
+            while (*q == ' ') q++;
+            {
+                char mn[32];
+                int n = 0;
+                while (*q && *q != ' ' && *q != '*' && n < 31) mn[n++] = *q++;
+                mn[n] = 0;
+                if (gpr_cache_clobber_mnemonic(mn)) return 1;
+            }
+            if (strstr(q, "rep ") || strstr(q, "rep;")) return 1;
+        }
+    }
+    return 0;
+}
+
+static int gpr_cache_is_set_write(const char *line, const char *p)
+{
+    static const char *const sets[] = { "SET8L(", "SET8H(", "SET16(" };
+    const char *q = p;
+    size_t i;
+    while (q > line && (q[-1] == ' ' || q[-1] == '\t')) q--;
+    for (i = 0; i < sizeof(sets) / sizeof(sets[0]); i++) {
+        size_t len = strlen(sets[i]);
+        size_t off = (size_t)(q - line);
+        if (off >= len && !strncmp(q - len, sets[i], len)) return 1;
+    }
+    return 0;
+}
+
+static void gpr_cache_scan_reg(const char *line, const char *reg,
+                               int *read, int *write, int *count)
+{
+    char pat[16];
+    const char *cm = strstr(line, "/*");
+    const char *end = cm ? cm : line + strlen(line);
+    const char *p = line;
+    size_t plen;
+    snprintf(pat, sizeof pat, "c->%s", reg);
+    plen = strlen(pat);
+    while (p < end && *p) {
+        if (!strncmp(p, pat, plen)) {
+            const char *q = p + plen;
+            int is_write = 0;
+            while (*q == ' ' || *q == '\t') q++;
+            if (q < end) {
+                if (q[0] == '=' && q[1] != '=') is_write = 1;
+                else if (q[0] == '+' && (q[1] == '+' || q[1] == '=')) is_write = 1;
+                else if (q[0] == '-' && (q[1] == '-' || q[1] == '=')) is_write = 1;
+                else if (q[0] == '*' && q[1] == '=') is_write = 1;
+                else if (q[0] == '/' && q[1] == '=') is_write = 1;
+                else if (q[0] == '%' && q[1] == '=') is_write = 1;
+                else if (q[0] == '&' && q[1] == '=') is_write = 1;
+                else if (q[0] == '|' && q[1] == '=') is_write = 1;
+                else if (q[0] == '^' && q[1] == '=') is_write = 1;
+                else if (q[0] == '<' && q[1] == '<' && q[2] == '=') is_write = 1;
+                else if (q[0] == '>' && q[1] == '>' && q[2] == '=') is_write = 1;
+            }
+            if (!is_write && gpr_cache_is_set_write(line, p)) is_write = 1;
+            if (is_write) *write = 1;
+            else *read = 1;
+            *count += 1;
+        }
+        p++;
+    }
+}
+
+static void gpr_cache_flush_run(char ***bv, size_t *bn, size_t *cap,
+                                char **run, size_t run_n)
+{
+    int used[7] = {0}, load[7] = {0}, flush[7] = {0}, count[7] = {0};
+    size_t i;
+    int r;
+    if (run_n == 0) return;
+    for (i = 0; i < run_n; i++) {
+        for (r = 0; r < 7; r++) {
+            int rd = 0, wr = 0, cnt = 0;
+            gpr_cache_scan_reg(run[i], gpr_cache_regs[r], &rd, &wr, &cnt);
+            count[r] += cnt;
+            if (rd) load[r] = 1;
+            if (wr) flush[r] = 1;
+        }
+    }
+    for (r = 0; r < 7; r++) {
+        if (count[r] < 2) {
+            used[r] = 0;
+            load[r] = 0;
+            flush[r] = 0;
+        } else {
+            used[r] = 1;
+        }
+    }
+    {
+        int any = 0;
+        for (r = 0; r < 7; r++) if (used[r]) any = 1;
+        if (!any) {
+            for (i = 0; i < run_n; i++) {
+                if (*bn >= *cap) {
+                    *cap = *cap * 2 + 16;
+                    *bv = (char **)realloc(*bv, *cap * sizeof(char *));
+                }
+                (*bv)[(*bn)++] = gpr_cache_strdup(run[i]);
+            }
+            return;
+        }
+    }
+    for (r = 0; r < 7; r++) if (load[r]) {
+        char buf[64];
+        if (*bn >= *cap) {
+            *cap = *cap * 2 + 16;
+            *bv = (char **)realloc(*bv, *cap * sizeof(char *));
+        }
+        snprintf(buf, sizeof buf, "    gpr_%s = c->%s;",
+                 gpr_cache_regs[r], gpr_cache_regs[r]);
+        (*bv)[(*bn)++] = gpr_cache_strdup(buf);
+    }
+    for (i = 0; i < run_n; i++) {
+        char *nl;
+        if (*bn >= *cap) {
+            *cap = *cap * 2 + 16;
+            *bv = (char **)realloc(*bv, *cap * sizeof(char *));
+        }
+        nl = gpr_cache_replace_line(run[i], used);
+        (*bv)[(*bn)++] = nl;
+    }
+    for (r = 0; r < 7; r++) if (flush[r]) {
+        char buf[64];
+        if (*bn >= *cap) {
+            *cap = *cap * 2 + 16;
+            *bv = (char **)realloc(*bv, *cap * sizeof(char *));
+        }
+        snprintf(buf, sizeof buf, "    c->%s = gpr_%s;",
+                 gpr_cache_regs[r], gpr_cache_regs[r]);
+        (*bv)[(*bn)++] = gpr_cache_strdup(buf);
+    }
+}
+
+static void gpr_cache_apply(char **out, size_t *out_len)
+{
+    size_t nlines, i, body_start = 0, body_end, bn = 0, bcap, run_n = 0;
+    char **lines, **bv, **run, **nv, *ns;
+    size_t nn = 0, nlen;
+    int used[7] = {0}, r;
+    if (!out || !*out) return;
+    lines = gpr_cache_split(*out, &nlines);
+    if (!lines) return;
+    body_end = nlines;
+    for (i = 0; i < nlines; i++) {
+        if (strchr(lines[i], '{')) { body_start = i + 1; break; }
+    }
+    for (i = nlines; i > body_start; i--) {
+        const char *t = lines[i - 1];
+        while (*t == ' ' || *t == '\t') t++;
+        if (*t == '}') { body_end = i - 1; break; }
+    }
+    bcap = (body_end - body_start) + 1;
+    if (bcap < 16) bcap = 16;
+    bv = (char **)malloc(bcap * sizeof(char *));
+    run = (char **)malloc(((body_end - body_start) + 1) * sizeof(char *));
+    if (!bv || !run) { free(bv); free(run); return; }
+    for (i = body_start; i < body_end; i++) {
+        if (gpr_cache_barrier_line(lines[i])) {
+            gpr_cache_flush_run(&bv, &bn, &bcap, run, run_n);
+            run_n = 0;
+            if (bn >= bcap) {
+                bcap = bcap * 2 + 16;
+                bv = (char **)realloc(bv, bcap * sizeof(char *));
+            }
+            bv[bn++] = gpr_cache_strdup(lines[i]);
+        } else {
+            run[run_n++] = lines[i];
+        }
+    }
+    gpr_cache_flush_run(&bv, &bn, &bcap, run, run_n);
+    free(run);
+    for (i = 0; i < bn; i++) {
+        for (r = 0; r < 7; r++) {
+            char pat[16];
+            snprintf(pat, sizeof pat, "gpr_%s", gpr_cache_regs[r]);
+            if (strstr(bv[i], pat)) used[r] = 1;
+        }
+    }
+    nv = (char **)malloc((body_start + bn + 8) * sizeof(char *));
+    if (!nv) { free(bv); return; }
+    for (i = 0; i < body_start; i++) nv[nn++] = gpr_cache_strdup(lines[i]);
+    for (r = 0; r < 7; r++) if (used[r]) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "    uint32_t gpr_%s;", gpr_cache_regs[r]);
+        nv[nn++] = gpr_cache_strdup(buf);
+    }
+    for (i = 0; i < bn; i++) nv[nn++] = bv[i];
+    if (body_end < nlines) nv[nn++] = gpr_cache_strdup(lines[body_end]);
+    ns = gpr_cache_join(nv, nn, &nlen);
+    for (i = 0; i < nn; i++) free(nv[i]);
+    free(nv);
+    for (i = 0; i < nlines; i++) free(lines[i]);
+    free(lines);
+    if (ns) {
+        free(*out);
+        *out = ns;
+        *out_len = nlen;
+    }
+    free(bv);
 }
 
 char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
@@ -1410,6 +2053,7 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
     int has_x87 = 0;
     uint8_t *flag_role = NULL;
     LfFlagFuse *flag_fuse = NULL;
+    uint8_t *flag_live_out = NULL;
 
     code = (uint8_t *)malloc(size ? size : 1);
     if (!code) return NULL;
@@ -1606,14 +2250,16 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
 
     if (L->flag_fusion && n > 1) {
         if (build_flag_plan(L, ins, n, labels, nlabels,
-                            &flag_role, &flag_fuse) < 0) {
+                            &flag_role, &flag_fuse, &flag_live_out) < 0) {
             flag_role = NULL;
             flag_fuse = NULL;
+            flag_live_out = NULL;
         }
     }
     L->flag_ins = ins;
     L->flag_role = flag_role;
     L->flag_fuse = flag_fuse;
+    L->flag_live_out = flag_live_out;
 
     /* ---- emit ---- */
     out_cap = 4096 + (size_t)n * 200;
@@ -1721,12 +2367,16 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
     out[out_len++] = '}';
     out[out_len] = 0;
 
+    if (L->gpr_cache) gpr_cache_apply(&out, &out_len);
+
     L->flag_ins = NULL;
     L->flag_current_index = 0;
     L->flag_role = NULL;
     L->flag_fuse = NULL;
+    L->flag_live_out = NULL;
     free(flag_role);
     free(flag_fuse);
+    free(flag_live_out);
     free(labels);
     free(ins);
     return out;

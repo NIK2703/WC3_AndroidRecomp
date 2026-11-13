@@ -310,7 +310,7 @@ static uint8_t live_out_of(const LfFlagInsn *in, const uint8_t *live, int n,
     return out;
 }
 
-static int producer_writes_af(int kind)
+int lf_flag_producer_af(int kind)
 {
     return kind == LF_FLAG_CMP || kind == LF_FLAG_ADD ||
            kind == LF_FLAG_SUB || kind == LF_FLAG_NEG ||
@@ -328,7 +328,8 @@ static int live_update(const LfFlagInsn *ins, uint8_t *live, int n, int i)
     return 1;
 }
 
-int lf_flag_plan(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out)
+int lf_flag_plan_ex(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out,
+                    uint8_t *live_out)
 {
     uint8_t *live;
     int *pred_head = NULL, *pred_next = NULL, *pred_src = NULL;
@@ -343,7 +344,8 @@ int lf_flag_plan(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out)
         if (ins[i].producer != LF_FLAG_NONE && ins[i].writes) have_producer = 1;
         if (ins[i].consumer != LF_CONS_NONE) have_consumer = 1;
     }
-    if (!have_producer || !have_consumer) return 0;
+    if (!have_producer) return 0;
+    if (!have_consumer && !live_out) return 0;
     live = (uint8_t *)calloc((size_t)n + 1, 1);
     pred_head = (int *)malloc(sizeof(int) * (size_t)n);
     pred_next = (int *)malloc(sizeof(int) * (size_t)n * 2);
@@ -412,6 +414,9 @@ int lf_flag_plan(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out)
     free(queue);
     free(queued);
 
+    if (live_out)
+        for (i = 0; i < n; i++) live_out[i] = live_out_of(ins, live, n, i);
+
     for (i = 0; i < n; i++) {
         int j;
         if (ins[i].producer == LF_FLAG_NONE || ins[i].writes == 0)
@@ -428,8 +433,13 @@ int lf_flag_plan(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out)
                 need = ins[j].cond_mask ? ins[j].cond_mask : ins[j].reads;
                 if (need & (uint8_t)~ins[i].writes) break;
                 mw = (uint8_t)(ins[i].writes |
-                               (producer_writes_af(kind) ? LF_FLAG_AF : 0));
-                if (ins[j].consumer == LF_CONS_SETCC ||
+                               (lf_flag_producer_af(kind) ? LF_FLAG_AF : 0));
+                if (ins[j].consumer == LF_CONS_LAHF) {
+                    /* Only the FP compare has a direct AH expression; an
+                     * integer producer would need the original helper plus a
+                     * LAHF, which is what the unfused path already emits. */
+                    if (kind != LF_FLAG_FP_CMP) break;
+                } else if (ins[j].consumer == LF_CONS_SETCC ||
                     ins[j].consumer == LF_CONS_CMOV) {
                     uint8_t after = live_out_of(ins, live, n, j);
                     if (after & mw) break;
@@ -445,7 +455,8 @@ int lf_flag_plan(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out)
                     mat_taken = nt;
                     mat_fall = nff;
                 }
-                if (sz != 1 && sz != 2 && sz != 4) break;
+                if (kind != LF_FLAG_FP_CMP &&
+                    sz != 1 && sz != 2 && sz != 4) break;
                 out[nf].producer = i;
                 out[nf].consumer = j;
                 out[nf].kind = kind;
@@ -468,4 +479,9 @@ int lf_flag_plan(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out)
     }
     free(live);
     return nf;
+}
+
+int lf_flag_plan(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out)
+{
+    return lf_flag_plan_ex(ins, n, out, max_out, NULL);
 }

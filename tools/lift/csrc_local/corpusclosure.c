@@ -68,6 +68,7 @@ typedef struct {
     int closure_pass;
     int unknown_count;
     int no_terminal_count;
+    int df_count;
     char external[256];
 } Module;
 
@@ -432,14 +433,14 @@ static int load_module_report(Module *m)
 
 static int write_report(Opts *o, const char *corpus_sha,
                         int passed, int total_def, int total_targets,
-                        int total_residual)
+                        int total_residual, int total_df)
 {
     FILE *f = fopen(o->report, "w");
     int i;
     if (!f) return -1;
     fprintf(f, "{\n  \"schema\": 1,\n  \"published\": false,\n");
     fprintf(f, "  \"corpus_sha256\": \"%s\",\n", corpus_sha);
-    fprintf(f, "  \"generator\": \"wc3lift\",\n  \"lift_rev\": 2,\n");
+    fprintf(f, "  \"generator\": \"wc3lift\",\n  \"lift_rev\": 4,\n");
     fprintf(f, "  \"seed_mode\": \"block\",\n");
     fprintf(f, "  \"max_functions\": %ld,\n", o->max_functions);
     fprintf(f, "  \"modules\": [\n");
@@ -452,11 +453,12 @@ static int write_report(Opts *o, const char *corpus_sha,
                 "\"seed_entries\": %d, \"rounds\": %d, "
                 "\"definitions\": %d, \"constant_targets\": %d, "
                 "\"residual_violations\": %d, \"in_image_unknown_target\": %d, "
-                "\"report\": ", m->sha, m->verdict_pass ? "pass" : "fail",
+                "\"df_instructions\": %d, \"report\": ", m->sha, m->verdict_pass ? "pass" : "fail",
                 m->closure_pass ? "pass" : "fail",
                 m->residual == 0 ? "pass" : "fail",
                 m->seed_entries, m->rounds, m->definitions,
-                m->constant_targets, m->residual, m->in_image_unknown);
+                m->constant_targets, m->residual, m->in_image_unknown,
+                m->df_count);
         json_str(f, m->report);
         fprintf(f, "}%s\n", i + 1 < o->nmod ? "," : "");
     }
@@ -471,8 +473,9 @@ static int write_report(Opts *o, const char *corpus_sha,
     }
     fprintf(f, "]},\n  \"totals\": {\"modules\": %d, \"passed\": %d, "
             "\"definitions\": %d, \"constant_targets\": %d, "
-            "\"residual_violations\": %d},\n",
-            o->nmod, passed, total_def, total_targets, total_residual);
+            "\"residual_violations\": %d, \"df_instructions\": %d},\n",
+            o->nmod, passed, total_def, total_targets, total_residual,
+            total_df);
     {
         int closure_ok = 0, lint_ok = 0, first = 1;
         for (i = 0; i < o->nmod; i++) {
@@ -513,13 +516,13 @@ static int write_report(Opts *o, const char *corpus_sha,
  * hash and the per-module translation units.  CMake reads it instead of
  * hard-coding module names or prefixes. */
 static int write_manifest(Opts *o, const char *corpus_sha, int passed,
-                          int total_def, int total_residual)
+                          int total_def, int total_residual, int total_df)
 {
     FILE *f = fopen(o->manifest, "w");
     int i, j;
     if (!f) return -1;
     fprintf(f, "{\n  \"schema\": 1,\n  \"generator\": \"wc3lift\",\n");
-    fprintf(f, "  \"lift_rev\": 2,\n  \"seed_mode\": \"block\",\n");
+    fprintf(f, "  \"lift_rev\": 4,\n  \"seed_mode\": \"block\",\n");
     fprintf(f, "  \"corpus_sha256\": \"%s\",\n", corpus_sha);
     fprintf(f, "  \"merged\": {\"list\": "); json_str(f, o->merged_list);
     fprintf(f, ", \"funcs\": "); json_str(f, o->merged_funcs);
@@ -546,8 +549,9 @@ static int write_manifest(Opts *o, const char *corpus_sha, int passed,
         fprintf(f, "}%s\n", i + 1 < o->nmod ? "," : "");
     }
     fprintf(f, "  ],\n  \"totals\": {\"modules\": %d, \"passed\": %d, "
-            "\"definitions\": %d, \"residual_violations\": %d},\n",
-            o->nmod, passed, total_def, total_residual);
+            "\"definitions\": %d, \"residual_violations\": %d, "
+            "\"df_instructions\": %d},\n",
+            o->nmod, passed, total_def, total_residual, total_df);
     fprintf(f, "  \"verdict\": \"%s\"\n}\n",
             (passed == o->nmod && total_residual == 0 && o->merged_ok &&
              o->merged_dups == 0 && o->merged_entries == total_def)
@@ -563,6 +567,7 @@ int main(int argc, char **argv)
     char workdir[DIR_MAX_PATH], tmp[DIR_MAX_PATH], corpus_sha[65] = "";
     char *verify_log_text, *hash_text;
     int i, rc, passed = 0, total_def = 0, total_targets = 0, total_residual = 0;
+    int total_df = 0;
 
     parse_args(argc, argv, &o);
     /* sanity: required binaries and files exist */
@@ -595,7 +600,7 @@ int main(int argc, char **argv)
         join_path(log, sizeof log, "%s/00_corpus_verify.log", o.out_root);
         rc = run_tool(log,
                       "\"%s/corpus.exe\" verify --inputs \"%s\" --root \"%s\" "
-                      "--generator wc3lift --lift-rev 2 --layout-file \"%s\" "
+                      "--generator wc3lift --lift-rev 4 --layout-file \"%s\" "
                       "--expected \"%s\"",
                       o.tools, o.input_list, o.root, o.layout_file, o.corpus_hash);
         verify_log_text = read_text(log);
@@ -677,11 +682,28 @@ int main(int argc, char **argv)
         if (sha256_file(m->seed_c, m->seed_sha) != 0) m->seed_sha[0] = 0;
         if (sha256_file(m->closed_c, m->closed_sha) != 0) m->closed_sha[0] = 0;
         if (sha256_file(m->list_h, m->list_sha) != 0) m->list_sha[0] = 0;
+        /* A.25 boundary audit: the corpus assumes DF=0.  Count `std`
+         * instructions so a non-zero value is visible in the report. */
+        m->df_count = 0;
+        {
+            FILE *df = fopen(m->closed_c, "rb");
+            if (df) {
+                char buf[65536];
+                size_t got;
+                while ((got = fread(buf, 1, sizeof buf, df)) > 0) {
+                    size_t k;
+                    for (k = 0; k + 5 <= got; k++)
+                        if (!memcmp(buf + k, ": std", 5)) m->df_count++;
+                }
+                fclose(df);
+            }
+        }
         m->present = 1;
         if (m->verdict_pass) passed++;
         if (m->residual > 0) total_residual += m->residual;
         total_def += m->definitions;
         total_targets += m->constant_targets;
+        total_df += m->df_count;
         printf("corpusclosure: %-16s %s (%d definitions, %d targets, %d residual)\n",
                m->name, m->verdict_pass ? "pass" : "FAIL",
                m->definitions, m->constant_targets, m->residual);
@@ -724,12 +746,13 @@ int main(int argc, char **argv)
                     "corpusclosure: merged list has %d entries, module sum is %d\n",
                     o.merged_entries, total_def);
     }
-    if (write_manifest(&o, corpus_sha, passed, total_def, total_residual) != 0) {
+    if (write_manifest(&o, corpus_sha, passed, total_def, total_residual,
+                       total_df) != 0) {
         fprintf(stderr, "corpusclosure: cannot write %s\n", o.manifest);
         return 1;
     }
     if (write_report(&o, corpus_sha, passed, total_def, total_targets,
-                     total_residual) != 0) {
+                     total_residual, total_df) != 0) {
         fprintf(stderr, "corpusclosure: cannot write %s\n", o.report);
         return 1;
     }
@@ -737,9 +760,10 @@ int main(int argc, char **argv)
         int ok = passed == o.nmod && total_residual == 0 && o.merged_ok &&
                  o.merged_dups == 0 && o.merged_entries == total_def;
         printf("corpusclosure: %s (%d/%d modules, %d definitions, %d targets, "
-               "%d residual, %d merged) -> %s\n",
+               "%d residual, %d df, %d merged) -> %s\n",
                ok ? "pass" : "fail", passed, o.nmod, total_def,
-               total_targets, total_residual, o.merged_entries, o.report);
+               total_targets, total_residual, total_df, o.merged_entries,
+               o.report);
         return ok ? 0 : 1;
     }
 }

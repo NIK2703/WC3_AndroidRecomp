@@ -108,6 +108,16 @@ int lf_lift_files(const char *module, const char *funcs_path, const char *out_c,
         const char *s = getenv("WC3_LIFT_FLAG_FUSION");
         if (s && !strcmp(s, "0")) L.flag_fusion = 0;
     }
+    L.flagless = 1;
+    {
+        const char *s = getenv("WC3_LIFT_FLAGLESS");
+        if (s && !strcmp(s, "0")) L.flagless = 0;
+    }
+    L.gpr_cache = 0;
+    {
+        const char *s = getenv("WC3_LIFT_GPR_CACHE");
+        if (s && strcmp(s, "0")) L.gpr_cache = 1;
+    }
     if (csg_open_x86(&L.h) != 0) { pe_close(&pe); return 1; }
     load_relocs(&L, module);
     if (verbose)

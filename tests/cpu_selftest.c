@@ -259,6 +259,18 @@ int main(void)
     eq("ucomiss clears sf", c.sf, 0u);
     eq("ucomiss clears af", c.af, 0u);
 
+    /* A.8: LAHF after the compare must produce the same AH as the original
+     * sse_compare + LAHF pair, including the unordered triple. */
+    c.eax = 0;
+    sse_compare_lahf(&c, 2.0, 1.0);
+    eq("sse_compare_lahf 2>1", R8H(c.eax), 2u);
+    sse_compare_lahf(&c, 1.0, 2.0);
+    eq("sse_compare_lahf 1<2", R8H(c.eax), 3u);
+    sse_compare_lahf(&c, 1.0, 1.0);
+    eq("sse_compare_lahf 1==1", R8H(c.eax), 0x42u);
+    sse_compare_lahf(&c, NAN, 1.0);
+    eq("sse_compare_lahf NaN", R8H(c.eax), 0x47u);
+
     /* min/max are "if (dst OP src) dst else src", so the second operand wins
      * every tie. These four are the ones fmin/fmax get wrong.
      *

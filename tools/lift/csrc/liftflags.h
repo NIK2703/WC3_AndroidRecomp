@@ -41,14 +41,16 @@ typedef enum {
     LF_FLAG_DEC,
     LF_FLAG_NEG,
     LF_FLAG_ADC,
-    LF_FLAG_SBB
+    LF_FLAG_SBB,
+    LF_FLAG_FP_CMP
 } LfFlagKind;
 
 typedef enum {
     LF_CONS_NONE = 0,
     LF_CONS_JCC,
     LF_CONS_SETCC,
-    LF_CONS_CMOV
+    LF_CONS_CMOV,
+    LF_CONS_LAHF
 } LfFlagConsumer;
 
 /* One instruction as seen by the flag planner.  succ1/succ2 are instruction
@@ -93,9 +95,18 @@ int lf_flag_cond(char *buf, size_t cap, const char *cc, LfFlagKind kind,
                  int sz, const char *fa, const char *fb, const char *fr,
                  const char *ffull, const char *fcin);
 
+/* True when the producer kind writes AF (the original helper does). */
+int lf_flag_producer_af(int kind);
+
 /* Plan a function-sized straight-line/CFG region.  Returns the number of
  * fused pairs, or -1 when the flag liveness did not converge (the caller must
- * then leave the function unchanged). */
+ * then leave the function unchanged).  When live_out is non-NULL it receives
+ * the live-out mask of every instruction, which the lifter uses to emit
+ * flagless arithmetic when no written flag is observable. */
+int lf_flag_plan_ex(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out,
+                    uint8_t *live_out);
+
+/* Wrapper without liveness export. */
 int lf_flag_plan(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out);
 
 #endif /* WC3_LIFTFLAGS_H */

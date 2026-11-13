@@ -679,28 +679,10 @@ Emit lf_sse(Lifter *L, cs_insn *insn)
 
     if (!strcmp(m, "unpcklpd") || !strcmp(m, "unpckhpd") ||
         !strcmp(m, "unpcklps") || !strcmp(m, "unpckhps")) {
-        char *src = lf_xm(L, insn, s);
         int xd = lf_xmm_index(L, d);
-        const char *tail3 = m + strlen(m) - 3;
-        int lo = !strcmp(tail3, "lpd") || !strcmp(tail3, "lps");
-        if (!strcmp(m + strlen(m) - 2, "pd")) {
-            int a = lo ? 0 : 1, b = lo ? 0 : 1;
-            lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d];"
-                                " c->xmm[%d].u64[0] = _d.u64[%d];"
-                                " c->xmm[%d].u64[1] = _s.u64[%d]; }",
-                                src, xd, xd, a, xd, b));
-            return e;
-        }
-        {
-            int a = lo ? 0 : 2, b = lo ? 1 : 3;
-            lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d];"
-                                " c->xmm[%d].u32[0] = _d.u32[%d];"
-                                " c->xmm[%d].u32[1] = _s.u32[%d];"
-                                " c->xmm[%d].u32[2] = _d.u32[%d];"
-                                " c->xmm[%d].u32[3] = _s.u32[%d]; }",
-                                src, xd, xd, a, xd, a, xd, b, xd, b));
-            return e;
-        }
+        lf_push(&e, lf_afmt("{ XMM _s = %s; sse_%s(&c->xmm[%d], &_s); }",
+                            lf_xm(L, insn, s), m, xd));
+        return e;
     }
 
     if (!strcmp(m, "movd")) {
@@ -743,21 +725,18 @@ Emit lf_sse(Lifter *L, cs_insn *insn)
     }
 
     if (in_list(m, SSE_BITWISE_NAMES, sizeof SSE_BITWISE_NAMES / sizeof SSE_BITWISE_NAMES[0])) {
-        const char *op;
+        const char *fn;
         int n = lf_xmm_index(L, d);
-        char *lanes;
-        if (!strcmp(m, "andnps") || !strcmp(m, "andnpd") || !strcmp(m, "pandn")) {
-            lanes = lf_afmt("c->xmm[%d].u64[0] = ~c->xmm[%d].u64[0] & _s.u64[0];"
-                            " c->xmm[%d].u64[1] = ~c->xmm[%d].u64[1] & _s.u64[1];",
-                            n, n, n, n);
-        } else {
-            if (!strcmp(m, "andps") || !strcmp(m, "andpd") || !strcmp(m, "pand")) op = "&";
-            else if (!strcmp(m, "orps") || !strcmp(m, "orpd") || !strcmp(m, "por")) op = "|";
-            else op = "^";
-            lanes = lf_afmt("c->xmm[%d].u64[0] %s= _s.u64[0]; c->xmm[%d].u64[1] %s= _s.u64[1];",
-                            n, op, n, op);
-        }
-        lf_push(&e, lf_afmt("{ XMM _s = %s; %s }", lf_xm(L, insn, s), lanes));
+        if (!strcmp(m, "andnps") || !strcmp(m, "andnpd") || !strcmp(m, "pandn"))
+            fn = "sse_pandn";
+        else if (!strcmp(m, "andps") || !strcmp(m, "andpd") || !strcmp(m, "pand"))
+            fn = "sse_pand";
+        else if (!strcmp(m, "orps") || !strcmp(m, "orpd") || !strcmp(m, "por"))
+            fn = "sse_por";
+        else
+            fn = "sse_pxor";
+        lf_push(&e, lf_afmt("{ XMM _s = %s; %s(&c->xmm[%d], &_s); }",
+                            lf_xm(L, insn, s), fn, n));
         return e;
     }
 
@@ -767,16 +746,8 @@ Emit lf_sse(Lifter *L, cs_insn *insn)
         int bits, lanes;
         if (pint_info(m, &op, &bits, &lanes)) {
             int xd = lf_xmm_index(L, d);
-            char *sets;
-            size_t cap = (size_t)lanes * 128 + 32, o = 0;
-            sets = (char *)malloc(cap);
-            for (i = 0; i < lanes; i++)
-                o += (size_t)snprintf(sets + o, cap - o,
-                    "c->xmm[%d].u%d[%d] = (uint%d_t)(_d.u%d[%d] %s _s.u%d[%d]);",
-                    xd, bits, i, bits, bits, i, op, bits, i);
-            lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; %s }",
-                                lf_xm(L, insn, s), xd, sets));
-            free(sets);
+            lf_push(&e, lf_afmt("{ XMM _s = %s; sse_%s(&c->xmm[%d], &_s); }",
+                                lf_xm(L, insn, s), m, xd));
             return e;
         }
     }
@@ -784,17 +755,9 @@ Emit lf_sse(Lifter *L, cs_insn *insn)
         const char *op, *helper;
         int bits;
         if (psat_info(m, &op, &bits, &helper)) {
-            int xd = lf_xmm_index(L, d), n = 128 / bits;
-            const char *lane = strstr(helper, "_i") ? "i" : "u";
-            char *buf = (char *)malloc((size_t)n * 160 + 32);
-            size_t o = 0;
-            for (i = 0; i < n; i++)
-                o += (size_t)snprintf(buf + o, (size_t)n * 160 + 32 - o,
-                    "c->xmm[%d].%s%d[%d] = %s((int32_t)_d.%s%d[%d] %s (int32_t)_s.%s%d[%d]);",
-                    xd, lane, bits, i, helper, lane, bits, i, op, lane, bits, i);
-            lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; %s }",
-                                lf_xm(L, insn, s), xd, buf));
-            free(buf);
+            int xd = lf_xmm_index(L, d);
+            lf_push(&e, lf_afmt("{ XMM _s = %s; sse_%s(&c->xmm[%d], &_s); }",
+                                lf_xm(L, insn, s), m, xd));
             return e;
         }
     }
@@ -802,134 +765,55 @@ Emit lf_sse(Lifter *L, cs_insn *insn)
         const char *op, *sgn;
         int bits;
         if (pcmp_info(m, &op, &bits, &sgn)) {
-            int xd = lf_xmm_index(L, d), n = 128 / bits;
-            unsigned ones = (bits == 32) ? 0xFFFFFFFFu : ((1u << bits) - 1u);
-            char *buf = (char *)malloc((size_t)n * 200 + 32);
-            size_t o = 0;
-            for (i = 0; i < n; i++)
-                o += (size_t)snprintf(buf + o, (size_t)n * 200 + 32 - o,
-                    "c->xmm[%d].u%d[%d] = (_d.%s%d[%d] %s _s.%s%d[%d]) ? (uint%d_t)0x%Xu : 0u;",
-                    xd, bits, i, sgn, bits, i, op, sgn, bits, i, bits, ones);
-            lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; %s }",
-                                lf_xm(L, insn, s), xd, buf));
-            free(buf);
+            int xd = lf_xmm_index(L, d);
+            lf_push(&e, lf_afmt("{ XMM _s = %s; sse_%s(&c->xmm[%d], &_s); }",
+                                lf_xm(L, insn, s), m, xd));
             return e;
         }
     }
-    if (!strcmp(m, "pmullw")) {
+    if (!strcmp(m, "pmullw") || !strcmp(m, "pmulhw") || !strcmp(m, "pmaddwd")) {
         int xd = lf_xmm_index(L, d);
-        char *buf = (char *)malloc(8 * 128 + 32);
-        size_t o = 0;
-        for (i = 0; i < 8; i++)
-            o += (size_t)snprintf(buf + o, 8 * 128 + 32 - o,
-                "c->xmm[%d].u16[%d] = (uint16_t)((int32_t)_d.i16[%d] * (int32_t)_s.i16[%d]);",
-                xd, i, i, i);
-        lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; %s }", lf_xm(L, insn, s), xd, buf));
-        free(buf);
-        return e;
-    }
-    if (!strcmp(m, "pmulhw")) {
-        int xd = lf_xmm_index(L, d);
-        char *buf = (char *)malloc(8 * 140 + 32);
-        size_t o = 0;
-        for (i = 0; i < 8; i++)
-            o += (size_t)snprintf(buf + o, 8 * 140 + 32 - o,
-                "c->xmm[%d].i16[%d] = (int16_t)(((int32_t)_d.i16[%d] * (int32_t)_s.i16[%d]) >> 16);",
-                xd, i, i, i);
-        lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; %s }", lf_xm(L, insn, s), xd, buf));
-        free(buf);
-        return e;
-    }
-    if (!strcmp(m, "pmaddwd")) {
-        int xd = lf_xmm_index(L, d);
-        char *buf = (char *)malloc(4 * 220 + 32);
-        size_t o = 0;
-        for (i = 0; i < 4; i++)
-            o += (size_t)snprintf(buf + o, 4 * 220 + 32 - o,
-                "c->xmm[%d].i32[%d] = (int32_t)_d.i16[%d] * (int32_t)_s.i16[%d]"
-                " + (int32_t)_d.i16[%d] * (int32_t)_s.i16[%d];",
-                xd, i, 2 * i, 2 * i, 2 * i + 1, 2 * i + 1);
-        lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; %s }", lf_xm(L, insn, s), xd, buf));
-        free(buf);
+        lf_push(&e, lf_afmt("{ XMM _s = %s; sse_%s(&c->xmm[%d], &_s); }",
+                            lf_xm(L, insn, s), m, xd));
         return e;
     }
     if (!strcmp(m, "packsswb") || !strcmp(m, "packuswb") || !strcmp(m, "packssdw")) {
-        int bits = !strcmp(m, "packssdw") ? 32 : 16;
-        const char *helper = !strcmp(m, "packsswb") ? "sse_sat_i8" :
-                             !strcmp(m, "packuswb") ? "sse_sat_u8" : "sse_sat_i16";
-        const char *sgn = "i";
-        int half = 128 / bits, out = bits / 2, xd = lf_xmm_index(L, d);
-        const char *lane = strstr(helper, "_u") ? "u" : "i";
-        char *buf = (char *)malloc(16 * 160 + 32);
-        size_t o = 0;
-        int pass, j;
-        for (pass = 0; pass < 2; pass++) {
-            const char *src = pass ? "_s" : "_d";
-            for (j = 0; j < half; j++)
-                o += (size_t)snprintf(buf + o, 16 * 160 + 32 - o,
-                    "c->xmm[%d].%s%d[%d] = %s((int32_t)%s.%s%d[%d]);",
-                    xd, lane, out, j + (pass ? half : 0), helper, src, sgn, bits, j);
-        }
-        lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; %s }", lf_xm(L, insn, s), xd, buf));
-        free(buf);
+        int xd = lf_xmm_index(L, d);
+        lf_push(&e, lf_afmt("{ XMM _s = %s; sse_%s(&c->xmm[%d], &_s); }",
+                            lf_xm(L, insn, s), m, xd));
         return e;
     }
     if (!strncmp(m, "punpck", 6)) {
-        int bits = 0, hi = 0, n, base, xd = lf_xmm_index(L, d);
-        char *buf;
-        size_t o = 0;
-        if (!strcmp(m, "punpcklbw")) { bits = 8; hi = 0; }
-        else if (!strcmp(m, "punpcklwd")) { bits = 16; hi = 0; }
-        else if (!strcmp(m, "punpckldq")) { bits = 32; hi = 0; }
-        else if (!strcmp(m, "punpcklqdq")) { bits = 64; hi = 0; }
-        else if (!strcmp(m, "punpckhbw")) { bits = 8; hi = 1; }
-        else if (!strcmp(m, "punpckhwd")) { bits = 16; hi = 1; }
-        else if (!strcmp(m, "punpckhdq")) { bits = 32; hi = 1; }
-        else if (!strcmp(m, "punpckhqdq")) { bits = 64; hi = 1; }
+        int bits = 0;
+        if (!strcmp(m, "punpcklbw")) bits = 1;
+        else if (!strcmp(m, "punpcklwd")) bits = 1;
+        else if (!strcmp(m, "punpckldq")) bits = 1;
+        else if (!strcmp(m, "punpcklqdq")) bits = 1;
+        else if (!strcmp(m, "punpckhbw")) bits = 1;
+        else if (!strcmp(m, "punpckhwd")) bits = 1;
+        else if (!strcmp(m, "punpckhdq")) bits = 1;
+        else if (!strcmp(m, "punpckhqdq")) bits = 1;
         if (bits) {
-            n = 128 / bits;
-            base = hi ? n / 2 : 0;
-            buf = (char *)malloc((size_t)(n / 2) * 120 + 32);
-            for (i = 0; i < n / 2; i++)
-                o += (size_t)snprintf(buf + o, (size_t)(n / 2) * 120 + 32 - o,
-                    "_t.u%d[%d] = _d.u%d[%d]; _t.u%d[%d] = _s.u%d[%d];",
-                    bits, 2 * i, bits, base + i, bits, 2 * i + 1, bits, base + i);
-            lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; XMM _t; %s c->xmm[%d] = _t; }",
-                                lf_xm(L, insn, s), xd, buf, xd));
-            free(buf);
+            int xd = lf_xmm_index(L, d);
+            lf_push(&e, lf_afmt("{ XMM _s = %s; sse_%s(&c->xmm[%d], &_s); }",
+                                lf_xm(L, insn, s), m, xd));
             return e;
         }
     }
 
     if (!strcmp(m, "pmovmskb") || !strcmp(m, "movmskps") || !strcmp(m, "movmskpd")) {
-        const char *lane = !strcmp(m, "pmovmskb") ? "u8" : !strcmp(m, "movmskps") ? "u32" : "u64";
-        int n = !strcmp(m, "pmovmskb") ? 16 : !strcmp(m, "movmskps") ? 4 : 2;
-        int top = !strcmp(m, "pmovmskb") ? 7 : !strcmp(m, "movmskps") ? 31 : 63;
-        char *bits = (char *)malloc((size_t)n * 80 + 32);
-        size_t o = 0;
-        for (i = 0; i < n; i++) {
-            if (i) o += (size_t)snprintf(bits + o, (size_t)n * 80 + 32 - o, " | ");
-            o += (size_t)snprintf(bits + o, (size_t)n * 80 + 32 - o,
-                "(uint32_t)((_s.%s[%d] >> %d) & 1u) << %d", lane, i, top, i);
-        }
+        const char *fn = !strcmp(m, "pmovmskb") ? "sse_pmovmskb" :
+                         !strcmp(m, "movmskps") ? "sse_movmskps" : "sse_movmskpd";
         lf_push(&e, lf_afmt("{ XMM _s = %s; %s }", lf_xm(L, insn, s),
-                            lf_dst_write(L, insn, d, bits)));
-        free(bits);
+                            lf_dst_write(L, insn, d, lf_afmt("%s(&_s)", fn))));
         return e;
     }
 
     if (!strcmp(m, "pshuflw") || !strcmp(m, "pshufhw")) {
         int imm = nops > 2 ? (int)OP(insn, 2)->imm : 0;
-        int hi = !strcmp(m, "pshufhw");
-        int xd = lf_xmm_index(L, d), base = hi ? 4 : 0, keep = hi ? 0 : 1;
-        char *buf = (char *)malloc(4 * 120 + 32);
-        size_t o = 0;
-        for (i = 0; i < 4; i++)
-            o += (size_t)snprintf(buf + o, 4 * 120 + 32 - o,
-                "c->xmm[%d].u16[%d] = _s.u16[%d];", xd, base + i, base + ((imm >> (2 * i)) & 3));
-        lf_push(&e, lf_afmt("{ XMM _s = %s; c->xmm[%d].u64[%d] = _s.u64[%d]; %s }",
-                            lf_xm(L, insn, s), xd, keep, keep, buf));
-        free(buf);
+        int xd = lf_xmm_index(L, d);
+        lf_push(&e, lf_afmt("{ XMM _s = %s; sse_%s(&c->xmm[%d], &_s, %du); }",
+                            lf_xm(L, insn, s), m, xd, (unsigned)imm));
         return e;
     }
 
@@ -943,10 +827,8 @@ Emit lf_sse(Lifter *L, cs_insn *insn)
 
     if (!strcmp(m, "movlhps") || !strcmp(m, "movhlps")) {
         int xd = lf_xmm_index(L, d);
-        int lane = !strcmp(m, "movlhps") ? 1 : 0;
-        int sl = !strcmp(m, "movlhps") ? 0 : 1;
-        lf_push(&e, lf_afmt("{ XMM _s = %s; c->xmm[%d].u64[%d] = _s.u64[%d]; }",
-                            lf_xm(L, insn, s), xd, lane, sl));
+        lf_push(&e, lf_afmt("{ XMM _s = %s; sse_%s(&c->xmm[%d], &_s); }",
+                            lf_xm(L, insn, s), m, xd));
         return e;
     }
 
@@ -965,49 +847,34 @@ Emit lf_sse(Lifter *L, cs_insn *insn)
 
     /* ---- packed shifts ---- */
     if (in_list(m, SSE_SHIFT_NAMES, sizeof SSE_SHIFT_NAMES / sizeof SSE_SHIFT_NAMES[0])) {
-        int bits = 0, arith = 0;
-        const char *lane = "<<";
-        int xd = lf_xmm_index(L, d), n;
-        char *cnt, *body;
-        if (!strcmp(m, "psllw")) { lane = "<<"; bits = 16; }
-        else if (!strcmp(m, "pslld")) { lane = "<<"; bits = 32; }
-        else if (!strcmp(m, "psllq")) { lane = "<<"; bits = 64; }
-        else if (!strcmp(m, "psrlw")) { lane = ">>"; bits = 16; }
-        else if (!strcmp(m, "psrld")) { lane = ">>"; bits = 32; }
-        else if (!strcmp(m, "psrlq")) { lane = ">>"; bits = 64; }
-        else if (!strcmp(m, "psraw")) { lane = ">>"; bits = 16; arith = 1; }
-        else { lane = ">>"; bits = 32; arith = 1; }
+        int xd = lf_xmm_index(L, d);
+        char *cnt;
         if (s->type == X86_OP_IMM)
             cnt = lf_afmt("unsigned _n = %uu;", (unsigned)(s->imm & 0xFF));
         else
             cnt = lf_afmt("XMM _s = %s; unsigned _n = _s.u64[0] > 255u ? 255u : (unsigned)_s.u64[0];",
                           lf_xm(L, insn, s));
-        n = 128 / bits;
-        if (arith)
-            body = lf_afmt("for (_i = 0; _i < %d; _i++) c->xmm[%d].i%d[_i] >>= (_n > %du ? %du : _n);",
-                           n, xd, bits, bits - 1, bits - 1);
-        else
-            body = lf_afmt("for (_i = 0; _i < %d; _i++) c->xmm[%d].u%d[_i] = _n > %du ? 0 : (uint%d_t)(c->xmm[%d].u%d[_i] %s _n);",
-                           n, xd, bits, bits - 1, bits, xd, bits, lane);
-        lf_push(&e, lf_afmt("{ %s int _i; %s }", cnt, body));
+        lf_push(&e, lf_afmt("{ %s sse_%s(&c->xmm[%d], _n); }", cnt, m, xd));
         return e;
     }
 
     if (!strcmp(m, "pslldq") || !strcmp(m, "psrldq")) {
         int xd = lf_xmm_index(L, d);
         int k = (int)(s->imm & 0xFF);
-        char *pick;
         if (k > 16) k = 16;
-        if (!strcmp(m, "pslldq"))
-            pick = lf_afmt("(_i >= %d) ? c->xmm[%d].u8[_i - %d] : 0", k, xd, k);
-        else
-            pick = lf_afmt("(_i + %d < 16) ? c->xmm[%d].u8[_i + %d] : 0", k, xd, k);
-        lf_push(&e, lf_afmt("{ XMM _t; int _i; for (_i = 0; _i < 16; _i++) _t.u8[_i] = %s;"
-                            " c->xmm[%d] = _t; }", pick, xd));
+        lf_push(&e, lf_afmt("sse_%s(&c->xmm[%d], %du);", m, xd, (unsigned)k));
         return e;
     }
 
-    if (!strcmp(m, "shufps") || !strcmp(m, "shufpd") || !strcmp(m, "pshufd")) {
+    if (!strcmp(m, "pshufd")) {
+        int imm = nops > 2 ? (int)OP(insn, 2)->imm : 0;
+        int xd = lf_xmm_index(L, d);
+        lf_push(&e, lf_afmt("{ XMM _s = %s; sse_pshufd(&c->xmm[%d], &_s, %du); }",
+                            lf_xm(L, insn, s), xd, (unsigned)imm));
+        return e;
+    }
+
+    if (!strcmp(m, "shufps") || !strcmp(m, "shufpd")) {
         int imm = nops > 2 ? (int)OP(insn, 2)->imm : 0;
         int xd = lf_xmm_index(L, d);
         char *buf = (char *)malloc(4 * 120 + 32);
@@ -1016,15 +883,11 @@ Emit lf_sse(Lifter *L, cs_insn *insn)
             o += (size_t)snprintf(buf + o, 4 * 120 + 32 - o,
                 "c->xmm[%d].f64[0] = _d.f64[%d]; c->xmm[%d].f64[1] = _s.f64[%d];",
                 xd, imm & 1, xd, (imm >> 1) & 1);
-        } else if (!strcmp(m, "shufps")) {
+        } else {
             for (i = 0; i < 4; i++)
                 o += (size_t)snprintf(buf + o, 4 * 120 + 32 - o,
                     "c->xmm[%d].u32[%d] = %s.u32[%d];", xd, i, i < 2 ? "_d" : "_s",
                     (imm >> (2 * i)) & 3);
-        } else {
-            for (i = 0; i < 4; i++)
-                o += (size_t)snprintf(buf + o, 4 * 120 + 32 - o,
-                    "c->xmm[%d].u32[%d] = _s.u32[%d];", xd, i, (imm >> (2 * i)) & 3);
         }
         lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; %s }", lf_xm(L, insn, s), xd, buf));
         free(buf);

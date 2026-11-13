@@ -43,10 +43,13 @@ typedef struct {
     int block_mode;             /* WC3_LIFT_BLOCK=1 */
     int x87_top;                /* compile-time virtual x87 top, 0..7 */
     int flag_fusion;            /* WC3_LIFT_FLAG_FUSION != "0" */
+    int flagless;               /* WC3_LIFT_FLAGLESS != "0" */
+    int gpr_cache;              /* WC3_LIFT_GPR_CACHE != "0" */
     const void *flag_ins;       /* InsnCopy array of the current extent */
     int flag_current_index;     /* index of the instruction being translated */
     const uint8_t *flag_role;   /* per instruction: 0 normal, 1 producer, 2 end */
     const LfFlagFuse *flag_fuse;/* per instruction, valid for roles 1 and 2 */
+    uint8_t *flag_live_out;     /* per instruction: flags live after it */
 } Lifter;
 
 /* A translated instruction: one or more lines of C. */
