@@ -2,10 +2,10 @@
  * d3d9_thin.h - thin D3D9 COM bridge, shared declarations.
  *
  * Ported from the as-built `runtime/host/hle_d3d9_thin.h` of the previous
- * tree.  The guest-visible layouts below are the frozen part: they were the
- * ABI of the prebuilt `hle_d3d9_thin.o`/`hle_d3d9_thin_gen.o` that are still
- * linked into the product, so ThinGuestObj, ThinObj, ThinSlot, the guest
- * structs and the mangled signatures of the lock layer must not change.
+ * tree.  The guest-visible layouts below are the frozen part that the
+ * as-built bridge defined, and the source port keeps them: ThinGuestObj,
+ * ThinObj, ThinSlot, the guest structs and the mangled signatures of the
+ * lock layer must not change.
  *
  * What changed in the port:
  *   - CPU, wr32g/rd32g and the guest layout come from the target headers
@@ -71,6 +71,9 @@ extern "C" {
 #endif
 #ifndef E_NOINTERFACE
 #define E_NOINTERFACE 0x80004002u
+#endif
+#ifndef E_OUTOFMEMORY
+#define E_OUTOFMEMORY 0x8007000Eu
 #endif
 #ifndef D3DVS_VERSION
 #define D3DVS_VERSION(a, b) ((DWORD)(0xFFFE0000u | ((a) << 8) | (b)))
@@ -285,8 +288,13 @@ enum {
     THIN_STAT_CAPS,
     THIN_STAT_MAX,
 };
+#if WC3_DEBUG && WC3_DEBUG_GRAPHICS
 void thin_count(unsigned which);
 void thin_note(const char *what);
+#else
+#define thin_count(which) ((void)0)
+#define thin_note(what)   ((void)0)
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Lock layer (d3d9_thin_lock.cpp)                                    */

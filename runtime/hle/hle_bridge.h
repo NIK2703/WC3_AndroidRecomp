@@ -145,6 +145,12 @@ void wc3_legacy_release_all(void);
  *
  * `rect` is the focused field's rectangle in surface fractions: (0,0) top-left,
  * (1,1) bottom-right.  It is NULL when the guest layout is not valid.
+ * `text`/`text_length` are the guest CEditBox text in standard UTF-8.  A
+ * negative length means the guest text could not be read; zero with a NULL
+ * pointer is a valid empty field.  `selection_start`/`selection_end` are byte
+ * offsets into that standard UTF-8 text; both are negative when the guest
+ * selection is not readable.  The host copies the bytes during the call and
+ * seeds a field's editor mirror only when that field has no mirror yet.
  */
 typedef struct Wc3LegacyKeyboardRect {
     float left;
@@ -154,7 +160,11 @@ typedef struct Wc3LegacyKeyboardRect {
 } Wc3LegacyKeyboardRect;
 
 void wc3_legacy_set_keyboard_bridge(void (*show)(uint32_t field,
-                                                 const Wc3LegacyKeyboardRect *rect),
+                                                 const Wc3LegacyKeyboardRect *rect,
+                                                 const char *text,
+                                                 int text_length,
+                                                 int selection_start,
+                                                 int selection_end),
                                     void (*hide)(void));
 /* Smallest upward translation that keeps the field's bottom edge above the
  * IME, or 0 when the field is already visible.  `ime_inset_bottom` and
@@ -170,6 +180,26 @@ void wc3_legacy_post_enter(void);
 /* One decoded UTF-16 unit of Java modified UTF-8.  Returns consumed bytes. */
 int wc3_legacy_mutf8_next(const char *text, int length, int offset,
                           uint16_t *unit);
+
+/* Decode one Unicode scalar from standard UTF-8.  Returns consumed bytes, or
+ * zero at the end of the buffer.  Invalid bytes decode as U+FFFD and consume
+ * one byte so callers always make progress. */
+int wc3_legacy_utf8_next(const char *text, int length, int offset,
+                         uint32_t *codepoint);
+
+/* Number of UTF-16 code units in the first `byte_offset` bytes of standard
+ * UTF-8.  A supplementary character counts as two units and a CESU-8 surrogate
+ * as one, matching the text CEditBox stores.  Stops at byte_offset without
+ * consuming a partial sequence. */
+int wc3_legacy_utf8_unit_offset(const char *text, int length, int byte_offset);
+
+/* Convert standard UTF-8 (the format CEditBox stores at +0x1E4) to Java
+ * modified UTF-8 (the format GameTextInputState carries).  Supplementary
+ * characters become surrogate pairs and U+0000 becomes C0 80.  Returns a
+ * malloc'ed NUL-terminated buffer and stores its byte length in out_length, or
+ * NULL for a negative length, missing text, or an allocation failure.  Invalid
+ * UTF-8 bytes become U+FFFD.  The caller owns the result. */
+char *wc3_legacy_utf8_to_mutf8(const char *text, int length, int *out_length);
 
 typedef struct {
     int old_start;

@@ -5,8 +5,10 @@
  * Android HLE headers.  Everything else consumes hle_bridge.h.
  */
 #include <errno.h>
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "hle_registry.h"
@@ -490,14 +492,19 @@ void wc3_legacy_release_all(void)
 }
 
 static void (*g_keyboard_show)(uint32_t field,
-                               const Wc3LegacyKeyboardRect *rect);
+                               const Wc3LegacyKeyboardRect *rect,
+                               const char *text, int text_length,
+                               int selection_start, int selection_end);
 
-static void keyboard_show_adapter(uint32_t field, const HleKeyboardRect *rect)
+static void keyboard_show_adapter(uint32_t field, const HleKeyboardRect *rect,
+                                  const char *text, int text_length,
+                                  int selection_start, int selection_end)
 {
     if (!g_keyboard_show)
         return;
     if (!rect) {
-        g_keyboard_show(field, NULL);
+        g_keyboard_show(field, NULL, text, text_length, selection_start,
+                        selection_end);
         return;
     }
     Wc3LegacyKeyboardRect out;
@@ -505,11 +512,16 @@ static void keyboard_show_adapter(uint32_t field, const HleKeyboardRect *rect)
     out.top = rect->top;
     out.right = rect->right;
     out.bottom = rect->bottom;
-    g_keyboard_show(field, &out);
+    g_keyboard_show(field, &out, text, text_length, selection_start,
+                    selection_end);
 }
 
 void wc3_legacy_set_keyboard_bridge(void (*show)(uint32_t field,
-                                                 const Wc3LegacyKeyboardRect *rect),
+                                                 const Wc3LegacyKeyboardRect *rect,
+                                                 const char *text,
+                                                 int text_length,
+                                                 int selection_start,
+                                                 int selection_end),
                                     void (*hide)(void))
 {
     g_keyboard_show = show;
@@ -562,6 +574,146 @@ int wc3_legacy_mutf8_next(const char *text, int length, int offset,
                           uint16_t *unit)
 {
     return hle_mutf8_next(text, length, offset, unit);
+}
+
+int wc3_legacy_utf8_next(const char *text, int length, int offset,
+                         uint32_t *codepoint)
+{
+    if (codepoint) *codepoint = 0xFFFDu;
+    if (!text || length <= 0 || offset < 0 || offset >= length)
+        return 0;
+
+    const unsigned char *p = (const unsigned char *)text + offset;
+    const unsigned char lead = p[0];
+    if (lead < 0x80) {
+        if (codepoint) *codepoint = lead;
+        return 1;
+    }
+
+    int count;
+    uint32_t value;
+    if ((lead & 0xE0) == 0xC0) {
+        count = 2;
+        value = lead & 0x1Fu;
+    } else if ((lead & 0xF0) == 0xE0) {
+        count = 3;
+        value = lead & 0x0Fu;
+    } else if ((lead & 0xF8) == 0xF0) {
+        count = 4;
+        value = lead & 0x07u;
+    } else if ((lead & 0xFC) == 0xF8) {
+        count = 5;
+        value = lead & 0x03u;
+    } else if ((lead & 0xFE) == 0xFC) {
+        count = 6;
+        value = lead & 0x01u;
+    } else {
+        return 1;
+    }
+
+    if (offset + count > length)
+        return 1;
+    for (int i = 1; i < count; i++) {
+        const unsigned char continuation = p[i];
+        if ((continuation & 0xC0) != 0x80)
+            return 1;
+        value = (value << 6) | (continuation & 0x3Fu);
+    }
+
+    /* Reject overlong encodings.  Surrogate code points are deliberately
+     * accepted: CEditBox stores WM_CHAR units with 0x6F06D470, which emits a
+     * three-byte sequence for each UTF-16 unit, including surrogate pairs. */
+    const uint32_t minimum =
+        count == 2 ? 0x80u :
+        count == 3 ? 0x800u :
+        count == 4 ? 0x10000u :
+        count == 5 ? 0x200000u : 0x4000000u;
+    if (value < minimum)
+        return 1;
+    if (value > 0x10FFFFu)
+        value = 0xFFFDu;
+    if (codepoint) *codepoint = value;
+    return count;
+}
+
+int wc3_legacy_utf8_unit_offset(const char *text, int length, int byte_offset)
+{
+    if (!text || length <= 0 || byte_offset <= 0)
+        return 0;
+    if (byte_offset > length)
+        byte_offset = length;
+
+    int units = 0;
+    int pos = 0;
+    while (pos < byte_offset) {
+        uint32_t codepoint = 0;
+        const int step = wc3_legacy_utf8_next(text, length, pos, &codepoint);
+        if (step <= 0 || pos + step > byte_offset)
+            break;
+        units += codepoint > 0xFFFFu ? 2 : 1;
+        pos += step;
+    }
+    return units;
+}
+
+static char *mutf8_put(char *out, uint32_t codepoint)
+{
+    if (codepoint == 0) {
+        *out++ = (char)0xC0;
+        *out++ = (char)0x80;
+        return out;
+    }
+    if (codepoint < 0x80u) {
+        *out++ = (char)codepoint;
+        return out;
+    }
+    if (codepoint < 0x800u) {
+        *out++ = (char)(0xC0u | (codepoint >> 6));
+        *out++ = (char)(0x80u | (codepoint & 0x3Fu));
+        return out;
+    }
+    if (codepoint < 0x10000u) {
+        *out++ = (char)(0xE0u | (codepoint >> 12));
+        *out++ = (char)(0x80u | ((codepoint >> 6) & 0x3Fu));
+        *out++ = (char)(0x80u | (codepoint & 0x3Fu));
+        return out;
+    }
+    if (codepoint <= 0x10FFFFu) {
+        const uint32_t v = codepoint - 0x10000u;
+        const uint32_t high = 0xD800u + (v >> 10);
+        const uint32_t low = 0xDC00u + (v & 0x3FFu);
+        out = mutf8_put(out, high);
+        out = mutf8_put(out, low);
+        return out;
+    }
+    return mutf8_put(out, 0xFFFDu);
+}
+
+char *wc3_legacy_utf8_to_mutf8(const char *text, int length, int *out_length)
+{
+    if (out_length) *out_length = 0;
+    if (length < 0 || (length > 0 && !text))
+        return NULL;
+    if (length > (INT_MAX - 1) / 3)
+        return NULL;
+
+    char *out = (char *)malloc((size_t)length * 3u + 1u);
+    if (!out)
+        return NULL;
+
+    char *dst = out;
+    int pos = 0;
+    while (pos < length) {
+        uint32_t codepoint = 0xFFFDu;
+        const int step = wc3_legacy_utf8_next(text, length, pos, &codepoint);
+        if (step <= 0)
+            break;
+        dst = mutf8_put(dst, codepoint);
+        pos += step;
+    }
+    *dst = '\0';
+    if (out_length) *out_length = (int)(dst - out);
+    return out;
 }
 
 void wc3_legacy_text_diff(const char *old_text, int old_length,

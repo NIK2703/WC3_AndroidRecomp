@@ -540,7 +540,15 @@ static int is_neutral_call(const char *name)
         "FS_RD32", "FS_WR32",
         "fst", "fpop", "fpush", "x87_ld_f32", "x87_ld_f64",
         "x87_st_f32", "x87_st_f64", "x87_add", "x87_mul",
-        "sse_load_ss", "sse_load_sd", "sse_compare", "sse_cvtt_i32",
+        "sse_load_ss", "sse_load_sd", "sse_compare", "sse_compare_lahf",
+        "sse_cvtt_i32", "x87_compare", "x87_compare_eflags",
+        /* Flagless ALU helpers: they do not write EFLAGS, so they must not
+         * stop a dead-flag scan.  The flag-writing forms (flags_*, op_shl,
+         * op_shr, op_sar, op_rol, op_ror, op_bittest) remain barriers. */
+        "add32", "sub32", "and32", "or32", "xor32",
+        "inc32", "dec32", "neg32", "not32", "bswap32",
+        "mul32", "mul64", "div32", "idiv32",
+        "op_shl_nf", "op_shr_nf", "op_sar_nf", "op_rol_nf", "op_ror_nf",
         "atomic_load32", "atomic_store32", "atomic_xchg32", "atomic_xadd32",
         "atomic_cmpxchg32", "atomic_cmpxchg64",
         "memcpy", "memmove", "memset", "strlen", "sizeof",
@@ -963,8 +971,10 @@ static char *process_body(const char *body, size_t n, const char *va,
     for (li = 0; li < 6; li++)
         if (pending[li] >= 0) records[pending[li]].live = 1;
 
-    /* Apply replacements from the end of each line.  Only one helper per line
-     * is accepted above, so spans cannot overlap. */
+    /* True when the replaced call is a whole C statement rather than the
+     * right-hand side of an assignment.  Standalone flag helpers carry the
+     * guest operation's memory reads, so a dead one must become (void)expr
+     * instead of a bare expression. */
     {
         size_t i, j;
         for (i = 0; i < ndead; i++)
@@ -990,13 +1000,33 @@ static char *process_body(const char *body, size_t n, const char *va,
             continue;
         }
         {
-            Buf nb = {0};
-            buf_add(&nb, line->text, r->start);
-            buf_str(&nb, r->repl_text);
-            buf_add(&nb, line->text + r->end, line->len - r->end);
-            free(line->text);
-            line->text = nb.p;
-            line->len = nb.n;
+            size_t back = r->start, fwd = r->end;
+            Buf repl = {0};
+            const char *text = r->repl_text;
+            while (back > 0 &&
+                   (line->text[back - 1] == ' ' || line->text[back - 1] == '\t'))
+                back--;
+            while (fwd < line->len &&
+                   (line->text[fwd] == ' ' || line->text[fwd] == '\t'))
+                fwd++;
+            if ((fwd >= line->len || line->text[fwd] == '\n' ||
+                 line->text[fwd] == '\r' || line->text[fwd] == ';') &&
+                (back == 0 || line->text[back - 1] == '{' ||
+                 line->text[back - 1] == '}' || line->text[back - 1] == ';') &&
+                strncmp(r->repl_text, "(void)", 6) != 0) {
+                buf_printf(&repl, "(void)(%s)", r->repl_text);
+                text = repl.p;
+            }
+            {
+                Buf nb = {0};
+                buf_add(&nb, line->text, r->start);
+                buf_str(&nb, text);
+                buf_add(&nb, line->text + r->end, line->len - r->end);
+                free(line->text);
+                line->text = nb.p;
+                line->len = nb.n;
+            }
+            free(repl.p);
         }
         report->dead_writes++;
         report->dead_flag_fields += r->field_count;

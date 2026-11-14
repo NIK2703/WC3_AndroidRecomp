@@ -559,6 +559,7 @@ int controls_populate_overlay(Wc3Overlay *overlay) {
         dst.scale = src->scale;
         dst.corner_radius = src->corner_radius;
         dst.dpad_corner_radius = src->dpad_corner_radius;
+        dst.icon_id = src->icon_id;
         copy_label(dst.text, sizeof(dst.text), src->display_text);
         dst.visual_layers = visual_layers_from_engine(src->visual_layers);
         dst.alpha_outer = (uint8_t)(src->visual_alpha >> 24);

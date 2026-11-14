@@ -49,7 +49,9 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var folderStatus: TextView
     private lateinit var resolutionSpinner: Spinner
     private lateinit var soundSwitch: SwitchCompat
-    private lateinit var doubleTapSwitch: SwitchCompat
+    private lateinit var gestureModeSpinner: Spinner
+    private lateinit var gestureModeHint: TextView
+    private lateinit var doubleTapDelayGroup: LinearLayout
     private lateinit var doubleTapDelaySlider: SeekBar
     private lateinit var doubleTapDelayValue: TextView
     private lateinit var longPressDelaySlider: SeekBar
@@ -84,6 +86,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var playButton: Button
 
     private var resolutionOptions: List<ResolutionOption> = emptyList()
+    private var gestureModeOptions: List<GestureModeOption> = emptyList()
     private var driverOptions: List<DriverOption> = emptyList()
     private var dxvkOptions: List<DxvkOption> = emptyList()
     private var drivers: List<VulkanDriverStore.DriverInfo> = emptyList()
@@ -116,6 +119,18 @@ class LaunchSettingsActivity : AppCompatActivity() {
             DxvkOption("", getString(R.string.launch_dxvk_auto)),
             DxvkOption(DXVK_VERSION_1_10, getString(R.string.launch_dxvk_110)),
             DxvkOption(DXVK_VERSION_3_1_1, getString(R.string.launch_dxvk_311))
+        )
+        gestureModeOptions = listOf(
+            GestureModeOption(
+                doubleTap = true,
+                label = getString(R.string.launch_gesture_mode_double),
+                hint = getString(R.string.launch_gesture_hint_double)
+            ),
+            GestureModeOption(
+                doubleTap = false,
+                label = getString(R.string.launch_gesture_mode_single),
+                hint = getString(R.string.launch_gesture_hint_single)
+            )
         )
         val settings = store.load(mode)
         resolutionOptions = buildResolutionOptions(settings)
@@ -163,7 +178,9 @@ class LaunchSettingsActivity : AppCompatActivity() {
         folderStatus = findViewById(R.id.folder_status)
         resolutionSpinner = findViewById(R.id.resolution_spinner)
         soundSwitch = findViewById(R.id.sound_switch)
-        doubleTapSwitch = findViewById(R.id.double_tap_switch)
+        gestureModeSpinner = findViewById(R.id.gesture_mode_spinner)
+        gestureModeHint = findViewById(R.id.gesture_mode_hint)
+        doubleTapDelayGroup = findViewById(R.id.double_tap_delay_group)
         doubleTapDelaySlider = findViewById(R.id.double_tap_delay_slider)
         doubleTapDelayValue = findViewById(R.id.double_tap_delay_value)
         longPressDelaySlider = findViewById(R.id.long_press_delay_slider)
@@ -201,6 +218,14 @@ class LaunchSettingsActivity : AppCompatActivity() {
             setDropDownViewResource(R.layout.item_resolution_dropdown)
         }
 
+        gestureModeSpinner.adapter = ArrayAdapter(
+            this,
+            R.layout.item_gesture_mode,
+            gestureModeOptions.map { it.label }
+        ).apply {
+            setDropDownViewResource(R.layout.item_gesture_mode_dropdown)
+        }
+
         driverSpinner.adapter = ArrayAdapter(
             this,
             R.layout.item_resolution,
@@ -231,7 +256,12 @@ class LaunchSettingsActivity : AppCompatActivity() {
         )
 
         soundSwitch.isChecked = settings.sound
-        doubleTapSwitch.isChecked = settings.doubleTapGestures
+        gestureModeSpinner.setSelection(
+            gestureModeOptions.indexOfFirst {
+                it.doubleTap == settings.doubleTapGestures
+            }.coerceAtLeast(0),
+            false
+        )
         bindDelaySlider(
             doubleTapDelaySlider,
             doubleTapDelayValue,
@@ -257,6 +287,15 @@ class LaunchSettingsActivity : AppCompatActivity() {
         )
         setDxvkConfig(settings.dxvkConfig)
         binding = false
+        updateGestureModeHint()
+    }
+
+    private fun updateGestureModeHint() {
+        val option = gestureModeOptions.getOrNull(gestureModeSpinner.selectedItemPosition)
+            ?: return
+        gestureModeHint.text = option.hint
+        doubleTapDelayGroup.visibility =
+            if (option.doubleTap) View.VISIBLE else View.GONE
     }
 
     private fun wireListeners() {
@@ -273,11 +312,21 @@ class LaunchSettingsActivity : AppCompatActivity() {
             }
         }
 
-        doubleTapSwitch.setOnCheckedChangeListener { _, _ ->
-            if (!binding) {
-                refreshValidation()
-                saveIfValid()
+        gestureModeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) {
+                if (!binding) {
+                    updateGestureModeHint()
+                    refreshValidation()
+                    saveIfValid()
+                }
             }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
 
         wireDelaySlider(doubleTapDelaySlider, doubleTapDelayValue)
@@ -811,7 +860,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
             driverId = currentDriverId(),
             dxvkVersion = currentDxvkVersion(),
             dxvkConfig = readDxvkConfig(),
-            doubleTapGestures = doubleTapSwitch.isChecked,
+            doubleTapGestures = gestureModeOptions
+                .getOrNull(gestureModeSpinner.selectedItemPosition)?.doubleTap ?: true,
             doubleTapTimeoutMs = progressToDelay(doubleTapDelaySlider.progress),
             longPressTimeoutMs = progressToDelay(longPressDelaySlider.progress)
         )
@@ -931,6 +981,12 @@ class LaunchSettingsActivity : AppCompatActivity() {
         val width: Int,
         val height: Int,
         val label: String
+    )
+
+    private data class GestureModeOption(
+        val doubleTap: Boolean,
+        val label: String,
+        val hint: String
     )
 
     private data class DriverOption(

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "corpus": "1.27b",
-  "note": "BP-4.2: pinned read-only upstream for the M5 toolchain migration. Verified by tools/lift/check_upstream.py. Local vendor patches: liftcore.c emits xchg with a memory operand as atomic_xchg32 and lock-prefixed inc/dec/add with a 32-bit memory destination as atomic_xadd32; lift.c uses _Thread_local for dispatcher TLS; liftemit.c emits the native x87 helpers (BCD, environment, FLDCW, FPREM1, FYL2XP1 pop and FST tag copy). The pin below covers the patched bytes.",
+  "note": "BP-4.2: pinned read-only upstream for the M5 toolchain migration. Verified by tools/lift/check_upstream.py. Local vendor patches: liftcore.c emits xchg with a memory operand as atomic_xchg32 and lock-prefixed inc/dec/add with a 32-bit memory destination as atomic_xadd32; lift.c uses _Thread_local for dispatcher TLS; liftemit.c emits the native x87 helpers (BCD, environment, FLDCW, FPREM1, FYL2XP1 pop and FST tag copy). liftflags.c/.h are local additions for fusion and flag liveness; liftcore.c/liftflags.c also carry the AF-aware flag masks and the exact call/ret/tail flag-summary model. The closure2 final full-func_map relift lives in tools/lift/csrc_local and is not part of this pin. The pin below covers the patched bytes.",
   "upstream": {
     "path": "E:/projects/warcraft3_recomp",
     "revision": "791bdbaf313520f3fa2e1b49df87ebb354b9b340",
@@ -76,23 +76,28 @@
         },
         {
           "name": "lift32.c",
-          "bytes": 6859,
-          "sha256": "5302a3f58a5c1c2420f76519e267f1229c3a48b943388448b94665692f570375"
+          "bytes": 8224,
+          "sha256": "acd4a0a5cc765838d5adffc72af5204805177dd446a3c989b190e0e99de95c07"
         },
         {
           "name": "liftcore.c",
-          "bytes": 44395,
-          "sha256": "56a87f2510af2b47d307d11008460371de127bafd47925529d535d821dd12751"
+          "bytes": 156364,
+          "sha256": "9bd96de447b92166e27856b59592b5710a00abfa4b8b0c002236fd26ef1d894b"
         },
         {
           "name": "liftemit.c",
-          "bytes": 54468,
-          "sha256": "50b6280b1201b834f17496753163c2ad1747a63ced24b01f759417335376e8bf"
+          "bytes": 51043,
+          "sha256": "049c891861c14312e9568022c4dde69d99a552eda3459a8efefeca68e7a12649"
+        },
+        {
+          "name": "liftflags.c",
+          "bytes": 17472,
+          "sha256": "2cda902a99fc97bce98b0e82ec05bed23aa0dcb32f04827dab1afada4a19d896"
         },
         {
           "name": "liftutil.c",
-          "bytes": 15044,
-          "sha256": "57f8d0e8cab7bcfec88046ad09b92b8f51ac169de37255200049699211b5d7c5"
+          "bytes": 15032,
+          "sha256": "948f93bd7a7e7fdf351d28239805b37a78c6d4a03a5cc1673e40c69f3f63ee5e"
         },
         {
           "name": "lint.c",
@@ -157,8 +162,13 @@
         },
         {
           "name": "liftcore.h",
-          "bytes": 3706,
-          "sha256": "8f4c1615dc20941a8453f76c19fe0dead870c56cc5878b741ce3b937d9a092ed"
+          "bytes": 6169,
+          "sha256": "9b2d99898d42139770edef491f21106221d198933ffcdcf7ae57e296459e39a9"
+        },
+        {
+          "name": "liftflags.h",
+          "bytes": 4487,
+          "sha256": "f7d67ba7f8a2d5eb5164a8e3f54e61bc6d080f72634d4cf9cbfb61d291ffdd3a"
         },
         {
           "name": "pe.h",

@@ -21,7 +21,16 @@
     <string name="launch_resolution_option" translatable="false">%1$d × %2$d</string>
 
     <string name="launch_sound_label">Sound</string>
-    <string name="launch_gesture_mode_label">Double tap</string>
+    <string name="launch_gesture_mode_label">Touchscreen control gestures</string>
+    <string name="launch_gesture_mode_double">Double tap, single tap with delay</string>
+    <string name="launch_gesture_mode_single">No double tap, single tap without delay</string>
+    <!-- Mirrors the authored Warcraft 3.icp touchscreenGestures and
+         wc3_profile_apply_gesture_mode(): the no-double-tap mode clears every
+         double-tap package and maps the long press to the right button.  The
+         second-finger tap/drag actions are empty; two-finger swipes remain
+         bound to the Sd2 camera scroll keys. -->
+    <string name="launch_gesture_hint_double">• Single tap — LMB (with delay)\n• Double tap — RMB\n• Long press — A + LMB\n• Single-finger drag — MMB\n• Long-press drag — LMB\n• Double-tap drag — LMB\n• Two-finger swipe up/down — camera tilt\n• Two-finger swipe left/right — camera rotation</string>
+    <string name="launch_gesture_hint_single">• Single tap — LMB (immediately)\n• Long press — RMB\n• Single-finger drag — MMB\n• Long-press drag — LMB\n• Two-finger swipe up/down — camera tilt\n• Two-finger swipe left/right — camera rotation</string>
     <string name="launch_double_tap_delay_label">Double-tap delay</string>
     <string name="launch_long_press_delay_label">Long-press delay</string>
     <string name="launch_gesture_delay_value">%1$d ms</string>

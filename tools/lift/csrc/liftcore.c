@@ -46,6 +46,45 @@ static int label_has(const uint32_t *labels, int n, uint64_t v)
     return 0;
 }
 
+/* Global call/ret flag summaries are defined after flag_use. */
+
+/* A.27: only the eight 32-bit GPRs are safe as an identity `lea` base.
+ * 16-bit bases are windows into the low half of a 32-bit field and would
+ * truncate the result, so they must not be elided. */
+static int reg_is_r32(unsigned r)
+{
+    return r == X86_REG_EAX || r == X86_REG_EBX ||
+           r == X86_REG_ECX || r == X86_REG_EDX ||
+           r == X86_REG_ESI || r == X86_REG_EDI ||
+           r == X86_REG_ESP || r == X86_REG_EBP;
+}
+
+static int mov_is_identity(const cs_insn *insn)
+{
+    const cs_x86_op *d = OP(insn, 0), *s = OP(insn, 1);
+    return d->type == X86_OP_REG && s->type == X86_OP_REG &&
+           d->reg == s->reg && d->size == s->size;
+}
+
+static int lea_is_identity(const cs_insn *insn)
+{
+    const cs_x86_op *d = OP(insn, 0), *m = OP(insn, 1);
+    return d->type == X86_OP_REG && m->type == X86_OP_MEM &&
+           reg_is_r32((unsigned)d->reg) &&
+           m->mem.base == d->reg && m->mem.index == 0 &&
+           m->mem.disp == 0;
+}
+
+/* A.28: pick the value-only helper when no flag is observable. */
+static const char *shift_fn(const char *m, int keep)
+{
+    if (!strcmp(m, "shr")) return keep ? "op_shr" : "op_shr_nf";
+    if (!strcmp(m, "sar")) return keep ? "op_sar" : "op_sar_nf";
+    if (!strcmp(m, "ror")) return keep ? "op_ror" : "op_ror_nf";
+    if (!strcmp(m, "rol")) return keep ? "op_rol" : "op_rol_nf";
+    return keep ? "op_shl" : "op_shl_nf";   /* shl/sal */
+}
+
 static char *target_expr(Lifter *L, cs_insn *insn, cs_x86_op *op)
 {
     if (op->type == X86_OP_IMM) return lf_afmt("0x%08Xu", (uint32_t)op->imm);
@@ -80,15 +119,57 @@ static int x87_pop_count(const char *m)
         return 2;
     return 0;
 }
-static void x87_top_after(Lifter *L, const char *m)
+static int x87_top_after_value(const char *m, int top)
 {
     int n;
-    if (!strcmp(m, "fdecstp")) { L->x87_top = (L->x87_top - 1) & 7; return; }
-    if (!strcmp(m, "fincstp")) { L->x87_top = (L->x87_top + 1) & 7; return; }
-    if (x87_is_reset(m)) { L->x87_top = 0; return; }
-    if (x87_is_push(m)) L->x87_top = (L->x87_top - 1) & 7;
+    if (!strcmp(m, "fdecstp")) return (top - 1) & 7;
+    if (!strcmp(m, "fincstp")) return (top + 1) & 7;
+    if (x87_is_reset(m)) return 0;
+    if (x87_is_push(m)) top = (top - 1) & 7;
     n = x87_pop_count(m);
-    while (n--) L->x87_top = (L->x87_top + 1) & 7;
+    while (n--) top = (top + 1) & 7;
+    return top;
+}
+static void x87_top_after(Lifter *L, const char *m)
+{
+    L->x87_top = x87_top_after_value(m, L->x87_top);
+}
+static int x87_is_barrier(const char *m)
+{
+    return LST(m, "fnclex", "finit", "fninit",
+               "fldenv", "fnstenv", "fstenv", "fnsave", "fsave",
+               "frstor", "fxsave", "fxrstor", "fprem", "fprem1",
+               "frndint", "fscale", "fxtract", "fldcw", "fnstcw",
+               "fxam", "fptan", "fpatan", "fyl2x", "fyl2xp1",
+               "fsincos", "int", "int3", "into", "syscall", "sysenter",
+               "hlt", "iret", "iretd");
+}
+static int x87_branch_internal(const cs_insn *in, const uint32_t *labels,
+                                int nlabels)
+{
+    const char *m = in->mnemonic;
+    if (m[0] != 'j' && strncmp(m, "loop", 4)) return 0;
+    if (NOPS(in) < 1 || OP(in, 0)->type != X86_OP_IMM) return 0;
+    return label_has(labels, nlabels, (uint32_t)OP(in, 0)->imm);
+}
+static int x87_lazy_check(Lifter *L, InsnCopy *ins, int n,
+                          const uint32_t *labels, int nlabels)
+{
+    int top = 0;
+    int i;
+    for (i = 0; i < n; i++) {
+        const char *m = ins[i].insn.mnemonic;
+        if (x87_is_barrier(m)) return 0;
+        if (lf_is_mmx(L, &ins[i].insn)) return 0;
+        if (m[0] == 'f') top = x87_top_after_value(m, top);
+        if (label_has(labels, nlabels, ins[i].insn.address) && top != 0)
+            return 0;
+        if (x87_branch_internal(&ins[i].insn, labels, nlabels) && top != 0)
+            return 0;
+        if (!strcmp(m, "call") || lf_is_mmx(L, &ins[i].insn))
+            top = 0;
+    }
+    return 1;
 }
 
 static void flag_tmp_name(uint32_t addr, const char *kind, char *buf, size_t cap)
@@ -198,23 +279,156 @@ static Emit lf_fused_start(Lifter *L, cs_insn *p, const LfFlagFuse *f)
     default: return e;
     }
 
-    decl = lf_afmt("uint32_t %s = (uint32_t)(%s)%s;", fa, a, mask);
-    if (f->kind == LF_FLAG_NEG)
-        decl = lf_afmt("%s uint32_t %s = (uint32_t)(%s)%s;", decl, fb, b, mask);
-    else if (f->kind != LF_FLAG_INC && f->kind != LF_FLAG_DEC)
-        decl = lf_afmt("%s uint32_t %s = (uint32_t)(%s)%s;", decl, fb, b, mask);
-    if (f->kind == LF_FLAG_ADC || f->kind == LF_FLAG_SBB) {
-        const char *op = f->kind == LF_FLAG_ADC ? "+" : "-";
-        decl = lf_afmt("%s uint32_t %s = c->cf & 1u; "
-                       "uint64_t %s = (uint64_t)%s %s %s %s %s;",
-                       decl, fcin, ffull, fa, op, fb, op, fcin);
+    /* Decide which temporaries the emitted block actually references.  A
+     * cmp/test result is not architecturally visible, and its direct
+     * condition may be constant (for example CF-only after test).  Emitting
+     * unused temporaries would fail -Werror=unused-variable; dropping them
+     * is safe only when the operand expression has no side effects. */
+    {
+        int need_a = 0, need_b = 0, need_r = 0, need_full = 0, need_cin = 0;
+        int has_dest = (f->kind != LF_FLAG_CMP && f->kind != LF_FLAG_TEST);
+        int known_consumer = 0;
+
+        if (has_dest) {
+            need_r = 1;
+            switch (f->kind) {
+            case LF_FLAG_CMP:
+            case LF_FLAG_TEST:
+            case LF_FLAG_ADD:
+            case LF_FLAG_SUB:
+            case LF_FLAG_AND:
+            case LF_FLAG_OR:
+            case LF_FLAG_XOR:
+                need_a = need_b = 1;
+                break;
+            case LF_FLAG_ADC:
+            case LF_FLAG_SBB:
+                need_a = need_b = need_full = need_cin = 1;
+                break;
+            case LF_FLAG_INC:
+            case LF_FLAG_DEC:
+                need_a = 1;
+                break;
+            case LF_FLAG_NEG:
+                need_b = 1;
+                break;
+            default:
+                break;
+            }
+        }
+
+        /* Memory operands must still be evaluated: a guest read can fault. */
+        if (a && (strstr(a, "rd8(") || strstr(a, "rd16(") ||
+                  strstr(a, "rd32(") || strstr(a, "rd64(")))
+            need_a = 1;
+        if (b && (strstr(b, "rd8(") || strstr(b, "rd16(") ||
+                  strstr(b, "rd32(") || strstr(b, "rd64(")))
+            need_b = 1;
+
+        /* The direct condition text is produced again by lf_fused_end(); ask
+         * the same builder now so operand use matches exactly. */
+        {
+            const InsnCopy *ic = (const InsnCopy *)L->flag_ins;
+            cs_insn *cons = (cs_insn *)&ic[f->consumer].insn;
+            const char *cm = cons->mnemonic;
+            const char *cc = NULL;
+            char cond[4096];
+            if (cm[0] == 'j' && strcmp(cm, "jmp"))
+                cc = cm + 1;
+            else if (!strncmp(cm, "set", 3))
+                cc = cm + 3;
+            else if (!strncmp(cm, "cmov", 4))
+                cc = cm + 4;
+            if (cc && lf_flag_cond(cond, sizeof cond, cc,
+                                   (LfFlagKind)f->kind, f->size,
+                                   fa, fb, fr, ffull, fcin) == 0) {
+                known_consumer = 1;
+                if (strstr(cond, fa)) need_a = 1;
+                if (strstr(cond, fb)) need_b = 1;
+                if (strstr(cond, fr)) need_r = 1;
+                if (strstr(cond, ffull)) need_full = 1;
+                if (strstr(cond, fcin)) need_cin = 1;
+            } else if (!cc) {
+                /* LAHF or something without a direct condition. */
+                known_consumer = 1;
+            }
+        }
+
+        /* Materialisation on one edge runs the original helper. */
+        if (f->mat_taken || f->mat_fall) {
+            char *mat = NULL;
+            if (f->kind != LF_FLAG_FP_CMP)
+                mat = flag_mat_call((LfFlagKind)f->kind, f->size,
+                                    f->producer_addr);
+            if (mat) {
+                if (strstr(mat, fa)) need_a = 1;
+                if (strstr(mat, fb)) need_b = 1;
+                if (strstr(mat, fr)) need_r = 1;
+                if (strstr(mat, ffull)) need_full = 1;
+                if (strstr(mat, fcin)) need_cin = 1;
+                /* lf_afmt() hands out arena memory; lf_arena_reset() owns it. */
+            } else {
+                need_a = need_b = need_r = 1;
+            }
+        }
+
+        if (!known_consumer) {
+            need_a = need_b = need_r = 1;
+            if (f->kind == LF_FLAG_ADC || f->kind == LF_FLAG_SBB)
+                need_full = need_cin = 1;
+        }
+
+        /* The result expression itself may reference the operand temps. */
+        if (need_r) {
+            switch (f->kind) {
+            case LF_FLAG_CMP:
+            case LF_FLAG_TEST:
+            case LF_FLAG_ADD:
+            case LF_FLAG_SUB:
+            case LF_FLAG_AND:
+            case LF_FLAG_OR:
+            case LF_FLAG_XOR:
+                need_a = need_b = 1;
+                break;
+            case LF_FLAG_ADC:
+            case LF_FLAG_SBB:
+                need_a = need_b = need_full = need_cin = 1;
+                break;
+            case LF_FLAG_INC:
+            case LF_FLAG_DEC:
+                need_a = 1;
+                break;
+            case LF_FLAG_NEG:
+                need_b = 1;
+                break;
+            default:
+                break;
+            }
+        }
+
+        decl = NULL;
+        if (need_a)
+            decl = lf_afmt("uint32_t %s = (uint32_t)(%s)%s;", fa, a, mask);
+        if (need_b && f->kind != LF_FLAG_INC && f->kind != LF_FLAG_DEC)
+            decl = lf_afmt("%s uint32_t %s = (uint32_t)(%s)%s;",
+                           decl ? decl : "", fb, b, mask);
+        if ((f->kind == LF_FLAG_ADC || f->kind == LF_FLAG_SBB) &&
+            (need_full || need_cin)) {
+            const char *op = f->kind == LF_FLAG_ADC ? "+" : "-";
+            decl = lf_afmt("%s uint32_t %s = c->cf & 1u; "
+                           "uint64_t %s = (uint64_t)%s %s %s %s %s;",
+                           decl ? decl : "", fcin, ffull,
+                           fa, op, fb, op, fcin);
+        }
+        if (need_r)
+            decl = lf_afmt("%s uint32_t %s = (%s)%s;",
+                           decl ? decl : "", fr, fr_expr, mask);
     }
-    decl = lf_afmt("%s uint32_t %s = (%s)%s;", decl, fr, fr_expr, mask);
 
     if (f->kind != LF_FLAG_CMP && f->kind != LF_FLAG_TEST)
         dw = lf_dst_write(L, p, OP(p, 0), fr);
 
-    lf_push(&e, lf_afmt("{ %s %s", decl, dw ? dw : ""));
+    lf_push(&e, lf_afmt("{ %s %s", decl ? decl : "", dw ? dw : ""));
     return e;
 }
 
@@ -555,10 +769,20 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
 
     /* ---- arithmetic / logic ---- */
     if (!strcmp(m, "mov")) {
+        if (mov_is_identity(insn)) {
+            lf_push(&e, lf_afmt("/* %08X: %s %s: identity */",
+                                (uint32_t)ea, insn->mnemonic, insn->op_str));
+            return e;
+        }
         lf_push(&e, lf_dst_write(L, insn, OP(insn, 0), lf_src(L, insn, OP(insn, 1))));
         return e;
     }
     if (!strcmp(m, "lea")) {
+        if (lea_is_identity(insn)) {
+            lf_push(&e, lf_afmt("/* %08X: %s %s: identity */",
+                                (uint32_t)ea, insn->mnemonic, insn->op_str));
+            return e;
+        }
         lf_push(&e, lf_afmt("c->%s = (uint32_t)(%s);",
                             lf_reg_name(L, (unsigned)OP(insn, 0)->reg),
                             lf_addr_expr(L, insn, OP(insn, 1))));
@@ -651,17 +875,24 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
     if (LST(m, "shl", "sal", "shr", "sar")) {
         cs_x86_op *d = OP(insn, 0);
         char *cnt = nops > 1 ? lf_src(L, insn, OP(insn, 1)) : (char *)"1";
-        const char *fn = (!strcmp(m, "shr")) ? "op_shr" : (!strcmp(m, "sar")) ? "op_sar" : "op_shl";
-        lf_push(&e, lf_dst_write(L, insn, d,
-                lf_afmt("%s(c, %s, %s, %d)", fn, lf_read_dst(L, insn, d), cnt, d->size)));
+        int keep = flag_live_any(L, LF_FLAG_CF | LF_FLAG_ZF |
+                                    LF_FLAG_SF | LF_FLAG_PF);
+        const char *fn = shift_fn(m, keep);
+        char *dw = keep
+            ? lf_afmt("%s(c, %s, %s, %d)", fn, lf_read_dst(L, insn, d), cnt, d->size)
+            : lf_afmt("%s(%s, %s, %d)", fn, lf_read_dst(L, insn, d), cnt, d->size);
+        lf_push(&e, lf_dst_write(L, insn, d, dw));
         return e;
     }
     if (LST(m, "rol", "ror")) {
         cs_x86_op *d = OP(insn, 0);
         char *cnt = nops > 1 ? lf_src(L, insn, OP(insn, 1)) : (char *)"1";
-        const char *fn = !strcmp(m, "rol") ? "op_rol" : "op_ror";
-        lf_push(&e, lf_dst_write(L, insn, d,
-                lf_afmt("%s(c, %s, %s, %d)", fn, lf_read_dst(L, insn, d), cnt, d->size)));
+        int keep = flag_live_any(L, LF_FLAG_CF | LF_FLAG_OF);
+        const char *fn = shift_fn(m, keep);
+        char *dw = keep
+            ? lf_afmt("%s(c, %s, %s, %d)", fn, lf_read_dst(L, insn, d), cnt, d->size)
+            : lf_afmt("%s(%s, %s, %d)", fn, lf_read_dst(L, insn, d), cnt, d->size);
+        lf_push(&e, lf_dst_write(L, insn, d, dw));
         return e;
     }
     if (!strcmp(m, "bswap")) {
@@ -1223,6 +1454,149 @@ static int decode_into(Lifter *L, const uint8_t *code, size_t len, uint32_t addr
     return 1;
 }
 
+/* Decode the exact extent lf_lift_function() emits for a seed.  The flag
+ * summary must see the same instructions as the emitted fragment: funcs.txt
+ * often cuts a function at a jmp to a shared epilogue, and a summary built
+ * from that prefix would miss tail calls and the real ret paths in the grown
+ * part. */
+static int lf_decode_extent(Lifter *L, uint32_t start, uint32_t size,
+                            InsnCopy **out_ins, int *out_n, uint32_t *out_end)
+{
+    uint8_t *code;
+    size_t got;
+    InsnCopy *ins = NULL;
+    int n = 0, cap = 0;
+    uint32_t end;
+    int i;
+
+    *out_ins = NULL;
+    *out_n = 0;
+    if (out_end) *out_end = start;
+    code = (uint8_t *)malloc(size ? size : 1);
+    if (!code) return 0;
+    got = lf_read_va(L, start, code, size);
+    if (!decode_into(L, code, got, start, &ins, &n, &cap)) {
+        free(code);
+        free(ins);
+        return 0;
+    }
+    free(code);
+    end = start + (uint32_t)got;
+
+    /* an extent that ends inside an instruction: read the few more bytes */
+    if (n > 0) {
+        uint32_t tail = (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size);
+        if (tail < end) {
+            size_t want = (size_t)(end - tail) + 15;
+            uint8_t *extra = (uint8_t *)malloc(want);
+            size_t got2 = extra ? lf_read_va(L, tail, extra, want) : 0;
+            if (got2) {
+                int before = n;
+                decode_into(L, extra, got2, tail, &ins, &n, &cap);
+                for (i = before; i < n; i++)
+                    if (ins[i].insn.address >= end) { n = i; break; }
+                if (n > 0) {
+                    uint32_t ne = (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size);
+                    if (ne > end) end = ne;
+                }
+            }
+            free(extra);
+        }
+    }
+
+    if (L->block_mode && n > 0) {
+        for (i = 0; i < n; i++)
+            if (last_word_is_term(ins[i].insn.mnemonic)) { n = i + 1; break; }
+    }
+
+    {
+        /* Two very different things can be seeded here, and they need
+         * different extents.
+         *
+         * A *function entry* - one preceded by int3/nop/zero padding - has to
+         * be lifted whole, up to its `ret`.  If it is cut short the prologue's
+         * pushes land in one fragment and the epilogue's pops in another, and
+         * since each fragment is entered as an independent "function" the pops
+         * are balanced against the wrong frame.  That is not a cosmetic
+         * problem: game.dll 6F1ACD50 lost its `pop edi` that way (its extent
+         * ended on the `jmp` at 6F1ACD78) and the caller then read a field of
+         * its object through a zeroed edi.
+         *
+         * A *mid-function* seed - a jump-table or branch target - must stay
+         * short, because the prologue before it is not part of the fragment.
+         * Growing those to the function's `ret` is what made a 0x4000 cap
+         * explode ijl15 from 44 MB to 1.4 GB.
+         *
+         * So: whole function when the preceding byte says "entry", otherwise
+         * the old 0x100 tail growth.  Note the guard is `whole ||` and not
+         * just "not a terminator": an extent that ends exactly on a `jmp` is
+         * still only half a function. */
+        int whole = 0;
+        {
+            uint8_t prev = 0;
+            if (start == L->image_lo ||
+                (lf_read_va(L, start - 1, &prev, 1) == 1 &&
+                 (prev == 0xCC || prev == 0x90 || prev == 0x00)))
+                whole = 1;
+        }
+        if (n > 0 && (whole || !last_word_is_term(ins[n - 1].insn.mnemonic))) {
+            int grown = 0;
+            int cap_grow = whole ? 0x800 : 0x100;
+            while (grown < cap_grow) {
+                InsnCopy *last = &ins[n - 1];
+                uint32_t nxt;
+                uint8_t more[300];
+                size_t got3;
+                int before;
+                if (last_word_is_term(last->insn.mnemonic)) {
+                    uint8_t pad = 0;
+                    size_t pg = lf_read_va(L, (uint32_t)(last->insn.address + last->insn.size),
+                                           &pad, 1);
+                    if (whole && strstr(last->insn.mnemonic, "ret")) break;
+                    if (!pg || pad == 0xCC || pad == 0x90) break;
+                    if (strstr(last->insn.mnemonic, "jmp") &&
+                        strchr(last->insn.op_str, '[')) break;
+                }
+                nxt = (uint32_t)(last->insn.address + last->insn.size);
+                {
+                    size_t budget = (size_t)(cap_grow - grown);
+                    if (budget > sizeof more - 15) budget = sizeof more - 15;
+                    got3 = lf_read_va(L, nxt, more, budget + 15);
+                }
+                if (!got3) break;
+                before = n;
+                decode_into(L, more, got3, nxt, &ins, &n, &cap);
+                if (n == before) break;
+                if (whole) {
+                    int k;
+                    for (k = before; k < n; k++)
+                        if (strstr(ins[k].insn.mnemonic, "ret")) { n = k + 1; break; }
+                }
+                if (L->block_mode) {
+                    int k;
+                    for (k = before; k < n; k++)
+                        if (last_word_is_term(ins[k].insn.mnemonic)) { n = k + 1; break; }
+                }
+                {
+                    uint32_t ne = (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size);
+                    grown += (int)(ne - nxt);
+                }
+                if (L->block_mode && last_word_is_term(ins[n - 1].insn.mnemonic))
+                    break;
+            }
+            if (n > 0) {
+                uint32_t ne = (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size);
+                if (ne > end) end = ne;
+            }
+        }
+    }
+
+    *out_ins = ins;
+    *out_n = n;
+    if (out_end) *out_end = end;
+    return 1;
+}
+
 static void append_str(char **out, size_t *len, size_t *cap, const char *s)
 {
     size_t n = strlen(s);
@@ -1345,8 +1719,30 @@ static LfFlagKind flag_producer_of(const cs_insn *in, int *sz)
  * producer's flags be treated as dead, so unknown integer instructions are
  * marked as readers of every flag and writers of none.  That keeps liveness
  * live and blocks fusion rather than changing behaviour. */
-static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
-                     uint8_t *writes)
+static LfFlagSummary *lf_get_summary(Lifter *L, uint32_t addr);
+
+/* Flags live at an external tail jump.  entry_reads is what the target reads
+ * before overwriting; the current function's exit needs must survive the jump
+ * unless the target definitely overwrites them on every exit path. */
+static uint8_t lf_tail_reads(Lifter *L, const cs_insn *in,
+                             const uint32_t *labels, int nlabels)
+{
+    LfFlagSummary *s;
+    if (!L->flag_boundary) return 0;
+    if (NOPS(in) < 1 || OP(in, 0)->type != X86_OP_IMM)
+        return LF_FLAG_ALL; /* unknown target */
+    if (labels && label_has(labels, nlabels, (uint32_t)OP(in, 0)->imm))
+        return 0;
+    s = lf_get_summary(L, (uint32_t)OP(in, 0)->imm);
+    if (!s) return LF_FLAG_ALL;
+    return (uint8_t)((s->entry_reads |
+                      (L->summary.exit_flags_needed &
+                       (uint8_t)(LF_FLAG_ALL & ~s->exit_must_writes))) &
+                     LF_FLAG_ALL);
+}
+
+static void flag_use(Lifter *L, const cs_insn *in, const uint32_t *labels,
+                     int nlabels, uint8_t *reads, uint8_t *writes)
 {
     const char *m = in->mnemonic;
     uint8_t r = 0, w = 0, cmask = 0;
@@ -1362,6 +1758,8 @@ static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
         op = op ? op + 1 : m;
         if (!strncmp(op, "cmps", 4) || !strncmp(op, "scas", 4)) {
             r |= LF_FLAG_ALL;
+            w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF |
+                 LF_FLAG_AF | LF_FLAG_PF;
         } else if (strncmp(op, "movs", 4) && strncmp(op, "stos", 4) &&
                    strncmp(op, "lods", 4)) {
             /* A rep prefix on a non-string instruction is outside the fast
@@ -1369,8 +1767,8 @@ static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
              * barrier instead of silently calling it transparent. */
             r |= LF_FLAG_ALL;
         }
-        *reads = r;
-        *writes = w;
+        *reads = (uint8_t)(r & LF_FLAG_ALL);
+        *writes = (uint8_t)(w & LF_FLAG_ALL);
         return;
     }
 
@@ -1390,14 +1788,20 @@ static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
         is_cond = 1;
     }
     if (is_cond) {
-        *reads = r;
-        *writes = w;
+        if (cons == LF_CONS_JCC)
+            r |= lf_tail_reads(L, in, labels, nlabels);
+        *reads = (uint8_t)(r & LF_FLAG_ALL);
+        *writes = (uint8_t)(w & LF_FLAG_ALL);
         return;
     }
 
     if (!strcmp(m, "loop") || !strcmp(m, "loope") || !strcmp(m, "loopz") ||
         !strcmp(m, "loopne") || !strcmp(m, "loopnz")) {
         if (strcmp(m, "loop")) r |= LF_FLAG_ZF;
+        /* loop is also a control transfer; its external target needs the same
+         * boundary reads as jmp/jcc.  The earlier else-if used to skip the
+         * control branch below and silently lost the target's needs. */
+        r |= lf_tail_reads(L, in, labels, nlabels);
     } else if (!strcmp(m, "pushf") || !strcmp(m, "pushfd") ||
                !strcmp(m, "pushfq")) {
         r |= LF_FLAG_ALL;
@@ -1417,7 +1821,8 @@ static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
         w |= LF_FLAG_CF;
     } else if (!strcmp(m, "adc") || !strcmp(m, "sbb")) {
         r |= LF_FLAG_CF;
-        w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF | LF_FLAG_PF;
+        w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF |
+             LF_FLAG_AF | LF_FLAG_PF;
     } else if (!strcmp(m, "rcl") || !strcmp(m, "rcr")) {
         r |= LF_FLAG_CF;
         w |= LF_FLAG_CF | LF_FLAG_OF;
@@ -1427,26 +1832,33 @@ static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
                !strcmp(m, "shr") || !strcmp(m, "sar") ||
                !strcmp(m, "shld") || !strcmp(m, "shrd")) {
         w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_PF;
-    } else if (!strcmp(m, "cmp") || !strcmp(m, "test") ||
-               !strcmp(m, "add") || !strcmp(m, "sub") ||
-               !strcmp(m, "and") || !strcmp(m, "or") || !strcmp(m, "xor") ||
-               !strcmp(m, "neg")) {
+    } else if (!strcmp(m, "cmp") || !strcmp(m, "add") ||
+               !strcmp(m, "sub") || !strcmp(m, "neg")) {
+        /* flags_sub/flags_add/flags_logicz: the first three write AF too;
+         * flags_* logic (and/or/xor/test) leaves AF undefined, so it must
+         * stay conservative and not kill an incoming AF. */
+        w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF |
+             LF_FLAG_AF | LF_FLAG_PF;
+    } else if (!strcmp(m, "test") || !strcmp(m, "and") ||
+               !strcmp(m, "or") || !strcmp(m, "xor")) {
         w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF | LF_FLAG_PF;
     } else if (!strcmp(m, "inc") || !strcmp(m, "dec")) {
-        w |= LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF | LF_FLAG_PF;
+        w |= LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF | LF_FLAG_AF | LF_FLAG_PF;
     } else if (!strcmp(m, "bt") || !strcmp(m, "bts") ||
                !strcmp(m, "btr") || !strcmp(m, "btc")) {
         w |= LF_FLAG_CF;
     } else if (!strcmp(m, "bsf") || !strcmp(m, "bsr")) {
         w |= LF_FLAG_ZF;
     } else if (!strcmp(m, "xadd") || !strcmp(m, "cmpxchg")) {
-        w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF | LF_FLAG_PF;
+        w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF |
+             LF_FLAG_AF | LF_FLAG_PF;
     } else if (!strcmp(m, "cmpxchg8b")) {
         w |= LF_FLAG_ZF;
     } else if (!strcmp(m, "daa") || !strcmp(m, "das") ||
                !strcmp(m, "aaa") || !strcmp(m, "aas") ||
                !strcmp(m, "aam") || !strcmp(m, "aad")) {
         r |= LF_FLAG_ALL;
+        w |= LF_FLAG_ALL;
     } else if (!strcmp(m, "mul") || !strcmp(m, "imul")) {
         /* MUL/IMUL write CF/OF and read no flags.  A.24 drops the write when
          * both are dead instead of treating the instruction as a full barrier. */
@@ -1471,7 +1883,8 @@ static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
                !strncmp(m, "lods", 4)) {
         /* string move: no flags */
     } else if (!strncmp(m, "cmps", 4) || !strncmp(m, "scas", 4)) {
-        w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF | LF_FLAG_PF;
+        w |= LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF |
+             LF_FLAG_AF | LF_FLAG_PF;
     } else if (!strcmp(m, "mov") || !strcmp(m, "movzx") ||
                !strcmp(m, "movsx") || !strcmp(m, "movsxd") ||
                !strcmp(m, "lea") || !strcmp(m, "not") ||
@@ -1493,23 +1906,59 @@ static void flag_use(Lifter *L, const cs_insn *in, uint8_t *reads,
         /* no EFLAGS effect */
     } else if (flag_is_control(m)) {
         /* call/ret/int and unsupported transfers: a caller, callee or trap
-         * handler may observe every flag. */
-        if (!strcmp(m, "jmp") || m[0] == 'j' || !strncmp(m, "loop", 4))
-            ; /* target liveness is modelled by the CFG */
-        else
+         * handler may observe every flag.  With the global boundary model,
+         * use per-function summaries instead of the conservative ALL. */
+        if (!strcmp(m, "call")) {
+            if (L->flag_boundary && NOPS(in) >= 1 &&
+                OP(in, 0)->type == X86_OP_IMM) {
+                LfFlagSummary *s = lf_get_summary(L, (uint32_t)OP(in, 0)->imm);
+                if (s) {
+                    r |= (uint8_t)(s->entry_reads |
+                                  (uint8_t)(LF_FLAG_ALL &
+                                            ~s->exit_must_writes));
+                    w |= s->exit_must_writes;
+                } else {
+                    /* No summary (table or allocation failure).  The callee
+                     * may leave a flag untouched, so killing it here would
+                     * expose a stale pre-call value.  Keep every incoming
+                     * flag. */
+                    r |= LF_FLAG_ALL;
+                }
+            } else {
+                r |= LF_FLAG_ALL;
+            }
+        } else if (!strcmp(m, "jmp") || m[0] == 'j' ||
+                   !strncmp(m, "loop", 4)) {
+            r |= lf_tail_reads(L, in, labels, nlabels);
+        } else if (L->flag_boundary &&
+                   (!strcmp(m, "ret") || !strcmp(m, "retn") ||
+                    !strcmp(m, "retf"))) {
+            /* The ret must keep every flag the caller needs alive, not only
+             * the flags the summary believes this function may write.  The
+             * may-write set can still be incomplete for conditional OF forms
+             * and for helpers whose exact EFLAGS effect is not modelled;
+             * filtering by it would drop the function's own writer and
+             * expose a stale incoming value.  An unknown/no-summary function
+             * still takes the conservative ALL path below. */
+            if (L->summary.addr != 0xffffffffu)
+                r |= (uint8_t)(L->summary.exit_flags_needed & LF_FLAG_ALL);
+            else
+                r |= LF_FLAG_ALL;
+        } else {
             r |= LF_FLAG_ALL;
+        }
     } else {
         r |= LF_FLAG_ALL;
     }
 
-    *reads = r;
-    *writes = w;
+    *reads = (uint8_t)(r & LF_FLAG_ALL);
+    *writes = (uint8_t)(w & LF_FLAG_ALL);
 }
 
 /* Can this producer drop its flag writes?  Only when every flag it writes is
- * dead on every outgoing edge.  AF is not part of the liveness mask (producers
- * never kill it conservatively), so it is added for the kinds whose helper
- * writes it. */
+ * dead on every outgoing edge.  flag_use() already adds AF for the producer
+ * kinds whose helper writes it; the extra AF term below is a defensive guard
+ * for a future kind/helper mismatch, not the primary source of that bit. */
 static int flag_dead(Lifter *L, const cs_insn *in, int *kind, int *sz)
 {
     uint8_t reads, writes;
@@ -1524,7 +1973,7 @@ static int flag_dead(Lifter *L, const cs_insn *in, int *kind, int *sz)
     }
     *kind = flag_producer_of(in, sz);
     if (*kind == LF_FLAG_NONE) return 0;
-    flag_use(L, in, &reads, &writes);
+    flag_use(L, in, NULL, 0, &reads, &writes);
     if (L->flag_live_out[L->flag_current_index] &
         (writes | (lf_flag_producer_af(*kind) ? LF_FLAG_AF : 0)))
         return 0;
@@ -1544,6 +1993,587 @@ static int flag_insn_index(const InsnCopy *ins, int n, uint64_t addr)
     return -1;
 }
 
+/* ---- global call/ret flag summaries ---- */
+
+static int is_ret_mnemonic(const char *m)
+{
+    return !strcmp(m, "ret") || !strcmp(m, "retn") || !strcmp(m, "retf");
+}
+
+static void flag_use_arch(Lifter *L, const cs_insn *in, uint8_t *reads,
+                          uint8_t *writes)
+{
+    int save = L->flag_boundary;
+    L->flag_boundary = 0;
+    flag_use(L, in, NULL, 0, reads, writes);
+    L->flag_boundary = save;
+    if (!strcmp(in->mnemonic, "call") || !strcmp(in->mnemonic, "ret") ||
+        !strcmp(in->mnemonic, "retn") || !strcmp(in->mnemonic, "retf") ||
+        !strcmp(in->mnemonic, "iret") || !strcmp(in->mnemonic, "iretd") ||
+        !strcmp(in->mnemonic, "hlt") || !strcmp(in->mnemonic, "int") ||
+        !strcmp(in->mnemonic, "int3") || !strcmp(in->mnemonic, "into") ||
+        !strcmp(in->mnemonic, "syscall") ||
+        !strcmp(in->mnemonic, "sysenter")) {
+        *reads = 0;
+        *writes = 0;
+    }
+    if (*reads == LF_FLAG_ALL && *writes == 0)
+        *writes = LF_FLAG_ALL; /* unknown instruction may write flags */
+}
+
+static int lf_func_index(Lifter *L, uint32_t addr)
+{
+    size_t lo = 0, hi = L->func_n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (L->func_map[mid].addr < addr) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < L->func_n && L->func_map[lo].addr == addr)
+        return (int)lo;
+    return -1;
+}
+
+static uint32_t lf_func_size(Lifter *L, uint32_t addr)
+{
+    int idx = lf_func_index(L, addr);
+    return idx >= 0 ? L->func_map[idx].size : 0;
+}
+
+/* The function whose claimed [addr, addr+size) range contains the value.
+ * Used only by the address-taken scan: an interior pointer (a thunk or a
+ * computed entry) still makes that function's ret indirectly reachable, so
+ * the containing function has to stay conservative. */
+static int lf_func_containing(Lifter *L, uint32_t addr)
+{
+    size_t lo = 0, hi = L->func_n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (L->func_map[mid].addr < addr) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < L->func_n && L->func_map[lo].addr == addr)
+        return (int)lo;
+    if (lo > 0) {
+        size_t p = lo - 1;
+        /* funcs.txt can end a function at a jmp to a shared epilogue, while
+         * lf_decode_extent() keeps growing it: the 0x800 cap is checked per
+         * batch, so the grown extent can overshoot it by one 300-byte batch.
+         * Accept 0xC00 past the claimed size too: an interior pointer there
+         * still makes the function's ret indirectly reachable.  Over-marking
+         * only costs optimization; a missed mark would hide the ret. */
+        uint64_t end = (uint64_t)L->func_map[p].addr + L->func_map[p].size + 0xC00u;
+        if ((uint64_t)addr < end) return (int)p;
+    }
+    return -1;
+}
+
+static uint32_t lf_summary_hash(uint32_t addr)
+{
+    return (addr * 2654435761u) >> 8;
+}
+
+static void lf_summary_table_init(Lifter *L, size_t cap)
+{
+    size_t i;
+    if (L->summary_table) return;
+    while (cap & (cap - 1)) cap++;
+    if (cap < 1024) cap = 1024;
+    L->summary_table_cap = cap;
+    L->summary_table = (LfFlagSummary *)calloc(cap, sizeof(LfFlagSummary));
+    if (!L->summary_table) return;
+    for (i = 0; i < cap; i++) L->summary_table[i].addr = 0xffffffffu;
+}
+
+static LfFlagSummary *lf_summary_lookup(Lifter *L, uint32_t addr)
+{
+    size_t mask, idx;
+    if (!L->summary_table) return NULL;
+    mask = L->summary_table_cap - 1;
+    idx = lf_summary_hash(addr) & mask;
+    while (L->summary_table[idx].addr != 0xffffffffu) {
+        if (L->summary_table[idx].addr == addr)
+            return &L->summary_table[idx];
+        idx = (idx + 1) & mask;
+    }
+    return NULL;
+}
+
+static LfFlagSummary *lf_summary_insert_raw(Lifter *L, uint32_t addr)
+{
+    size_t mask = L->summary_table_cap - 1;
+    size_t idx = lf_summary_hash(addr) & mask;
+    while (L->summary_table[idx].addr != 0xffffffffu) {
+        if (L->summary_table[idx].addr == addr)
+            return &L->summary_table[idx];
+        idx = (idx + 1) & mask;
+    }
+    L->summary_table[idx].addr = addr;
+    L->summary_table[idx].entry_reads = LF_FLAG_ALL;
+    L->summary_table[idx].exit_may_writes = LF_FLAG_ALL;
+    L->summary_table[idx].exit_must_writes = 0;
+    L->summary_table[idx].exit_flags_needed = 0;
+    L->summary_table[idx].computed = 0;
+    L->summary_table[idx].conservative = 1;
+    L->summary_table[idx].queued = 0;
+    L->summary_table_n++;
+    return &L->summary_table[idx];
+}
+
+static void lf_summary_grow(Lifter *L)
+{
+    size_t old_cap = L->summary_table_cap;
+    LfFlagSummary *old_table = L->summary_table;
+    size_t new_cap = old_cap * 2;
+    LfFlagSummary *new_table;
+    size_t i;
+    if (!old_table) { lf_summary_table_init(L, 1024); return; }
+    new_table = (LfFlagSummary *)calloc(new_cap, sizeof(LfFlagSummary));
+    if (!new_table) return;
+    for (i = 0; i < new_cap; i++) new_table[i].addr = 0xffffffffu;
+    L->summary_table = new_table;
+    L->summary_table_cap = new_cap;
+    L->summary_table_n = 0;
+    for (i = 0; i < old_cap; i++) {
+        if (old_table[i].addr != 0xffffffffu) {
+            LfFlagSummary *s = lf_summary_insert_raw(L, old_table[i].addr);
+            if (s) *s = old_table[i];
+        }
+    }
+    free(old_table);
+}
+
+static LfFlagSummary *lf_summary_insert(Lifter *L, uint32_t addr)
+{
+    LfFlagSummary *s;
+    if (!L->summary_table) lf_summary_table_init(L, 1024);
+    if (!L->summary_table) {
+        L->summary_incomplete = 1;
+        return NULL;
+    }
+    /* Updating an existing entry must not depend on the load factor: a full
+     * table used to return NULL for an address that was already present. */
+    s = lf_summary_lookup(L, addr);
+    if (s) return s;
+    if (L->summary_table_n * 10 >= L->summary_table_cap * 7)
+        lf_summary_grow(L);
+    if (!L->summary_table ||
+        L->summary_table_n * 10 >= L->summary_table_cap * 7) {
+        /* A full table must not silently drop summaries: callers would use
+         * stale N=0 and the ret would not store their flags. */
+        L->summary_incomplete = 1;
+        return NULL;
+    }
+    s = lf_summary_insert_raw(L, addr);
+    if (!s) L->summary_incomplete = 1;
+    return s;
+}
+
+static int is_flag_barrier(const char *m)
+{
+    return !strcmp(m, "hlt") || !strcmp(m, "int") || !strcmp(m, "int3") ||
+           !strcmp(m, "into") || !strcmp(m, "iret") ||
+           !strcmp(m, "iretd") || !strcmp(m, "syscall") ||
+           !strcmp(m, "sysenter") || !strcmp(m, "rsm") ||
+           !strcmp(m, "ud2");
+}
+
+/* True only when the instruction defines the flags it writes on every
+ * execution.  Call/return/trap barriers are handled separately; shifts and
+ * rotates with a zero or variable count, and DIV/IDIV, are deliberately not
+ * in this set because their flag effects are conditional or undefined. */
+static int is_must_flag_writer(const cs_insn *in)
+{
+    const char *m = in->mnemonic;
+    int sz;
+    if (flag_producer_of(in, &sz) != LF_FLAG_NONE) return 1;
+    return !strcmp(m, "popf") || !strcmp(m, "popfd") ||
+           !strcmp(m, "popfq") || !strcmp(m, "sahf") ||
+           !strncmp(m, "cmps", 4) || !strncmp(m, "scas", 4) ||
+           !strncmp(m, "fcomi", 5) || !strncmp(m, "fucomi", 6) ||
+           !strncmp(m, "fcompi", 6) || !strncmp(m, "fucompi", 7) ||
+           !strcmp(m, "mul") || !strcmp(m, "imul") ||
+           !strcmp(m, "bt") || !strcmp(m, "bts") ||
+           !strcmp(m, "btr") || !strcmp(m, "btc") ||
+           !strcmp(m, "bsf") || !strcmp(m, "bsr") ||
+           !strcmp(m, "stc") || !strcmp(m, "clc") ||
+           !strcmp(m, "cmc") || !strcmp(m, "xadd") ||
+           !strcmp(m, "cmpxchg") || !strcmp(m, "cmpxchg8b");
+}
+
+static int lf_summary_cfg(Lifter *L, const InsnCopy *ins, int n,
+                          LfFlagInsn *d)
+{
+    int i;
+    int has_indirect = 0;
+    for (i = 0; i < n; i++) {
+        const cs_insn *in = &ins[i].insn;
+        const char *m = in->mnemonic;
+        d[i].reads = d[i].writes = d[i].must_writes = 0;
+        d[i].is_ret = (uint8_t)is_ret_mnemonic(m);
+        flag_use_arch(L, in, &d[i].reads, &d[i].writes);
+        if (!strcmp(m, "call") || is_flag_barrier(m)) {
+            /* A callee or trap handler may read any incoming flag and leave
+             * any outgoing flag; nothing is a guaranteed write. */
+            d[i].reads = LF_FLAG_ALL;
+            d[i].writes = LF_FLAG_ALL;
+            d[i].must_writes = 0;
+        } else if (d[i].is_ret) {
+            d[i].reads = 0;
+            d[i].writes = 0;
+            d[i].must_writes = 0;
+        } else if (d[i].reads == LF_FLAG_ALL &&
+                   d[i].writes == LF_FLAG_ALL) {
+            d[i].must_writes = 0;
+        } else if (is_must_flag_writer(in)) {
+            d[i].must_writes = d[i].writes;
+        } else {
+            d[i].must_writes = 0;
+        }
+        d[i].succ1 = d[i].succ2 = -2;
+        if (!strcmp(m, "jmp")) {
+            if (NOPS(in) >= 1 && OP(in, 0)->type == X86_OP_IMM) {
+                int t = flag_insn_index(ins, n, (uint64_t)OP(in, 0)->imm);
+                if (t < 0) {
+                    d[i].reads = LF_FLAG_ALL;
+                    d[i].writes = LF_FLAG_ALL;
+                    d[i].must_writes = 0;
+                }
+                d[i].succ1 = t >= 0 ? t : -1;
+            } else {
+                /* The target is unknown: it may read any incoming flag and
+                 * leave any outgoing one, exactly like an indirect call. */
+                d[i].reads = LF_FLAG_ALL;
+                d[i].writes = LF_FLAG_ALL;
+                d[i].must_writes = 0;
+                d[i].succ1 = -1;
+                has_indirect = 1;
+            }
+        } else if (m[0] == 'j' || !strncmp(m, "loop", 4)) {
+            if (NOPS(in) >= 1 && OP(in, 0)->type == X86_OP_IMM) {
+                int t = flag_insn_index(ins, n, (uint64_t)OP(in, 0)->imm);
+                if (t < 0) {
+                    d[i].reads = LF_FLAG_ALL;
+                    d[i].writes = LF_FLAG_ALL;
+                    d[i].must_writes = 0;
+                }
+                d[i].succ1 = t >= 0 ? t : -1;
+            } else {
+                d[i].reads = LF_FLAG_ALL;
+                d[i].writes = LF_FLAG_ALL;
+                d[i].must_writes = 0;
+                d[i].succ1 = -1;
+                has_indirect = 1;
+            }
+            d[i].succ2 = (i + 1 < n) ? i + 1 : -1;
+        } else if (!strcmp(m, "call")) {
+            if (NOPS(in) >= 1 && OP(in, 0)->type != X86_OP_IMM)
+                has_indirect = 1;
+            d[i].succ1 = (i + 1 < n) ? i + 1 : -1;
+        } else if (!strcmp(m, "ret") || !strcmp(m, "retn") ||
+                   !strcmp(m, "retf") || !strcmp(m, "hlt") ||
+                   !strcmp(m, "iret") || !strcmp(m, "iretd")) {
+            /* no successor */
+        } else if (!strcmp(m, "int3") || !strcmp(m, "int") ||
+                   !strcmp(m, "into")) {
+            d[i].succ1 = (i + 1 < n) ? i + 1 : -1;
+            d[i].succ2 = -1;
+        } else if (flag_is_control(m)) {
+            d[i].succ1 = -1;
+            d[i].succ2 = -1;
+        } else {
+            d[i].succ1 = (i + 1 < n) ? i + 1 : -1;
+        }
+    }
+    return has_indirect;
+}
+
+static uint8_t lf_entry_reads(const LfFlagInsn *d, int n)
+{
+    uint8_t *in, *queued, entry_reads = 0;
+    int *work;
+    size_t head = 0, tail = 0, work_cap;
+    if (n <= 0) return LF_FLAG_ALL;
+    work_cap = (size_t)n * 8 + 8;
+    in = (uint8_t *)calloc((size_t)n, 1);
+    queued = (uint8_t *)calloc((size_t)n, 1);
+    work = (int *)malloc(work_cap * sizeof(int));
+    if (!in || !queued || !work) {
+        free(in); free(queued); free(work);
+        return LF_FLAG_ALL;
+    }
+    in[0] = LF_FLAG_ALL;
+    work[tail++] = 0;
+    queued[0] = 1;
+    while (head < tail) {
+        int i = work[head++];
+        uint8_t out = (uint8_t)(in[i] & ~d[i].must_writes);
+        entry_reads |= (uint8_t)(d[i].reads & in[i]);
+        int s;
+        for (s = 0; s < 2; s++) {
+            int succ = s == 0 ? d[i].succ1 : d[i].succ2;
+            if (succ >= 0 && succ < n) {
+                uint8_t ni = (uint8_t)(in[succ] | out);
+                if (ni != in[succ]) {
+                    in[succ] = ni;
+                    if (!queued[succ]) {
+                        if (tail >= work_cap) {
+                            free(in); free(queued); free(work);
+                            return LF_FLAG_ALL;
+                        }
+                        queued[succ] = 1;
+                        work[tail++] = succ;
+                    }
+                }
+            }
+        }
+        queued[i] = 0;
+    }
+    free(in); free(queued); free(work);
+    return entry_reads;
+}
+
+static uint8_t lf_exit_may_writes(const LfFlagInsn *d, int n)
+{
+    uint8_t *in, *queued, exit_may = 0;
+    int *work, any_exit = 0;
+    size_t head = 0, tail = 0, work_cap;
+    if (n <= 0) return LF_FLAG_ALL;
+    work_cap = (size_t)n * 8 + 8;
+    in = (uint8_t *)calloc((size_t)n, 1);
+    queued = (uint8_t *)calloc((size_t)n, 1);
+    work = (int *)malloc(work_cap * sizeof(int));
+    if (!in || !queued || !work) {
+        free(in); free(queued); free(work);
+        return LF_FLAG_ALL;
+    }
+    in[0] = 0;
+    work[tail++] = 0;
+    queued[0] = 1;
+    while (head < tail) {
+        int i = work[head++];
+        uint8_t out = (uint8_t)(in[i] | d[i].writes);
+        int s;
+        /* Every path that leaves the function counts, not only a direct ret.
+         * An external tail jump, hlt/iret or an unresolved branch is modelled
+         * as a barrier with writes=ALL and must=0 by lf_summary_cfg(); if it
+         * were ignored whenever another path has a ret, the caller would
+         * wrongly assume that this exit preserves or rewrites a flag. */
+        if (d[i].succ1 == -1 || d[i].succ2 == -1 ||
+            (d[i].succ1 < 0 && d[i].succ2 < 0)) {
+            exit_may |= out;
+            any_exit = 1;
+        }
+        for (s = 0; s < 2; s++) {
+            int succ = s == 0 ? d[i].succ1 : d[i].succ2;
+            if (succ >= 0 && succ < n) {
+                uint8_t ni = (uint8_t)(in[succ] | out);
+                if (ni != in[succ]) {
+                    in[succ] = ni;
+                    if (!queued[succ]) {
+                        if (tail >= work_cap) {
+                            free(in); free(queued); free(work);
+                            return LF_FLAG_ALL;
+                        }
+                        queued[succ] = 1;
+                        work[tail++] = succ;
+                    }
+                }
+            }
+        }
+        queued[i] = 0;
+    }
+    free(in); free(queued); free(work);
+    return any_exit ? exit_may : LF_FLAG_ALL;
+}
+
+static uint8_t lf_exit_must_writes(const LfFlagInsn *d, int n)
+{
+    uint8_t *in, *queued, *valid, exit_must = LF_FLAG_ALL;
+    int *work, any_exit = 0;
+    size_t head = 0, tail = 0, work_cap;
+    if (n <= 0) return 0;
+    work_cap = (size_t)n * 8 + 8;
+    in = (uint8_t *)calloc((size_t)n, 1);
+    queued = (uint8_t *)calloc((size_t)n, 1);
+    valid = (uint8_t *)calloc((size_t)n, 1);
+    work = (int *)malloc((size_t)work_cap * sizeof(int));
+    if (!in || !queued || !valid || !work) {
+        free(in); free(queued); free(valid); free(work);
+        return 0;
+    }
+    /* Intersection analysis: a successor starts at TOP and is tightened by
+     * every predecessor.  The valid[] bit distinguishes "not visited yet"
+     * from a real ALL value, so a first predecessor that writes all flags
+     * still schedules the successor. */
+    in[0] = 0;
+    valid[0] = 1;
+    work[tail++] = 0;
+    queued[0] = 1;
+    while (head < tail) {
+        int i = work[head++];
+        uint8_t out = (uint8_t)(in[i] | d[i].must_writes);
+        int s;
+        /* Intersect over every exit path, including external tail jumps and
+         * traps.  Such a barrier has must_writes=0, so a flag written only on
+         * the ret path is not claimed as a must-write for the whole function;
+         * otherwise the caller could drop the pre-call value and observe a
+         * stale flag after the barrier's target eventually returns. */
+        if (d[i].succ1 == -1 || d[i].succ2 == -1 ||
+            (d[i].succ1 < 0 && d[i].succ2 < 0)) {
+            exit_must &= out;
+            any_exit = 1;
+        }
+        for (s = 0; s < 2; s++) {
+            int succ = s == 0 ? d[i].succ1 : d[i].succ2;
+            if (succ >= 0 && succ < n) {
+                int first = !valid[succ];
+                uint8_t ni = first ? out : (uint8_t)(in[succ] & out);
+                if (first || ni != in[succ]) {
+                    valid[succ] = 1;
+                    in[succ] = ni;
+                    if (!queued[succ]) {
+                        if (tail >= work_cap) {
+                            free(in); free(queued); free(valid); free(work);
+                            return 0;
+                        }
+                        queued[succ] = 1;
+                        work[tail++] = succ;
+                    }
+                }
+            }
+        }
+        queued[i] = 0;
+    }
+    free(in); free(queued); free(valid); free(work);
+    /* No direct ret: the function may leave through a tail jump or never
+     * return.  Claiming that it must write flags would let its caller drop
+     * pre-call flag values; return "none" instead. */
+    return any_exit ? exit_must : 0;
+}
+
+static void lf_compute_summary(Lifter *L, const InsnCopy *ins, int n,
+                               uint32_t addr, LfFlagSummary *out)
+{
+    LfFlagInsn *d;
+    out->addr = addr;
+    out->computed = 0;
+    out->queued = 0;
+    out->conservative = 1;
+    if (n <= 0) {
+        out->entry_reads = LF_FLAG_ALL;
+        out->exit_may_writes = LF_FLAG_ALL;
+        out->exit_must_writes = 0;
+        out->exit_flags_needed = LF_FLAG_ALL;
+        return;
+    }
+    d = (LfFlagInsn *)calloc((size_t)n, sizeof *d);
+    if (!d) {
+        out->entry_reads = LF_FLAG_ALL;
+        out->exit_may_writes = LF_FLAG_ALL;
+        out->exit_must_writes = 0;
+        out->exit_flags_needed = LF_FLAG_ALL;
+        return;
+    }
+    if (lf_summary_cfg(L, ins, n, d)) {
+        out->entry_reads = LF_FLAG_ALL;
+        out->exit_may_writes = LF_FLAG_ALL;
+        out->exit_must_writes = 0;
+        out->exit_flags_needed = LF_FLAG_ALL;
+        free(d);
+        return;
+    }
+    /* The size in funcs.txt can end before the real terminator (the lifted
+     * extent is grown past a jmp to a shared epilogue).  A trailing jmp/jcc
+     * is modelled as an external barrier and its needs are propagated to the
+     * target, but a non-terminator means the decoded extent is cut in the
+     * middle of the function; its continuation is unknown. */
+    if (!last_word_is_term(ins[n - 1].insn.mnemonic)) {
+        out->entry_reads = LF_FLAG_ALL;
+        out->exit_may_writes = LF_FLAG_ALL;
+        out->exit_must_writes = 0;
+        out->exit_flags_needed = LF_FLAG_ALL;
+        out->conservative = 1;
+        free(d);
+        return;
+    }
+    out->entry_reads = lf_entry_reads(d, n);
+    out->exit_may_writes = lf_exit_may_writes(d, n);
+    out->exit_must_writes = lf_exit_must_writes(d, n);
+    /* Callers replace this with the propagated N or the global fallback; the
+     * default only matters when no summary could be stored, where ALL is the
+     * only safe choice (may_writes does not cover AF and some OF forms). */
+    out->exit_flags_needed = LF_FLAG_ALL;
+    out->conservative = 0;
+    free(d);
+}
+
+static LfFlagSummary *lf_get_summary(Lifter *L, uint32_t addr)
+{
+    LfFlagSummary *s;
+    LfFlagSummary tmp;
+    uint32_t size;
+    InsnCopy *ins = NULL;
+    int n = 0;
+    uint8_t need, queued;
+    uint8_t precomputed = (uint8_t)(L->summary_precomputed != 0);
+
+    s = lf_summary_lookup(L, addr);
+    if (s && s->computed) return s;
+    size = lf_func_size(L, addr);
+    if (!size) {
+        s = lf_summary_insert(L, addr);
+        if (s) {
+            queued = s->queued;
+            s->entry_reads = LF_FLAG_ALL;
+            s->exit_may_writes = LF_FLAG_ALL;
+            s->exit_must_writes = 0;
+            s->exit_flags_needed = LF_FLAG_ALL;
+            s->computed = 1;
+            s->conservative = 1;
+            s->queued = queued;
+        }
+        return s;
+    }
+    if (!lf_decode_extent(L, addr, size, &ins, &n, NULL) || n <= 0) {
+        free(ins);
+        s = lf_summary_insert(L, addr);
+        if (s) {
+            queued = s->queued;
+            s->entry_reads = LF_FLAG_ALL;
+            s->exit_may_writes = LF_FLAG_ALL;
+            s->exit_must_writes = 0;
+            s->exit_flags_needed = LF_FLAG_ALL;
+            s->computed = 1;
+            s->conservative = 1;
+            s->queued = queued;
+        }
+        return s;
+    }
+    lf_compute_summary(L, ins, n, addr, &tmp);
+    s = lf_summary_insert(L, addr);
+    if (s) {
+        need = s->exit_flags_needed;
+        queued = s->queued;
+        /* During precompute a fresh summary starts with N=0; Phase 2 fixes
+         * that after callers have propagated their live_out.  After
+         * precompute that would be a hole (the function was skipped because
+         * decode or insertion failed), so keep every flag. */
+        if (!tmp.conservative)
+            tmp.exit_flags_needed = precomputed ? LF_FLAG_ALL : need;
+        tmp.computed = 1;
+        tmp.queued = queued;
+        *s = tmp;
+    }
+    free(ins);
+    return s;
+}
+
+void lf_summary_init(Lifter *L, size_t cap)
+{
+    lf_summary_table_init(L, cap);
+}
+
 static int build_flag_plan(Lifter *L, const InsnCopy *ins, int n,
                            const uint32_t *labels, int nlabels,
                            uint8_t **role_out, LfFlagFuse **fuse_out,
@@ -1557,7 +2587,7 @@ static int build_flag_plan(Lifter *L, const InsnCopy *ins, int n,
     *role_out = NULL;
     *fuse_out = NULL;
     *live_out_out = NULL;
-    if (n <= 1) return 0;
+    if (n <= 0) return 0;
     d = (LfFlagInsn *)calloc((size_t)n, sizeof *d);
     pairs = (LfFlagFuse *)calloc((size_t)n, sizeof *pairs);
     live_out = (uint8_t *)calloc((size_t)n, 1);
@@ -1574,11 +2604,14 @@ static int build_flag_plan(Lifter *L, const InsnCopy *ins, int n,
         uint8_t mask = 0;
         d[i].is_label = (uint8_t)(label_has(labels, nlabels, in->address) != 0);
         d[i].is_control = (uint8_t)flag_is_control(m);
+        d[i].is_ret = (uint8_t)is_ret_mnemonic(m);
+        d[i].is_call = (uint8_t)!strcmp(m, "call");
+        d[i].tail_exact = (uint8_t)L->flag_boundary;
         d[i].consumer = (uint8_t)flag_consumer_of(L, in, &mask);
         d[i].cond_mask = mask;
         d[i].producer = (uint8_t)flag_producer_of(in, &sz);
         d[i].size = (uint8_t)sz;
-        flag_use(L, in, &d[i].reads, &d[i].writes);
+        flag_use(L, in, labels, nlabels, &d[i].reads, &d[i].writes);
 
         d[i].succ1 = d[i].succ2 = -2;
         if (!strcmp(m, "jmp")) {
@@ -1650,6 +2683,382 @@ static int build_flag_plan(Lifter *L, const InsnCopy *ins, int n,
     return nf;
 }
 
+static int u32_cmp(const void *a, const void *b)
+{
+    uint32_t x = *(const uint32_t *)a;
+    uint32_t y = *(const uint32_t *)b;
+    return (x > y) - (x < y);
+}
+
+static void lf_summary_enqueue(Lifter *L, uint32_t addr)
+{
+    LfFlagSummary *s = lf_summary_lookup(L, addr);
+    if (!s) s = lf_summary_insert(L, addr);
+    if (!s) {
+        L->summary_incomplete = 1;
+        return;
+    }
+    if (s->queued) return;
+    if (L->summary_qtail == L->summary_qcap) {
+        size_t ncap = L->summary_qcap ? L->summary_qcap * 2 : 1024;
+        uint32_t *nq = (uint32_t *)realloc(L->summary_queue,
+                                           ncap * sizeof(uint32_t));
+        if (!nq) {
+            L->summary_incomplete = 1;
+            return;
+        }
+        L->summary_queue = nq;
+        L->summary_qcap = ncap;
+    }
+    s->queued = 1;
+    L->summary_queue[L->summary_qtail++] = addr;
+}
+
+static int lf_summary_add_needed(Lifter *L, uint32_t addr, uint8_t mask)
+{
+    LfFlagSummary *s = lf_summary_lookup(L, addr);
+    if (!s) s = lf_summary_insert(L, addr);
+    if (!s) {
+        L->summary_incomplete = 1;
+        return 0;
+    }
+    mask = (uint8_t)(mask & LF_FLAG_ALL);
+    if ((mask & (uint8_t)~s->exit_flags_needed) == 0) return 0;
+    s->exit_flags_needed |= mask;
+    /* Targets outside func_map have no lifted ret to update. */
+    if (s->computed && lf_func_size(L, addr))
+        lf_summary_enqueue(L, addr);
+    return 1;
+}
+
+/* Re-run one function's liveness with its current exit_flags_needed and push
+ * the resulting call/tail needs to the targets.  The initial pass below does
+ * the same work on the already-decoded extent; the worklist uses this helper
+ * when a function gains a needed flag after it was first visited. */
+static void lf_summary_pass(Lifter *L, uint32_t addr)
+{
+    uint32_t size = lf_func_size(L, addr);
+    InsnCopy *ins = NULL;
+    int n = 0;
+    uint32_t *labels = NULL;
+    int nlabels = 0;
+    uint8_t *role = NULL;
+    LfFlagFuse *fuse = NULL;
+    uint8_t *live_out = NULL;
+    LfFlagSummary *s;
+    LfFlagSummary cur;
+    int i;
+
+    if (!size) return;
+    if (!lf_decode_extent(L, addr, size, &ins, &n, NULL) || n <= 0) {
+        L->summary_incomplete = 1;
+        free(ins);
+        return;
+    }
+    labels = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+    if (!labels) {
+        L->summary_incomplete = 1;
+        free(ins);
+        return;
+    }
+    for (i = 0; i < n; i++) labels[i] = (uint32_t)ins[i].insn.address;
+    qsort(labels, (size_t)n, sizeof(uint32_t), u32_cmp);
+    nlabels = 1;
+    for (i = 1; i < n; i++)
+        if (labels[i] != labels[nlabels - 1]) labels[nlabels++] = labels[i];
+
+    s = lf_summary_lookup(L, addr);
+    if (!s || !s->computed) {
+        L->summary_incomplete = 1;
+        free(labels); free(ins);
+        return;
+    }
+    cur = *s;
+    /* Tail jumps first: N(F) travels through the jump to the target's ret,
+     * because the caller of F still needs those flags after the target
+     * eventually returns.  flag_use() separately models what the jump itself
+     * must keep live (target entry_reads and N(F) the target does not
+     * definitely overwrite). */
+    if (cur.exit_flags_needed) {
+        for (i = 0; i < n; i++) {
+            const char *m = ins[i].insn.mnemonic;
+            if ((!strcmp(m, "jmp") || m[0] == 'j' ||
+                 !strncmp(m, "loop", 4)) &&
+                NOPS(&ins[i].insn) >= 1 &&
+                OP(&ins[i].insn, 0)->type == X86_OP_IMM) {
+                uint32_t target = (uint32_t)OP(&ins[i].insn, 0)->imm;
+                if (target != addr && !label_has(labels, nlabels, target) &&
+                    lf_func_size(L, target))
+                    lf_summary_add_needed(L, target, cur.exit_flags_needed);
+            }
+        }
+    }
+    if (n > 0) {
+        int save = L->flag_boundary;
+        L->flag_boundary = 1;
+        L->summary = cur;
+        if (build_flag_plan(L, ins, n, labels, nlabels,
+                            &role, &fuse, &live_out) < 0) {
+            role = NULL; fuse = NULL; live_out = NULL;
+            /* Without live_out the calls below keep the callee's old N. */
+            L->summary_incomplete = 1;
+        }
+        L->flag_boundary = save;
+    }
+    if (live_out) {
+        for (i = 0; i < n; i++) {
+            const char *m = ins[i].insn.mnemonic;
+            if (!strcmp(m, "call") && NOPS(&ins[i].insn) >= 1 &&
+                OP(&ins[i].insn, 0)->type == X86_OP_IMM) {
+                uint32_t target = (uint32_t)OP(&ins[i].insn, 0)->imm;
+                lf_summary_add_needed(L, target, live_out[i]);
+            }
+        }
+    }
+    free(role); free(fuse); free(live_out);
+    free(labels); free(ins);
+}
+
+/* A function whose address appears in the image may be reached by an
+ * indirect call/jmp.  Such a caller cannot name the target, so it cannot
+ * contribute to exit_flags_needed; the target must keep every flag it may
+ * write visible at its ret.  Marking is global (relocation table plus code
+ * immediates), not an address denylist. */
+static void lf_mark_taken(Lifter *L, uint8_t *taken, uint32_t v)
+{
+    LfFlagSummary *s;
+    int idx;
+    if (!taken || v < L->image_lo || v >= L->image_hi) return;
+    idx = lf_func_containing(L, v);
+    if (idx < 0 || taken[idx]) return;
+    taken[idx] = 1;
+    s = lf_summary_lookup(L, L->func_map[idx].addr);
+    if (s && s->computed)
+        lf_summary_add_needed(L, L->func_map[idx].addr, LF_FLAG_ALL);
+}
+
+static void lf_scan_addr_taken(Lifter *L, uint8_t *taken,
+                               const InsnCopy *ins, int n)
+{
+    int i, k;
+    if (!taken) return;
+    for (i = 0; i < n; i++) {
+        const cs_insn *in = &ins[i].insn;
+        const char *m = in->mnemonic;
+        int direct = !strcmp(m, "call") || !strcmp(m, "jmp") ||
+                     m[0] == 'j' || !strncmp(m, "loop", 4);
+        for (k = 0; k < NOPS(in); k++) {
+            const cs_x86_op *op = OP(in, k);
+            uint32_t v;
+            if (op->type == X86_OP_IMM) {
+                if (direct && k == 0) continue; /* direct branch target */
+                v = (uint32_t)op->imm;
+            } else if (op->type == X86_OP_MEM && !strcmp(m, "lea") &&
+                       op->mem.base == 0 && op->mem.index == 0) {
+                v = (uint32_t)op->mem.disp;
+            } else {
+                continue;
+            }
+            lf_mark_taken(L, taken, v);
+        }
+    }
+}
+
+/* Sound only for the exact func_map handed in: every direct call and tail
+ * edge in the corpus has to be represented, otherwise a callee's N omits a
+ * later caller's live flags and flag_dead can delete a writer that caller
+ * still observes.  Seed/closure rounds pass a partial map for target
+ * discovery; closure2's final pass repeats the lift with seed + all closure
+ * targets before publishing seed.c/closed.c. */
+void lf_precompute_summaries(Lifter *L)
+{
+    size_t fi;
+    uint8_t *addr_taken = NULL;
+    uint8_t *phase1_done = NULL;
+    if (!L->flag_boundary) {
+        L->summary_precomputed = 1;
+        return;
+    }
+    L->summary_qhead = L->summary_qtail = 0;
+
+    addr_taken = (uint8_t *)calloc(L->func_n ? L->func_n : 1, 1);
+    if (addr_taken) {
+        size_t ri;
+        if (!L->nreloc) {
+            /* Without relocations a function address can be hidden in any
+             * initialized data word; keep every ret conservative. */
+            memset(addr_taken, 1, L->func_n);
+        } else {
+            for (ri = 0; ri < L->nreloc; ri++) {
+                uint8_t raw[4];
+                if (lf_read_va(L, L->reloc[ri], raw, 4) != 4) continue;
+                lf_mark_taken(L, addr_taken, pe_rd32(raw));
+            }
+        }
+    }
+    /* Per-function proof that the Phase 1 body reached its end.  A summary
+     * can be computed on demand while an earlier caller is processed; that
+     * sets computed=1 without propagating this function's call needs or
+     * scanning its code immediates. */
+    phase1_done = (uint8_t *)calloc(L->func_n ? L->func_n : 1, 1);
+    if (!phase1_done) L->summary_incomplete = 1;
+
+    /* Phase 1: entry_reads / exit_may_writes / exit_must_writes.  Calls are
+     * modelled as barriers, so these masks do not depend on callee summaries
+     * and this pass is order-independent. */
+    for (fi = 0; fi < L->func_n; fi++) {
+        uint32_t addr = L->func_map[fi].addr;
+        uint32_t size = L->func_map[fi].size;
+        InsnCopy *ins = NULL;
+        int n = 0;
+        uint32_t *labels = NULL;
+        int nlabels = 0;
+        uint8_t *role = NULL;
+        LfFlagFuse *fuse = NULL;
+        uint8_t *live_out = NULL;
+        int i;
+        int indirect = 0;
+        int have_s = 0;
+        uint8_t cur_needed = 0;
+        LfFlagSummary tmp;
+        LfFlagSummary *s;
+
+        if (!lf_decode_extent(L, addr, size, &ins, &n, NULL) || n <= 0) {
+            free(ins);
+            continue;
+        }
+        labels = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+        if (!labels) { free(ins); continue; }
+        for (i = 0; i < n; i++) labels[i] = (uint32_t)ins[i].insn.address;
+        qsort(labels, (size_t)n, sizeof(uint32_t), u32_cmp);
+        nlabels = 1;
+        for (i = 1; i < n; i++)
+            if (labels[i] != labels[nlabels - 1]) labels[nlabels++] = labels[i];
+
+        for (i = 0; i < n; i++) {
+            const char *m = ins[i].insn.mnemonic;
+            if ((!strcmp(m, "jmp") || m[0] == 'j' ||
+                 !strncmp(m, "loop", 4) || !strcmp(m, "call")) &&
+                (NOPS(&ins[i].insn) < 1 ||
+                 OP(&ins[i].insn, 0)->type != X86_OP_IMM))
+                indirect = 1;
+        }
+        lf_scan_addr_taken(L, addr_taken, ins, n);
+
+        lf_compute_summary(L, ins, n, addr, &tmp);
+        tmp.computed = 1;
+        tmp.queued = 0;
+        if (indirect || tmp.conservative) {
+            tmp.entry_reads = LF_FLAG_ALL;
+            tmp.exit_may_writes = LF_FLAG_ALL;
+            tmp.exit_must_writes = 0;
+            tmp.exit_flags_needed = LF_FLAG_ALL;
+            tmp.conservative = 1;
+        } else {
+            LfFlagSummary *old = lf_summary_lookup(L, addr);
+            tmp.exit_flags_needed = old ? old->exit_flags_needed : 0;
+            /* An indirect caller cannot add its needs to this function;
+             * keep every may-written flag visible at its ret instead. */
+            if (!addr_taken || addr_taken[fi])
+                tmp.exit_flags_needed = LF_FLAG_ALL;
+            tmp.conservative = 0;
+        }
+        s = lf_summary_insert(L, addr);
+        have_s = s != NULL;
+        if (s) {
+            uint8_t q = s->queued;
+            *s = tmp;
+            s->queued = q;
+            tmp = *s;
+            cur_needed = tmp.exit_flags_needed;
+        }
+
+        /* Tail jumps first: N(F) travels through the jump to the target's
+         * ret, because the caller of F still needs those flags after the
+         * target eventually returns.  This may rehash the summary table; tmp
+         * and have_s are the only values used below. */
+        if (cur_needed) {
+            for (i = 0; i < n; i++) {
+                const char *m = ins[i].insn.mnemonic;
+                if ((!strcmp(m, "jmp") || m[0] == 'j' ||
+                     !strncmp(m, "loop", 4)) &&
+                    NOPS(&ins[i].insn) >= 1 &&
+                    OP(&ins[i].insn, 0)->type == X86_OP_IMM) {
+                    uint32_t target = (uint32_t)OP(&ins[i].insn, 0)->imm;
+                    if (target != addr && !label_has(labels, nlabels, target) &&
+                        lf_func_size(L, target))
+                        lf_summary_add_needed(L, target, cur_needed);
+                }
+            }
+        }
+
+        if (n > 0 && have_s) {
+            int save = L->flag_boundary;
+            L->flag_boundary = 1;
+            L->summary = tmp;
+            if (build_flag_plan(L, ins, n, labels, nlabels,
+                                &role, &fuse, &live_out) < 0) {
+                role = NULL; fuse = NULL; live_out = NULL;
+                /* No live_out means no call-needs propagation below. */
+                L->summary_incomplete = 1;
+            }
+            L->flag_boundary = save;
+        }
+        if (live_out) {
+            for (i = 0; i < n; i++) {
+                const char *m = ins[i].insn.mnemonic;
+                if (!strcmp(m, "call") && NOPS(&ins[i].insn) >= 1 &&
+                    OP(&ins[i].insn, 0)->type == X86_OP_IMM) {
+                    uint32_t target = (uint32_t)OP(&ins[i].insn, 0)->imm;
+                    lf_summary_add_needed(L, target, live_out[i]);
+                }
+            }
+        }
+        free(role); free(fuse); free(live_out);
+        free(labels);
+        free(ins);
+        if (phase1_done) phase1_done[fi] = 1;
+    }
+
+    /* Phase 1 can compute a summary on demand while an earlier caller is
+     * processed.  computed=1 then only proves that the masks exist; it does
+     * not prove that this function's own pass ran, so its call needs were
+     * never propagated and its code immediates were never scanned.  A missed
+     * pass can still lift later (lf_lift_function decodes independently), so
+     * force the global ALL fallback before the first lift; there is no safe
+     * repair after some functions were already emitted.  A persistent decode
+     * failure costs precision but not correctness. */
+    if (phase1_done) {
+        for (fi = 0; fi < L->func_n; fi++) {
+            if (!L->func_map[fi].size) continue;
+            if (phase1_done[fi]) continue;
+            L->summary_incomplete = 1;
+            break;
+        }
+    }
+
+    /* Phase 2: propagate exit_flags_needed backwards.  A function that gains
+     * a needed flag must be re-run because its ret may now keep an additional
+     * flag alive at calls inside it. */
+    while (L->summary_qhead < L->summary_qtail) {
+        uint32_t addr = L->summary_queue[L->summary_qhead++];
+        LfFlagSummary *s = lf_summary_lookup(L, addr);
+        if (!s) {
+            L->summary_incomplete = 1;
+            continue;
+        }
+        s->queued = 0;
+        if (s->computed) lf_summary_pass(L, addr);
+        else L->summary_incomplete = 1;
+    }
+
+    L->summary_precomputed = 1;
+    free(addr_taken);
+    free(phase1_done);
+    free(L->summary_queue);
+    L->summary_queue = NULL;
+    L->summary_qhead = L->summary_qtail = L->summary_qcap = 0;
+}
 /* ---- optional lifter-level GPR cache (A.4 prototype) ----
  *
  * The generated C reads and writes guest registers through c->eax and friends.
@@ -2039,10 +3448,8 @@ static void gpr_cache_apply(char **out, size_t *out_len)
 
 char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
 {
-    uint8_t *code;
-    size_t got;
     InsnCopy *ins = NULL;
-    int n = 0, cap = 0;
+    int n = 0;
     uint32_t end;
     uint32_t *labels = NULL;
     size_t lcap = 0;
@@ -2055,125 +3462,7 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
     LfFlagFuse *flag_fuse = NULL;
     uint8_t *flag_live_out = NULL;
 
-    code = (uint8_t *)malloc(size ? size : 1);
-    if (!code) return NULL;
-    got = lf_read_va(L, start, code, size);
-    if (!decode_into(L, code, got, start, &ins, &n, &cap)) { free(code); return NULL; }
-    free(code);
-    end = start + (uint32_t)got;
-
-    /* an extent that ends inside an instruction: read the few more bytes */
-    if (n > 0) {
-        uint32_t tail = (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size);
-        if (tail < end) {
-            /* the extent can be kilobytes longer than what capstone decoded
-             * (a clamp against a phantom start leaves the tail in data), so the
-             * read buffer is sized from the gap, not a fixed array. */
-            size_t want = (size_t)(end - tail) + 15;
-            uint8_t *extra = (uint8_t *)malloc(want);
-            size_t got2 = extra ? lf_read_va(L, tail, extra, want) : 0;
-            if (got2) {
-                int before = n;
-                decode_into(L, extra, got2, tail, &ins, &n, &cap);
-                for (i = before; i < n; i++)
-                    if (ins[i].insn.address >= end) { n = i; break; }
-                if (n > 0) {
-                    uint32_t ne = (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size);
-                    if (ne > end) end = ne;
-                }
-            }
-            free(extra);
-        }
-    }
-
-    if (L->block_mode && n > 0) {
-        for (i = 0; i < n; i++)
-            if (last_word_is_term(ins[i].insn.mnemonic)) { n = i + 1; break; }
-    }
-
-    {
-        /* Two very different things can be seeded here, and they need
-         * different extents.
-         *
-         * A *function entry* - one preceded by int3/nop/zero padding - has to
-         * be lifted whole, up to its `ret`.  If it is cut short the prologue's
-         * pushes land in one fragment and the epilogue's pops in another, and
-         * since each fragment is entered as an independent "function" the pops
-         * are balanced against the wrong frame.  That is not a cosmetic
-         * problem: game.dll 6F1ACD50 lost its `pop edi` that way (its extent
-         * ended on the `jmp` at 6F1ACD78) and the caller then read a field of
-         * its object through a zeroed edi.
-         *
-         * A *mid-function* seed - a jump-table or branch target - must stay
-         * short, because the prologue before it is not part of the fragment.
-         * Growing those to the function's `ret` is what made a 0x4000 cap
-         * explode ijl15 from 44 MB to 1.4 GB.
-         *
-         * So: whole function when the preceding byte says "entry", otherwise
-         * the old 0x100 tail growth.  Note the guard is `whole ||` and not
-         * just "not a terminator": an extent that ends exactly on a `jmp` is
-         * still only half a function. */
-        int whole = 0;
-        {
-            uint8_t prev = 0;
-            if (start == L->image_lo ||
-                (lf_read_va(L, start - 1, &prev, 1) == 1 &&
-                 (prev == 0xCC || prev == 0x90 || prev == 0x00)))
-                whole = 1;
-        }
-        if (n > 0 && (whole || !last_word_is_term(ins[n - 1].insn.mnemonic))) {
-        int grown = 0;
-        int cap_grow = whole ? 0x800 : 0x100;
-        while (grown < cap_grow) {
-            InsnCopy *last = &ins[n - 1];
-            uint32_t nxt;
-            uint8_t more[300];
-            size_t got3;
-            int before;
-            if (last_word_is_term(last->insn.mnemonic)) {
-                uint8_t pad = 0;
-                size_t pg = lf_read_va(L, (uint32_t)(last->insn.address + last->insn.size), &pad, 1);
-                /* In whole-function mode a ret ends it even without padding:
-                 * the bytes after it belong to the next function. */
-                if (whole && strstr(last->insn.mnemonic, "ret")) break;
-                if (!pg || pad == 0xCC || pad == 0x90) break;
-                if (strstr(last->insn.mnemonic, "jmp") && strchr(last->insn.op_str, '[')) break;
-            }
-            nxt = (uint32_t)(last->insn.address + last->insn.size);
-            {
-                size_t budget = (size_t)(cap_grow - grown);
-                if (budget > sizeof more - 15) budget = sizeof more - 15;
-                got3 = lf_read_va(L, nxt, more, budget + 15);
-            }
-            if (!got3) break;
-            before = n;
-            decode_into(L, more, got3, nxt, &ins, &n, &cap);
-            if (n == before) break;
-            /* decode_into decodes the whole read buffer linearly, so a batch
-             * can run past the function's `ret` into the next one.  In
-             * whole-function mode the first `ret` is the end, so cut there. */
-            if (whole) {
-                int k;
-                for (k = before; k < n; k++)
-                    if (strstr(ins[k].insn.mnemonic, "ret")) { n = k + 1; break; }
-            }
-            if (L->block_mode) {
-                int k;
-                for (k = before; k < n; k++)
-                    if (last_word_is_term(ins[k].insn.mnemonic)) { n = k + 1; break; }
-            }
-            {
-                uint32_t ne = (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size);
-                grown += (int)(ne - nxt);
-            }
-            if (L->block_mode && last_word_is_term(ins[n - 1].insn.mnemonic)) break;
-        }
-        if (n > 0) {
-            uint32_t ne = (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size);
-            if (ne > end) end = ne;
-        }
-        }
-    }
+    if (!lf_decode_extent(L, start, size, &ins, &n, &end)) return NULL;
 
     L->func_start = start;
     L->func_end = end;
@@ -2248,6 +3537,40 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
     for (i = 0; i < n; i++)
         if (ins[i].insn.mnemonic[0] == 'f') { has_x87 = 1; break; }
 
+    L->x87_lazy = 0;
+    {
+        const char *s = getenv("WC3_LIFT_X87_LAZY");
+        if (s && strcmp(s, "0")) L->x87_lazy = 1;
+    }
+    L->flag_boundary = 1;
+    {
+        const char *s = getenv("WC3_LIFT_FLAG_BOUNDARY");
+        if (s && !strcmp(s, "0")) L->flag_boundary = 0;
+    }
+    L->x87_lazy_safe = 0;
+    if (has_x87 && L->x87_lazy)
+        L->x87_lazy_safe = x87_lazy_check(L, ins, n, labels, nlabels);
+    L->x87_dirty = 0;
+
+    L->summary.addr = 0xffffffffu;
+    lf_compute_summary(L, ins, n, start, &L->summary);
+    {
+        LfFlagSummary *sp = lf_summary_lookup(L, start);
+        if (sp && L->summary_precomputed && !L->summary_incomplete)
+            L->summary.exit_flags_needed = sp->exit_flags_needed;
+        else
+            /* No stored summary or a failed/skipped summary step: some
+             * callee N may be 0 even though this function's callers need its
+             * result.  Keep every flag visible at its ret. */
+            L->summary.exit_flags_needed = LF_FLAG_ALL;
+        sp = lf_summary_insert(L, start);
+        if (sp) {
+            uint8_t q = sp->queued;
+            *sp = L->summary;
+            sp->queued = q;
+            sp->computed = 1;
+        }
+    }
     if (L->flag_fusion && n > 1) {
         if (build_flag_plan(L, ins, n, labels, nlabels,
                             &flag_role, &flag_fuse, &flag_live_out) < 0) {
@@ -2276,6 +3599,7 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
                    "    double st[8]; int x87_base; uint16_t x87_tag;\n"
                    "    VS_LOAD(c, st, x87_tag, x87_base);\n");
         L->x87_top = 0;
+        L->x87_dirty = 0;
     }
     for (i = 0; i < n; i++) {
         cs_insn *in = &ins[i].insn;
@@ -2288,16 +3612,40 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
                         strstr(in->mnemonic, "iret") ||
                         LST(in->mnemonic, "loop", "loope", "loopz", "loopne", "loopnz");
         int is_label = label_has(labels, nlabels, in->address);
+        int x87_internal_branch = has_x87 &&
+                                  x87_branch_internal(in, labels, nlabels);
+        int x87_external_transfer = 0;
         /* MMX aliases the low 64 bits of the same physical st[8].  A mixed
          * x87/MMX function must spill the virtual stack before the MMX
          * instruction and reload it afterwards, or MMX reads stale values and
          * later x87 ops overwrite the MMX result. */
         int is_mmx = has_x87 && lf_is_mmx(L, in);
-        if (has_x87 && (is_branch || is_label)) {
-            char x87buf[128];
-            snprintf(x87buf, sizeof x87buf,
-                     "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n", L->x87_top);
-            append_str(&out, &out_len, &out_cap, x87buf);
+        if (has_x87) {
+            if (L->x87_lazy_safe) {
+                if (!strcmp(in->mnemonic, "call") ||
+                    !strcmp(in->mnemonic, "ret") ||
+                    !strcmp(in->mnemonic, "retn") ||
+                    !strcmp(in->mnemonic, "retf") ||
+                    !strcmp(in->mnemonic, "hlt") ||
+                    !strcmp(in->mnemonic, "iret") ||
+                    !strcmp(in->mnemonic, "iretd") ||
+                    (is_branch && !x87_internal_branch)) {
+                    x87_external_transfer = 1;
+                }
+                if (x87_external_transfer && L->x87_dirty) {
+                    char x87buf[128];
+                    snprintf(x87buf, sizeof x87buf,
+                             "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n",
+                             L->x87_top);
+                    append_str(&out, &out_len, &out_cap, x87buf);
+                    L->x87_dirty = 0;
+                }
+            } else if (is_branch || is_label) {
+                char x87buf[128];
+                snprintf(x87buf, sizeof x87buf,
+                         "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n", L->x87_top);
+                append_str(&out, &out_len, &out_cap, x87buf);
+            }
         }
         if (is_label) {
             char lb[32];
@@ -2306,16 +3654,36 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
             memcpy(out + out_len, lb, (size_t)ln);
             out_len += (size_t)ln;
             if (has_x87) {
-                append_str(&out, &out_len, &out_cap,
-                           "    VS_LOAD(c, st, x87_tag, x87_base);\n");
-                L->x87_top = 0;
+                if (!L->x87_lazy_safe) {
+                    append_str(&out, &out_len, &out_cap,
+                               "    VS_LOAD(c, st, x87_tag, x87_base);\n");
+                    L->x87_top = 0;
+                } else {
+                    /* A label may be entered from a dirty path.  Treat the
+                     * state as dirty so a later real transfer flushes. */
+                    L->x87_dirty = 1;
+                    L->x87_top = 0;
+                }
             }
         }
         if (is_mmx) {
-            char x87buf[128];
-            snprintf(x87buf, sizeof x87buf,
-                     "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n", L->x87_top);
-            append_str(&out, &out_len, &out_cap, x87buf);
+            if (has_x87) {
+                if (L->x87_lazy_safe) {
+                    if (L->x87_dirty) {
+                        char x87buf[128];
+                        snprintf(x87buf, sizeof x87buf,
+                                 "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n",
+                                 L->x87_top);
+                        append_str(&out, &out_len, &out_cap, x87buf);
+                        L->x87_dirty = 0;
+                    }
+                } else {
+                    char x87buf[128];
+                    snprintf(x87buf, sizeof x87buf,
+                             "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n", L->x87_top);
+                    append_str(&out, &out_len, &out_cap, x87buf);
+                }
+            }
         }
         lf_arena_reset();
         L->flag_current_index = i;
@@ -2337,8 +3705,13 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
                 append_str(&out, &out_len, &out_cap,
                            "    VS_LOAD(c, st, x87_tag, x87_base);\n");
                 L->x87_top = 0;
+                L->x87_dirty = 0;
             } else {
                 x87_top_after(L, in->mnemonic);
+                if (L->x87_lazy_safe && in->mnemonic[0] == 'f' &&
+                    !LST(in->mnemonic, "fwait", "fnop")) {
+                    L->x87_dirty = 1;
+                }
             }
         }
     }
@@ -2350,11 +3723,12 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
         uint32_t nxt = n ? (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size) : end;
         char tail[160];
         int tn;
-        if (has_x87) {
+        if (has_x87 && (!L->x87_lazy_safe || L->x87_dirty)) {
             char x87buf[128];
             snprintf(x87buf, sizeof x87buf,
                      "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n", L->x87_top);
             append_str(&out, &out_len, &out_cap, x87buf);
+            L->x87_dirty = 0;
         }
         tn = snprintf(tail, sizeof tail,
                       "    /* extent ends mid-function: fall through */\n"

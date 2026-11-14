@@ -82,6 +82,13 @@ static void load_relocs(Lifter *L, const char *path)
     }
 }
 
+static int lf_func_size_cmp(const void *a, const void *b)
+{
+    const LfFuncSize *x = (const LfFuncSize *)a;
+    const LfFuncSize *y = (const LfFuncSize *)b;
+    return (x->addr > y->addr) - (x->addr < y->addr);
+}
+
 int lf_lift_files(const char *module, const char *funcs_path, const char *out_c,
                   const char *out_list, int block_mode, int verbose)
 {
@@ -118,6 +125,11 @@ int lf_lift_files(const char *module, const char *funcs_path, const char *out_c,
         const char *s = getenv("WC3_LIFT_GPR_CACHE");
         if (s && strcmp(s, "0")) L.gpr_cache = 1;
     }
+    L.flag_boundary = 1;
+    {
+        const char *s = getenv("WC3_LIFT_FLAG_BOUNDARY");
+        if (s && !strcmp(s, "0")) L.flag_boundary = 0;
+    }
     if (csg_open_x86(&L.h) != 0) { pe_close(&pe); return 1; }
     load_relocs(&L, module);
     if (verbose)
@@ -148,6 +160,17 @@ int lf_lift_files(const char *module, const char *funcs_path, const char *out_c,
     fclose(f);
     if (!nf) { fprintf(stderr, "[!] %s: no functions\n", funcs_path); free(addrs); free(sizes); csg.close(&L.h); pe_close(&pe); return 1; }
 
+    L.func_map = (LfFuncSize *)malloc((size_t)nf * sizeof(LfFuncSize));
+    if (!L.func_map) { fprintf(stderr, "[!] out of memory\n"); free(addrs); free(sizes); csg.close(&L.h); pe_close(&pe); return 1; }
+    for (i = 0; i < nf; i++) {
+        L.func_map[i].addr = addrs[i];
+        L.func_map[i].size = sizes[i];
+    }
+    qsort(L.func_map, (size_t)nf, sizeof(LfFuncSize), lf_func_size_cmp);
+    L.func_n = (size_t)nf;
+    lf_summary_init(&L, (size_t)nf * 4);
+    lf_precompute_summaries(&L);
+
     oc = fopen(out_c, "w");
     if (!oc) { fprintf(stderr, "[!] cannot write %s\n", out_c); return 1; }
     ol = fopen(out_list, "w");
@@ -175,6 +198,8 @@ int lf_lift_files(const char *module, const char *funcs_path, const char *out_c,
 
     free(addrs);
     free(sizes);
+    free(L.func_map);
+    free(L.summary_table);
     free(L.reloc);
     csg.close(&L.h);
     pe_close(&pe);

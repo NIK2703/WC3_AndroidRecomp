@@ -24,7 +24,8 @@
 
 #define OVERLAY_CANVAS_METHOD "buildAtlas"
 #define OVERLAY_CANVAS_SIGNATURE \
-    "(IIIFI[I[F[Ljava/lang/String;[I)Landroid/graphics/Bitmap;"
+    "(Landroid/content/Context;IIIFI[I[F[Ljava/lang/String;[I[I)" \
+    "Landroid/graphics/Bitmap;"
 
 static JavaVM *g_vm;
 static jobject g_activity;
@@ -256,10 +257,12 @@ int overlay_canvas_build(Wc3Overlay *overlay) {
     int *meta = NULL;
     float *params = NULL;
     int *layers = NULL;
+    int *icon_ids = NULL;
     uint8_t *atlas_pixels = NULL;
     jintArray meta_array = NULL;
     jfloatArray params_array = NULL;
     jobjectArray label_array = NULL;
+    jintArray icon_array = NULL;
     jintArray layer_array = NULL;
     jstring *label_refs = NULL;
     jobject bitmap = NULL;
@@ -271,8 +274,9 @@ int overlay_canvas_build(Wc3Overlay *overlay) {
     meta = (int *)calloc((size_t)n * 6u, sizeof(int));
     params = (float *)calloc((size_t)n * 2u, sizeof(float));
     layers = (int *)calloc((size_t)max_layers * 9u + 1u, sizeof(int));
+    icon_ids = (int *)calloc((size_t)n, sizeof(int));
     label_refs = (jstring *)calloc((size_t)n, sizeof(jstring));
-    if (!meta || !params || !layers || !label_refs) {
+    if (!meta || !params || !layers || !icon_ids || !label_refs) {
         OVERLAY_CANVAS_LOGE("out of memory preparing cache request");
         goto done;
     }
@@ -285,9 +289,11 @@ int overlay_canvas_build(Wc3Overlay *overlay) {
     meta_array = (*env)->NewIntArray(env, n * 6);
     params_array = (*env)->NewFloatArray(env, n * 2);
     label_array = (*env)->NewObjectArray(env, n, string_class, NULL);
+    icon_array = (*env)->NewIntArray(env, n);
     layer_array = (*env)->NewIntArray(env, max_layers * 9 + 1);
     (*env)->DeleteLocalRef(env, string_class);
-    if (!meta_array || !params_array || !label_array || !layer_array) {
+    if (!meta_array || !params_array || !label_array || !icon_array ||
+        !layer_array) {
         clear_exception(env, "allocating JNI arrays");
         goto done;
     }
@@ -306,6 +312,7 @@ int overlay_canvas_build(Wc3Overlay *overlay) {
         meta[i * 6 + 5] = e->y + half_h;
         params[i * 2 + 0] = e->scale;
         params[i * 2 + 1] = effective_radius(overlay, e);
+        icon_ids[i] = e->icon_id;
 
         label_refs[i] = (*env)->NewStringUTF(
             env, e->type == WC3_OVERLAY_ELEMENT_BUTTON ? e->text : "");
@@ -320,17 +327,19 @@ int overlay_canvas_build(Wc3Overlay *overlay) {
 
     (*env)->SetIntArrayRegion(env, meta_array, 0, n * 6, meta);
     (*env)->SetFloatArrayRegion(env, params_array, 0, n * 2, params);
+    (*env)->SetIntArrayRegion(env, icon_array, 0, n, icon_ids);
     if ((*env)->ExceptionCheck(env)) {
         clear_exception(env, "setting cache arrays");
         goto done;
     }
 
     bitmap = (*env)->CallStaticObjectMethod(
-        env, g_helper, g_build,
+        env, g_helper, g_build, g_activity,
         (jint)overlay->width, (jint)overlay->height,
         (jint)overlay->snapping_size,
         (jfloat)overlay->style.stroke_width_multiplier,
-        (jint)n, meta_array, params_array, label_array, layer_array);
+        (jint)n, meta_array, params_array, label_array, icon_array,
+        layer_array);
     if ((*env)->ExceptionCheck(env)) {
         clear_exception(env, "buildAtlas");
         bitmap = NULL;
@@ -387,6 +396,8 @@ done:
     free(meta);
     free(params);
     free(layers);
+    free(icon_ids);
+    if (icon_array) (*env)->DeleteLocalRef(env, icon_array);
     if (label_refs) {
         for (int i = 0; i < n; i++) {
             if (label_refs[i]) (*env)->DeleteLocalRef(env, label_refs[i]);

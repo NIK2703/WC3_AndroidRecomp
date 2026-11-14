@@ -98,6 +98,13 @@ static void expect_package(const char *name, const ProfileBindPackage *package,
     }
 }
 
+/* An explicit empty array becomes a NONE package.  The key must stay present:
+ * deleting it makes the loader re-apply the second-finger defaults. */
+static int package_is_none(const ProfileBindPackage *package) {
+    return package->count == 1 &&
+           strcmp(package->bindings[0].name, "NONE") == 0;
+}
+
 static void init_engine(const ProfileData *profile, bool direct_mode,
                         TouchProcessorConfig *config, TouchElement *elements) {
     profile_to_config(profile, SCREEN_W, SCREEN_H, 1.0f, config);
@@ -244,6 +251,17 @@ int main(int argc, char **argv) {
     if (!scroll_slot_has_binding(&profile, PROFILE_SCROLL_SLOT_SD2,
                                  PROFILE_SCROLL_DIR_RIGHT, "KEY_INSERT"))
         fail("two-finger camera right is not KEY_INSERT");
+
+    /* The second finger is reserved for the two-finger camera swipe.  Its
+     * tap and drag packages must be NONE so a second-finger tap cannot click. */
+    if (!package_is_none(gesture(&profile, PROFILE_GESTURE_SINGLE_2ND)))
+        fail("second-finger tap action is not disabled");
+    if (!package_is_none(gesture(&profile, PROFILE_GESTURE_SINGLE_DRAG_2ND)))
+        fail("second-finger drag action is not disabled");
+    if (!package_is_none(gesture(&profile, PROFILE_GESTURE_DOUBLE_2ND)))
+        fail("second-finger double tap action is not disabled");
+    if (!package_is_none(gesture(&profile, PROFILE_GESTURE_DOUBLE_DRAG_2ND)))
+        fail("second-finger double tap drag action is not disabled");
 
     /* Authored profile: the double-tap scheme used by the product default. */
     if (gesture(&profile, PROFILE_GESTURE_DOUBLE_TAP)->count <= 0)

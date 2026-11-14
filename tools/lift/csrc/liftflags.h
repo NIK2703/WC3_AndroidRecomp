@@ -57,13 +57,17 @@ typedef enum {
  * indices, -1 for "leaves this lifted extent" and -2 for "no successor". */
 typedef struct {
     uint8_t reads;
-    uint8_t writes;
+    uint8_t writes;       /* flags the instruction may write */
+    uint8_t must_writes;  /* flags the instruction always writes */
     uint8_t consumer;
     uint8_t cond_mask;
     uint8_t producer;
     uint8_t size;
     uint8_t is_label;
     uint8_t is_control;
+    uint8_t is_ret;       /* direct ret/retn/retf: a transparent exit edge */
+    uint8_t is_call;      /* succ1 == -1 after a call is an unknown return */
+    uint8_t tail_exact;   /* exact boundary model when succ1 == -1 was built */
     int succ1;
     int succ2;
 } LfFlagInsn;
@@ -79,6 +83,7 @@ typedef struct {
     int mat_taken;
     int mat_fall;
     uint32_t producer_addr;
+    uint8_t cond_mask;      /* flags the fused condition actually reads */
 } LfFlagFuse;
 
 #define LF_FLAG_MAX_SPAN 8
@@ -97,6 +102,13 @@ int lf_flag_cond(char *buf, size_t cap, const char *cc, LfFlagKind kind,
 
 /* True when the producer kind writes AF (the original helper does). */
 int lf_flag_producer_af(int kind);
+
+/* True when the direct condition for this kind would reference the result
+ * temporary.  Producers whose result is not architecturally visible (cmp,
+ * test, logic ops) still need it for ZF/SF/PF and some OF/CF forms; when the
+ * condition does not read it, emitting the temporary would leave an unused
+ * variable in the generated C. */
+int lf_flag_cond_needs_fr(LfFlagKind kind, uint8_t cond_mask);
 
 /* Plan a function-sized straight-line/CFG region.  Returns the number of
  * fused pairs, or -1 when the flag liveness did not converge (the caller must

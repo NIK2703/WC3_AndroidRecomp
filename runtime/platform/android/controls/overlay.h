@@ -140,6 +140,12 @@ typedef struct {
     char text[WC3_OVERLAY_TEXT_MAX];
 
     /*
+     * Standard overlay icon id.  Non-zero ids are loaded from the
+     * inputcontrols/icons/<id>.png asset set.  Zero means text only.
+     */
+    int icon_id;
+
+    /*
      * Visual state.  visual_layers is a WC3_OVERLAY_LAYER_* mask.  A BUTTON
      * with visual_layers == 0 is inactive and draws its inactive fill (if any)
      * plus stroke and text.  The layer alphas are 0..255 multipliers; 255 is

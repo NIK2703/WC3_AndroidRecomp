@@ -31,6 +31,23 @@ typedef struct {
     uint32_t t[LF_MAX_JT_ENT];
 } LfJumpTable;
 
+/* Per-function flag summary used by the global call/ret boundary model. */
+typedef struct {
+    uint32_t addr;
+    uint8_t entry_reads;      /* flags read at entry before any write */
+    uint8_t exit_may_writes;  /* flags written on some path to any exit */
+    uint8_t exit_must_writes; /* flags written on every path to every exit */
+    uint8_t exit_flags_needed; /* callers need these after the ret */
+    uint8_t computed;          /* entry/may/must are real, not a placeholder */
+    uint8_t conservative;      /* masks are the unknown/indirect fallback */
+    uint8_t queued;            /* addr is in the summary worklist */
+} LfFlagSummary;
+
+typedef struct {
+    uint32_t addr;
+    uint32_t size;
+} LfFuncSize;
+
 typedef struct {
     Pe *pe;
     csh h;
@@ -42,6 +59,20 @@ typedef struct {
     size_t nreloc;
     int block_mode;             /* WC3_LIFT_BLOCK=1 */
     int x87_top;                /* compile-time virtual x87 top, 0..7 */
+    int x87_lazy;               /* WC3_LIFT_X87_LAZY: skip clean internal sync */
+    int x87_lazy_safe;          /* per-function: top==0 at internal boundaries */
+    int x87_dirty;              /* emission-time: local x87 state changed */
+    int flag_boundary;          /* WC3_LIFT_FLAG_BOUNDARY: global call/ret model */
+    LfFlagSummary summary;      /* current function's flag summary */
+    LfFlagSummary *summary_table; /* hash table of summaries */
+    size_t summary_table_cap;
+    size_t summary_table_n;
+    uint32_t *summary_queue;    /* exit_flags_needed worklist */
+    size_t summary_qhead, summary_qtail, summary_qcap;
+    int summary_precomputed;    /* lf_precompute_summaries completed */
+    int summary_incomplete;     /* a summary step failed: every ret N is ALL */
+    LfFuncSize *func_map;       /* sorted function size map from funcs.txt */
+    size_t func_n;
     int flag_fusion;            /* WC3_LIFT_FLAG_FUSION != "0" */
     int flagless;               /* WC3_LIFT_FLAGLESS != "0" */
     int gpr_cache;              /* WC3_LIFT_GPR_CACHE != "0" */
@@ -63,6 +94,10 @@ typedef struct {
 /* --- scratch strings (freed wholesale once per instruction) --- */
 void   lf_arena_reset(void);
 char  *lf_afmt(const char *fmt, ...);
+
+/* Global call/ret flag summaries. */
+void   lf_summary_init(Lifter *L, size_t cap);
+void   lf_precompute_summaries(Lifter *L);
 
 /* --- emission helpers (liftemit.c) --- */
 Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels);

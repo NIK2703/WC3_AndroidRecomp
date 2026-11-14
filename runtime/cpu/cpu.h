@@ -763,6 +763,44 @@ static inline uint32_t op_ror(CPU *c, uint32_t v, uint32_t cnt, int sz) {
     return r;
 }
 
+/* A.28: value-only forms.  They must match the helpers above exactly,
+ * including the count >= width cases and rotate modulo; only the flag
+ * stores are omitted. */
+static inline uint32_t op_shl_nf(uint32_t v, uint32_t cnt, int sz) {
+    uint32_t m = mask_sz(sz); cnt &= 31; if (!cnt) return v & m;
+    uint32_t w = (uint32_t)sz * 8u;
+    if (cnt >= w) return 0;
+    return (v << cnt) & m;
+}
+static inline uint32_t op_shr_nf(uint32_t v, uint32_t cnt, int sz) {
+    uint32_t m = mask_sz(sz); v &= m; cnt &= 31; if (!cnt) return v;
+    uint32_t w = (uint32_t)sz * 8u;
+    if (cnt >= w) return 0;
+    return v >> cnt;
+}
+static inline uint32_t op_sar_nf(uint32_t v, uint32_t cnt, int sz) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz); v &= m; cnt &= 31;
+    if (!cnt) return v;
+    uint32_t w = (uint32_t)sz * 8u, r;
+    if (cnt >= w) {
+        r = (v & s) ? m : 0;
+    } else {
+        uint32_t ext = (v & s) ? (m << (w - cnt)) & m : 0;
+        r = ((v >> cnt) | ext) & m;
+    }
+    return r;
+}
+static inline uint32_t op_rol_nf(uint32_t v, uint32_t cnt, int sz) {
+    uint32_t m = mask_sz(sz); int w = sz * 8; v &= m;
+    cnt &= 31; cnt %= (uint32_t)w; if (!cnt) return v;
+    return ((v << cnt) | (v >> (w - cnt))) & m;
+}
+static inline uint32_t op_ror_nf(uint32_t v, uint32_t cnt, int sz) {
+    uint32_t m = mask_sz(sz); int w = sz * 8; v &= m;
+    cnt &= 31; cnt %= (uint32_t)w; if (!cnt) return v;
+    return ((v >> cnt) | (v << (w - cnt))) & m;
+}
+
 /* ---- byte order ----
  *
  * bswap reverses the four bytes of a 32-bit register and touches no flags.

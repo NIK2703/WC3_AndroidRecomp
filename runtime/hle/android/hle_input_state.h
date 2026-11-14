@@ -510,9 +510,10 @@ typedef struct {
 } HleTextDiff;
 
 /*
- * The editor always owns the tail of the field, so the old Java bridge
- * represented every change as "delete the old suffix, then type the new
- * suffix".  Keep that rule but compare decoded code units, not bytes, so a
+ * The bridge represents every change as "delete the old suffix, then type the
+ * new suffix".  That is exact while the guest caret is at the end of the field
+ * (the normal focus and typing state), but a caret in the middle of the text
+ * would need a caret-aware diff.  Compare decoded code units, not bytes, so a
  * multi-byte character is one backspace and one WM_CHAR.
  */
 static inline void hle_text_diff(const char *old_text, int old_length,

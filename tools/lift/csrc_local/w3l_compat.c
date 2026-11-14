@@ -655,6 +655,24 @@ static void line_info(const char *text, size_t n, size_t pos, size_t end,
     (void)n;
 }
 
+/* The lazy flag emitter wraps a fused compare and its consumer in a block and
+ * prints the consumer's instruction comment on the synthetic closing brace as
+ * well.  That comment is not a second instruction site; anchor-based patches
+ * must ignore it or every fused branch looks like a duplicate anchor. */
+static int line_is_synthetic_close(const char *text, size_t n, size_t pos,
+                                   size_t end)
+{
+    size_t ls, ce, ne, i;
+    line_info(text, n, pos, end, &ls, &ce, &ne);
+    i = ls;
+    while (i < ce && (text[i] == ' ' || text[i] == '\t')) i++;
+    if (i >= ce || text[i] != '}') return 0;
+    i++;
+    while (i < ce && (text[i] == ' ' || text[i] == '\t')) i++;
+    if (i == ce) return 1;
+    return text[i] == '/' && i + 1 < ce && text[i + 1] == '*';
+}
+
 static int anchor_pos(const char *text, size_t n, size_t start, size_t end,
                       const Site *site, size_t *out, char **err)
 {
@@ -662,8 +680,12 @@ static int anchor_pos(const char *text, size_t n, size_t start, size_t end,
     size_t pos = find_sub(text, end, site->anchor, alen, start);
     size_t second;
 
+    while (pos != NPOS && line_is_synthetic_close(text, n, pos, end))
+        pos = find_sub(text, end, site->anchor, alen, pos + 1);
     if (pos == NPOS) return 0;
     second = find_sub(text, end, site->anchor, alen, pos + 1);
+    while (second != NPOS && line_is_synthetic_close(text, n, second, end))
+        second = find_sub(text, end, site->anchor, alen, second + 1);
     if (second != NPOS) {
         set_err(err, "%s: anchor %s appears more than once in %s",
                 site->key, site->va, site->function);
@@ -802,17 +824,43 @@ static int apply_site(const char *text, size_t n, const Site *site,
     } else if (strcmp(site->key, "logon_proof_hash_verify") == 0) {
         Buf b = {0};
         size_t p;
-        if (!contains_range(text, n, line_start, content_end, "if (c->zf)")) {
-            set_err(err, "logon_proof: expected 'if (c->zf)' at 0x6F8DD732");
-            return 0;
-        }
-        p = find_sub(text, content_end, "if (c->zf)", 10, line_start);
         buf_str(&b,
                 "    /* WC3_W3L_COMPAT logon_proof: VA 0x6F8DD732 je -> jne. */");
         buf_str(&b, nl);
-        buf_mem(&b, text + line_start, p - line_start);
-        buf_str(&b, "if (!c->zf)");
-        buf_mem(&b, text + p + 10, content_end - (p + 10));
+        p = find_sub(text, content_end, "if (c->zf)", 10, line_start);
+        if (p != NPOS) {
+            buf_mem(&b, text + line_start, p - line_start);
+            buf_str(&b, "if (!c->zf)");
+            buf_mem(&b, text + p + 10, content_end - (p + 10));
+        } else {
+            /* The final flag pass may fuse the compare and the branch into an
+             * `if ((_fr_... == 0u))` block.  Invert whatever condition is on
+             * the anchor line instead of insisting on the old c->zf form. */
+            size_t ip = find_sub(text, content_end, "if (", 4, line_start);
+            size_t q;
+            int depth = 1;
+            if (ip == NPOS) {
+                set_err(err, "logon_proof: expected a branch at 0x6F8DD732");
+                free(b.p);
+                return 0;
+            }
+            q = ip + 4;
+            while (q < content_end && depth > 0) {
+                if (text[q] == '(') depth++;
+                else if (text[q] == ')') depth--;
+                q++;
+            }
+            if (depth != 0 || q == ip + 4) {
+                set_err(err, "logon_proof: unbalanced branch at 0x6F8DD732");
+                free(b.p);
+                return 0;
+            }
+            buf_mem(&b, text + line_start, ip - line_start);
+            buf_str(&b, "if (!(");
+            buf_mem(&b, text + ip + 4, (q - 1) - (ip + 4));
+            buf_str(&b, "))");
+            buf_mem(&b, text + q, content_end - q);
+        }
         replacement = buf_take(&b);
         edit_start = line_start;
         edit_end = content_end;

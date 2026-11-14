@@ -72,11 +72,17 @@
  * so the pointers stay NULL and the guest runs exactly as before.  A function
  * pointer also keeps the call out of the same translation unit as the empty
  * definition, which a compiler would otherwise be free to inline away. */
-static void (*g_keyboard_show)(uint32_t field, const HleKeyboardRect *rect);
+static void (*g_keyboard_show)(uint32_t field, const HleKeyboardRect *rect,
+                               const char *text, int text_length,
+                               int selection_start, int selection_end);
 static void (*g_keyboard_hide)(void);
 
 void hle_android_set_keyboard_bridge(void (*show)(uint32_t field,
-                                                  const HleKeyboardRect *rect),
+                                                  const HleKeyboardRect *rect,
+                                                  const char *text,
+                                                  int text_length,
+                                                  int selection_start,
+                                                  int selection_end),
                                      void (*hide)(void))
 {
     g_keyboard_show = show;
@@ -478,7 +484,7 @@ static int guest_ok(uint32_t addr, uint32_t size)
     return 0;
 }
 
-/* The experimental thin D3D9 COM bridge (runtime/host/hle_d3d9_thin.cpp)
+/* The thin D3D9 COM bridge (runtime/hle/d3d9/d3d9_thin.cpp)
  * hands guest pointers straight to native DXVK COM methods.  It must reject
  * an unmapped pointer instead of letting the host fault, and it needs the
  * same validator the CRT imports use - including the fallback for ranges
@@ -6684,6 +6690,13 @@ static volatile int g_ime_click_pending;
  * next non-text click; clearing it early can leave the IME on screen after a
  * button click. */
 static volatile int g_ime_shown;
+/* The window rect the renderer asked for.  SetWindowPos is the call that sets
+ * it, and GetClientRect/GetWindowRect must agree with it or the game sizes its
+ * back buffer from a rectangle it did not choose.  The message dispatcher also
+ * needs the client size to hit-test the active edit field. */
+static int32_t  g_win_x, g_win_y;
+static uint32_t g_win_w = 800, g_win_h = 600;
+
 /* Defined next to the virtual mouse below; the dispatcher needs them earlier. */
 static volatile int32_t g_mouse_x, g_mouse_y;
 static volatile int g_mouse_down, g_mouse_dispatched_down;
@@ -6701,6 +6714,17 @@ static volatile uint32_t g_ime_click_ms;
 static volatile uint32_t g_ime_click_seq;
 static volatile uint32_t g_ime_focus_seq;
 static volatile int g_ime_hide_pending;
+/* Last CEditBox that asked for the IME.  The guest calls ImmGetContext when a
+ * field gains focus, not when an already-focused field is tapped again, so the
+ * dispatcher keeps this pointer to recognise a repeat tap against the field's
+ * current CLayoutFrame.  The pointer is validated by its exact CEditBox vtable
+ * before every use, and a click that hides the keyboard clears it. */
+static volatile uint32_t g_ime_field;
+/* Deferred fallback for a tap inside g_ime_field when ImmGetContext does not
+ * arrive for that click sequence. */
+static volatile int g_ime_reopen_pending;
+static volatile uint32_t g_ime_reopen_seq;
+static volatile uint32_t g_ime_reopen_field;
 
 typedef struct {
     uint32_t hwnd, msg, wp, lp, time;
@@ -6873,6 +6897,8 @@ static void service_settings_save(CPU *c)
 }
 
 static void keyboard_service(void);
+static int  keyboard_field_contains(uint32_t field, int x, int y);
+static void keyboard_show_field(uint32_t field);
 
 static void u_get_message(CPU *c)
 {
@@ -6940,6 +6966,7 @@ static void u_dispatch_message(CPU *c)
 
     uint32_t hwnd = rd32g(p), msg = rd32g(p + 4);
     uint32_t wp = rd32g(p + 8), lp = rd32g(p + 12);
+    uint32_t click_seq = 0;
 
     /* Only the messages this HLE itself produces are dispatched.  Injecting
      * the game's own posted messages here changed startup behaviour, so the
@@ -6966,8 +6993,23 @@ static void u_dispatch_message(CPU *c)
         g_mouse_dispatched_down = 1;
         g_ime_click_pending = 1;
         g_ime_click_ms = hle_now_ms();
-        g_ime_click_seq++;
+        click_seq = ++g_ime_click_seq;
         g_ime_hide_pending = 0;
+
+        /* The guest asks IMM for a context when a field gains focus.  Tapping
+         * the same field again after the platform dismissed the IME does not
+         * change focus, so it may never call ImmGetContext.  Remember a tap
+         * inside the last field's current layout rectangle; if the window
+         * procedure does not claim the click, show that field again below. */
+        g_ime_reopen_pending = 0;
+        const int click_x = (int)(int16_t)(lp & 0xFFFF);
+        const int click_y = (int)(int16_t)((lp >> 16) & 0xFFFF);
+        if (g_ime_field &&
+            keyboard_field_contains(g_ime_field, click_x, click_y)) {
+            g_ime_reopen_pending = 1;
+            g_ime_reopen_seq = click_seq;
+            g_ime_reopen_field = g_ime_field;
+        }
     } else if (msg == WM_LBUTTONUP) {
         g_mouse_buttons &= ~0x1;
         g_mouse_down = 0;
@@ -7046,10 +7088,33 @@ static void u_dispatch_message(CPU *c)
     /* A left click that did not reach ImmGetContext inside the window
      * procedure can still do so just after DispatchMessage returns.  Do not
      * hide here: mark the click as possibly-a-button and let keyboard_service
-     * hide only if no ImmGetContext arrives shortly afterwards. */
-    if (msg == WM_LBUTTONDOWN && g_ime_click_pending) {
-        g_ime_click_pending = 0;
-        g_ime_hide_pending = 1;
+     * hide only if no ImmGetContext arrives shortly afterwards.  A click that
+     * hit the last active text field is different: CEditBox does not ask for
+     * an IME context again on a repeat tap, so show it directly. */
+    if (msg == WM_LBUTTONDOWN) {
+        if (g_ime_click_pending) {
+            g_ime_click_pending = 0;
+            if (g_ime_reopen_pending &&
+                g_ime_reopen_seq == click_seq &&
+                g_ime_reopen_field == g_ime_field) {
+                g_ime_reopen_pending = 0;
+                g_ime_hide_pending = 0;
+                g_ime_focus_seq = click_seq;
+                keyboard_show_field(g_ime_field);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+                fprintf(stderr,
+                        "[input] repeat tap in field %08X; keyboard shown\n",
+                        g_ime_field);
+#endif
+            } else {
+                g_ime_hide_pending = 1;
+            }
+        } else {
+            /* ImmGetContext handled this click and already showed the field.
+             * Its request is authoritative, including a switch to another
+             * field inside the same window procedure. */
+            g_ime_reopen_pending = 0;
+        }
     }
 }
 
@@ -7062,9 +7127,14 @@ static void keyboard_service(void)
     if (!g_ime_hide_pending) return;
     if ((uint32_t)(hle_now_ms() - g_ime_click_ms) < 300u) return;
     g_ime_hide_pending = 0;
+    /* The click was not a text field.  The old CEditBox may outlive this
+     * click, but the keyboard is no longer associated with it; do not let a
+     * later tap at the same screen position revive a dialog that is gone. */
+    g_ime_field = 0;
+    g_ime_reopen_pending = 0;
     if (g_ime_shown) {
         g_ime_shown = 0;
-#if WC3_DEBUG
+#if WC3_DEBUG && WC3_DEBUG_INPUT
         fprintf(stderr, "[input] click was not a text field; keyboard hidden\n");
 #endif
         if (g_keyboard_hide) g_keyboard_hide();
@@ -7088,12 +7158,6 @@ static void u_post_message(CPU *c) { (void)c; c->eax = 1; }
 static void u_send_message(CPU *c) { (void)c; c->eax = 0; }
 static void u_get_dc(CPU *c) { c->eax = 0x00030000u + (g_fake_next += 4); }
 static void u_release_dc(CPU *c) { (void)c; c->eax = 1; }
-/* The window rect the renderer asked for.  SetWindowPos is the call that sets
- * it, and GetClientRect/GetWindowRect must agree with it or the game sizes its
- * back buffer from a rectangle it did not choose. */
-static int32_t  g_win_x, g_win_y;
-static uint32_t g_win_w = 800, g_win_h = 600;
-
 /* ---- virtual mouse -------------------------------------------------------
  * The game imports no DirectInput and does not get a real Windows cursor on
  * Android, so touch has to become the polled Win32 state the engine reads:
@@ -7479,6 +7543,19 @@ static void u_set_cursor(CPU *c)
  * own text fields, which is exactly the point where Android has to show or
  * hide the soft keyboard. */
 
+/* CEditBox main vtable in the frozen 1.27.1.7085 image.  The pointer kept by
+ * the ImmGetContext wrapper is also used from the message dispatcher, after
+ * the dialog may already have destroyed the field; the vtable check rejects a
+ * freed or reused object before any CEditBox offset is read. */
+#define CEDITBOX_VTABLE 0x6FA8C62Cu
+
+static int keyboard_field_valid(uint32_t field)
+{
+    if (field < 0x10000u || !hle_android_guest_ok(field, 4u))
+        return 0;
+    return rd32g(field) == CEDITBOX_VTABLE;
+}
+
 /* CEditBox embeds its CLayoutFrame at +0xB4; the frame's CRect is at +0x44
  * and its valid flag at +0x54, so the field's absolute rectangle is at
  * CEditBox+0xF8 and the flag at CEditBox+0x108.  CLayoutFrame::GetRect
@@ -7487,7 +7564,7 @@ static void u_set_cursor(CPU *c)
  * rectangle.  CRect stores minY, minX, maxY, maxX. */
 static int keyboard_field_rect(uint32_t field, HleKeyboardRect *out)
 {
-    if (!out || field < 0x10000u ||
+    if (!out || !keyboard_field_valid(field) ||
         (uint64_t)field + 0x10Cu > 0x100000000ull)
         return 0;
     if (!hle_android_guest_ok(field + 0xF8u, 16u) ||
@@ -7503,6 +7580,157 @@ static int keyboard_field_rect(uint32_t field, HleKeyboardRect *out)
     return hle_keyboard_rect_from_ddc(min_y, min_x, max_y, max_x, out);
 }
 
+/* CEditBox stores the field text as UTF-8 at +0x1E4 and its byte length at
+ * +0x1E8.  Zero is a valid empty field.  A negative length or an unmapped
+ * buffer means the text is not available yet; the caller then passes length
+ * -1 so the host does not seed an empty mirror it would have to keep. */
+static int keyboard_field_text(uint32_t field, const char **out,
+                               int *out_length)
+{
+    if (out) *out = NULL;
+    if (out_length) *out_length = 0;
+    if (!keyboard_field_valid(field) ||
+        (uint64_t)field + 0x1ECu > 0x100000000ull)
+        return 0;
+    if (!hle_android_guest_ok(field + 0x1E4u, 8u))
+        return 0;
+
+    const int32_t length = (int32_t)rd32g(field + 0x1E8u);
+    const uint32_t text = rd32g(field + 0x1E4u);
+    if (length < 0)
+        return 0;
+    if (length == 0)
+        return 1;
+    if (text < 0x10000u ||
+        (uint64_t)text + (uint32_t)length > 0x100000000ull ||
+        !hle_android_guest_ok(text, (uint32_t)length))
+        return 0;
+    if (out) *out = (const char *)(uintptr_t)text;
+    if (out_length) *out_length = (int)length;
+    return 1;
+}
+
+/* CEditBox stores the selection as byte offsets at +0x234/+0x238 and the
+ * caret as a text pointer at +0x21C.  0x6F1043C0 does not store a collapsed
+ * selection at all, and 0x6F102F20 clears both offsets to zero after a plain
+ * click, so equal offsets mean "collapsed at the caret".  Focus uses
+ * 0x6F102F40 to set 0..length, which the host editor must reproduce or its
+ * first Backspace would not match the guest's selected range. */
+static void keyboard_field_selection(uint32_t field, uint32_t text, int length,
+                                     int *out_start, int *out_end)
+{
+    if (out_start) *out_start = -1;
+    if (out_end) *out_end = -1;
+    if (length < 0 || !out_start || !out_end)
+        return;
+    if (length == 0) {
+        *out_start = 0;
+        *out_end = 0;
+        return;
+    }
+    if (!text ||
+        (uint64_t)field + 0x23Cu > 0x100000000ull ||
+        !hle_android_guest_ok(field + 0x21Cu, 4u) ||
+        !hle_android_guest_ok(field + 0x234u, 8u))
+        return;
+
+    int32_t start = (int32_t)rd32g(field + 0x234u);
+    int32_t end = (int32_t)rd32g(field + 0x238u);
+    const uint32_t caret_pointer = rd32g(field + 0x21Cu);
+    int32_t caret = -1;
+    if (caret_pointer >= text &&
+        (uint64_t)(caret_pointer - text) <= (uint32_t)length)
+        caret = (int32_t)(caret_pointer - text);
+
+    if (start < 0 || end < 0)
+        return;
+    if (start > length || end > length) {
+        /* A shortened text can leave the selection offsets stale; the caret
+         * is the authoritative collapsed position. */
+        if (caret < 0)
+            return;
+        start = caret;
+        end = caret;
+    } else if (start == end) {
+        if (caret < 0)
+            return;
+        start = caret;
+        end = caret;
+    } else if (start > end) {
+        const int32_t swap = start;
+        start = end;
+        end = swap;
+    }
+    *out_start = start;
+    *out_end = end;
+}
+
+/* `x`/`y` are client pixels, the same space as WM_LBUTTONDOWN.  The field
+ * rectangle is in surface fractions, and the client area covers the same
+ * viewport, so the hit test is a direct normalization. */
+static int keyboard_field_contains(uint32_t field, int x, int y)
+{
+    if (!field || g_win_w == 0 || g_win_h == 0)
+        return 0;
+    if (x < 0 || y < 0 || (uint32_t)x > g_win_w || (uint32_t)y > g_win_h)
+        return 0;
+
+    /* CEditBox::OnClick (0x6F104E80) enters its IME wrapper only when
+     * 0x6F1120C0(this, 1) reports [field+0x1D4] & 1.  A repeat tap must not
+     * revive an input that the guest itself would treat as disabled. */
+    if ((uint64_t)field + 0x1D8u > 0x100000000ull ||
+        !hle_android_guest_ok(field + 0x1D4u, 4u) ||
+        (rd32g(field + 0x1D4u) & 1u) == 0)
+        return 0;
+
+    HleKeyboardRect rect;
+    if (!keyboard_field_rect(field, &rect))
+        return 0;
+    const float nx = (float)x / (float)g_win_w;
+    const float ny = (float)y / (float)g_win_h;
+    return nx >= rect.left && nx <= rect.right &&
+           ny >= rect.top && ny <= rect.bottom;
+}
+
+static void keyboard_show_field(uint32_t field)
+{
+    HleKeyboardRect rect;
+    const int has_rect = keyboard_field_rect(field, &rect);
+
+    const char *text = NULL;
+    int text_length = -1;
+    if (!keyboard_field_text(field, &text, &text_length)) {
+        text = NULL;
+        text_length = -1;
+    }
+
+    int selection_start = -1;
+    int selection_end = -1;
+    if (text_length >= 0) {
+        keyboard_field_selection(field, (uint32_t)(uintptr_t)text, text_length,
+                                 &selection_start, &selection_end);
+    }
+
+    if (g_keyboard_show)
+        g_keyboard_show(field, has_rect ? &rect : NULL, text, text_length,
+                        selection_start, selection_end);
+
+    g_ime_field = field;
+    g_ime_shown = 1;
+    g_ime_reopen_pending = 0;
+
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    fprintf(stderr,
+            "[input] keyboard show field=%08X text=%d sel=%d..%d rect=%s\n",
+            field, text_length, selection_start, selection_end,
+            has_rect ? "yes" : "no");
+    if (has_rect)
+        fprintf(stderr,
+                "[input] field %08X surface rect %.4f,%.4f..%.4f,%.4f\n",
+                field, rect.left, rect.top, rect.right, rect.bottom);
+#endif
+}
+
 static void u_imm_get_context(CPU *c)
 {
     uint32_t hwnd = arg32(c, 0);
@@ -7513,46 +7741,34 @@ static void u_imm_get_context(CPU *c)
     /* The game asks for an IME context when a click focuses one of its edit
      * fields.  It can do that inside the window procedure or immediately
      * after DispatchMessage returns, so accept either the in-dispatch flag or
-     * a click from the last second.  That is the only reliable "show the soft
-     * keyboard" signal: WC3 draws its own caret, stores focus internally and
-     * never calls SetFocus or SetCursor for a text field.
+     * a click from the last second.
      *
      * Request the show once per click instead of latching on g_ime_shown.  A
      * keyboard dismissed with Back does not always produce a visibility
      * callback, so a cached "shown" bit can stay set forever and swallow the
-     * next text-field tap.  The host's show path is idempotent and preserves
-     * the editor text, so repeating it for a new click is safe.
+     * next text-field tap.  A repeat tap on the same field is handled by the
+     * dispatcher's hit test, because CEditBox does not ask for a new context
+     * when focus has not changed.
      *
      * The CEditBox::ImmGetContext wrapper (0x6F104EA7) keeps its `this` in
      * ESI.  That pointer is the field identity the host uses to keep a
      * separate text mirror for Login and Password. */
-    uint32_t now = hle_now_ms();
-    int recent_click = g_ime_click_ms != 0 &&
-                       (uint32_t)(now - g_ime_click_ms) < 1000u;
+    const uint32_t now = hle_now_ms();
+    const int recent_click = g_ime_click_ms != 0 &&
+                             (uint32_t)(now - g_ime_click_ms) < 1000u;
     if (g_ime_click_pending || recent_click) {
-        uint32_t click_seq = g_ime_click_seq;
+        const uint32_t click_seq = g_ime_click_seq;
+        const uint32_t field = c->esi;
+        const int same_click = click_seq != 0 && click_seq == g_ime_focus_seq;
+        const int same_field = field == g_ime_field;
         g_ime_click_pending = 0;
         g_ime_hide_pending = 0;
-        if (click_seq != g_ime_focus_seq) {
+        /* A deferred ImmGetContext can arrive after the dispatcher already
+         * showed the repeat-tapped field.  Suppress only that duplicate; a
+         * different field is a real focus switch and must be shown. */
+        if (!same_click || !same_field) {
             g_ime_focus_seq = click_seq;
-            g_ime_shown = 1;
-            HleKeyboardRect rect;
-            int has_rect = keyboard_field_rect(c->esi, &rect);
-#if WC3_DEBUG
-            fprintf(stderr, "[input] text field %08X focused; keyboard shown\n",
-                    c->esi);
-#endif
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-            if (has_rect)
-                fprintf(stderr,
-                        "[input] field %08X surface rect %.4f,%.4f..%.4f,%.4f\n",
-                        c->esi, rect.left, rect.top, rect.right, rect.bottom);
-            else
-                fprintf(stderr, "[input] field %08X surface rect unavailable\n",
-                        c->esi);
-#endif
-            if (g_keyboard_show)
-                g_keyboard_show(c->esi, has_rect ? &rect : NULL);
+            keyboard_show_field(field);
         }
     }
     c->eax = 0;

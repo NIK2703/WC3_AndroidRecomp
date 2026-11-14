@@ -218,9 +218,9 @@
     }
   ],
   "corpus_manifest": {
-    "sha256": "543a0682d7df8d6211c7e33fe2943e234d6018465d2eec6830a11a558bc3db75", "inputs": 8, "generator": "wc3lift",
+    "sha256": "8675f72f17b33e67984e550d1631396607baacaeaf275b916bd7211770369a30", "inputs": 8, "generator": "wc3lift",
     "status": "generated",
-    "lift_rev": 4,
+    "lift_rev": 5,
     "layout_rev": 2
   }
 }

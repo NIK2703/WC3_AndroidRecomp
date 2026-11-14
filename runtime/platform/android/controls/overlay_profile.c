@@ -433,6 +433,11 @@ static int parse_icp_data(const char *data, size_t size, Wc3OverlayProfile *out,
         string_field(body, body_end, "text", element.text,
                      sizeof(element.text));
 
+        number = 0.0;
+        number_field(body, body_end, "iconId", &number);
+        if (number > 0.0 && number < 128.0)
+            element.icon_id = (int)number;
+
         char binding[64] = {0};
         first_binding_string(body, body_end, binding, sizeof(binding));
         if (element.text[0] == '\0' && element.type != WC3_OVERLAY_ELEMENT_DPAD)

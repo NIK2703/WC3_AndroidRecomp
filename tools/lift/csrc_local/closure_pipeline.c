@@ -120,7 +120,7 @@ typedef struct {
     int lift32_entries;
     char seed_c_sha[65];
     long seed_c_bytes;
-    int converged, rounds, round_targets[MAX_ROUNDS], nrounds, added;
+    int converged, final_global_pass, rounds, round_targets[MAX_ROUNDS], nrounds, added;
     char closed_c_sha[65];
     long closed_c_bytes;
     int known_entries;
@@ -922,8 +922,10 @@ static void write_report(const char *path, const Report *r)
     fprintf(f, "  \"lift32\": {\"entries\": %d, \"bytes\": %ld, "
             "\"c_sha256\": \"%s\"},\n", r->lift32_entries, r->seed_c_bytes,
             r->seed_c_sha);
-    fprintf(f, "  \"closure\": {\"converged\": %s, \"rounds\": %d, "
-            "\"round_targets\": [", r->converged ? "true" : "false", r->rounds);
+    fprintf(f, "  \"closure\": {\"converged\": %s, \"final_global_pass\": %s, "
+            "\"rounds\": %d, \"round_targets\": [",
+            r->converged ? "true" : "false",
+            r->final_global_pass ? "true" : "false", r->rounds);
     for (i = 0; i < r->nrounds && i < MAX_ROUNDS; i++)
         fprintf(f, "%s%d", i ? ", " : "", r->round_targets[i]);
     fprintf(f, "], \"added\": %d, \"bytes\": %ld, \"c_sha256\": \"%s\"},\n",
@@ -1112,6 +1114,7 @@ int main(int argc, char **argv)
     char ref_args[CMD_CAP / 2] = "";
     char extra_arg[2048] = "";
     char extra_add[2048] = "";
+    char final_args[2048] = "";
     int extra_count = 0;
     uint32_t excluded[MAX_EXCLUDED];
     int nexcluded = 0;
@@ -1351,19 +1354,30 @@ int main(int argc, char **argv)
         if (have_pe) pe_close(&pe);
         return 1;
     }
+    if (o.block_seeds)
+        snprintf(final_args, sizeof final_args,
+                 " --seed-funcs \"%s\" --final-seed-out \"%s\"", funcs, seed_c);
     join(log, sizeof log, "%s/step_closure.log", o.out_dir);
     rc = run_step(log,
                   "\"%s/closure2.exe\" \"%s\" \"%s\" \"%s\" \"%s\" "
-                  "--workdir \"%s\"",
+                  "--workdir \"%s\"%s",
                   o.tools, o.image, closure_seed_c, seed_list, closed_c,
-                  o.work_dir);
+                  o.work_dir, final_args);
     if (rc != 0) {
         fprintf(stderr, "closure2.exe did not converge (see %s)\n", log);
         if (have_pe) pe_close(&pe);
         return 1;
     }
     r.converged = 1;
+    r.final_global_pass = (o.block_seeds != 0);
     parse_closure_log(&r, log);
+    /* With the final global pass seed.c is rewritten by closure2 after the
+     * complete func_map exists, so the published bytes, not the pre-final
+     * seed lift, are what the report must name. */
+    if (r.final_global_pass) {
+        r.seed_c_bytes = file_bytes(seed_c);
+        hash_into(seed_c, r.seed_c_sha);
+    }
     r.closed_c_bytes = file_bytes(closed_c);
     hash_into(closed_c, r.closed_c_sha);
 

@@ -303,8 +303,21 @@ static uint8_t live_out_of(const LfFlagInsn *in, const uint8_t *live, int n,
                            int idx)
 {
     uint8_t out = 0;
-    if (in[idx].succ1 == -1) out |= LF_FLAG_ALL;
-    else if (in[idx].succ1 >= 0) out |= live_at(live, n, in[idx].succ1);
+    /* -1 means the edge leaves the lifted extent.  With the exact flag
+     * boundary model enabled, reads of the boundary are modelled explicitly
+     * by flag_use(): a ret carries its exit_flags_needed, a tail jump carries
+     * the target's entry_reads and the caller's needs.  Only a call or a
+     * fallthrough whose continuation is unknown stays ALL.  With the model
+     * disabled, keep the old conservative ALL so WC3_LIFT_FLAG_BOUNDARY=0
+     * reproduces the previous liveness. */
+    if (in[idx].succ1 == -1) {
+        if (in[idx].is_call || !in[idx].is_control || !in[idx].tail_exact)
+            out |= LF_FLAG_ALL;
+    } else if (in[idx].succ1 >= 0) {
+        out |= live_at(live, n, in[idx].succ1);
+    }
+    /* succ2 == -1 is either an unknown fallthrough (conditional at the end)
+     * or a barrier with no real second edge (int/int3); ALL is conservative. */
     if (in[idx].succ2 == -1) out |= LF_FLAG_ALL;
     else if (in[idx].succ2 >= 0) out |= live_at(live, n, in[idx].succ2);
     return out;
@@ -316,6 +329,27 @@ int lf_flag_producer_af(int kind)
            kind == LF_FLAG_SUB || kind == LF_FLAG_NEG ||
            kind == LF_FLAG_ADC || kind == LF_FLAG_SBB ||
            kind == LF_FLAG_INC || kind == LF_FLAG_DEC;
+}
+
+int lf_flag_cond_needs_fr(LfFlagKind kind, uint8_t cond_mask)
+{
+    if (cond_mask & (LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_PF))
+        return 1;
+    if ((cond_mask & LF_FLAG_CF) && kind == LF_FLAG_ADD)
+        return 1;
+    if (cond_mask & LF_FLAG_OF) {
+        switch (kind) {
+        case LF_FLAG_ADD:
+        case LF_FLAG_ADC:
+        case LF_FLAG_SUB:
+        case LF_FLAG_CMP:
+        case LF_FLAG_SBB:
+            return 1;
+        default:
+            break;
+        }
+    }
+    return 0;
 }
 
 static int live_update(const LfFlagInsn *ins, uint8_t *live, int n, int i)
@@ -336,15 +370,22 @@ int lf_flag_plan_ex(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out,
     int *queue = NULL;
     uint8_t *queued = NULL;
     int i, nf = 0, edges = 0, qhead = 0, qtail = 0, qcount = 0;
-    int have_producer = 0, have_consumer = 0;
+    int have_producer = 0, have_consumer = 0, have_flag_writer = 0;
 
     if (n <= 0 || !ins) return 0;
     if (!out || max_out <= 0) return 0;
     for (i = 0; i < n; i++) {
         if (ins[i].producer != LF_FLAG_NONE && ins[i].writes) have_producer = 1;
         if (ins[i].consumer != LF_CONS_NONE) have_consumer = 1;
+        if (ins[i].writes) have_flag_writer = 1;
     }
-    if (!have_producer) return 0;
+    /* liveness is also read by flag_live_any() for atomics that are not
+     * fusable producers (cmpxchg8b, xadd, cmpxchg).  Returning here left
+     * live_out zeroed and made those atomics drop their flag writes.  The
+     * same applies to the global boundary model: a function made only of
+     * calls and rets still has to propagate its callers' exit_flags_needed
+     * to those calls, so live_out is needed even with no local producer. */
+    if (!have_producer && !have_flag_writer && !live_out) return 0;
     if (!have_consumer && !live_out) return 0;
     live = (uint8_t *)calloc((size_t)n + 1, 1);
     pred_head = (int *)malloc(sizeof(int) * (size_t)n);
@@ -463,6 +504,7 @@ int lf_flag_plan_ex(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out,
                 out[nf].size = sz;
                 out[nf].mat_taken = mat_taken;
                 out[nf].mat_fall = mat_fall;
+                out[nf].cond_mask = need;
                 nf++;
                 if (nf >= max_out) {
                     free(live);

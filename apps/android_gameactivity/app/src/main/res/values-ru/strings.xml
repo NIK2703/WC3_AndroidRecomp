@@ -11,8 +11,17 @@
     <string name="launch_resolution_label">Разрешение</string>
 
     <string name="launch_sound_label">Звук</string>
-    <string name="launch_gesture_mode_label">Двойное нажатие</string>
-    <string name="launch_double_tap_delay_label">Задержка двойного нажатия</string>
+    <string name="launch_gesture_mode_label">Жесты тачскрин управления</string>
+    <string name="launch_gesture_mode_double">Двойное касание, одиночное с задержкой</string>
+    <string name="launch_gesture_mode_single">Без двойного касания, одиночное без задержки</string>
+    <!-- Mirrors the authored Warcraft 3.icp touchscreenGestures and
+         wc3_profile_apply_gesture_mode(): the no-double-tap mode clears every
+         double-tap package and maps the long press to the right button.  The
+         second-finger tap/drag actions are empty; two-finger swipes remain
+         bound to the Sd2 camera scroll keys. -->
+    <string name="launch_gesture_hint_double">• Одиночное касание — ЛКМ (с задержкой)\n• Двойное касание — ПКМ\n• Долгое нажатие — A + ЛКМ\n• Перетаскивание одним пальцем — СКМ\n• Долгое нажатие с перетаскиванием — ЛКМ\n• Двойное касание с перетаскиванием — ЛКМ\n• Свайп двумя пальцами вверх/вниз — наклон камеры\n• Свайп двумя пальцами влево/вправо — поворот камеры</string>
+    <string name="launch_gesture_hint_single">• Одиночное касание — ЛКМ (без задержки)\n• Долгое нажатие — ПКМ\n• Перетаскивание одним пальцем — СКМ\n• Долгое нажатие с перетаскиванием — ЛКМ\n• Свайп двумя пальцами вверх/вниз — наклон камеры\n• Свайп двумя пальцами влево/вправо — поворот камеры</string>
+    <string name="launch_double_tap_delay_label">Задержка двойного касания</string>
     <string name="launch_long_press_delay_label">Задержка долгого нажатия</string>
     <string name="launch_gesture_delay_value">%1$d мс</string>
 

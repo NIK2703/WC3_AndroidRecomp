@@ -1,6 +1,8 @@
 package wc3.recomp.overlaycanvas
 
+import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
@@ -8,18 +10,22 @@ import android.graphics.CornerPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
 import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.Xfermode
+import java.io.IOException
 import kotlin.math.ceil
 
 /**
  * Builds the layer bitmaps used by the C overlay compositor.
  *
- * The C side passes only geometry, scale, effective corner radius and label
- * text.  This helper rasterises the control layers once with Android Canvas;
- * the C hot path then blits the cached atlas for every frame.  No Java code
- * runs during rendering, visual-state changes or touch handling.
+ * The C side passes geometry, scale, effective corner radius, label text and
+ * the standard overlay icon id.  Icons are read from the same
+ * `inputcontrols/icons/<id>.png` asset set as the Winlator control editor.
+ * This helper rasterises the control layers once with Android Canvas; the C
+ * hot path then blits the cached atlas for every frame.  No Java code runs
+ * during rendering, visual-state changes or touch handling.
  */
 object OverlayCanvasCache {
     private const val TYPE_BUTTON = 0
@@ -36,6 +42,8 @@ object OverlayCanvasCache {
 
     private val XFER_CLEAR: Xfermode =
         PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+    private val XFER_DST_OUT: Xfermode =
+        PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
 
     private class Layer(
         val element: Int,
@@ -52,6 +60,7 @@ object OverlayCanvasCache {
 
     @JvmStatic
     fun buildAtlas(
+        context: Context,
         width: Int,
         height: Int,
         snappingSize: Int,
@@ -60,6 +69,7 @@ object OverlayCanvasCache {
         meta: IntArray?,
         params: FloatArray?,
         labels: Array<String?>?,
+        icons: IntArray?,
         layerOut: IntArray
     ): Bitmap {
         if (meta == null || params == null || elementCount <= 0) {
@@ -70,6 +80,7 @@ object OverlayCanvasCache {
         val strokeWidth = snappingSize * strokeWidthMultiplier
         val strokePad = maxOf(1, ceil(strokeWidth * 0.5f).toInt() + 1)
         val layers = ArrayList<Layer>()
+        val iconCache = HashMap<Int, Bitmap?>()
 
         for (i in 0 until elementCount) {
             val base = i * 6
@@ -83,6 +94,18 @@ object OverlayCanvasCache {
             val scale = params[i * 2]
             val cornerRadius = params[i * 2 + 1]
             val text = labels?.getOrNull(i).orEmpty()
+            val iconId = icons?.getOrNull(i) ?: 0
+            val icon = if (iconId > 0) {
+                if (iconCache.containsKey(iconId)) {
+                    iconCache[iconId]
+                } else {
+                    loadIcon(context, iconId).also {
+                        iconCache[iconId] = it
+                    }
+                }
+            } else {
+                null
+            }
 
             if (type == TYPE_DPAD) {
                 addDPadLayers(
@@ -92,7 +115,7 @@ object OverlayCanvasCache {
             } else if (type == TYPE_BUTTON) {
                 addButtonLayers(
                     layers, i, box, snappingSize, scale, shape,
-                    cornerRadius, strokeWidth, strokePad, text
+                    cornerRadius, strokeWidth, strokePad, text, icon
                 )
             }
         }
@@ -169,7 +192,8 @@ object OverlayCanvasCache {
         cornerRadius: Float,
         strokeWidth: Float,
         strokePad: Int,
-        text: String
+        text: String,
+        icon: Bitmap?
     ) {
         val halfStroke = strokeWidth * 0.5f
         val radius = cornerRadius * snappingSize * scale
@@ -189,7 +213,9 @@ object OverlayCanvasCache {
         paint.style = Paint.Style.FILL
         paint.color = Color.WHITE
         drawButtonShape(canvas, box, shape, radius, halfStroke, paint, true)
-        if (text.isNotEmpty()) {
+        if (icon != null) {
+            drawIcon(canvas, icon, box, snappingSize, scale, shape, true)
+        } else if (text.isNotEmpty()) {
             paint.textSize = textSize(
                 paint, text, box.width() - strokeWidth * 2.0f,
                 snappingSize * 2.0f * scale
@@ -215,7 +241,9 @@ object OverlayCanvasCache {
         paint.strokeWidth = strokeWidth
         paint.color = Color.WHITE
         drawButtonShape(canvas, box, shape, radius, 0.0f, paint, false)
-        if (text.isNotEmpty()) {
+        if (icon != null) {
+            drawIcon(canvas, icon, box, snappingSize, scale, shape, false)
+        } else if (text.isNotEmpty()) {
             paint.style = Paint.Style.FILL
             paint.color = Color.WHITE
             paint.textSize = textSize(
@@ -550,5 +578,47 @@ object OverlayCanvasCache {
             centerY - (paint.descent() + paint.ascent()) * 0.5f, paint
         )
         paint.xfermode = null
+    }
+
+    private fun loadIcon(context: Context, iconId: Int): Bitmap? {
+        val appContext = context.applicationContext ?: context
+        return try {
+            appContext.assets.open("inputcontrols/icons/$iconId.png").use {
+                BitmapFactory.decodeStream(it)
+            }
+        } catch (e: IOException) {
+            null
+        }
+    }
+
+    private fun drawIcon(
+        canvas: Canvas,
+        icon: Bitmap,
+        box: Rect,
+        snappingSize: Int,
+        scale: Float,
+        shape: Int,
+        clear: Boolean
+    ) {
+        val margin = (snappingSize *
+            (if (shape == SHAPE_CIRCLE) 2.0f else 1.0f) * scale).toInt()
+        val halfSize = (minOf(box.width(), box.height()) - margin) / 2
+        if (halfSize <= 0) return
+
+        val src = Rect(0, 0, icon.width, icon.height)
+        val dst = Rect(
+            box.centerX() - halfSize, box.centerY() - halfSize,
+            box.centerX() + halfSize, box.centerY() + halfSize
+        )
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        paint.isFilterBitmap = true
+        if (clear) {
+            paint.xfermode = XFER_DST_OUT
+        } else {
+            paint.colorFilter = PorterDuffColorFilter(
+                Color.WHITE, PorterDuff.Mode.SRC_IN
+            )
+        }
+        canvas.drawBitmap(icon, src, dst, paint)
     }
 }

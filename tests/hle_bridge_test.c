@@ -12,6 +12,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -48,11 +49,17 @@ static int g_mouse_button_ex;
 static int g_mouse_wheel;
 static int g_key_vk, g_key_down;
 static int g_release_all;
-static void (*g_keyboard_show)(uint32_t field, const HleKeyboardRect *rect);
+static void (*g_keyboard_show)(uint32_t field, const HleKeyboardRect *rect,
+                               const char *text, int text_length,
+                               int selection_start, int selection_end);
 static void (*g_keyboard_hide)(void);
 static uint32_t g_show_field;
 static int g_show_rect_valid;
 static Wc3LegacyKeyboardRect g_show_rect;
+static int g_show_text_length;
+static int g_show_sel_start;
+static int g_show_sel_end;
+static char g_show_text[256];
 static int g_show_calls;
 static int g_hide_calls;
 static int g_keyboard_visible;
@@ -221,7 +228,11 @@ void hle_android_release_all(void)
 }
 
 void hle_android_set_keyboard_bridge(void (*show)(uint32_t field,
-                                                  const HleKeyboardRect *rect),
+                                                  const HleKeyboardRect *rect,
+                                                  const char *text,
+                                                  int text_length,
+                                                  int selection_start,
+                                                  int selection_end),
                                      void (*hide)(void))
 {
     g_keyboard_show = show;
@@ -248,13 +259,26 @@ void hle_android_post_enter(void)
     g_post_enter++;
 }
 
-static void fake_show(uint32_t field, const Wc3LegacyKeyboardRect *rect)
+static void fake_show(uint32_t field, const Wc3LegacyKeyboardRect *rect,
+                      const char *text, int text_length,
+                      int selection_start, int selection_end)
 {
     g_show_calls++;
     g_show_field = field;
     g_show_rect_valid = rect != NULL;
     if (rect)
         g_show_rect = *rect;
+    g_show_text_length = text_length;
+    g_show_sel_start = selection_start;
+    g_show_sel_end = selection_end;
+    g_show_text[0] = '\0';
+    if (text && text_length > 0) {
+        const int n = text_length < (int)sizeof g_show_text - 1
+                          ? text_length
+                          : (int)sizeof g_show_text - 1;
+        memcpy(g_show_text, text, (size_t)n);
+        g_show_text[n] = '\0';
+    }
 }
 
 static void fake_hide(void) { g_hide_calls++; }
@@ -459,7 +483,7 @@ int main(void)
 
     {
         const HleKeyboardRect hle_rect = {0.125f, 0.25f, 0.5f, 0.75f};
-        g_keyboard_show(0x1234u, &hle_rect);
+        g_keyboard_show(0x1234u, &hle_rect, "AB", 2, 0, 2);
         CHECK(g_show_calls == 1 && g_show_field == 0x1234u &&
                   g_show_rect_valid,
               "keyboard field passed to host");
@@ -468,10 +492,18 @@ int main(void)
                   close_to(g_show_rect.right, 0.5f) &&
                   close_to(g_show_rect.bottom, 0.75f),
               "keyboard rect copied to host");
-        g_keyboard_show(0x5678u, NULL);
+        CHECK(g_show_text_length == 2 && strcmp(g_show_text, "AB") == 0,
+              "keyboard text copied to host");
+        CHECK(g_show_sel_start == 0 && g_show_sel_end == 2,
+              "keyboard selection copied to host");
+        g_keyboard_show(0x5678u, NULL, NULL, -1, -1, -1);
         CHECK(g_show_calls == 2 && g_show_field == 0x5678u &&
                   !g_show_rect_valid,
               "missing keyboard rect stays NULL");
+        CHECK(g_show_text_length == -1,
+              "unavailable keyboard text keeps negative length");
+        CHECK(g_show_sel_start == -1 && g_show_sel_end == -1,
+              "unavailable keyboard selection stays negative");
         g_keyboard_hide();
         CHECK(g_hide_calls == 1, "keyboard hide forwarded");
         wc3_legacy_set_keyboard_bridge(NULL, NULL);
@@ -495,6 +527,54 @@ int main(void)
               "DDC inverted rect rejected");
         CHECK(hle_keyboard_rect_from_ddc(0.0f, 0.0f, 0.6f, 0.8f, NULL) == 0,
               "DDC NULL output rejected");
+    }
+
+    {
+        uint32_t cp = 0;
+        CHECK(wc3_legacy_utf8_next("\xF0\x9F\x98\x80", 4, 0, &cp) == 4 &&
+                  cp == 0x1F600u,
+              "standard UTF-8 emoji decodes to one scalar");
+        CHECK(wc3_legacy_utf8_next("\xED\xA0\xBD", 3, 0, &cp) == 3 &&
+                  cp == 0xD83Du,
+              "CESU-8 surrogate decodes as its unit");
+        CHECK(wc3_legacy_utf8_unit_offset("\xF0\x9F\x98\x80", 4, 4) == 2,
+              "supplementary character is two UTF-16 units");
+        CHECK(wc3_legacy_utf8_unit_offset("A\xC3\xA9", 3, 3) == 2,
+              "BMP text offset counts one unit per character");
+        CHECK(wc3_legacy_utf8_unit_offset(
+                  "\xED\xA0\xBD\xED\xB8\x80", 6, 6) == 2,
+              "CESU-8 surrogate pair is two UTF-16 units");
+        CHECK(wc3_legacy_utf8_unit_offset("A\xC3\xA9", 3, 2) == 1,
+              "partial UTF-8 sequence is not consumed");
+        CHECK(wc3_legacy_utf8_unit_offset(NULL, 0, 0) == 0,
+              "missing text has no units");
+
+        int len = 0;
+        char *mutf8 = wc3_legacy_utf8_to_mutf8(
+            "A\xC3\xA9\xF0\x9F\x98\x80", 7, &len);
+        CHECK(mutf8 != NULL && len == 9 &&
+                  memcmp(mutf8, "A\xC3\xA9\xED\xA0\xBD\xED\xB8\x80", 9) == 0,
+              "standard UTF-8 converts to modified UTF-8");
+        free(mutf8);
+
+        mutf8 = wc3_legacy_utf8_to_mutf8("a\0b", 3, &len);
+        CHECK(mutf8 != NULL && len == 4 &&
+                  memcmp(mutf8, "a\xC0\x80" "b", 4) == 0,
+              "UTF-8 NUL becomes modified UTF-8 C0 80");
+        free(mutf8);
+
+        mutf8 = wc3_legacy_utf8_to_mutf8(
+            "\xED\xA0\xBD\xED\xB8\x80", 6, &len);
+        CHECK(mutf8 != NULL && len == 6 &&
+                  memcmp(mutf8, "\xED\xA0\xBD\xED\xB8\x80", 6) == 0,
+              "CESU-8 surrogate pair passes through");
+        free(mutf8);
+
+        mutf8 = wc3_legacy_utf8_to_mutf8("\xFF", 1, &len);
+        CHECK(mutf8 != NULL && len == 3 &&
+                  memcmp(mutf8, "\xEF\xBF\xBD", 3) == 0,
+              "invalid UTF-8 becomes U+FFFD");
+        free(mutf8);
     }
 
     {

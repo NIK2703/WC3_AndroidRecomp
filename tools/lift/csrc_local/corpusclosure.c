@@ -440,7 +440,7 @@ static int write_report(Opts *o, const char *corpus_sha,
     if (!f) return -1;
     fprintf(f, "{\n  \"schema\": 1,\n  \"published\": false,\n");
     fprintf(f, "  \"corpus_sha256\": \"%s\",\n", corpus_sha);
-    fprintf(f, "  \"generator\": \"wc3lift\",\n  \"lift_rev\": 4,\n");
+    fprintf(f, "  \"generator\": \"wc3lift\",\n  \"lift_rev\": 5,\n");
     fprintf(f, "  \"seed_mode\": \"block\",\n");
     fprintf(f, "  \"max_functions\": %ld,\n", o->max_functions);
     fprintf(f, "  \"modules\": [\n");
@@ -522,7 +522,7 @@ static int write_manifest(Opts *o, const char *corpus_sha, int passed,
     int i, j;
     if (!f) return -1;
     fprintf(f, "{\n  \"schema\": 1,\n  \"generator\": \"wc3lift\",\n");
-    fprintf(f, "  \"lift_rev\": 4,\n  \"seed_mode\": \"block\",\n");
+    fprintf(f, "  \"lift_rev\": 5,\n  \"seed_mode\": \"block\",\n");
     fprintf(f, "  \"corpus_sha256\": \"%s\",\n", corpus_sha);
     fprintf(f, "  \"merged\": {\"list\": "); json_str(f, o->merged_list);
     fprintf(f, ", \"funcs\": "); json_str(f, o->merged_funcs);
@@ -600,7 +600,7 @@ int main(int argc, char **argv)
         join_path(log, sizeof log, "%s/00_corpus_verify.log", o.out_root);
         rc = run_tool(log,
                       "\"%s/corpus.exe\" verify --inputs \"%s\" --root \"%s\" "
-                      "--generator wc3lift --lift-rev 4 --layout-file \"%s\" "
+                      "--generator wc3lift --lift-rev 5 --layout-file \"%s\" "
                       "--expected \"%s\"",
                       o.tools, o.input_list, o.root, o.layout_file, o.corpus_hash);
         verify_log_text = read_text(log);

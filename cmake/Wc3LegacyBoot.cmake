@@ -368,16 +368,20 @@ target_compile_options(wc3_hle_android PRIVATE
     -D_FORTIFY_SOURCE=0)
 set_target_properties(wc3_hle_android PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# --- thin D3D9 bridge: target-owned lock layer -----------------------------
-# The guest COM surface (d3d9_thin.cpp) and the generated dispatcher are still
-# the as-built objects pinned from the previous tree.  The lock layer is
-# compiled here because it owns the staging copies and the low-pointer fast
-# path measured in docs/THIN_D3D9_COPY_PLAN.md.  The header stays ABI-
-# compatible with the pinned objects: ThinObj/ThinSlot and the mangled
-# thin_lock_* signatures are unchanged, so replacing only this object is a
-# source port, not a new guest ABI.  The other two objects move the same way in
-# Phase 1b, once their generator is vendored.
-add_library(wc3_hle_d3d9 STATIC
+# --- thin D3D9 bridge: source-built guest COM surface ----------------------
+# Phase 1b, step 1: the guest COM surface and the lock layer are compiled from
+# target-owned sources.  The previous tree's hle_d3d9_thin.o is gone; the
+# generated dispatcher (thin_gen_call/thin_method_hw) is still the pinned
+# hle_d3d9_thin_gen.o because it is pure marshalling with no wrapper state and
+# its generator/spec are not vendored yet.  It calls the source-built
+# thin_after_out()/thin_hw_call() below, so the leak and OOM fixes apply to
+# every generated method.  ThinGuestObj, ThinObj, ThinSlot and the mangled
+# thin_lock_* signatures stay compatible with the frozen guest ABI; this is a
+# source port, not a new ABI.
+set(WC3_D3D9_GEN_OBJECT
+    "${WC3_LEGACY_ROOT}/build/android/boot_probe/hle_d3d9_thin_gen.o")
+add_library(wc3_hle_d3d9 OBJECT
+    "${WC3_ROOT}/runtime/hle/d3d9/d3d9_thin.cpp"
     "${WC3_ROOT}/runtime/hle/d3d9/d3d9_thin_lock.cpp")
 target_include_directories(wc3_hle_d3d9 PRIVATE
     "${WC3_ROOT}/runtime/hle/d3d9"
@@ -489,10 +493,6 @@ foreach(_need
     endif()
 endforeach()
 
-set(WC3_D3D9_OBJECTS
-    "${WC3_LEGACY_ROOT}/build/android/boot_probe/hle_d3d9_thin.o"
-    "${WC3_LEGACY_ROOT}/build/android/boot_probe/hle_d3d9_thin_gen.o")
-
 # Both DXVK archives are built from the vendored sources in third_party/dxvk
 # by tools/android/build_dxvk.ps1.  The old tree supplies no DXVK binary: these
 # archives are target build products, not pinned inputs.  The debug variant
@@ -510,7 +510,7 @@ set(WC3_DXVK_ARCHIVES
     "${WC3_DXVK_DIR}/libdxvk3_iso.a")
 
 foreach(_required
-        ${WC3_CORPUS_OBJECTS} ${WC3_D3D9_OBJECTS} ${WC3_DXVK_ARCHIVES})
+        ${WC3_CORPUS_OBJECTS} ${WC3_D3D9_GEN_OBJECT} ${WC3_DXVK_ARCHIVES})
     if(NOT EXISTS "${_required}")
         message(FATAL_ERROR
             "target input missing: ${_required}\n"
@@ -526,7 +526,8 @@ target_sources(wc3gameactivity PRIVATE
     "${WC3_ROOT}/runtime/platform/android/vulkan_driver_package.c"
     "${WC3_ROOT}/runtime/platform/android/vulkan_driver_android.c"
     ${WC3_CORPUS_OBJECTS}
-    ${WC3_D3D9_OBJECTS})
+    ${WC3_D3D9_GEN_OBJECT}
+    $<TARGET_OBJECTS:wc3_hle_d3d9>)
 target_include_directories(wc3gameactivity PRIVATE
     "${WC3_ROOT}/runtime/diag")
 
@@ -535,7 +536,6 @@ target_link_libraries(wc3gameactivity PRIVATE
     wc3_hle_modules
     wc3_hle_bridge
     wc3_guest
-    wc3_hle_d3d9
     wc3_hle_android
     ${WC3_CORPUS_LIBS}
     wc3_dxvk_entry

@@ -131,7 +131,7 @@ static char *reg_read(const char *n)
 static char *reg_write(const char *n, const char *val)
 {
     const char *m;
-    if (is_r32(n)) return lf_afmt("c->%s = (uint32_t)(%s);", n, val);
+    if (is_r32(n)) return lf_afmt("c->%s = %s;", n, val);
     if ((m = r16_of(n)) != NULL) return lf_afmt("SET16(c->%s, %s);", m, val);
     if ((m = r8l_of(n)) != NULL) return lf_afmt("SET8L(c->%s, %s);", m, val);
     if ((m = r8h_of(n)) != NULL) return lf_afmt("SET8H(c->%s, %s);", m, val);

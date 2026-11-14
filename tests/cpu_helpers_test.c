@@ -160,6 +160,48 @@ int main(void)
         eq("pshuflw", (uint32_t)a.u16[0], 4u);
     }
 
+    /* A.28: value-only shifts/rotates must match the flag helpers exactly,
+     * including count >= width and rotate modulo. */
+    {
+        static const uint32_t vals[] = {0u, 1u, 0x80000000u,
+                                        0x12345678u, 0xFFFFFFFFu};
+        static const uint32_t cnts[] = {0u, 1u, 7u, 8u, 9u,
+                                        15u, 16u, 17u, 31u, 32u};
+        for (int sz = 1; sz <= 4; sz++) {
+            for (unsigned vi = 0; vi < sizeof vals / sizeof vals[0]; vi++) {
+                for (unsigned ci = 0; ci < sizeof cnts / sizeof cnts[0]; ci++) {
+                    uint32_t d = vals[vi];
+                    uint32_t cnt = cnts[ci];
+                    CPU a = c;
+                    eq("shl_nf result",
+                       op_shl_nf(d, cnt, sz), op_shl(&a, d, cnt, sz));
+                    a = c;
+                    eq("shr_nf result",
+                       op_shr_nf(d, cnt, sz), op_shr(&a, d, cnt, sz));
+                    a = c;
+                    eq("sar_nf result",
+                       op_sar_nf(d, cnt, sz), op_sar(&a, d, cnt, sz));
+                    a = c;
+                    eq("rol_nf result",
+                       op_rol_nf(d, cnt, sz), op_rol(&a, d, cnt, sz));
+                    a = c;
+                    eq("ror_nf result",
+                       op_ror_nf(d, cnt, sz), op_ror(&a, d, cnt, sz));
+                }
+            }
+        }
+        c.cf = c.zf = c.sf = c.of = 1;
+        (void)op_shl_nf(0x80000000u, 1, 4);
+        (void)op_shr_nf(0x80000000u, 1, 4);
+        (void)op_sar_nf(0x80000000u, 1, 4);
+        (void)op_rol_nf(0x80000000u, 1, 4);
+        (void)op_ror_nf(0x80000000u, 1, 4);
+        eq("_nf leaves CF", c.cf, 1u);
+        eq("_nf leaves ZF", c.zf, 1u);
+        eq("_nf leaves SF", c.sf, 1u);
+        eq("_nf leaves OF", c.of, 1u);
+    }
+
     if (fails == 0) printf("cpu helpers OK\n");
     return fails != 0;
 }
