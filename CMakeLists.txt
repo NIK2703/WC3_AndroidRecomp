@@ -207,6 +207,60 @@ else()
     set(WC3_DEBUG_DEFINE 0)
 endif()
 
+# Experimental release_optimized native profile.  It is the same Android
+# release product as WC3_VARIANT=release (same app id, Gradle release build
+# type, corpus, HLE, graphics and hardening) with two compiler-profile changes:
+# ThinLTO across the product link graph and a two-stage PGO profile.  The
+# profile-generation build is intentionally not LTO: it collects counts, while
+# the final build applies both -fprofile-instr-use and -flto=thin.
+set(WC3_LTO "OFF" CACHE STRING
+    "Interprocedural optimization: OFF or THIN (ThinLTO)")
+set_property(CACHE WC3_LTO PROPERTY STRINGS OFF THIN)
+set(WC3_PGO_MODE "off" CACHE STRING
+    "Profile-guided optimization: off, generate, or use")
+set_property(CACHE WC3_PGO_MODE PROPERTY STRINGS off generate use)
+set(WC3_PGO_PROFILE "" CACHE FILEPATH
+    "Path to the merged .profdata for WC3_PGO_MODE=use")
+set(WC3_PGO_RAW_DIR "" CACHE STRING
+    "On-device directory for .profraw files when WC3_PGO_MODE=generate")
+string(TOUPPER "${WC3_LTO}" _wc3_lto_upper)
+if(_wc3_lto_upper STREQUAL "THIN")
+    message(STATUS "release_optimized: ThinLTO enabled")
+    add_compile_options(-flto=thin)
+    add_link_options(-flto=thin)
+elseif(NOT _wc3_lto_upper STREQUAL "OFF")
+    message(FATAL_ERROR "WC3_LTO must be OFF or THIN, got '${WC3_LTO}'")
+endif()
+string(TOLOWER "${WC3_PGO_MODE}" _wc3_pgo_lower)
+if(_wc3_pgo_lower STREQUAL "generate")
+    if(NOT WC3_PGO_RAW_DIR)
+        message(FATAL_ERROR
+            "WC3_PGO_MODE=generate requires WC3_PGO_RAW_DIR")
+    endif()
+    # %p is expanded by the LLVM profile runtime, so concurrent app processes
+    # and reruns do not overwrite one another's counters.
+    set(_wc3_profraw_file "${WC3_PGO_RAW_DIR}/wc3-%p.profraw")
+    message(STATUS
+        "release_optimized: PGO generate -> ${_wc3_profraw_file}")
+    add_compile_options(
+        "-fprofile-instr-generate=${_wc3_profraw_file}")
+    add_link_options(
+        "-fprofile-instr-generate=${_wc3_profraw_file}")
+elseif(_wc3_pgo_lower STREQUAL "use")
+    if(NOT WC3_PGO_PROFILE OR NOT EXISTS "${WC3_PGO_PROFILE}")
+        message(FATAL_ERROR
+            "WC3_PGO_MODE=use requires an existing WC3_PGO_PROFILE "
+            "(got '${WC3_PGO_PROFILE}')")
+    endif()
+    message(STATUS
+        "release_optimized: PGO use <- ${WC3_PGO_PROFILE}")
+    add_compile_options(
+        "-fprofile-instr-use=${WC3_PGO_PROFILE}")
+elseif(NOT _wc3_pgo_lower STREQUAL "off")
+    message(FATAL_ERROR
+        "WC3_PGO_MODE must be off, generate, or use, got '${WC3_PGO_MODE}'")
+endif()
+
 # BV-5.3: WC3_DEBUG_TAGS is the single source of subsystem tags.  A tag is a
 # compile definition only in a debug build; release never activates one even
 # if a caller passes a non-empty list.
@@ -399,6 +453,13 @@ if(WC3_BUILD_APP)
 
     add_library(wc3gameactivity SHARED
         "${WC3_ROOT}/apps/android_gameactivity/src/main/cpp/host_shell.c")
+    if(_wc3_pgo_lower STREQUAL "generate")
+        # The Android process has no reliable atexit on a force-stop.  This
+        # training-only writer snapshots the counters after startup so the
+        # final profile-use build can be produced from a real device run.
+        target_sources(wc3gameactivity PRIVATE
+            "${WC3_ROOT}/apps/android_gameactivity/src/main/cpp/pgo_profile.c")
+    endif()
     target_include_directories(wc3gameactivity PRIVATE
         ${WC3_INCLUDES}
         "${WC3_ROOT}/runtime/app")

@@ -14,9 +14,17 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('release', 'debug')]
+    [ValidateSet('release', 'debug', 'release_optimized', 'release_optimized_pgo')]
     [string]$Variant = 'release',
     [string]$GamesActivityAar = '',
+    # release_optimized is release plus ThinLTO and a two-stage PGO profile.
+    # release_optimized_pgo is the on-device training build: profile generation
+    # only, with no LTO.  The final release_optimized build consumes the merged
+    # profile and applies ThinLTO.
+    [ValidateSet('off', 'generate', 'use')]
+    [string]$Pgo = 'off',
+    [string]$PgoProfile = 'build/pgo/wc3.profdata',
+    [string]$PgoRawDir = '/data/data/wc3.recomp/files/pgo',
     # Product builds require the relifted corpus.  SoftFloat was removed, so
     # the prebuilt legacy corpus is not a linkable product input.
     [string]$CorpusRoot = 'build/corpus-full',
@@ -41,6 +49,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$isDebug = $Variant -eq 'debug'
+$isOptimized = $Variant -in @('release_optimized', 'release_optimized_pgo')
+$isProfileBuild = $Variant -eq 'release_optimized_pgo'
+if (-not $isOptimized -and $Pgo -ne 'off') {
+    throw "-Pgo is only valid with -Variant release_optimized or release_optimized_pgo"
+}
+if ($isOptimized -and $Pgo -eq 'off') {
+    $Pgo = if ($isProfileBuild) { 'generate' } else { 'use' }
+}
+if ($isProfileBuild -and $Pgo -ne 'generate') {
+    throw "-Variant release_optimized_pgo requires -Pgo generate"
+}
+if (-not $isProfileBuild -and $isOptimized -and $Pgo -eq 'generate') {
+    throw "profile generation uses -Variant release_optimized_pgo, not release_optimized"
+}
 
 # BV-5.3: the debug tag list lives in config/debug_tags.txt, not in this
 # script.  The file is parsed here so a build only needs the variant; there is
@@ -102,7 +125,7 @@ function Read-DebugTagsFile {
 # Resolve the tag set before the first side effect (SDK checks, AAR
 # extraction).  A broken tag file must fail the build before it touches
 # output.
-if ($Variant -eq 'release') {
+if (-not $isDebug) {
     $DebugTags = ''
 } else {
     $tagPath = Join-Path $root 'config\debug_tags.txt'
@@ -204,7 +227,8 @@ if (-not (Test-Path $cmake) -or -not (Test-Path $ninja) -or
 # DXVK is a target product now: both archives are built from
 # third_party/dxvk by the target script, not consumed from the legacy tree.
 $dxvkScript = Join-Path $PSScriptRoot 'build_dxvk.ps1'
-& $dxvkScript -Variant $Variant -Api 26 -Ndk $ndk.Root
+$dxvkVariant = if ($isDebug) { 'debug' } else { 'release' }
+& $dxvkScript -Variant $dxvkVariant -Api 26 -Ndk $ndk.Root
 
 if (-not $GamesActivityAar) {
     $cache = Join-Path $env:USERPROFILE `
@@ -230,7 +254,7 @@ New-Item -ItemType Directory -Force $ga | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::ExtractToDirectory($GamesActivityAar, $ga)
 
-$debugValue = if ($Variant -eq 'debug') { 'ON' } else { 'OFF' }
+$debugValue = if ($isDebug) { 'ON' } else { 'OFF' }
 $configure = @(
     '-S', $root,
     '-B', (Join-Path $out 'cmake'),
@@ -259,6 +283,34 @@ $configure += "-DWC3_RELIFTED_CORPUS_ROOT=$CorpusRoot"
 $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
 $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
+# release_optimized is the release product plus ThinLTO and PGO.  The training
+# build deliberately skips LTO; it exists only to collect counters.  The final
+# build uses both flags and the same release product inputs.
+$ltoValue = if ($Variant -eq 'release_optimized') { 'THIN' } else { 'OFF' }
+$configure += "-DWC3_LTO=$ltoValue"
+if ($isOptimized) {
+    if ($Pgo -eq 'use') {
+        $profilePath = if ([IO.Path]::IsPathRooted($PgoProfile)) {
+            $PgoProfile
+        } else {
+            Join-Path $root $PgoProfile
+        }
+        if (-not (Test-Path -LiteralPath $profilePath)) {
+            throw "PGO profile not found: $profilePath (run the training build first)"
+        }
+        $PgoProfile = (Resolve-Path -LiteralPath $profilePath).Path
+        $configure += '-DWC3_PGO_MODE=use'
+        $configure += "-DWC3_PGO_PROFILE=$PgoProfile"
+    } else {
+        if (-not $PgoRawDir) {
+            throw '-PgoRawDir is required for profile generation'
+        }
+        $configure += '-DWC3_PGO_MODE=generate'
+        $configure += "-DWC3_PGO_RAW_DIR=$PgoRawDir"
+    }
+} else {
+    $configure += '-DWC3_PGO_MODE=off'
+}
 # Optimization policy: the generated-corpus transformations (P0-1/P0-2/P0-6,
 # D1, D2, D3b, D4) are unconditional in CMake/liftcore.  There are no
 # per-optimization command-line switches to pass here.  -fno-plt is not passed
@@ -281,7 +333,7 @@ $configure += "-DWC3_ICF_PRINT_SECTIONS=ON"
 # O-42: release ships only the JNI surface.  Debug keeps all dynamic symbols so
 # on-device crash logs retain L_<va> names; -KeepDynsym is the explicit escape
 # hatch for a release triage build.
-$hideDynsym = ($Variant -eq 'release') -and (-not $KeepDynsym)
+$hideDynsym = (-not $isDebug) -and (-not $KeepDynsym)
 if ($hideDynsym) {
     $configure += '-DWC3_HIDE_DYNSYM=ON'
 } else {
@@ -296,8 +348,17 @@ Write-Host "[app] thin_skip_writeonly_copyin $($thinSkipCopyinValue -eq 'ON')"
 Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
 Write-Host "[app] hide_dynsym $hideDynsym"
+Write-Host "[app] lto   $ltoValue"
+Write-Host "[app] pgo   $Pgo"
+if ($isOptimized) {
+    if ($Pgo -eq 'use') {
+        Write-Host "[app] pgo_profile $PgoProfile"
+    } else {
+        Write-Host "[app] pgo_raw_dir $PgoRawDir"
+    }
+}
 Write-Host "[app] aar   $GamesActivityAar"
-Write-Host "[app] debug $($Variant -eq 'debug')"
+Write-Host "[app] debug $isDebug"
 $ErrorActionPreference = 'Continue'
 & $cmake @configure 2>&1 | ForEach-Object { Write-Host $_ }
 $rc = $LASTEXITCODE
