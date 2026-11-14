@@ -11,10 +11,19 @@
 [CmdletBinding()]
 param(
     [switch]$Release,
+    [switch]$ReleaseOptimized,
     [switch]$NativeDebug,
     [switch]$Install,
     [switch]$Launch,
     [switch]$KeepDynsym,
+    # Internal explicit variant selector for the two-stage release_optimized
+    # profile flow.  Public callers normally use -Release or -ReleaseOptimized.
+    [ValidateSet('release', 'debug', 'release_optimized', 'release_optimized_pgo')]
+    [string]$Variant = '',
+    [ValidateSet('off', 'generate', 'use')]
+    [string]$Pgo = 'off',
+    [string]$PgoProfile = 'build/pgo/wc3.profdata',
+    [string]$PgoRawDir = '/data/data/wc3.recomp/files/pgo',
     # O-52: initial-exec is rejected by bionic for a dlopen'ed app library.
     # Only global-dynamic is accepted.
     [ValidateSet('global-dynamic')]
@@ -40,7 +49,42 @@ if ($Release -and $NativeDebug) {
     Write-Host '[apk] -NativeDebug is incompatible with -Release'
     exit 1
 }
-$variant = if ($Release) { 'release' } else { 'debug' }
+if ($ReleaseOptimized -and ($Release -or $NativeDebug)) {
+    Write-Host '[apk] -ReleaseOptimized is incompatible with -Release/-NativeDebug'
+    exit 1
+}
+if ($Variant) {
+    if ($Release -or $ReleaseOptimized -or $NativeDebug) {
+        Write-Host '[apk] -Variant is incompatible with -Release/-ReleaseOptimized/-NativeDebug'
+        exit 1
+    }
+    $variant = $Variant
+} elseif ($ReleaseOptimized) {
+    $variant = 'release_optimized'
+} elseif ($Release) {
+    $variant = 'release'
+} else {
+    $variant = 'debug'
+}
+$isDebug = $variant -eq 'debug'
+$isOptimized = $variant -in @('release_optimized', 'release_optimized_pgo')
+$isRelease = -not $isDebug
+if ($isOptimized) {
+    if ($Pgo -eq 'off') {
+        $Pgo = if ($variant -eq 'release_optimized_pgo') { 'generate' } else { 'use' }
+    }
+    if ($variant -eq 'release_optimized_pgo' -and $Pgo -ne 'generate') {
+        Write-Host '[apk] release_optimized_pgo requires -Pgo generate'
+        exit 1
+    }
+    if ($variant -eq 'release_optimized' -and $Pgo -eq 'generate') {
+        Write-Host '[apk] use -Variant release_optimized_pgo for profile generation'
+        exit 1
+    }
+} elseif ($Pgo -ne 'off') {
+    Write-Host '[apk] -Pgo is only valid for release_optimized variants'
+    exit 1
+}
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $projectDir = Join-Path $root 'apps\android_gameactivity'
 $outDir = Join-Path $root 'build\android_app'
@@ -143,6 +187,11 @@ if ($NoHostHardening) { $nativeParams['NoHostHardening'] = $true }
 # against CorpusRoot and passes ON/OFF explicitly to CMake.
 $nativeParams['W3LCompat'] = $W3LCompat
 $nativeParams['W3LLatency'] = $W3LLatency
+if ($isOptimized) {
+    $nativeParams['Pgo'] = $Pgo
+    $nativeParams['PgoProfile'] = $PgoProfile
+    $nativeParams['PgoRawDir'] = $PgoRawDir
+}
 $ErrorActionPreference = 'Continue'
 & $nativeScript @nativeParams 2>&1 | ForEach-Object { Write-Host $_ }
 $nativeRc = $LASTEXITCODE
@@ -220,7 +269,7 @@ if (-not (Test-Path $readelf)) {
 # Java_* entry points, android_main and JNI_OnLoad.  Crash triage uses the module
 # base plus the unstripped .symtab through tools/symbolize_crash.py.
 # The debug copy intentionally keeps symbols for the wc3.recomp.debug package.
-if ($variant -eq 'release') {
+if ($isRelease) {
     $strip = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe'
     if (-not (Test-Path $strip) -or -not (Test-Path $readelf)) {
         Write-Host '[apk] unavailable: NDK llvm-strip/llvm-readelf not found'
@@ -326,8 +375,11 @@ $env:ANDROID_SDK_ROOT = $sdk
 $gradleApp = Join-Path $outDir 'gradle-app'
 $gradleCache = Join-Path $outDir 'gradle-cache'
 $aapt2 = Join-Path $buildTools 'aapt2.exe'
-$gradleTask = 'assemble' + $variant.Substring(0, 1).ToUpper() +
-    $variant.Substring(1)
+# release_optimized and its training build share the release Gradle build
+# type.  Only the native directory and the final APK name differ, so the
+# applicationId and every release input stay identical to wc3-release.apk.
+$gradleVariant = if ($isDebug) { 'debug' } else { 'release' }
+$gradleTask = if ($isDebug) { 'assembleDebug' } else { 'assembleRelease' }
 # BV-3.2: jniLibs belong to the Gradle buildType source set, so use the
 # per-buildType property and keep the native directories separate.
 $jniProperty = if ($variant -eq 'debug') {
@@ -362,8 +414,8 @@ $rc = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 if ($rc -ne 0) { Write-Host "[apk] gradle failed ($rc)"; exit 1 }
 
-$apkDir = Join-Path $gradleApp "outputs\apk\$variant"
-$apk = Join-Path $apkDir "app-$variant.apk"
+$apkDir = Join-Path $gradleApp "outputs\apk\$gradleVariant"
+$apk = Join-Path $apkDir "app-$gradleVariant.apk"
 if (-not (Test-Path $apk)) {
     $apk = Get-ChildItem $apkDir -Filter '*.apk' -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
@@ -448,7 +500,7 @@ if ($Install -or $Launch) {
     & $adb @deviceArgs install -r $final 2>&1 | ForEach-Object { Write-Host $_ }
     if ($LASTEXITCODE -ne 0) { Write-Host '[apk] install failed'; exit 1 }
     if ($Launch) {
-        $package = if ($variant -eq 'debug') { 'wc3.recomp.debug' } else { 'wc3.recomp' }
+        $package = if ($isDebug) { 'wc3.recomp.debug' } else { 'wc3.recomp' }
         & $adb @deviceArgs shell am start -n "$package/wc3.recomp.Wc3GameActivity" 2>&1 |
             ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { Write-Host '[apk] launch failed'; exit 1 }
