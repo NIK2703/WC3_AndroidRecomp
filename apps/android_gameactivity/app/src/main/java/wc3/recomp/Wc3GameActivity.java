@@ -18,7 +18,6 @@ import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 
 import com.google.androidgamesdk.GameActivity;
-import com.google.androidgamesdk.gametextinput.State;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -81,9 +80,6 @@ public class Wc3GameActivity extends GameActivity {
      * handling. */
     private native boolean nativeImeBackspace(boolean down);
 
-    /* Completion callback for requestImeReset(). */
-    private native void nativeImeResetComplete(int generation);
-
     /**
      * Applies the host-side IME pan on the UI thread.  Both full-screen
      * SurfaceViews move together: the game surface and the touch overlay.
@@ -100,18 +96,6 @@ public class Wc3GameActivity extends GameActivity {
             if (overlayView != null) {
                 overlayView.setTranslationY(offset);
             }
-        });
-    }
-
-    /**
-     * Replaces the platform editor state with an empty one on the UI thread.
-     * The generation token lets native code ignore a completion from an older
-     * field when the player switches text boxes quickly.
-     */
-    public void requestImeReset(final int generation) {
-        runOnUiThread(() -> {
-            setTextInputState(new State("", 0, 0, -1, -1));
-            nativeImeResetComplete(generation);
         });
     }
 

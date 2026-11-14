@@ -211,12 +211,6 @@ static char *g_ime_text;
 static int g_ime_text_len;
 static int g_ime_text_cap;
 static int g_ime_active;
-/* True while show() is installing the empty editor state.  Text events that
- * arrive during this window belong to the previous editor contents and must
- * not be diffed against the new field.  g_ime_sync_gen rejects a completion
- * callback from an older show when fields are switched quickly. */
-static int g_ime_syncing;
-static uint32_t g_ime_sync_gen;
 /* The IME inset and focused-field rectangle decide whether the game surface
  * has to move.  g_ime_pan_px is the translation applied by Java; input adds it
  * back so a screen tap still lands on the same guest point. */
@@ -1300,47 +1294,6 @@ static void ime_request_pan_refresh(GameActivity *activity)
     if (attached) (*vm)->DetachCurrentThread(vm);
 }
 
-/* Replace the platform editor contents with an empty state on the UI thread.
- * The completion callback carries the show generation so a stale reset from an
- * older field cannot release the current field's sync guard. */
-static int ime_request_reset(GameActivity *activity, uint32_t generation)
-{
-    if (!activity || !activity->vm || !activity->javaGameActivity)
-        return 0;
-
-    JavaVM *vm = activity->vm;
-    JNIEnv *env = NULL;
-    int attached = 0;
-    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
-        if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) {
-            IME_LOGE("IME reset: cannot attach thread");
-            return 0;
-        }
-        attached = 1;
-    }
-
-    int ok = 0;
-    jclass cls = (*env)->GetObjectClass(env, activity->javaGameActivity);
-    jmethodID method = cls
-        ? (*env)->GetMethodID(env, cls, "requestImeReset", "(I)V")
-        : NULL;
-    if (method) {
-        (*env)->CallVoidMethod(env, activity->javaGameActivity, method,
-                               (jint)generation);
-        ok = 1;
-    } else {
-        IME_LOGE("IME reset: requestImeReset missing");
-    }
-    if ((*env)->ExceptionCheck(env)) {
-        (*env)->ExceptionDescribe(env);
-        (*env)->ExceptionClear(env);
-        ok = 0;
-    }
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    if (attached) (*vm)->DetachCurrentThread(vm);
-    return ok;
-}
-
 static void ime_pan_update(GameActivity *activity)
 {
     pthread_mutex_lock(&g_window_lock);
@@ -1407,35 +1360,35 @@ static void ime_window_insets(GameActivity *activity)
 /* Called from the guest thread when the game focuses a text field.  CEditBox
  * is the only owner of pre-existing field text: the platform editor starts
  * empty on every show and receives only the characters typed through this
- * bridge.  Mirroring guest text into the IME made the IME's own state feedback
- * look like a user edit and inserted a stray character into the newly tapped
- * field. */
+ * bridge.  Mirroring guest text into the IME would make the IME's own state
+ * feedback look like a user edit and can insert stray characters into the
+ * newly tapped field. */
 static void ime_show(uint32_t field_id, const Wc3LegacyKeyboardRect *rect)
 {
     GameActivity *activity = host_activity();
     if (!activity) return;
 
-    uint32_t generation;
     pthread_mutex_lock(&g_ime_lock);
     g_ime_active = 1;
-    g_ime_syncing = 1;
-    generation = ++g_ime_sync_gen;
     g_ime_rect_valid = rect != NULL;
     if (rect) g_ime_rect = *rect;
     ime_clear_locked();
     pthread_mutex_unlock(&g_ime_lock);
 
-    /* requestImeReset() and showSoftInput() are both posted to the UI thread.
-     * The reset replaces the Java editor state synchronously and then calls
-     * nativeImeResetComplete(), which releases g_ime_syncing.  Any text event
-     * queued before the reset belongs to the previous field and is ignored. */
-    if (!ime_request_reset(activity, generation)) {
-        pthread_mutex_lock(&g_ime_lock);
-        if (g_ime_sync_gen == generation)
-            g_ime_syncing = 0;
-        pthread_mutex_unlock(&g_ime_lock);
-    }
-
+    /* The native reset and show requests travel through the same main-thread
+     * work pipe, so the empty editor state is installed before the keyboard
+     * opens.  This is the as-built order.  A Java runOnUiThread() reset uses a
+     * different queue, so its position relative to showSoftInput() is not
+     * defined; keep the native pair. */
+    GameTextInputState empty;
+    memset(&empty, 0, sizeof empty);
+    empty.text_UTF8 = "";
+    empty.text_length = 0;
+    empty.selection.start = 0;
+    empty.selection.end = 0;
+    empty.composingRegion.start = SPAN_UNDEFINED;
+    empty.composingRegion.end = SPAN_UNDEFINED;
+    GameActivity_setTextInputState(activity, &empty);
     GameActivity_showSoftInput(activity,
                                GAMEACTIVITY_SHOW_SOFT_INPUT_IMPLICIT);
 
@@ -1455,8 +1408,6 @@ static void ime_hide(void)
 
     pthread_mutex_lock(&g_ime_lock);
     g_ime_active = 0;
-    g_ime_syncing = 1;
-    g_ime_sync_gen++;
     g_ime_rect_valid = 0;
     const int length = g_ime_text_len;
     ime_clear_locked();
@@ -1486,13 +1437,10 @@ static void ime_text_changed(GameActivity *activity,
          state->composingRegion.start, state->composingRegion.end);
 
     pthread_mutex_lock(&g_ime_lock);
-    if (!g_ime_active || g_ime_syncing) {
-        /* A late event from a hidden editor, or from the editor that is being
-         * replaced by the current show, must not become a guest edit. */
-        const int syncing = g_ime_syncing;
+    if (!g_ime_active) {
+        /* A late event from a hidden editor must not become a guest edit. */
         pthread_mutex_unlock(&g_ime_lock);
-        IME_LOG("text ignored %s len=%d",
-                syncing ? "syncing" : "inactive", length);
+        IME_LOG("text ignored inactive len=%d", length);
         return;
     }
 
@@ -1586,8 +1534,6 @@ static void ime_shutdown(struct android_app *app)
     g_ime_text_len = 0;
     g_ime_text_cap = 0;
     g_ime_active = 0;
-    g_ime_syncing = 1;
-    g_ime_sync_gen++;
     g_ime_rect_valid = 0;
     g_ime_inset_bottom = 0;
     g_ime_pan_px = 0.0f;
@@ -1621,23 +1567,6 @@ Java_wc3_recomp_Wc3GameActivity_nativeImeBackspace(
         IME_LOG("backspace");
     }
     return JNI_TRUE;
-}
-
-/* Runs on the UI thread after Wc3GameActivity.requestImeReset() has replaced the
- * Java editor state synchronously.  Releasing the guard here gives
- * ime_text_changed() a precise boundary: events after this point belong to the
- * empty editor and can be diffed normally. */
-JNIEXPORT void JNICALL
-Java_wc3_recomp_Wc3GameActivity_nativeImeResetComplete(
-    JNIEnv *env, jobject thiz, jint generation)
-{
-    (void)env;
-    (void)thiz;
-
-    pthread_mutex_lock(&g_ime_lock);
-    if (g_ime_sync_gen == (uint32_t)generation)
-        g_ime_syncing = 0;
-    pthread_mutex_unlock(&g_ime_lock);
 }
 
 static void haptics_init(struct android_app *app)

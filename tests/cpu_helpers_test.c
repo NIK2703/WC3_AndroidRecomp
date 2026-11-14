@@ -4,8 +4,10 @@
  * operands assume a 32-bit host pointer.  This file keeps the integer helpers
  * checked in a test that runs unchanged on a 64-bit host.
  */
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "cpu.h"
 
@@ -15,6 +17,17 @@ static void eq(const char *what, uint32_t got, uint32_t want)
 {
     if (got != want) {
         printf("FAIL %-28s got 0x%08X want 0x%08X\n", what, got, want);
+        fails++;
+    }
+}
+
+static void eqf_bits(const char *what, float got, float want)
+{
+    uint32_t g, w;
+    memcpy(&g, &got, sizeof g);
+    memcpy(&w, &want, sizeof w);
+    if (g != w) {
+        printf("FAIL %-28s got 0x%08X want 0x%08X\n", what, g, w);
         fails++;
     }
 }
@@ -200,6 +213,69 @@ int main(void)
         eq("_nf leaves ZF", c.zf, 1u);
         eq("_nf leaves SF", c.sf, 1u);
         eq("_nf leaves OF", c.of, 1u);
+    }
+
+    /* Packed SSE FP: on this host the scalar fallback runs; the AArch64
+     * NEON path is exercised by the Android self-test/device run. */
+    {
+        XMM a, b;
+        const uint32_t nan_bits = 0x7FC12345u;
+        const uint32_t neg_zero = 0x80000000u;
+
+        memset(&a, 0, sizeof a); memset(&b, 0, sizeof b);
+        a.f32[0] = 1.5f; a.f32[1] = -2.0f; a.f32[2] = 0.0f; a.f32[3] = 8.0f;
+        b.f32[0] = 2.5f; b.f32[1] = 3.0f; b.f32[2] = -0.0f; b.f32[3] = 0.5f;
+        sse_addps(&a, &b);
+        eqf_bits("addps lane 0", a.f32[0], 4.0f);
+        eqf_bits("addps lane 1", a.f32[1], 1.0f);
+        eqf_bits("addps lane 2", a.f32[2], 0.0f);
+        eqf_bits("addps lane 3", a.f32[3], 8.5f);
+
+        a.f32[0] = 5.0f; a.f32[1] = 5.0f; a.f32[2] = 5.0f; a.f32[3] = 5.0f;
+        b.f32[0] = 2.0f; b.f32[1] = 2.0f; b.f32[2] = 2.0f; b.f32[3] = 2.0f;
+        sse_subps(&a, &b); eqf_bits("subps", a.f32[3], 3.0f);
+        a.f32[0] = 1.5f; a.f32[1] = -2.0f; a.f32[2] = 3.0f; a.f32[3] = 4.0f;
+        b.f32[0] = 2.0f; b.f32[1] = 2.0f; b.f32[2] = 2.0f; b.f32[3] = 2.0f;
+        sse_mulps(&a, &b); eqf_bits("mulps", a.f32[1], -4.0f);
+        a.f32[0] = 9.0f; a.f32[1] = 8.0f; a.f32[2] = 6.0f; a.f32[3] = 4.0f;
+        sse_divps(&a, &b); eqf_bits("divps", a.f32[3], 2.0f);
+        a.f32[0] = 4.0f; a.f32[1] = 9.0f; a.f32[2] = 16.0f; a.f32[3] = 25.0f;
+        sse_sqrtps(&a, &a);
+        eqf_bits("sqrtps lane 0", a.f32[0], 2.0f);
+        eqf_bits("sqrtps lane 3", a.f32[3], 5.0f);
+
+        /* MINPS/MAXPS select the second operand for NaN and equal +/-0. */
+        memset(&a, 0, sizeof a); memset(&b, 0, sizeof b);
+        a.f32[0] = 3.0f; b.f32[0] = 4.0f;
+        sse_minps(&a, &b); eqf_bits("minps", a.f32[0], 3.0f);
+        a.f32[0] = 3.0f; b.f32[0] = 4.0f;
+        sse_maxps(&a, &b); eqf_bits("maxps", a.f32[0], 4.0f);
+
+        a.f32[0] = 3.0f;
+        memcpy(&b.f32[0], &nan_bits, sizeof nan_bits);
+        sse_minps(&a, &b); eq("minps NaN source bits", a.u32[0], nan_bits);
+
+        memcpy(&a.f32[0], &nan_bits, sizeof nan_bits);
+        b.f32[0] = 3.0f;
+        sse_minps(&a, &b); eqf_bits("minps NaN dst", a.f32[0], 3.0f);
+
+        memcpy(&a.f32[0], &neg_zero, sizeof neg_zero);
+        b.f32[0] = 0.0f;
+        sse_minps(&a, &b);
+        eq("minps -0,+0 keeps src +0", a.u32[0], 0u);
+        a.f32[0] = 0.0f;
+        memcpy(&b.f32[0], &neg_zero, sizeof neg_zero);
+        sse_minps(&a, &b);
+        eq("minps +0,-0 keeps src -0", a.u32[0], neg_zero);
+
+        /* A NaN result falls back to the scalar lane code; the other lanes
+         * still receive the vector result. */
+        a.f32[0] = 1.0f; a.f32[1] = 2.0f; a.f32[2] = 3.0f; a.f32[3] = 4.0f;
+        b.f32[0] = 1.0f; b.f32[1] = 2.0f; b.f32[2] = 3.0f; b.f32[3] = 4.0f;
+        a.f32[0] = 0.0f; b.f32[0] = 0.0f;
+        sse_divps(&a, &b);
+        eq("divps NaN lane is NaN", (a.u32[0] & 0x7F800000u) == 0x7F800000u, 1u);
+        eqf_bits("divps non-NaN lane", a.f32[3], 1.0f);
     }
 
     if (fails == 0) printf("cpu helpers OK\n");

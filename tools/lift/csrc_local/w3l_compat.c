@@ -816,9 +816,24 @@ static int apply_site(const char *text, size_t n, const Site *site,
     nl = has_crlf(text, n) ? "\r\n" : "\n";
 
     if (strcmp(site->key, "auth_req") == 0) {
-        replacement = xstrdup(
-            "    /* WC3_W3L_COMPAT auth_req: VA 0x6F8DDD94 branch NOP "
-            "(profile pvpgn/rubattle). */");
+        Buf b = {0};
+        size_t fr = find_sub(text, content_end, "_fr_", 4, line_start);
+        buf_str(&b,
+                "    /* WC3_W3L_COMPAT auth_req: VA 0x6F8DDD94 branch NOP "
+                "(profile pvpgn/rubattle). */");
+        if (fr != NPOS) {
+            size_t fe = fr + 4;
+            while (fe < content_end &&
+                   (isalnum((unsigned char)text[fe]) || text[fe] == '_'))
+                fe++;
+            if (fe > fr + 4) {
+                buf_str(&b, nl);
+                buf_str(&b, "    (void)");
+                buf_mem(&b, text + fr, fe - fr);
+                buf_str(&b, ";");
+            }
+        }
+        replacement = buf_take(&b);
         edit_start = line_start;
         edit_end = content_end;
     } else if (strcmp(site->key, "logon_proof_hash_verify") == 0) {

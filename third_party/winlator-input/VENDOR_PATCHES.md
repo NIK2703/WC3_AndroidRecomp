@@ -100,3 +100,25 @@ threshold and lifts outside, verifying that no tap press or gesture haptic is
 emitted.  It also covers a coalesced fast swipe whose only outside sample is
 the UP point.  Before the patch the outside threshold crossing produced no
 gesture, and the outside UP could leak a deferred primary tap.
+
+## 5. `gesture/base.c`: do not run global gesture timers for an element-owned touch
+
+A touch that starts on a non-passthrough element never enters the global
+gesture state machine, so its finger stays `GESTURE_STATE_IDLE`.  The cached
+global long-press timer was still armed from the finger bindings.  While the
+element was engaged, `gesture_tick()` skipped the finger through
+`engaged_elem_count`; HOVER buttons release on the first outside MOVE, which
+drops that count to zero before UP.  The next timer tick then fired the global
+long-press action and `gestureLongPressHaptic` (default 3) after the button was
+already gone.  This was the non-swipe buzz when leaving ESC, Shift or Enter.
+
+`gesture_tick()` and `gesture_next_deadline_tick()` now ignore an active IDLE
+finger.  A real global gesture with a pending timer is in `TAP_WAITING`,
+`DOUBLE_TAP_WAITING`, `LONG_PRESSING` or `DRAGGING`, so its timers keep
+running.  Element long-press is unaffected: it uses the element's own
+`LONG_PRESS_ARM` and haptic, not the global timer.
+
+Host test: `tests/gesture_button_swipe_test.c` now also presses a plain HOVER
+button (no gesture or long-press binding), leaves it on an outside MOVE, and
+ticks past `longPressTimeout`.  It verifies that no global long-press haptic or
+binding press is emitted and that the following UP leaks no tap.

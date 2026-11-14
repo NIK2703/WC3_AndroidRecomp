@@ -11,8 +11,9 @@ Steps:
   3. relift build/corpus-full;
   4. re-run CMake configure so splitcorpus and the LiftPasses see the new
      corpus and tool timestamps;
-  5. compile every generated chunk with -Wall -Wextra -Werror and report
-     every diagnostic.
+  5. compile every final generated chunk (leaf_call output when present,
+     otherwise w3l_compat) with -Wall -Wextra -Werror and report every
+     diagnostic.
 
 Use --skip-tools/--skip-relift/--skip-configure to rerun only part of the
 pipeline. Exit code is non-zero when any chunk fails.
@@ -33,6 +34,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 TOOLS = ROOT / "build" / "lift-tools"
 CHUNK_ROOT = ROOT / "build" / "android_app" / "debug" / "cmake" / "w3l_compat"
+LEAF_ROOT = ROOT / "build" / "android_app" / "debug" / "cmake" / "leaf_call"
 
 DEFAULT_CMAKE = r"E:\Android\Sdk\cmake\3.22.1\bin\cmake.exe"
 DEFAULT_CLANG = (
@@ -174,8 +176,13 @@ def compile_chunk(path: Path, clang: Path, debug_value: str,
 
 
 def scan(clang: Path, debug_value: str, latency: str, jobs: int):
-    chunks = sorted(glob.glob(str(CHUNK_ROOT / "**" / "*.c"), recursive=True))
-    print(f"scanning {len(chunks)} chunks with -Werror")
+    chunks = sorted(glob.glob(str(LEAF_ROOT / "**" / "*.c"), recursive=True))
+    source = "leaf_call"
+    if not chunks:
+        chunks = sorted(glob.glob(str(CHUNK_ROOT / "**" / "*.c"),
+                                  recursive=True))
+        source = "w3l_compat"
+    print(f"scanning {len(chunks)} {source} chunks with -Werror")
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         futures = [ex.submit(compile_chunk, Path(c), clang, debug_value,

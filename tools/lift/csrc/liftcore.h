@@ -95,6 +95,9 @@ typedef struct {
 void   lf_arena_reset(void);
 char  *lf_afmt(const char *fmt, ...);
 
+/* A.29 self-test used by lift32 --self-test-cond. */
+int    lf_cond_fold_selftest(void);
+
 /* Global call/ret flag summaries. */
 void   lf_summary_init(Lifter *L, size_t cap);
 void   lf_precompute_summaries(Lifter *L);

@@ -141,6 +141,19 @@ static inline void wc3_guest_leave(CPU *c, const Wc3DispFrame *saved)
         wc3_guest_leave((c), &wc3_saved_frame_);                             \
     } while (0)
 
+/* D4: a callee with no guest call, tail dispatch, HLE/W3L helper or dispatcher
+ * state access cannot observe or publish a pending target.  The transition
+ * frame and drain are therefore dead; keep the guest return address and the
+ * depth counter only.  leaf_call emits this form only for a target proven by
+ * the complete-corpus leaf scan. */
+#define WC3_DIRECT_CALL_LEAF(fn, c)                                          \
+    do {                                                                     \
+        uint32_t wc3_saved_depth_ = (c)->disp_depth;                         \
+        (c)->disp_depth = wc3_saved_depth_ + 1u;                             \
+        (fn)(c);                                                             \
+        (c)->disp_depth = wc3_saved_depth_;                                  \
+    } while (0)
+
 /* Generated C keeps its own `return;` immediately after this macro. */
 #define WC3_DIRECT_TAIL(fn, c)                                               \
     do {                                                                     \

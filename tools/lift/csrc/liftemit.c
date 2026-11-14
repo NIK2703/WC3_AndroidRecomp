@@ -903,54 +903,33 @@ Emit lf_sse(Lifter *L, cs_insn *insn)
             if (!strcmp(opc, "add") || !strcmp(opc, "sub") ||
                 !strcmp(opc, "mul") || !strcmp(opc, "div")) {
                 int wide = !strcmp(m + ml - 2, "pd");
-                const char *op = !strcmp(opc, "add") ? "+" : !strcmp(opc, "sub") ? "-" :
-                                 !strcmp(opc, "mul") ? "*" : "/";
-                const char *lanef = wide ? "f64" : "f32";
-                int n = wide ? 2 : 4, xd = lf_xmm_index(L, d);
-                char *buf = (char *)malloc((size_t)n * 120 + 32);
-                size_t o = 0;
-                for (i = 0; i < n; i++)
-                    o += (size_t)snprintf(buf + o, (size_t)n * 120 + 32 - o,
-                        "c->xmm[%d].%s[%d] = _d.%s[%d] %s _s.%s[%d];",
-                        xd, lanef, i, lanef, i, op, lanef, i);
-                lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; %s }",
-                                    lf_xm(L, insn, s), xd, buf));
-                free(buf);
+                const char *fn = !strcmp(opc, "add") ? (wide ? "sse_addpd" : "sse_addps")
+                               : !strcmp(opc, "sub") ? (wide ? "sse_subpd" : "sse_subps")
+                               : !strcmp(opc, "mul") ? (wide ? "sse_mulpd" : "sse_mulps")
+                               : (wide ? "sse_divpd" : "sse_divps");
+                int xd = lf_xmm_index(L, d);
+                lf_push(&e, lf_afmt("{ XMM _s = %s; %s(&c->xmm[%d], &_s); }",
+                                    lf_xm(L, insn, s), fn, xd));
                 return e;
             }
         }
         if (!strcmp(m, "sqrtps") || !strcmp(m, "sqrtpd")) {
             int wide = !strcmp(m, "sqrtpd");
-            const char *lanef = wide ? "f64" : "f32";
-            const char *fn = wide ? "sqrt" : "sqrtf";
-            int n = wide ? 2 : 4, xd = lf_xmm_index(L, d);
-            char *buf = (char *)malloc((size_t)n * 100 + 32);
-            size_t o = 0;
-            for (i = 0; i < n; i++)
-                o += (size_t)snprintf(buf + o, (size_t)n * 100 + 32 - o,
-                    "c->xmm[%d].%s[%d] = %s(_s.%s[%d]);", xd, lanef, i, fn, lanef, i);
-            lf_push(&e, lf_afmt("{ XMM _s = %s; %s }", lf_xm(L, insn, s), buf));
-            free(buf);
+            const char *fn = wide ? "sse_sqrtpd" : "sse_sqrtps";
+            int xd = lf_xmm_index(L, d);
+            lf_push(&e, lf_afmt("{ XMM _s = %s; %s(&c->xmm[%d], &_s); }",
+                                lf_xm(L, insn, s), fn, xd));
             return e;
         }
         if (!strcmp(m, "minps") || !strcmp(m, "maxps") ||
             !strcmp(m, "minpd") || !strcmp(m, "maxpd")) {
             int wide = m[strlen(m) - 1] == 'd';
-            const char *lanef = wide ? "f64" : "f32";
-            char fn[16];
-            int n = wide ? 2 : 4, xd = lf_xmm_index(L, d);
-            char *buf;
-            size_t o = 0;
-            snprintf(fn, sizeof fn, "sse_%s%s", m[0] == 'm' && m[1] == 'i' ? "min" : "max",
-                     wide ? "d" : "f");
-            buf = (char *)malloc((size_t)n * 140 + 32);
-            for (i = 0; i < n; i++)
-                o += (size_t)snprintf(buf + o, (size_t)n * 140 + 32 - o,
-                    "c->xmm[%d].%s[%d] = %s(_d.%s[%d], _s.%s[%d]);",
-                    xd, lanef, i, fn, lanef, i, lanef, i);
-            lf_push(&e, lf_afmt("{ XMM _s = %s; XMM _d = c->xmm[%d]; %s }",
-                                lf_xm(L, insn, s), xd, buf));
-            free(buf);
+            int is_min = m[1] == 'i';
+            const char *fn = is_min ? (wide ? "sse_minpd" : "sse_minps")
+                                    : (wide ? "sse_maxpd" : "sse_maxps");
+            int xd = lf_xmm_index(L, d);
+            lf_push(&e, lf_afmt("{ XMM _s = %s; %s(&c->xmm[%d], &_s); }",
+                                lf_xm(L, insn, s), fn, xd));
             return e;
         }
     }

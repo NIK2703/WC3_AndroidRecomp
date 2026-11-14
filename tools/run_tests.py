@@ -940,6 +940,49 @@ def test_guest_memory() -> int:
     return run([str(exe)])
 
 
+def test_hle_guest_mem() -> int:
+    """T0: HLE range coalescing keeps the exact full-scan fallback."""
+    cc = gcc()
+    if not cc:
+        print("hle guest memory: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    include = [
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        "-I" + str(ROOT / "runtime" / "hle" / "android"),
+        "-I" + str(ROOT / "runtime" / "diag"),
+    ]
+    exe = BUILD / "hle_guest_mem_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        *include,
+        str(ROOT / "tests" / "hle_guest_mem_test.c"),
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_dxvk_movemask() -> int:
+    """T0: the DXVK shim keeps x86 movemask byte order and sign bits."""
+    cc = gcc()
+    if not cc:
+        print("dxvk movemask: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "dxvk_movemask_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        str(ROOT / "tests" / "dxvk_movemask_test.c"),
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
 def test_window_settle() -> int:
     """T0: cold-start surface settle rule shared with the Android shell."""
     cc = gcc()
@@ -1204,6 +1247,16 @@ def test_dead_flags_pass() -> int:
     return run_host_tool("dead_flags", ["--self-test"])
 
 
+def test_leaf_call_pass() -> int:
+    """D4 source check: only calls to proven leaf functions lose the frame."""
+    return run_host_tool("leaf_call", ["--self-test"])
+
+
+def test_lift_cond_fold() -> int:
+    """A.29 source check: fused branch conditions fold only exact constants."""
+    return run_host_tool("lift32", ["--self-test-cond"])
+
+
 def test_save_list_display_pass() -> int:
     """V10/T2-save: the save-list LiftPass is idempotent and emits its marker."""
     return run_host_tool("save_list_display", ["--self-test"])
@@ -1389,7 +1442,7 @@ def test_corpus_flag_policy() -> int:
 
 
 def test_pass6_build_guards() -> int:
-    """O-64/O-65: ICF and -fno-plt are on in every Android product build."""
+    """O-64: ICF is on in every Android product build; -fno-plt is absent."""
     cmake = (ROOT / "CMakeLists.txt").read_text(
         encoding="utf-8", errors="replace")
     build_app = (ROOT / "tools" / "android" / "build_app.ps1").read_text(
@@ -1400,8 +1453,8 @@ def test_pass6_build_guards() -> int:
 
     if "set(_wc3_icf_default ON)" not in cmake:
         problems.append("CMake does not default ICF ON")
-    if "set(_wc3_fno_plt_default ON)" not in cmake:
-        problems.append("CMake does not default -fno-plt ON")
+    if "WC3_FNO_PLT" in cmake or "add_compile_options(-fno-plt)" in cmake:
+        problems.append("CMake still wires -fno-plt")
     if not re.search(
             r'option\(WC3_ICF_PRINT_SECTIONS\s+"[^"]*"\s+ON\)', cmake, re.S):
         problems.append("WC3_ICF_PRINT_SECTIONS default is not ON")
@@ -1411,19 +1464,17 @@ def test_pass6_build_guards() -> int:
         problems.append("WC3_ICF_MODE default is not safe")
     if '"-Wl,--icf=${WC3_ICF_MODE}"' not in cmake:
         problems.append("CMake does not pass -Wl,--icf=... to the link")
-    if "add_compile_options(-fno-plt)" not in cmake:
-        problems.append("CMake does not wire -fno-plt")
 
     for needle in (
         "$icfValue = 'ON'",
         '"-DWC3_ICF=$icfValue"',
         '"-DWC3_ICF_MODE=safe"',
         '"-DWC3_ICF_PRINT_SECTIONS=ON"',
-        "$fnoPltValue = 'ON'",
-        '"-DWC3_FNO_PLT=$fnoPltValue"',
     ):
         if needle not in build_app:
             problems.append(f"build_app.ps1 missing {needle}")
+    if "WC3_FNO_PLT" in build_app or "fnoPltValue" in build_app:
+        problems.append("build_app.ps1 still passes -fno-plt")
     for needle in ("$nativeParams['Icf']", "$nativeParams['FnoPlt']"):
         if needle in build_apk:
             problems.append(f"build_apk.ps1 still requires {needle}")
@@ -1432,7 +1483,7 @@ def test_pass6_build_guards() -> int:
         for problem in problems:
             print(f"pass6_build_guards: {problem}", file=sys.stderr)
         return 1
-    print("pass6_build_guards: ICF/-fno-plt are product defaults")
+    print("pass6_build_guards: ICF is a product default; -fno-plt is absent")
     return 0
 
 
@@ -1583,7 +1634,7 @@ def test_icf_audit() -> int:
 
 
 def test_plt_audit() -> int:
-    """O-65 source check: AArch64 BL and PLT-slot mapping."""
+    """Static PLT audit: AArch64 BL and PLT-slot mapping."""
     return run([sys.executable,
                 str(ROOT / "tools" / "plt_audit.py"),
                 "--self-test"])
@@ -3349,6 +3400,8 @@ TESTS = {
     "direct_call_multi_tu": test_direct_call_multi_tu,
     "devirtualize_pass": test_devirtualize_pass,
     "dead_flags_pass": test_dead_flags_pass,
+    "leaf_call_pass": test_leaf_call_pass,
+    "lift_cond_fold": test_lift_cond_fold,
     "save_list_display_pass": test_save_list_display_pass,
     "required_save_fixes": test_required_save_fixes,
     "w3l_compat": test_w3l_compat,
@@ -3442,6 +3495,8 @@ TESTS = {
     "platform_contract": test_platform_contract,
     "platform_headless": test_platform_headless,
     "guest_memory": test_guest_memory,
+    "hle_guest_mem": test_hle_guest_mem,
+    "dxvk_movemask": test_dxvk_movemask,
     "window_settle": test_window_settle,
     "dsound_hle": test_dsound_hle,
     "winmm_guard_timer": test_winmm_guard_timer,

@@ -6711,8 +6711,9 @@ static volatile int g_ime_hide_pending;
 /* Last CEditBox that asked for the IME.  The guest calls ImmGetContext when a
  * field gains focus, not when an already-focused field is tapped again, so the
  * dispatcher keeps this pointer to recognise a repeat tap against the field's
- * current CLayoutFrame.  The pointer is validated by its exact CEditBox vtable
- * before every use, and a click that hides the keyboard clears it. */
+ * current CLayoutFrame.  The pointer survives a keyboard hide because hiding
+ * does not blur the guest control; every use validates the exact CEditBox
+ * vtable, the click-path style bit and the current rectangle first. */
 static volatile uint32_t g_ime_field;
 /* Deferred fallback for a tap inside g_ime_field when ImmGetContext does not
  * arrive for that click sequence. */
@@ -6892,6 +6893,7 @@ static void service_settings_save(CPU *c)
 
 static void keyboard_service(void);
 static int  keyboard_field_contains(uint32_t field, int x, int y);
+static int  keyboard_field_valid(uint32_t field);
 static void keyboard_show_field(uint32_t field);
 
 static void u_get_message(CPU *c)
@@ -7121,10 +7123,11 @@ static void keyboard_service(void)
     if (!g_ime_hide_pending) return;
     if ((uint32_t)(hle_now_ms() - g_ime_click_ms) < 300u) return;
     g_ime_hide_pending = 0;
-    /* The click was not a text field.  The old CEditBox may outlive this
-     * click, but the keyboard is no longer associated with it; do not let a
-     * later tap at the same screen position revive a dialog that is gone. */
-    g_ime_field = 0;
+    /* Keep g_ime_field: hiding the keyboard does not blur the guest's edit
+     * control, so the game does not call ImmGetContext() again when the player
+     * taps the same field.  keyboard_field_contains() validates the CEditBox
+     * vtable, its style bit and its current CLayoutFrame before the remembered
+     * pointer is used, so a destroyed field normally fails validation. */
     g_ime_reopen_pending = 0;
     if (g_ime_shown) {
         g_ime_shown = 0;
@@ -7137,10 +7140,10 @@ static void keyboard_service(void)
 
 /* Called by the Android front end when the IME window appears or disappears.
  * visible=true arms the deferred hide if the platform opened the IME on its
- * own.  visible=false is ignored: the callback can be missed after a Back
- * dismissal and can also be delayed while the IME is still usable, so it must
- * not drive either the show request or the input lifetime.  Showing is driven
- * per text-field click. */
+ * own.  visible=false is ignored for the input lifetime: the callback can be
+ * missed after a Back dismissal and can also be delayed while the IME is still
+ * usable, so it must not drive either the show request or the input lifetime.
+ * Showing is driven per text-field click. */
 void hle_android_set_keyboard_visible(int visible)
 {
     if (visible) g_ime_shown = 1;
@@ -7537,17 +7540,35 @@ static void u_set_cursor(CPU *c)
  * own text fields, which is exactly the point where Android has to show or
  * hide the soft keyboard. */
 
-/* CEditBox main vtable in the frozen 1.27.1.7085 image.  The pointer kept by
- * the ImmGetContext wrapper is also used from the message dispatcher, after
- * the dialog may already have destroyed the field; the vtable check rejects a
- * freed or reused object before any CEditBox offset is read. */
-#define CEDITBOX_VTABLE 0x6FA8C62Cu
+/* Main vtables of the engine edit-box classes in the frozen 1.27.1.7085
+ * image.  CGlueEditBoxWar3 and CSlashChatBox derive from CEditBox;
+ * CChatEditBox and CBattleNetChatEditBox derive from CSlashChatBox.  All of
+ * them keep the inherited CEditBox fields and the CLayoutFrame subobject at
+ * the same offsets, so the rectangle reads below are valid for every entry.
+ * The pointer kept by the ImmGetContext wrapper is also used from the message
+ * dispatcher, after the dialog may already have destroyed the field; the
+ * vtable check rejects a freed or reused object before any CEditBox offset is
+ * read. */
+#define CEDITBOX_VTABLE                  0x6FA8C62Cu
+#define CGLUE_EDITBOX_WAR3_VTABLE        0x6FAA40B4u
+#define CSLASH_CHATBOX_VTABLE            0x6FAA5238u
+#define CBATTLENET_CHAT_EDITBOX_VTABLE   0x6FAABF88u
+#define CCHAT_EDITBOX_VTABLE             0x6FABD4B8u
 
 static int keyboard_field_valid(uint32_t field)
 {
     if (field < 0x10000u || !hle_android_guest_ok(field, 4u))
         return 0;
-    return rd32g(field) == CEDITBOX_VTABLE;
+    switch (rd32g(field)) {
+    case CEDITBOX_VTABLE:
+    case CGLUE_EDITBOX_WAR3_VTABLE:
+    case CSLASH_CHATBOX_VTABLE:
+    case CBATTLENET_CHAT_EDITBOX_VTABLE:
+    case CCHAT_EDITBOX_VTABLE:
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 /* CEditBox embeds its CLayoutFrame at +0xB4; the frame's CRect is at +0x44
@@ -7586,7 +7607,7 @@ static int keyboard_field_contains(uint32_t field, int x, int y)
 
     /* CEditBox::OnClick (0x6F104E80) enters its IME wrapper only when
      * 0x6F1120C0(this, 1) reports [field+0x1D4] & 1.  A repeat tap must not
-     * revive an input that the guest itself would treat as disabled. */
+     * revive an input that the guest itself would reject at that entry. */
     if ((uint64_t)field + 0x1D8u > 0x100000000ull ||
         !hle_android_guest_ok(field + 0x1D4u, 4u) ||
         (rd32g(field + 0x1D4u) & 1u) == 0)
@@ -7609,14 +7630,16 @@ static void keyboard_show_field(uint32_t field)
     if (g_keyboard_show)
         g_keyboard_show(field, has_rect ? &rect : NULL);
 
-    g_ime_field = field;
+    __atomic_store_n(&g_ime_field, field, __ATOMIC_RELEASE);
     g_ime_shown = 1;
     g_ime_reopen_pending = 0;
 
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     fprintf(stderr,
-            "[input] keyboard show field=%08X rect=%s\n",
-            field, has_rect ? "yes" : "no");
+            "[input] keyboard show field=%08X rect=%s vtable=%08X\n",
+            field, has_rect ? "yes" : "no",
+            (field >= 0x10000u && hle_android_guest_ok(field, 4u))
+                ? rd32g(field) : 0u);
     if (has_rect)
         fprintf(stderr,
                 "[input] field %08X surface rect %.4f,%.4f..%.4f,%.4f\n",

@@ -6,7 +6,7 @@ indirect branch.  Whether that is faster is a runtime question (PM-8/PM-19),
 so this tool only publishes the static side of the comparison: the PLT slot
 count, the number of ``bl``/``b`` instructions that target those slots, the
 ``adrp/ldr/br|blr`` GOT call sites, and the per-symbol call counts.  It never
-enables ``WC3_FNO_PLT`` and never writes to the artifact.
+adds the compiler flag itself and never writes to the artifact.
 
 The parser is self-contained (ELF64 little-endian, AArch64): no NDK or
 ``objdump`` is required.  ``.rela.plt`` supplies the slot-to-symbol mapping;

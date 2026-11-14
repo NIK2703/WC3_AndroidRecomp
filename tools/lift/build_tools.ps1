@@ -63,8 +63,8 @@ $closure2Src = @((Join-Path $csrcLocal 'closure2.c'), (Join-Path $csrc 'lift32.c
 
 # out -> sources, plus an optional define and an optional source directory.
 # closure.exe reuses lift32.c's lf_lift_files(), so its main must be compiled
-# out.  The two csrc_local tools are owned by this tree, not by the upstream
-# pin in config/build_upstream.json.
+# out.  The csrc_local tools are owned by this tree, not by the upstream pin in
+# config/build_upstream.json.
 $targets = @(
     @{ out = 'triage.exe';   src = @('triage.c') },
     @{ out = 'probe.exe';    src = @('probe.c') },
@@ -97,6 +97,7 @@ $targets = @(
     @{ out = 'save_list_display.exe'; src = @('save_list_display.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'dead_flags.exe'; src = @('dead_flags.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'xmm_local.exe'; src = @('xmm_local.c'); dir = $csrcLocal },
+    @{ out = 'leaf_call.exe'; src = @('leaf_call.c'); dir = $csrcLocal },
     @{ out = 'return_address_elide.exe'; src = @('return_address_elide.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'w3l_compat.exe'; src = @('w3l_compat.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'ccache_wrapper.exe'; src = @('ccache_wrapper.c'); dir = $csrcLocal },
@@ -177,6 +178,13 @@ if ($Smoke) {
     if ($LASTEXITCODE -ne 0) { $decoded | ForEach-Object { Write-Host $_ }; throw 'cstest failed: capstone.dll did not load' }
     if (-not ($decoded -match 'mov\s+eax')) { throw 'cstest produced no x86 decode' }
     Write-Host 'smoke: capstone decode OK'
+
+    $cond = & (Join-Path $bin 'lift32.exe') --self-test-cond 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $cond | ForEach-Object { Write-Host $_ }
+        throw 'lift32 cond-fold self-test failed'
+    }
+    Write-Host 'smoke: cond-fold self-test OK'
 
     $outList = Join-Path $bin 'smoke_known.h'
     $merge = & (Join-Path $bin 'lift.exe') known $outList $fixtures 2>&1
@@ -342,6 +350,12 @@ void L_00401000(CPU *c)
     if ($LASTEXITCODE -ne 0 -or -not ($xmOut -match 'self-test: OK')) {
         $xmOut | ForEach-Object { Write-Host $_ }
         throw 'xmm_local self-test failed'
+    }
+    $lc = Join-Path $bin 'leaf_call.exe'
+    $lcOut = & $lc --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($lcOut -match 'self-test: OK')) {
+        $lcOut | ForEach-Object { Write-Host $_ }
+        throw 'leaf_call self-test failed'
     }
     $ra = Join-Path $bin 'return_address_elide.exe'
     $raOut = & $ra --self-test 2>&1

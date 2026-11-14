@@ -120,6 +120,16 @@ void gesture_tick(uint64_t now_tick, TouchActionResult* result) {
         TouchFinger* f = &fingers[i];
         if (!f->active) continue;
         if (f->engaged_elem_count > 0) continue;
+        /*
+         * A touch that started on an element never entered the global
+         * gesture state machine.  HOVER buttons release on the first
+         * outside MOVE, so the finger can be active, IDLE and no longer
+         * engaged while the cached global long-press timer is still
+         * armed.  Ticking it here would fire the global long-press action
+         * and haptic after the button was already left.  A real global
+         * gesture is never IDLE while it has a timer pending.
+         */
+        if (f->state == GESTURE_STATE_IDLE) continue;
         gesture_branch(f, &g_ctx[i], result, now_tick, GESTURE_EVENT_TICK, 0 /*x*/, 0 /*y*/);
     }
 }
@@ -145,6 +155,7 @@ uint64_t gesture_next_deadline_tick(void) {
     for (int i = 0; i < MAX_FINGERS; i++) {
         TouchFinger* f = &g_state.fingers[i];
         if (!f->active || f->engaged_elem_count > 0) continue;
+        if (f->state == GESTURE_STATE_IDLE) continue;
 
         const GesturePairSlot* slot = select_gesture_slot(f);
         if (!slot) continue;

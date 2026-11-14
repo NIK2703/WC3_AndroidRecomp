@@ -63,6 +63,16 @@ find_program(WC3_W3L_COMPAT_EXE
     HINTS "${WC3_ROOT}/build/lift-tools"
     NO_DEFAULT_PATH)
 
+find_program(WC3_LEAF_CALL_EXE
+    NAMES leaf_call leaf_call.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+if(NOT WC3_LEAF_CALL_EXE)
+    message(FATAL_ERROR
+        "leaf_call.exe missing; run tools/lift/build_tools.ps1 "
+        "before configuring")
+endif()
+
 find_program(WC3_ATOMICCHECK_EXE
     NAMES atomiccheck atomiccheck.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -464,6 +474,93 @@ endif()
 if(NOT WC3_RELIFTED_SOURCES)
     message(FATAL_ERROR "relifted corpus has no translation units")
 endif()
+
+# D4: leaf calls need a complete-corpus summary, because a caller and its leaf
+# callee may be split into different translation units.  Run one text pass over
+# the final chunks after every other pass, then compile its outputs.  A function
+# is a leaf only when it contains no guest call, tail dispatch, HLE/W3L helper
+# or dispatcher-state access; the pass rewrites only calls to such targets.
+set(_wc3_leaf_dir "${CMAKE_CURRENT_BINARY_DIR}/leaf_call")
+set(_wc3_leaf_list "${CMAKE_CURRENT_BINARY_DIR}/leaf_call_inputs.txt")
+set(_wc3_leaf_report "${WC3_ROOT}/reports/generated/leaf_call.json")
+set(_wc3_leaf_stamp "${_wc3_leaf_dir}/.stamp")
+set(_wc3_leaf_fingerprint_file "${_wc3_leaf_dir}/.inputs")
+string(SHA256 _wc3_leaf_fingerprint
+    "${WC3_LEAF_CALL_EXE}|${WC3_RELIFTED_SOURCES}")
+set(_wc3_leaf_outputs)
+foreach(_wc3_src IN LISTS WC3_RELIFTED_SOURCES)
+    get_filename_component(_wc3_base "${_wc3_src}" NAME)
+    list(APPEND _wc3_leaf_outputs "${_wc3_leaf_dir}/${_wc3_base}")
+endforeach()
+list(LENGTH _wc3_leaf_outputs _wc3_leaf_count)
+list(REMOVE_DUPLICATES _wc3_leaf_outputs)
+list(LENGTH _wc3_leaf_outputs _wc3_leaf_unique)
+if(NOT _wc3_leaf_count EQUAL _wc3_leaf_unique)
+    message(FATAL_ERROR "leaf_call output basenames are not unique")
+endif()
+
+set(_wc3_leaf_need 0)
+if(NOT EXISTS "${_wc3_leaf_stamp}" OR
+   NOT EXISTS "${_wc3_leaf_fingerprint_file}" OR
+   "${WC3_LEAF_CALL_EXE}" IS_NEWER_THAN "${_wc3_leaf_stamp}")
+    set(_wc3_leaf_need 1)
+else()
+    file(READ "${_wc3_leaf_fingerprint_file}" _wc3_leaf_fingerprint_old)
+    string(STRIP "${_wc3_leaf_fingerprint_old}" _wc3_leaf_fingerprint_old)
+    if(NOT _wc3_leaf_fingerprint_old STREQUAL _wc3_leaf_fingerprint)
+        set(_wc3_leaf_need 1)
+    endif()
+    if(NOT _wc3_leaf_need)
+        foreach(_wc3_src IN LISTS WC3_RELIFTED_SOURCES)
+            if("${_wc3_src}" IS_NEWER_THAN "${_wc3_leaf_stamp}")
+                set(_wc3_leaf_need 1)
+                break()
+            endif()
+        endforeach()
+    endif()
+endif()
+if(NOT _wc3_leaf_need)
+    if(NOT EXISTS "${_wc3_leaf_report}")
+        set(_wc3_leaf_need 1)
+    endif()
+endif()
+if(NOT _wc3_leaf_need)
+    foreach(_wc3_out IN LISTS _wc3_leaf_outputs)
+        if(NOT EXISTS "${_wc3_out}")
+            set(_wc3_leaf_need 1)
+            break()
+        endif()
+    endforeach()
+endif()
+
+if(_wc3_leaf_need)
+    file(REMOVE_RECURSE "${_wc3_leaf_dir}")
+    file(MAKE_DIRECTORY "${_wc3_leaf_dir}")
+    get_filename_component(_wc3_leaf_report_dir "${_wc3_leaf_report}" DIRECTORY)
+    file(MAKE_DIRECTORY "${_wc3_leaf_report_dir}")
+    file(WRITE "${_wc3_leaf_list}" "")
+    foreach(_wc3_src IN LISTS WC3_RELIFTED_SOURCES)
+        file(APPEND "${_wc3_leaf_list}" "${_wc3_src}\n")
+    endforeach()
+    execute_process(
+        COMMAND "${WC3_LEAF_CALL_EXE}"
+                --inputs "${_wc3_leaf_list}"
+                --out-dir "${_wc3_leaf_dir}"
+                --report "${_wc3_leaf_report}"
+                --quiet
+        RESULT_VARIABLE _wc3_leaf_rc
+        OUTPUT_VARIABLE _wc3_leaf_out
+        ERROR_VARIABLE _wc3_leaf_err)
+    if(NOT _wc3_leaf_rc EQUAL 0)
+        message(FATAL_ERROR
+            "leaf_call failed (rc=${_wc3_leaf_rc}).\n"
+            "${_wc3_leaf_out}\n${_wc3_leaf_err}")
+    endif()
+    file(WRITE "${_wc3_leaf_fingerprint_file}"
+        "${_wc3_leaf_fingerprint}\n")
+    file(TOUCH "${_wc3_leaf_stamp}")
+endif()
+set(WC3_RELIFTED_SOURCES "${_wc3_leaf_outputs}")
 
 add_library(wc3_corpus_relifted STATIC ${WC3_RELIFTED_SOURCES})
 target_include_directories(wc3_corpus_relifted PRIVATE

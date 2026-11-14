@@ -227,9 +227,38 @@ static void thin_gfx_event(CPU *c, uint16_t key)
 /* ------------------------------------------------------------------ */
 
 static ThinObj g_rec[THIN_MAX_REC];
-static uint32_t g_rec_hint;
 static uint32_t g_vt[D3D9_IFACE_COUNT];
 static int g_vt_ready;
+
+/* thin_wrap() is called for every out-parameter resource and the original
+ * registry is a linear scan over 16 K records.  The profile shows it at
+ * 2.04% of the render thread.  This cache is only a lookup accelerator: the
+ * record table remains authoritative, and a miss falls back to the exact
+ * linear search.  A slot stores index + 1, so zero means empty. */
+#define THIN_WRAP_CACHE 32768u
+static_assert((THIN_WRAP_CACHE & (THIN_WRAP_CACHE - 1u)) == 0u,
+              "wrap_hash masks with THIN_WRAP_CACHE - 1");
+static_assert(THIN_MAX_REC < 65535u,
+              "wrap cache stores record index + 1 in uint16_t");
+static uint16_t g_wrap_cache[THIN_WRAP_CACHE];
+
+/* Free records are linked through ThinObj::guest while flags == 0.  Allocation
+ * no longer scans the table, and a released record is immediately reusable. */
+static uint32_t g_free_head;
+static int g_free_ready;
+
+static uint32_t wrap_hash(const void *host)
+{
+    uintptr_t v = (uintptr_t)host;
+    v ^= v >> 17;
+    v ^= v >> 9;
+    return (uint32_t)v & (THIN_WRAP_CACHE - 1u);
+}
+
+static void wrap_cache_reset(void)
+{
+    memset(g_wrap_cache, 0, sizeof g_wrap_cache);
+}
 
 static IDirect3D9 *g_d3d;
 static IDirect3DDevice9 *g_dev;
@@ -241,24 +270,50 @@ static int g_device_retired;
 static unsigned g_presents;
 #endif
 
+static void rec_pool_init(void)
+{
+    for (uint32_t i = 0; i < THIN_MAX_REC; i++)
+        g_rec[i].guest = i + 1u;
+    g_rec[THIN_MAX_REC - 1u].guest = UINT32_MAX;
+    g_free_head = 0;
+    g_free_ready = 1;
+}
+
 static ThinObj *rec_alloc(void)
 {
-    for (uint32_t n = 0; n < THIN_MAX_REC; n++) {
-        uint32_t i = (g_rec_hint + n) % THIN_MAX_REC;
-        if (!(g_rec[i].flags & THIN_F_USED)) {
-            g_rec_hint = (i + 1u) % THIN_MAX_REC;
-            memset(&g_rec[i], 0, sizeof g_rec[i]);
-            g_rec[i].flags = THIN_F_USED;
-            return &g_rec[i];
-        }
+    if (!g_free_ready) rec_pool_init();
+    if (g_free_head == UINT32_MAX) {
+        THIN_LOG("registry full (%d objects)", THIN_MAX_REC);
+        return NULL;
     }
-    THIN_LOG("registry full (%d objects)", THIN_MAX_REC);
-    return NULL;
+    uint32_t i = g_free_head;
+    ThinObj *r = &g_rec[i];
+    g_free_head = r->guest;
+    memset(r, 0, sizeof *r);
+    r->flags = THIN_F_USED;
+    return r;
 }
 
 static int rec_index(const ThinObj *r)
 {
     return (int)(r - g_rec);
+}
+
+static void wrap_cache_clear(const ThinObj *r)
+{
+    if (!r->host) return;
+    uint32_t slot = wrap_hash(r->host);
+    if (g_wrap_cache[slot] == (uint16_t)(rec_index(r) + 1))
+        g_wrap_cache[slot] = 0;
+}
+
+static void rec_free(ThinObj *r)
+{
+    uint32_t i = (uint32_t)rec_index(r);
+    r->host = NULL;
+    r->guest = g_free_head;
+    r->flags = 0;
+    g_free_head = i;
 }
 
 static void guest_set_iface(ThinObj *r, int iface)
@@ -288,21 +343,35 @@ static int iface_from_type(void *host)
     }
 }
 
+static uint32_t wrap_hit(ThinObj *r, int iface, int take_ref)
+{
+    if (!take_ref) ((IUnknown *)r->host)->AddRef();
+    r->refs++;
+    /* BaseTexture/Resource9 requests keep the concrete vtable; a concrete
+     * request switches it.  All concrete resource tables share the Resource9
+     * prefix, so this does not invalidate the old handle. */
+    if (iface >= 0 && (int)r->iface != iface) guest_set_iface(r, iface);
+    return r->guest;
+}
+
 uint32_t thin_wrap(void *host, int iface, int take_ref)
 {
     if (!host) return 0;
     IUnknown *unk = (IUnknown *)host;
+    uint32_t slot = wrap_hash(host);
+
+    uint32_t cached = g_wrap_cache[slot];
+    if (cached) {
+        ThinObj *r = &g_rec[cached - 1u];
+        if ((r->flags & THIN_F_USED) && r->host == host)
+            return wrap_hit(r, iface, take_ref);
+    }
 
     for (int i = 0; i < THIN_MAX_REC; i++) {
         ThinObj *r = &g_rec[i];
         if (!(r->flags & THIN_F_USED) || r->host != host) continue;
-        if (!take_ref) unk->AddRef();
-        r->refs++;
-        /* BaseTexture/Resource9 requests keep the concrete vtable; a concrete
-         * request switches it.  All concrete resource tables share the
-         * Resource9 prefix, so this does not invalidate the old handle. */
-        if (iface >= 0 && (int)r->iface != iface) guest_set_iface(r, iface);
-        return r->guest;
+        g_wrap_cache[slot] = (uint16_t)(i + 1);
+        return wrap_hit(r, iface, take_ref);
     }
 
     int kind = iface;
@@ -316,7 +385,7 @@ uint32_t thin_wrap(void *host, int iface, int take_ref)
     ThinObj *r = rec_alloc();
     if (!r) { if (take_ref) unk->Release(); return 0; }
     uint32_t g = g_alloc0(sizeof(ThinGuestObj));
-    if (!g) { r->flags = 0; if (take_ref) unk->Release(); return 0; }
+    if (!g) { rec_free(r); if (take_ref) unk->Release(); return 0; }
 
     ThinGuestObj *o = (ThinGuestObj *)(uintptr_t)g;
     o->vtbl = g_vt[kind];
@@ -331,6 +400,7 @@ uint32_t thin_wrap(void *host, int iface, int take_ref)
     r->iface = (uint16_t)kind;
     r->flags = THIN_F_USED;
     if (!take_ref) unk->AddRef();
+    g_wrap_cache[slot] = (uint16_t)(rec_index(r) + 1);
     return g;
 }
 
@@ -413,9 +483,8 @@ static uint32_t thin_obj_release(uint32_t g)
          * block to a new wrapper, the guest pointer denotes that new COM
          * object, exactly as COM refcounting requires. */
         o->magic = 0;
-        r->host = NULL;
-        r->guest = 0;
-        r->flags = 0;
+        wrap_cache_clear(r);
+        rec_free(r);
         hle_guest_free(g);
     }
     return r->refs;
@@ -462,6 +531,7 @@ void thin_forget_host(void *host)
     for (int i = 0; i < THIN_MAX_REC; i++) {
         ThinObj *r = &g_rec[i];
         if (!(r->flags & THIN_F_USED) || r->host != host) continue;
+        wrap_cache_clear(r);
         r->host = NULL;
         r->flags |= THIN_F_DETACHED;
     }
@@ -485,6 +555,7 @@ void thin_detach_all(void)
         r->host = NULL;
         r->flags |= THIN_F_DETACHED;
     }
+    wrap_cache_reset();
     /* The shadows described native objects that no longer exist. */
     thin_lock_reset();
 }

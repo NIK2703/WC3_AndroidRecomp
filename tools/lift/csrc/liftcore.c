@@ -206,6 +206,92 @@ static char *flag_mat_call(int kind, int sz, uint32_t addr)
     }
 }
 
+/* A.29: lf_flag_cond() has exact constant spellings for TEST/AND/OR/XOR
+ * consumers.  The CF and OF of those producers are architecturally zero, so
+ * "jb/jc" is the literal 0u and "jae/jnc" is !(0u).  Fold only those exact
+ * strings; compound conditions are left to the normal path because an
+ * unreachable arm can still carry a different predecessor at a join. */
+static int lf_cond_const(const char *cond, int *value)
+{
+    if (!cond || !value) return 0;
+    if (!strcmp(cond, "0u")) {
+        *value = 0;
+        return 1;
+    }
+    if (!strcmp(cond, "!(0u)")) {
+        *value = 1;
+        return 1;
+    }
+    if (!strcmp(cond, "1u")) {
+        *value = 1;
+        return 1;
+    }
+    if (!strcmp(cond, "!(1u)")) {
+        *value = 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* A constant condition can make the flag materialisation of one edge
+ * unreachable.  lf_fused_start() still declared the temporaries referenced by
+ * that edge, so keep them syntactically used without executing the helper.
+ * The emitted expressions have no side effects: they only prevent
+ * -Werror=unused-variable. */
+static void lf_fused_void_mat_temps(Emit *e, const char *mat,
+                                    const char *fa, const char *fb,
+                                    const char *fr, const char *ffull,
+                                    const char *fcin)
+{
+    if (!mat) return;
+    if (strstr(mat, fa)) lf_push(e, lf_afmt("(void)%s;", fa));
+    if (strstr(mat, fb)) lf_push(e, lf_afmt("(void)%s;", fb));
+    if (strstr(mat, fr)) lf_push(e, lf_afmt("(void)%s;", fr));
+    if (strstr(mat, ffull)) lf_push(e, lf_afmt("(void)%s;", ffull));
+    if (strstr(mat, fcin)) lf_push(e, lf_afmt("(void)%s;", fcin));
+}
+
+int lf_cond_fold_selftest(void)
+{
+    static const struct {
+        const char *text;
+        int found;
+        int value;
+    } cases[] = {
+        { "0u",     1, 0 },
+        { "!(0u)",  1, 1 },
+        { "1u",     1, 1 },
+        { "!(1u)",  1, 0 },
+        { "(0u)",   0, 0 },
+        { "",       0, 0 },
+        { NULL,     0, 0 },
+    };
+    size_t i;
+    Emit e;
+
+    for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        int value = -1;
+        int found = lf_cond_const(cases[i].text, &value);
+        if (found != cases[i].found) return 1;
+        if (found && value != cases[i].value) return 1;
+    }
+
+    lf_arena_reset();
+    e = lf_emit();
+    lf_fused_void_mat_temps(&e, "flags_logicz(c, _fa & _fb, 4);",
+                            "_fa", "_fb", "_fr", "_ffull", "_fcin");
+    if (e.n != 2) return 1;
+    if (strcmp(e.v[0], "(void)_fa;") != 0) return 1;
+    if (strcmp(e.v[1], "(void)_fb;") != 0) return 1;
+
+    e = lf_emit();
+    lf_fused_void_mat_temps(&e, NULL,
+                            "_fa", "_fb", "_fr", "_ffull", "_fcin");
+    if (e.n != 0) return 1;
+
+    return 0;
+}
+
 /* Open the fused region at the producer.  The closing brace is emitted at the
  * consumer, so instructions between the two (moves, pushes, x87 bookkeeping)
  * stay inside the same C block.  The flag helper is deliberately not called
@@ -303,7 +389,10 @@ static Emit lf_fused_start(Lifter *L, cs_insn *p, const LfFlagFuse *f)
                 break;
             case LF_FLAG_ADC:
             case LF_FLAG_SBB:
-                need_a = need_b = need_full = need_cin = 1;
+                /* The result expression uses a/b/cin; the 64-bit full sum is
+                 * only for carry/overflow materialisation, which is added
+                 * below when the consumer or a helper actually needs it. */
+                need_a = need_b = 1;
                 break;
             case LF_FLAG_INC:
             case LF_FLAG_DEC:
@@ -392,7 +481,8 @@ static Emit lf_fused_start(Lifter *L, cs_insn *p, const LfFlagFuse *f)
                 break;
             case LF_FLAG_ADC:
             case LF_FLAG_SBB:
-                need_a = need_b = need_full = need_cin = 1;
+                /* _fr is written from a/b/cin; it does not read _ffull. */
+                need_a = need_b = need_cin = 1;
                 break;
             case LF_FLAG_INC:
             case LF_FLAG_DEC:
@@ -406,19 +496,24 @@ static Emit lf_fused_start(Lifter *L, cs_insn *p, const LfFlagFuse *f)
             }
         }
 
+        /* _ffull is defined in terms of _fcin; a consumer that needs the
+         * carry/overflow expression must keep that input alive. */
+        if (need_full)
+            need_cin = 1;
+
         decl = NULL;
         if (need_a)
             decl = lf_afmt("uint32_t %s = (uint32_t)(%s)%s;", fa, a, mask);
         if (need_b && f->kind != LF_FLAG_INC && f->kind != LF_FLAG_DEC)
             decl = lf_afmt("%s uint32_t %s = (uint32_t)(%s)%s;",
                            decl ? decl : "", fb, b, mask);
-        if ((f->kind == LF_FLAG_ADC || f->kind == LF_FLAG_SBB) &&
-            (need_full || need_cin)) {
+        if ((f->kind == LF_FLAG_ADC || f->kind == LF_FLAG_SBB) && need_cin)
+            decl = lf_afmt("%s uint32_t %s = c->cf & 1u;",
+                           decl ? decl : "", fcin);
+        if ((f->kind == LF_FLAG_ADC || f->kind == LF_FLAG_SBB) && need_full) {
             const char *op = f->kind == LF_FLAG_ADC ? "+" : "-";
-            decl = lf_afmt("%s uint32_t %s = c->cf & 1u; "
-                           "uint64_t %s = (uint64_t)%s %s %s %s %s;",
-                           decl ? decl : "", fcin, ffull,
-                           fa, op, fb, op, fcin);
+            decl = lf_afmt("%s uint64_t %s = (uint64_t)%s %s %s %s %s;",
+                           decl ? decl : "", ffull, fa, op, fb, op, fcin);
         }
         if (need_r)
             decl = lf_afmt("%s uint32_t %s = (%s)%s;",
@@ -483,6 +578,7 @@ static Emit lf_fused_end(Lifter *L, const LfFlagFuse *f,
     const char *cc;
     char fa[32], fb[32], fr[32], ffull[32], fcin[32], cond[4096];
     char *mat = NULL;
+    int cond_value = 0, fold_const = 0;
 
     flag_tmp_name(f->producer_addr, "a", fa, sizeof fa);
     flag_tmp_name(f->producer_addr, "b", fb, sizeof fb);
@@ -521,6 +617,8 @@ static Emit lf_fused_end(Lifter *L, const LfFlagFuse *f,
         lf_push(&e, lf_todo((uint32_t)c->address, "fused condition"));
         lf_push(&e, "}");
         return e;
+    } else {
+        fold_const = lf_cond_const(cond, &cond_value);
     }
 
     if (f->kind == LF_FLAG_FP_CMP) {
@@ -531,17 +629,44 @@ static Emit lf_fused_end(Lifter *L, const LfFlagFuse *f,
     }
 
     if (!strncmp(m, "cmov", 4)) {
-        char *src = lf_src(L, c, OP(c, 1));
-        char *dw = lf_dst_write(L, c, OP(c, 0), src);
-        lf_push(&e, lf_afmt("if (%s) { %s }", cond, dw));
+        if (!fold_const) {
+            char *src = lf_src(L, c, OP(c, 1));
+            char *dw = lf_dst_write(L, c, OP(c, 0), src);
+            lf_push(&e, lf_afmt("if (%s) { %s }", cond, dw));
+        } else if (cond_value) {
+            char *src = lf_src(L, c, OP(c, 1));
+            char *dw = lf_dst_write(L, c, OP(c, 0), src);
+            lf_push(&e, dw);
+        }
     } else if (!strncmp(m, "set", 3)) {
-        char *dw = lf_dst_write(L, c, OP(c, 0),
-                                lf_afmt("((%s) ? 1u : 0u)", cond));
+        char *dw;
+        if (fold_const)
+            dw = lf_dst_write(L, c, OP(c, 0), cond_value ? "1u" : "0u");
+        else
+            dw = lf_dst_write(L, c, OP(c, 0),
+                              lf_afmt("((%s) ? 1u : 0u)", cond));
         lf_push(&e, dw);
     } else {
         uint32_t target = (uint32_t)OP(c, 0)->imm;
         int internal = label_has(labels, nlabels, target);
-        if (internal) {
+        if (fold_const) {
+            if (cond_value) {
+                if (f->mat_taken)
+                    lf_push(&e, mat);
+                else if (f->mat_fall)
+                    lf_fused_void_mat_temps(&e, mat, fa, fb, fr, ffull, fcin);
+                if (internal)
+                    lf_push(&e, lf_afmt("goto L_%08X;", target));
+                else
+                    lf_push(&e, lf_afmt("dispatch_jmp(c, 0x%08Xu); return;",
+                                        target));
+            } else {
+                if (f->mat_fall)
+                    lf_push(&e, mat);
+                else if (f->mat_taken)
+                    lf_fused_void_mat_temps(&e, mat, fa, fb, fr, ffull, fcin);
+            }
+        } else if (internal) {
             if (f->mat_taken)
                 lf_push(&e, lf_afmt("if (%s) { %s goto L_%08X; }",
                                     cond, mat, target));
@@ -555,7 +680,7 @@ static Emit lf_fused_end(Lifter *L, const LfFlagFuse *f,
                 lf_push(&e, lf_afmt("if (%s) { dispatch_jmp(c, 0x%08Xu); return; }",
                                     cond, target));
         }
-        if (f->mat_fall)
+        if (!fold_const && f->mat_fall)
             lf_push(&e, mat);
     }
     lf_push(&e, "}");

@@ -190,16 +190,6 @@ set(WC3_ICF_MODE "safe" CACHE STRING
 set_property(CACHE WC3_ICF_MODE PROPERTY STRINGS safe all)
 option(WC3_ICF_PRINT_SECTIONS
        "Pass --print-icf-sections when ICF is enabled" ON)
-# O-65: replace external PLT calls with GOT loads.  This is part of the normal
-# Android product build; keep the option only so an explicit exactness/baseline
-# A/B can turn it off without editing CMake.
-set(_wc3_fno_plt_default OFF)
-if(ANDROID)
-    set(_wc3_fno_plt_default ON)
-endif()
-option(WC3_FNO_PLT
-       "Compile with -fno-plt (Android only)"
-       ${_wc3_fno_plt_default})
 if(WC3_ICF)
     if(NOT ANDROID)
         message(FATAL_ERROR "WC3_ICF requires the Android toolchain")
@@ -210,9 +200,6 @@ if(WC3_ICF)
     message(STATUS
         "O-64 ICF is enabled (${WC3_ICF_MODE}); record "
         "--print-icf-sections and RELACOUNT with the artifact.")
-endif()
-if(WC3_FNO_PLT AND NOT ANDROID)
-    message(FATAL_ERROR "WC3_FNO_PLT requires the Android toolchain")
 endif()
 if(WC3_DEBUG)
     set(WC3_DEBUG_DEFINE 1)
@@ -289,14 +276,6 @@ if(WC3_W3L_COMPAT)
 endif()
 
 include("${WC3_ROOT}/cmake/Wc3CompilerCache.cmake")
-# O-65: this is a compile-time option, so it must be set before the target
-# definitions below.  It is on in the normal Android product build.
-if(WC3_FNO_PLT)
-    message(STATUS
-        "O-65 -fno-plt is enabled; record PM-8/PM-19 and cold-start with the "
-        "artifact.")
-    add_compile_options(-fno-plt)
-endif()
 # O-51/O-52: this must be a directory-level option, before every target that
 # can contain a THREAD_LOCAL object (corpus, boot, shim, HLE, platform and the
 # DXVK bridge).  Prebuilt vendor archives are inputs; they are not recompiled

@@ -1543,6 +1543,8 @@ static inline uint16_t sse_sat_u16(int32_t v) { return v > 65535 ? 65535 : v < 0
 
 /* Packed integer SSE: one ASIMD instruction on AArch64, scalar here. */
 #include "cpu_sse_int.h"
+/* Packed FP SSE: ASIMD arithmetic with a scalar NaN fallback, scalar here. */
+#include "cpu_sse_fp.h"
 #include "cpu_bulk.h"
 
 #endif /* PCRECOMP_CPU_H */

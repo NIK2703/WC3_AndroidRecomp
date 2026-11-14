@@ -260,8 +260,9 @@ $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
 $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
 # Optimization policy: the generated-corpus transformations (P0-1/P0-2/P0-6,
-# D1, D2, D3b) are unconditional in CMake/liftcore.  There are no
-# per-optimization command-line switches to pass here.
+# D1, D2, D3b, D4) are unconditional in CMake/liftcore.  There are no
+# per-optimization command-line switches to pass here.  -fno-plt is not passed
+# for either variant.
 $packDynRelocsValue = 'ON'
 $packDynRelocsMode = 'android'
 $nativeTlsValue = 'ON'
@@ -277,8 +278,6 @@ $icfValue = 'ON'
 $configure += "-DWC3_ICF=$icfValue"
 $configure += "-DWC3_ICF_MODE=safe"
 $configure += "-DWC3_ICF_PRINT_SECTIONS=ON"
-$fnoPltValue = 'ON'
-$configure += "-DWC3_FNO_PLT=$fnoPltValue"
 # O-42: release ships only the JNI surface.  Debug keeps all dynamic symbols so
 # on-device crash logs retain L_<va> names; -KeepDynsym is the explicit escape
 # hatch for a release triage build.
@@ -291,7 +290,6 @@ if ($hideDynsym) {
 Write-Host "[app] ndk   $($ndk.Root)"
 Write-Host "[app] pack_dyn_relocs $($packDynRelocsValue -eq 'ON') ($packDynRelocsMode)"
 Write-Host "[app] icf $($icfValue -eq 'ON') (safe)"
-Write-Host "[app] fno_plt $($fnoPltValue -eq 'ON')"
 Write-Host "[app] native_tls $($nativeTlsValue -eq 'ON') model $TlsModel"
 Write-Host "[app] lift_p0_1/2/6 unconditional"
 Write-Host "[app] thin_skip_writeonly_copyin $($thinSkipCopyinValue -eq 'ON')"

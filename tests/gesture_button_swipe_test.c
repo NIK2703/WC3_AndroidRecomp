@@ -8,6 +8,10 @@
  * gesture action and could leak a tap on UP.  The engine now keeps the gesture
  * button engaged until UP, forwards outside MOVE samples to its element, and
  * cancels the deferred tap when the pointer lifts outside before the threshold.
+ *
+ * The same test also leaves a plain HOVER button (no element gesture or
+ * long-press binding) and ticks past the global long-press timeout.  The
+ * global timer must not fire for a touch that was owned by an element.
  */
 
 #include "profile/loader.h"
@@ -101,6 +105,14 @@ static TouchActionResult up(int ptr_id, float x, float y, uint64_t tick) {
     return result;
 }
 
+static TouchActionResult tick(uint64_t tick) {
+    set_tick(tick);
+    TouchActionResult result;
+    memset(&result, 0, sizeof(result));
+    touch_processor_tick(&result, tick);
+    return result;
+}
+
 static float gesture_threshold(void) {
     return g_state.cfg.gesture_threshold_px > 0
         ? (float)g_state.cfg.gesture_threshold_px
@@ -135,6 +147,21 @@ static TouchElement *find_gesture_button(void) {
         if (!(e->flags & TOUCH_BIT_CACHED_HAS_GESTURE)) continue;
         if (e->flags & (TOUCH_BIT_CACHED_HAS_TOGGLE |
                         TOUCH_BIT_CACHED_GESTURE_HAS_TOGGLE)) continue;
+        if (e->hw < 10.0f) continue;
+        return e;
+    }
+    return NULL;
+}
+
+static TouchElement *find_plain_hover_button(void) {
+    for (int i = 0; i < g_state.element_count; i++) {
+        TouchElement *e = &g_state.elements[i];
+        if (e->type != BUTTON || e->shape != RECT) continue;
+        if (!(e->flags & TOUCH_BIT_IS_HOVER)) continue;
+        if (e->flags & (TOUCH_BIT_CACHED_HAS_GESTURE |
+                        TOUCH_BIT_CACHED_HAS_LONG_PRESS |
+                        TOUCH_BIT_CACHED_HAS_TOGGLE)) continue;
+        if (e->bindings[0].type == NONE) continue;
         if (e->hw < 10.0f) continue;
         return e;
     }
@@ -263,6 +290,55 @@ int main(int argc, char **argv) {
         fail("coalesced swipe left the swipe flag set");
     if (g_state.active_finger_count != 0)
         fail("finger stayed active after the coalesced swipe");
+
+    /*
+     * A plain HOVER button releases on the first outside MOVE.  The finger
+     * is then active but has no gesture state.  Its cached global long-press
+     * timer must not fire after the button is gone; that leaked the global
+     * long-press action and haptic when leaving ESC/Shift/Enter.
+     */
+    TouchElement *plain = find_plain_hover_button();
+    if (!plain) {
+        fail("profile has no plain HOVER button for the long-press leak test");
+    } else {
+        float py = (float)plain->y;
+        float inside_x, outside_x;
+        if (plain->cached_left > 2.0f) {
+            inside_x = plain->cached_left + 2.0f;
+            outside_x = plain->cached_left - 2.0f;
+        } else {
+            inside_x = plain->cached_right - 2.0f;
+            outside_x = plain->cached_right + 2.0f;
+        }
+        if (!point_in_element(inside_x, py, plain))
+            fail("plain button down point is not inside the button");
+        if (point_in_element(outside_x, py, plain))
+            fail("plain button outside point is still inside the button");
+
+        down(0, inside_x, py, 400);
+        if (plain->current_ptr_id != 0)
+            fail("plain button did not engage on down");
+
+        TouchActionResult plain_leave = move(0, outside_x, py, 401);
+        (void)plain_leave;
+        if (plain->current_ptr_id >= 0)
+            fail("plain button did not release on the outside move");
+
+        uint64_t after_timeout = 401
+            + (uint64_t)g_state.cfg.long_press_timeout_ticks + 2;
+        TouchActionResult leaked = tick(after_timeout);
+        if (g_state.cfg.gesture_long_press_haptic > 0
+            && has_haptic(&leaked, g_state.cfg.gesture_long_press_haptic))
+            fail("global long-press haptic fired after leaving a plain button");
+        if (has_press(&leaked))
+            fail("global long-press action fired after leaving a plain button");
+
+        TouchActionResult plain_up = up(0, outside_x, py, after_timeout + 1);
+        if (has_press(&plain_up))
+            fail("plain button outside UP pressed a binding");
+        if (g_state.active_finger_count != 0)
+            fail("finger stayed active after the plain button leave");
+    }
 
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);

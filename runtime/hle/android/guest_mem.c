@@ -81,7 +81,18 @@ void guest_range_add(uint32_t base, uint32_t size)
     int n = guest_extra_count();
     /* Coalesce with an adjacent or overlapping entry: the staging arena is
      * committed one page-run at a time as locks come in, so consecutive calls
-     * extend the previous range rather than adding a new one. */
+     * extend the previous range rather than adding a new one.  Check the most
+     * recently claimed slot first; the full scan stays the exact fallback. */
+    if (n > 0) {
+        int i = n - 1;
+        if (g_extra[i].lo && g_extra[i].hi &&
+            hi >= g_extra[i].lo && base <= g_extra[i].hi) {
+            if (base < g_extra[i].lo) g_extra[i].lo = base;
+            if (hi > g_extra[i].hi) g_extra[i].hi = hi;
+            guest_pages_mark(g_extra[i].lo, g_extra[i].hi);
+            return;
+        }
+    }
     for (int i = 0; i < n; i++) {
         if (!g_extra[i].lo || !g_extra[i].hi) continue;
         if (hi >= g_extra[i].lo && base <= g_extra[i].hi) {

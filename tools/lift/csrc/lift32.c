@@ -200,6 +200,15 @@ int main(int argc, char **argv)
     const char *dot;
     int block = getenv("WC3_LIFT_BLOCK") && !strcmp(getenv("WC3_LIFT_BLOCK"), "1");
 
+    if (argc == 2 && !strcmp(argv[1], "--self-test-cond")) {
+        if (lf_cond_fold_selftest() != 0) {
+            fprintf(stderr, "lift32: cond-fold self-test FAIL\n");
+            return 1;
+        }
+        puts("lift32: cond-fold self-test OK");
+        return 0;
+    }
+
     if (argc < 4) {
         fprintf(stderr, "usage: %s <module> <funcs.txt> <out.c> [0xADDR ...]\n", argv[0]);
         return 2;

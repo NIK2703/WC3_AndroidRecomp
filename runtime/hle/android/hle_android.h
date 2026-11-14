@@ -160,12 +160,14 @@ typedef struct HleKeyboardRect {
 } HleKeyboardRect;
 
 /* Convert an absolute UI rectangle from 1.27b's fixed 0.8 x 0.6 DDC space
- * into surface fractions.  game.dll creates the root UI frame at width 0.8
- * (0x6F39D8B7) and height 0.6 (0x6F39D8CD) and builds the UI orthographic
- * projection over 0..0.8 x 0..0.6 (0x6F193546), so no aspect-dependent scale
- * applies.  CLayoutFrame stores a CRect as minY, minX, maxY, maxX; UI Y grows
- * upwards from the bottom of the root frame, so the screen top comes from
- * maxY.  Returns 0 for an empty or non-finite rectangle. */
+ * into surface fractions.  The UI renderer builds its orthographic projection
+ * over 0..0.8 x 0..0.6 (function 0x6F193532; the extents are written at
+ * 0x6F193542 and 0x6F193552), so no aspect-dependent scale applies.
+ * Full-screen UI frames such as the esc menu use that same virtual screen
+ * (0x6F39D8B4 and 0x6F39D8CA).  CLayoutFrame stores a CRect as minY, minX,
+ * maxY, maxX; UI Y grows upwards from the bottom of the root frame, so the
+ * screen top comes from maxY.  Returns 0 for an empty or non-finite
+ * rectangle. */
 static inline int hle_keyboard_rect_from_ddc(float min_y, float min_x,
                                              float max_y, float max_x,
                                              HleKeyboardRect *out)
@@ -208,9 +210,10 @@ void hle_android_set_keyboard_bridge(void (*show)(uint32_t field,
                                                   const HleKeyboardRect *rect),
                                      void (*hide)(void));
 /* Advisory platform IME visibility.  visible=true arms the deferred-hide path
- * if the platform opened the IME by itself.  visible=false is ignored: Back
- * dismissals can miss the callback and delayed false values can arrive while
- * the IME is still usable.  Showing is driven per text-field click instead. */
+ * if the platform opened the IME by itself.  visible=false is ignored for the
+ * input lifetime: Back dismissals can miss the callback and delayed false
+ * values can arrive while the IME is still usable.  Showing is driven per
+ * text-field click instead. */
 void hle_android_set_keyboard_visible(int visible);
 void wc3_android_show_keyboard(void);
 void wc3_android_hide_keyboard(void);

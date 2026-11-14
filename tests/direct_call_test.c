@@ -90,6 +90,16 @@ static void chain(CPU *c) {
     return;
 }
 
+static uint32_t g_leaf_depth;
+static void leaf_probe(CPU *c) {
+    g_leaf_depth = c->disp_depth;
+    note(c, 10);
+}
+
+static void leaf_caller(CPU *c) {
+    WC3_DIRECT_CALL_LEAF(leaf_probe, c);
+}
+
 int main(void)
 {
     CPU c = { .n = 0, .hops = 0 };
@@ -109,20 +119,37 @@ int main(void)
     CHECK(c.log[0] == 4 && c.log[1] == 5 && c.log[2] == 6);
     CHECK(wc3_guest_depth_get(&c) == 0u);
 
-    /* 3. a nested tail target is drained before the nested caller resumes */
+    /* 3. a leaf call keeps depth and the caller's pending slot intact */
+    c.n = 0;
+    g_leaf_depth = 0;
+    WC3_DIRECT_CALL_LEAF(leaf_probe, &c);
+    CHECK(c.n == 1 && c.log[0] == 10);
+    CHECK(g_leaf_depth == 1u);
+    CHECK(wc3_guest_depth_get(&c) == 0u);
+    CHECK(c.disp_pending_valid == 0u);
+
+    /* 4. a leaf call inside a direct call sees depth 2 and restores depth 1 */
+    c.n = 0;
+    g_leaf_depth = 0;
+    WC3_DIRECT_CALL(leaf_caller, &c);
+    CHECK(c.n == 1 && c.log[0] == 10);
+    CHECK(g_leaf_depth == 2u);
+    CHECK(wc3_guest_depth_get(&c) == 0u);
+
+    /* 5. a nested tail target is drained before the nested caller resumes */
     c.n = 0;
     WC3_DIRECT_CALL(nested_caller, &c);
     CHECK(c.n == 4);
     CHECK(c.log[0] == 6 && c.log[1] == 7 && c.log[2] == 8 && c.log[3] == 9);
     CHECK(wc3_guest_depth_get(&c) == 0u);
 
-    /* 4. a long tail chain must be a loop, not host-stack recursion */
+    /* 6. a long tail chain must be a loop, not host-stack recursion */
     c.hops = 0;
     WC3_DIRECT_CALL(chain, &c);
     CHECK(c.hops == 100000L);
     CHECK(wc3_guest_depth_get(&c) == 0u);
 
-    /* 5. top-level drain resolves a legacy VA pending through dispatch() */
+    /* 7. top-level drain resolves a legacy VA pending through dispatch() */
     g_va_hits = 0;
     c.disp_pending_valid = 1u;
     c.disp_pending_kind = WC3_DISP_PENDING_VA;
@@ -132,10 +159,10 @@ int main(void)
     CHECK(g_va_target == 0x1234);
     CHECK(c.disp_pending_valid == 0u);
 
-    /* 6. top-level drain is idempotent */
+    /* 8. top-level drain is idempotent */
     WC3_GUEST_DRAIN(&c);
     CHECK(c.disp_pending_valid == 0u);
 
-    printf("direct_call_test: OK (tail chain, nesting, 100000 hops)\n");
+    printf("direct_call_test: OK (tail chain, nesting, leaf depth, 100000 hops)\n");
     return 0;
 }
