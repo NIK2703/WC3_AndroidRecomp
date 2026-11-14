@@ -100,31 +100,26 @@ if(WC3_THIN_SKIP_WRITEONLY_COPYIN)
 else()
     set(WC3_THIN_SKIP_WRITEONLY_COPYIN_DEFINE 0)
 endif()
-# P0-1/P0-2/P0-6 are part of the normal relifted-corpus build.  They require
-# the generated corpus; the legacy prebuilt chunks cannot be rewritten.  The
-# passes stay individually addressable for an exactness A/B, but a product
+# P0-1/P0-2/P0-6 are unconditional parts of the relifted-corpus pipeline.
+# They require the generated corpus; the legacy prebuilt chunks cannot be
+# rewritten.  There is no per-optimization CMake switch: a product or headless
 # configure must not silently produce the older, slower form.
-set(_wc3_lift_opt_default OFF)
-if(ANDROID AND WC3_RELIFTED_CORPUS_ROOT)
-    set(_wc3_lift_opt_default ON)
-endif()
 # P0-1: replace dispatch(c, VA) with the direct lifted entry point where the
 # callee is known to the same corpus.  The pass is self-tested and keeps the
 # HLE/hash path for every unresolved target.
-option(WC3_DEVIRTUALIZE_P0_1
-       "Apply the P0-1 direct-call LiftPass to relifted corpus chunks"
-       ${_wc3_lift_opt_default})
+set(WC3_DEVIRTUALIZE_P0_1 ON)
 # P0-2: conservative, straight-line dead-flag elimination.  Control flow and
 # calls are barriers; the pass never removes a flag across either.
-option(WC3_DEAD_FLAGS_P0_2
-       "Apply the P0-2 dead-flag LiftPass to relifted corpus chunks"
-       ${_wc3_lift_opt_default})
+set(WC3_DEAD_FLAGS_P0_2 ON)
 # P0-6: elide only the return-address store before a direct call whose callee
 # proves it never reads the entry [esp] slot.  The callee's return sequence and
 # the esp slot are unchanged.
-option(WC3_RETURN_ADDRESS_ELIDE_P0_6
-       "Apply the P0-6 return-address-store LiftPass to relifted corpus chunks"
-       ${_wc3_lift_opt_default})
+set(WC3_RETURN_ADDRESS_ELIDE_P0_6 ON)
+# D3b is part of the normal relifted-corpus pipeline.  It promotes XMM in
+# label-free leaf functions without a guest call (WC3_DIRECT_CALL,
+# WC3_GUEST_DRAIN or generic dispatch()); dispatch_jmp/WC3_DIRECT_TAIL exits
+# are flushed before and reloaded after.  The pass refuses labels, loops and
+# unbraced branches; cmake/Wc3ReliftedCorpus.cmake runs it unconditionally.
 # P0-10 stays OFF until a corpus audit proves no live PF/AF read; it is a
 # semantic variant, not a free compiler flag.
 option(WC3_FLAGS_FAST_PF_AF

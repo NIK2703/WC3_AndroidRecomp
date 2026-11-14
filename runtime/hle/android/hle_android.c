@@ -72,17 +72,11 @@
  * so the pointers stay NULL and the guest runs exactly as before.  A function
  * pointer also keeps the call out of the same translation unit as the empty
  * definition, which a compiler would otherwise be free to inline away. */
-static void (*g_keyboard_show)(uint32_t field, const HleKeyboardRect *rect,
-                               const char *text, int text_length,
-                               int selection_start, int selection_end);
+static void (*g_keyboard_show)(uint32_t field, const HleKeyboardRect *rect);
 static void (*g_keyboard_hide)(void);
 
 void hle_android_set_keyboard_bridge(void (*show)(uint32_t field,
-                                                  const HleKeyboardRect *rect,
-                                                  const char *text,
-                                                  int text_length,
-                                                  int selection_start,
-                                                  int selection_end),
+                                                  const HleKeyboardRect *rect),
                                      void (*hide)(void))
 {
     g_keyboard_show = show;
@@ -7580,91 +7574,6 @@ static int keyboard_field_rect(uint32_t field, HleKeyboardRect *out)
     return hle_keyboard_rect_from_ddc(min_y, min_x, max_y, max_x, out);
 }
 
-/* CEditBox stores the field text as UTF-8 at +0x1E4 and its byte length at
- * +0x1E8.  Zero is a valid empty field.  A negative length or an unmapped
- * buffer means the text is not available yet; the caller then passes length
- * -1 so the host does not seed an empty mirror it would have to keep. */
-static int keyboard_field_text(uint32_t field, const char **out,
-                               int *out_length)
-{
-    if (out) *out = NULL;
-    if (out_length) *out_length = 0;
-    if (!keyboard_field_valid(field) ||
-        (uint64_t)field + 0x1ECu > 0x100000000ull)
-        return 0;
-    if (!hle_android_guest_ok(field + 0x1E4u, 8u))
-        return 0;
-
-    const int32_t length = (int32_t)rd32g(field + 0x1E8u);
-    const uint32_t text = rd32g(field + 0x1E4u);
-    if (length < 0)
-        return 0;
-    if (length == 0)
-        return 1;
-    if (text < 0x10000u ||
-        (uint64_t)text + (uint32_t)length > 0x100000000ull ||
-        !hle_android_guest_ok(text, (uint32_t)length))
-        return 0;
-    if (out) *out = (const char *)(uintptr_t)text;
-    if (out_length) *out_length = (int)length;
-    return 1;
-}
-
-/* CEditBox stores the selection as byte offsets at +0x234/+0x238 and the
- * caret as a text pointer at +0x21C.  0x6F1043C0 does not store a collapsed
- * selection at all, and 0x6F102F20 clears both offsets to zero after a plain
- * click, so equal offsets mean "collapsed at the caret".  Focus uses
- * 0x6F102F40 to set 0..length, which the host editor must reproduce or its
- * first Backspace would not match the guest's selected range. */
-static void keyboard_field_selection(uint32_t field, uint32_t text, int length,
-                                     int *out_start, int *out_end)
-{
-    if (out_start) *out_start = -1;
-    if (out_end) *out_end = -1;
-    if (length < 0 || !out_start || !out_end)
-        return;
-    if (length == 0) {
-        *out_start = 0;
-        *out_end = 0;
-        return;
-    }
-    if (!text ||
-        (uint64_t)field + 0x23Cu > 0x100000000ull ||
-        !hle_android_guest_ok(field + 0x21Cu, 4u) ||
-        !hle_android_guest_ok(field + 0x234u, 8u))
-        return;
-
-    int32_t start = (int32_t)rd32g(field + 0x234u);
-    int32_t end = (int32_t)rd32g(field + 0x238u);
-    const uint32_t caret_pointer = rd32g(field + 0x21Cu);
-    int32_t caret = -1;
-    if (caret_pointer >= text &&
-        (uint64_t)(caret_pointer - text) <= (uint32_t)length)
-        caret = (int32_t)(caret_pointer - text);
-
-    if (start < 0 || end < 0)
-        return;
-    if (start > length || end > length) {
-        /* A shortened text can leave the selection offsets stale; the caret
-         * is the authoritative collapsed position. */
-        if (caret < 0)
-            return;
-        start = caret;
-        end = caret;
-    } else if (start == end) {
-        if (caret < 0)
-            return;
-        start = caret;
-        end = caret;
-    } else if (start > end) {
-        const int32_t swap = start;
-        start = end;
-        end = swap;
-    }
-    *out_start = start;
-    *out_end = end;
-}
-
 /* `x`/`y` are client pixels, the same space as WM_LBUTTONDOWN.  The field
  * rectangle is in surface fractions, and the client area covers the same
  * viewport, so the hit test is a direct normalization. */
@@ -7697,23 +7606,8 @@ static void keyboard_show_field(uint32_t field)
     HleKeyboardRect rect;
     const int has_rect = keyboard_field_rect(field, &rect);
 
-    const char *text = NULL;
-    int text_length = -1;
-    if (!keyboard_field_text(field, &text, &text_length)) {
-        text = NULL;
-        text_length = -1;
-    }
-
-    int selection_start = -1;
-    int selection_end = -1;
-    if (text_length >= 0) {
-        keyboard_field_selection(field, (uint32_t)(uintptr_t)text, text_length,
-                                 &selection_start, &selection_end);
-    }
-
     if (g_keyboard_show)
-        g_keyboard_show(field, has_rect ? &rect : NULL, text, text_length,
-                        selection_start, selection_end);
+        g_keyboard_show(field, has_rect ? &rect : NULL);
 
     g_ime_field = field;
     g_ime_shown = 1;
@@ -7721,9 +7615,8 @@ static void keyboard_show_field(uint32_t field)
 
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     fprintf(stderr,
-            "[input] keyboard show field=%08X text=%d sel=%d..%d rect=%s\n",
-            field, text_length, selection_start, selection_end,
-            has_rect ? "yes" : "no");
+            "[input] keyboard show field=%08X rect=%s\n",
+            field, has_rect ? "yes" : "no");
     if (has_rect)
         fprintf(stderr,
                 "[input] field %08X surface rect %.4f,%.4f..%.4f,%.4f\n",
@@ -7751,8 +7644,8 @@ static void u_imm_get_context(CPU *c)
      * when focus has not changed.
      *
      * The CEditBox::ImmGetContext wrapper (0x6F104EA7) keeps its `this` in
-     * ESI.  That pointer is the field identity the host uses to keep a
-     * separate text mirror for Login and Password. */
+     * ESI.  That pointer is the field identity used for repeat-tap hit testing;
+     * the host editor itself starts empty on every show. */
     const uint32_t now = hle_now_ms();
     const int recent_click = g_ime_click_ms != 0 &&
                              (uint32_t)(now - g_ime_click_ms) < 1000u;

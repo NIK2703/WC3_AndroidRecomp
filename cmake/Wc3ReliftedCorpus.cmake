@@ -53,6 +53,11 @@ find_program(WC3_RETURN_ADDRESS_ELIDE_EXE
     HINTS "${WC3_ROOT}/build/lift-tools"
     NO_DEFAULT_PATH)
 
+find_program(WC3_XMM_LOCAL_EXE
+    NAMES xmm_local xmm_local.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+
 find_program(WC3_W3L_COMPAT_EXE
     NAMES w3l_compat w3l_compat.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -339,6 +344,48 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             endforeach()
             set(_chunks "${_dead_chunks}")
         endif()
+        # D3b first increment: a label-free leaf function without a guest
+        # call can keep its XMM values in a local XMM[8] and write them back
+        # only before an exit.  Host helpers are allowed; they must not read
+        # CPU.xmm directly.  This pass is part of the normal relifted-corpus
+        # pipeline and has no opt-in switch.  It runs after P0-2 and before the
+        # W3L profile, which must see the final instruction text.
+        if(NOT WC3_XMM_LOCAL_EXE)
+            message(FATAL_ERROR
+                "xmm_local.exe missing; run tools/lift/build_tools.ps1 "
+                "before configuring")
+        endif()
+        set(_xmm_dir
+            "${CMAKE_CURRENT_BINARY_DIR}/xmm_local/${_name}/${_kind}")
+        file(MAKE_DIRECTORY "${_xmm_dir}")
+        set(_xmm_chunks)
+        foreach(_chunk IN LISTS _chunks)
+            get_filename_component(_chunk_name "${_chunk}" NAME)
+            set(_xmm_out "${_xmm_dir}/${_chunk_name}")
+            set(_xmm_json "${_xmm_out}.json")
+            if(NOT EXISTS "${_xmm_out}" OR
+               NOT EXISTS "${_xmm_json}" OR
+               "${_chunk}" IS_NEWER_THAN "${_xmm_out}" OR
+               "${WC3_XMM_LOCAL_EXE}" IS_NEWER_THAN "${_xmm_out}")
+                execute_process(
+                    COMMAND "${WC3_XMM_LOCAL_EXE}"
+                            --lift "${_chunk}"
+                            --out "${_xmm_out}"
+                            --json "${_xmm_json}"
+                            --quiet
+                    RESULT_VARIABLE _xmm_rc
+                    OUTPUT_VARIABLE _xmm_stdout
+                    ERROR_VARIABLE _xmm_stderr)
+                if(NOT _xmm_rc EQUAL 0)
+                    message(FATAL_ERROR
+                        "xmm_local failed for ${_chunk} "
+                        "(rc=${_xmm_rc}):\n"
+                        "${_xmm_stdout}\n${_xmm_stderr}")
+                endif()
+            endif()
+            list(APPEND _xmm_chunks "${_xmm_out}")
+        endforeach()
+        set(_chunks "${_xmm_chunks}")
         if(WC3_W3L_COMPAT)
             # The W3L/PvPGN/rubattle profile runs after every other enabled
             # pass, so it sees the final instruction text.  The profile and

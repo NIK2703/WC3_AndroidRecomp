@@ -196,24 +196,16 @@ static inline int hle_keyboard_rect_from_ddc(float min_y, float min_x,
     return 1;
 }
 
-/* Soft-keyboard bridge.  The Java activity owns the invisible EditText; the
- * HLE shows/hides it from the guest's IMM calls and turns its edits into
+/* Soft-keyboard bridge.  The Java activity owns the platform IME; the HLE
+ * shows/hides it from the guest's IMM calls and turns its edits into
  * WM_CHAR/WM_KEYDOWN messages in the same queue the mouse uses.  The APK
  * front end installs the callbacks; the shell leaves them NULL.  show()
- * receives the guest CEditBox identity so the front end can keep a separate
- * editor mirror for each field and restore the correct text on a field
- * switch.  `rect` is non-NULL only when the focused field's CLayoutFrame is
- * valid; it is the field's surface-space rectangle.  `text`/`text_length` are
- * the CEditBox text in standard UTF-8; a negative length means it could not be
- * read, and zero with NULL is a valid empty field.  `selection_start` and
- * `selection_end` are byte offsets into that text, or negative when the guest
- * selection is not readable.  The callback copies the bytes before returning. */
+ * receives the guest CEditBox identity and, when the layout is valid, the
+ * field's surface-space rectangle.  The host does not mirror guest text: the
+ * editor starts empty for every show and only edits typed through the bridge
+ * are delivered to the guest. */
 void hle_android_set_keyboard_bridge(void (*show)(uint32_t field,
-                                                  const HleKeyboardRect *rect,
-                                                  const char *text,
-                                                  int text_length,
-                                                  int selection_start,
-                                                  int selection_end),
+                                                  const HleKeyboardRect *rect),
                                      void (*hide)(void));
 /* Advisory platform IME visibility.  visible=true arms the deferred-hide path
  * if the platform opened the IME by itself.  visible=false is ignored: Back

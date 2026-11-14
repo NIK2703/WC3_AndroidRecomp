@@ -110,26 +110,12 @@ int lf_lift_files(const char *module, const char *funcs_path, const char *out_c,
     L.image_lo = pe.base;
     L.image_hi = pe.base + pe.image_size;
     L.block_mode = block_mode;
+    /* These are part of the generator, not a tunable profile.  The GPR-cache
+     * prototype was measured negative and is not an active optimization. */
     L.flag_fusion = 1;
-    {
-        const char *s = getenv("WC3_LIFT_FLAG_FUSION");
-        if (s && !strcmp(s, "0")) L.flag_fusion = 0;
-    }
     L.flagless = 1;
-    {
-        const char *s = getenv("WC3_LIFT_FLAGLESS");
-        if (s && !strcmp(s, "0")) L.flagless = 0;
-    }
     L.gpr_cache = 0;
-    {
-        const char *s = getenv("WC3_LIFT_GPR_CACHE");
-        if (s && strcmp(s, "0")) L.gpr_cache = 1;
-    }
     L.flag_boundary = 1;
-    {
-        const char *s = getenv("WC3_LIFT_FLAG_BOUNDARY");
-        if (s && !strcmp(s, "0")) L.flag_boundary = 0;
-    }
     if (csg_open_x86(&L.h) != 0) { pe_close(&pe); return 1; }
     load_relocs(&L, module);
     if (verbose)

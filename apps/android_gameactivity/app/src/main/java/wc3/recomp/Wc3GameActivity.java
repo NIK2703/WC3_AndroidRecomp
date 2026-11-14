@@ -9,6 +9,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.provider.Settings;
 import android.text.InputType;
+import android.view.KeyEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -17,6 +18,7 @@ import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 
 import com.google.androidgamesdk.GameActivity;
+import com.google.androidgamesdk.gametextinput.State;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -74,6 +76,14 @@ public class Wc3GameActivity extends GameActivity {
      * the value that requestImePan() applies. */
     private native float nativeImePan();
 
+    /* Backspace forwarding for the empty-editor case.  Returns false when no
+     * guest text field is active, so the key keeps its normal GameActivity
+     * handling. */
+    private native boolean nativeImeBackspace(boolean down);
+
+    /* Completion callback for requestImeReset(). */
+    private native void nativeImeResetComplete(int generation);
+
     /**
      * Applies the host-side IME pan on the UI thread.  Both full-screen
      * SurfaceViews move together: the game surface and the touch overlay.
@@ -91,6 +101,41 @@ public class Wc3GameActivity extends GameActivity {
                 overlayView.setTranslationY(offset);
             }
         });
+    }
+
+    /**
+     * Replaces the platform editor state with an empty one on the UI thread.
+     * The generation token lets native code ignore a completion from an older
+     * field when the player switches text boxes quickly.
+     */
+    public void requestImeReset(final int generation) {
+        runOnUiThread(() -> {
+            setTextInputState(new State("", 0, 0, -1, -1));
+            nativeImeResetComplete(generation);
+        });
+    }
+
+    /*
+     * The GameActivity input connection consumes Backspace while its editor
+     * has text and reports the edit through the text-state callback.  When the
+     * editor is empty the key reaches the activity instead; native code then
+     * forwards it to the focused guest field.  The matching key-up is consumed
+     * so it is not delivered as an independent game key.
+     */
+    @Override
+    public boolean onKeyDown(final int keyCode, final KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_DEL && nativeImeBackspace(true)) {
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public boolean onKeyUp(final int keyCode, final KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_DEL && nativeImeBackspace(false)) {
+            return true;
+        }
+        return super.onKeyUp(keyCode, event);
     }
 
     protected static void setGameMode(final String mode) {

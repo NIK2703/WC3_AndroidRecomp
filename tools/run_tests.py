@@ -1450,17 +1450,12 @@ def test_pass7_build_guards() -> int:
 
     if "set(_wc3_pack_dyn_relocs_default ON)" not in cmake:
         problems.append("CMake does not default packed relocations ON")
-    if "set(_wc3_lift_opt_default ON)" not in cmake:
-        problems.append("CMake does not default the LiftPass optimizations ON")
     if "set(_wc3_thin_skip_writeonly_default ON)" not in cmake:
         problems.append("CMake does not default the thin copy-in skip ON")
     for name in ("WC3_DEVIRTUALIZE_P0_1", "WC3_DEAD_FLAGS_P0_2",
                  "WC3_RETURN_ADDRESS_ELIDE_P0_6"):
-        if not re.search(
-                rf'option\({name}\s+"[^"]*"\s+\$\{{_wc3_lift_opt_default\}}\)',
-                cmake, re.S):
-            problems.append(f"CMake option {name} is not wired to the "
-                            "product LiftPass default")
+        if f"set({name} ON)" not in cmake:
+            problems.append(f"CMake does not force {name} unconditionally")
     mode = re.search(
         r'set\(WC3_PACK_DYN_RELOCS_MODE\s+"([^"]+)"\s+CACHE STRING',
         cmake, re.S)
@@ -1476,10 +1471,11 @@ def test_pass7_build_guards() -> int:
         problems.append("build_app.ps1 does not pass the relocation mode")
     for needle in ('"-DWC3_DEVIRTUALIZE_P0_1=$liftOptValue"',
                    '"-DWC3_DEAD_FLAGS_P0_2=$liftOptValue"',
-                   '"-DWC3_RETURN_ADDRESS_ELIDE_P0_6=$liftOptValue"',
-                   '"-DWC3_THIN_SKIP_WRITEONLY_COPYIN=$thinSkipCopyinValue"'):
-        if needle not in build_app:
-            problems.append(f"build_app.ps1 missing {needle}")
+                   '"-DWC3_RETURN_ADDRESS_ELIDE_P0_6=$liftOptValue"'):
+        if needle in build_app:
+            problems.append(f"build_app.ps1 still exposes {needle}")
+    if '"-DWC3_THIN_SKIP_WRITEONLY_COPYIN=$thinSkipCopyinValue"' not in build_app:
+        problems.append("build_app.ps1 missing the thin copy-in skip switch")
     if "$nativeParams['PackDynRelocsMode']" in build_apk:
         problems.append("build_apk.ps1 still requires a pack switch")
 
@@ -1487,7 +1483,7 @@ def test_pass7_build_guards() -> int:
         for problem in problems:
             print(f"pass7_build_guards: {problem}", file=sys.stderr)
         return 1
-    print("pass7_build_guards: packed relocations/P0 are product defaults")
+    print("pass7_build_guards: packed relocations and P0 passes are unconditional")
     return 0
 
 
@@ -3200,6 +3196,47 @@ def test_gesture_lifetime() -> int:
     return run([str(exe), str(profile)])
 
 
+def test_gesture_button_swipe() -> int:
+    """T0: a HOVER button swipe counts the path outside its rect."""
+    cc = gcc()
+    if not cc:
+        print("gesture_button_swipe: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    vendor = ROOT / "third_party" / "winlator-input"
+    profile = (ROOT / "apps" / "android_gameactivity" / "app" / "src"
+               / "main" / "assets" / "Warcraft 3.icp")
+    sources = sorted(str(path) for path in vendor.rglob("*.c"))
+    sources.append(str(ROOT / "tests" / "host_shims" / "gesture_host.c"))
+    exe = BUILD / "gesture_button_swipe_test.exe"
+    rc = run([
+        cc,
+        "-std=gnu11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+        "-Wno-unused-function",
+        "-Wno-unused-variable",
+        "-Wno-sign-compare",
+        "-Wno-switch",
+        "-I" + str(vendor),
+        "-I" + str(ROOT / "tests" / "host_shims"),
+        "-include", str(ROOT / "tests" / "host_shims" / "open_memstream.h"),
+        "-Dclock_gettime=wc3_test_clock_gettime",
+        "-Dopen_memstream=wc3_host_open_memstream",
+        *sources,
+        str(ROOT / "tests" / "gesture_button_swipe_test.c"),
+        "-lpthread",
+        "-lm",
+        "-o",
+        str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe), str(profile)])
+
+
 def test_gesture_mode() -> int:
     """T0: direct mode and timer overrides are applied after profile parsing."""
     cc = gcc()
@@ -3373,6 +3410,7 @@ TESTS = {
     "pass4_build": test_pass4_build,
     "controls_idle": test_controls_idle,
     "gesture_lifetime": test_gesture_lifetime,
+    "gesture_button_swipe": test_gesture_button_swipe,
     "gesture_mode": test_gesture_mode,
     "input_adapter": test_input_adapter,
     "overlay": test_overlay,

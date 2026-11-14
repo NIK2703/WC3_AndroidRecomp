@@ -199,30 +199,24 @@ static int g_cache_requested;
 static int g_cache_attached;
 
 /*
- * Text-field/IME state.  The guest owns the focused field; this side only
- * mirrors the editor text and converts UTF-16 changes into WM_CHAR and
- * WM_KEYDOWN messages through the legacy bridge.
+ * Text-field/IME state.  The guest owns the focused field and its text.  This
+ * side keeps only the text that the bridge itself has delivered to the guest,
+ * so each Java editor change can be translated into the WM_CHAR and
+ * WM_KEYDOWN messages the guest field already understands.  The platform
+ * editor starts empty on every show; seeding it from the guest would make the
+ * IME's own state feedback look like a user edit and insert stray characters.
  */
 static pthread_mutex_t g_ime_lock = PTHREAD_MUTEX_INITIALIZER;
 static char *g_ime_text;
 static int g_ime_text_len;
 static int g_ime_text_cap;
 static int g_ime_active;
-/* The guest's CEditBox object is stable for the lifetime of a text field.
- * Keep the mirrored text per field so switching Login -> Password -> Login
- * restores the exact tail that the guest field still owns.  Without this the
- * diff would either delete the wrong characters or lose Backspace after a
- * field switch. */
-#define IME_FIELD_SLOTS 8
-typedef struct {
-    uint32_t id;
-    uint32_t used;
-    char *text;
-    int length;
-} ImeFieldText;
-static ImeFieldText g_ime_fields[IME_FIELD_SLOTS];
-static uint32_t g_ime_field_id;
-static uint32_t g_ime_field_clock;
+/* True while show() is installing the empty editor state.  Text events that
+ * arrive during this window belong to the previous editor contents and must
+ * not be diffed against the new field.  g_ime_sync_gen rejects a completion
+ * callback from an older show when fields are switched quickly. */
+static int g_ime_syncing;
+static uint32_t g_ime_sync_gen;
 /* The IME inset and focused-field rectangle decide whether the game surface
  * has to move.  g_ime_pan_px is the translation applied by Java; input adds it
  * back so a screen tap still lands on the same guest point. */
@@ -1241,21 +1235,6 @@ static void ime_clear_locked(void)
     if (g_ime_text) g_ime_text[0] = '\0';
 }
 
-/* Selection offsets in GameTextInputState are UTF-16 code units, while the
- * text is modified UTF-8.  Count decoded units, not bytes. */
-static int ime_text_units(const char *text, int length)
-{
-    int units = 0;
-    int pos = 0;
-    while (text && pos < length) {
-        int step = wc3_legacy_mutf8_next(text, length, pos, NULL);
-        if (step <= 0) break;
-        pos += step;
-        units++;
-    }
-    return units;
-}
-
 static int ime_reserve_locked(int length)
 {
     if (length < 0) return 0;
@@ -1274,146 +1253,6 @@ static int ime_reserve_locked(int length)
     g_ime_text = next;
     g_ime_text_cap = cap;
     return 1;
-}
-
-static ImeFieldText *ime_field_lookup_locked(uint32_t id)
-{
-    if (!id) return NULL;
-    for (int i = 0; i < IME_FIELD_SLOTS; i++) {
-        if (g_ime_fields[i].id == id) return &g_ime_fields[i];
-    }
-    return NULL;
-}
-
-static ImeFieldText *ime_field_claim_locked(uint32_t id)
-{
-    ImeFieldText *free_slot = NULL;
-    ImeFieldText *oldest = NULL;
-    for (int i = 0; i < IME_FIELD_SLOTS; i++) {
-        ImeFieldText *entry = &g_ime_fields[i];
-        if (entry->id == id) return entry;
-        if (!entry->id) {
-            if (!free_slot) free_slot = entry;
-        } else if (!oldest || entry->used < oldest->used) {
-            oldest = entry;
-        }
-    }
-
-    ImeFieldText *entry = free_slot ? free_slot : oldest;
-    if (!entry) return NULL;
-    free(entry->text);
-    entry->text = NULL;
-    entry->length = 0;
-    entry->id = id;
-    entry->used = 0;
-    return entry;
-}
-
-/* Park the current field's mirror before another field replaces it.  A field
- * whose guest text was not readable has no entry yet; saving its temporary
- * buffer would create an empty baseline that permanently hides the real guest
- * text.  Skip it and let the next show seed from the field itself. */
-static void ime_field_save_locked(void)
-{
-    if (!g_ime_field_id) return;
-    if (!ime_field_lookup_locked(g_ime_field_id)) return;
-
-    char *copy = NULL;
-    if (g_ime_text_len > 0) {
-        copy = (char *)malloc((size_t)g_ime_text_len + 1u);
-        if (!copy) return;
-        memcpy(copy, g_ime_text, (size_t)g_ime_text_len);
-        copy[g_ime_text_len] = '\0';
-    }
-
-    ImeFieldText *entry = ime_field_claim_locked(g_ime_field_id);
-    if (!entry) {
-        free(copy);
-        return;
-    }
-    free(entry->text);
-    entry->text = copy;
-    entry->length = g_ime_text_len;
-    entry->used = ++g_ime_field_clock;
-}
-
-static void ime_field_load_locked(uint32_t id)
-{
-    g_ime_field_id = id;
-    ImeFieldText *entry = ime_field_lookup_locked(id);
-    if (!entry) {
-        ime_clear_locked();
-        return;
-    }
-
-    if (ime_reserve_locked(entry->length)) {
-        if (entry->length > 0)
-            memcpy(g_ime_text, entry->text, (size_t)entry->length);
-        g_ime_text[entry->length] = '\0';
-        g_ime_text_len = entry->length;
-    } else {
-        ime_clear_locked();
-    }
-    entry->used = ++g_ime_field_clock;
-}
-
-/* First show of a field: the guest already owns text that this bridge has
- * never delivered, so seed the mirror and the active buffer with it.  Existing
- * entries are never overwritten here; their baseline is the text the guest has
- * actually received through the bridge. */
-static int ime_field_seed_locked(uint32_t id, const char *text, int length)
-{
-    /* Build the copy before touching the slot table: a failed allocation must
-     * leave every existing mirror, including the one being replaced, intact. */
-    char *copy = NULL;
-    if (length > 0) {
-        copy = (char *)malloc((size_t)length + 1u);
-        if (!copy)
-            return 0;
-        memcpy(copy, text, (size_t)length);
-        copy[length] = '\0';
-    }
-
-    ImeFieldText *entry = ime_field_claim_locked(id);
-    if (!entry) {
-        free(copy);
-        return 0;
-    }
-
-    free(entry->text);
-    entry->text = copy;
-    entry->length = length;
-    entry->id = id;
-    entry->used = ++g_ime_field_clock;
-
-    g_ime_field_id = id;
-    if (ime_reserve_locked(length)) {
-        if (length > 0)
-            memcpy(g_ime_text, text, (size_t)length);
-        g_ime_text[length] = '\0';
-        g_ime_text_len = length;
-    } else {
-        /* The active buffer cannot hold the seed, so the entry must not claim
-         * text the mirror does not have.  The next show retries from guest
-         * text rather than diffing against a phantom baseline. */
-        free(entry->text);
-        entry->text = NULL;
-        entry->length = 0;
-        entry->id = 0;  /* leave no slot that would suppress the retry */
-        ime_clear_locked();
-        return 0;
-    }
-    return 1;
-}
-
-static void ime_fields_clear_locked(void)
-{
-    for (int i = 0; i < IME_FIELD_SLOTS; i++) {
-        free(g_ime_fields[i].text);
-        memset(&g_ime_fields[i], 0, sizeof g_ime_fields[i]);
-    }
-    g_ime_field_id = 0;
-    g_ime_field_clock = 0;
 }
 
 static float ime_input_pan(void)
@@ -1459,6 +1298,47 @@ static void ime_request_pan_refresh(GameActivity *activity)
     }
     if (cls) (*env)->DeleteLocalRef(env, cls);
     if (attached) (*vm)->DetachCurrentThread(vm);
+}
+
+/* Replace the platform editor contents with an empty state on the UI thread.
+ * The completion callback carries the show generation so a stale reset from an
+ * older field cannot release the current field's sync guard. */
+static int ime_request_reset(GameActivity *activity, uint32_t generation)
+{
+    if (!activity || !activity->vm || !activity->javaGameActivity)
+        return 0;
+
+    JavaVM *vm = activity->vm;
+    JNIEnv *env = NULL;
+    int attached = 0;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) {
+            IME_LOGE("IME reset: cannot attach thread");
+            return 0;
+        }
+        attached = 1;
+    }
+
+    int ok = 0;
+    jclass cls = (*env)->GetObjectClass(env, activity->javaGameActivity);
+    jmethodID method = cls
+        ? (*env)->GetMethodID(env, cls, "requestImeReset", "(I)V")
+        : NULL;
+    if (method) {
+        (*env)->CallVoidMethod(env, activity->javaGameActivity, method,
+                               (jint)generation);
+        ok = 1;
+    } else {
+        IME_LOGE("IME reset: requestImeReset missing");
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        ok = 0;
+    }
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    if (attached) (*vm)->DetachCurrentThread(vm);
+    return ok;
 }
 
 static void ime_pan_update(GameActivity *activity)
@@ -1524,157 +1404,48 @@ static void ime_window_insets(GameActivity *activity)
     ime_read_insets(activity);
 }
 
-/* Called from the guest thread when the game focuses a text field.  The field
- * identity comes from the guest's CEditBox object, so a hide/show of the same
- * field keeps its mirror while switching to another field restores that
- * field's own mirror.  The editor buffer deliberately survives a hide/show
- * cycle: it is the only record of the text this bridge has already delivered
- * to the guest.  Clearing it while the game keeps its field contents makes
- * Backspace unable to remove anything that was typed before the keyboard was
- * dismissed.
- *
- * The first time a field is shown, its mirror is empty even though CEditBox
- * usually contains text the player or the game put there before the keyboard
- * existed.  Seed that mirror from the guest bytes.  Later shows keep their
- * baseline: the guest has already received every edit the mirror describes,
- * so replacing it with the guest copy would make a tail diff repeat edits. */
-static void ime_show(uint32_t field_id, const Wc3LegacyKeyboardRect *rect,
-                     const char *guest_text, int guest_text_length,
-                     int guest_sel_start, int guest_sel_end)
+/* Called from the guest thread when the game focuses a text field.  CEditBox
+ * is the only owner of pre-existing field text: the platform editor starts
+ * empty on every show and receives only the characters typed through this
+ * bridge.  Mirroring guest text into the IME made the IME's own state feedback
+ * look like a user edit and inserted a stray character into the newly tapped
+ * field. */
+static void ime_show(uint32_t field_id, const Wc3LegacyKeyboardRect *rect)
 {
     GameActivity *activity = host_activity();
     if (!activity) return;
 
-    int seeded = 0;
+    uint32_t generation;
     pthread_mutex_lock(&g_ime_lock);
     g_ime_active = 1;
+    g_ime_syncing = 1;
+    generation = ++g_ime_sync_gen;
     g_ime_rect_valid = rect != NULL;
     if (rect) g_ime_rect = *rect;
-
-    if (field_id) {
-        const int field_changed = field_id != g_ime_field_id;
-        if (field_changed)
-            ime_field_save_locked();
-
-        ImeFieldText *entry = ime_field_lookup_locked(field_id);
-        if (entry) {
-            if (field_changed)
-                ime_field_load_locked(field_id);
-        } else if (guest_text_length >= 0) {
-            int seed_length = 0;
-            char *seed = wc3_legacy_utf8_to_mutf8(
-                guest_text, guest_text_length, &seed_length);
-            if (seed) {
-                seeded = ime_field_seed_locked(field_id, seed, seed_length);
-                free(seed);
-                if (!seeded) {
-                    /* Keep the active buffer from still holding the previous
-                     * field's text when the new field could not be seeded. */
-                    g_ime_field_id = field_id;
-                    ime_clear_locked();
-                }
-            } else {
-                /* Do not create a misleading empty baseline if conversion
-                 * failed; retry with the same field on the next show. */
-                IME_LOGE("IME seed: cannot convert %d guest bytes",
-                         guest_text_length);
-                g_ime_field_id = field_id;
-                ime_clear_locked();
-            }
-        } else {
-            /* The guest text could not be read.  Leave the field without a
-             * mirror so a later show can seed it instead of keeping an empty
-             * baseline forever. */
-            g_ime_field_id = field_id;
-            ime_clear_locked();
-            IME_LOG("show field=%08X text=unavailable (no mirror)", field_id);
-        }
-    }
-    const int length = g_ime_text_len;
-    char *text = NULL;
-    if (length > 0) {
-        text = (char *)malloc((size_t)length + 1u);
-        if (text) {
-            memcpy(text, g_ime_text, (size_t)length);
-            text[length] = '\0';
-        }
-    }
+    ime_clear_locked();
     pthread_mutex_unlock(&g_ime_lock);
 
-    /* The guest reports selection offsets into its standard UTF-8 text; the
-     * Java editor stores modified UTF-8.  Convert them to UTF-16 units against
-     * the guest bytes.  CEditBox selects the whole field when it gains focus,
-     * and its printable-character handler deletes that selected range before
-     * inserting.  A collapsed host selection would make the host diff append
-     * one character while the guest replaces the whole field, so the mirror
-     * and the guest would diverge on the first keystroke. */
-    const int total_units =
-        (text && length > 0) ? ime_text_units(text, length) : 0;
-    int selection_start = total_units;
-    int selection_end = total_units;
-    if (guest_sel_start >= 0 && guest_sel_end >= 0 &&
-        guest_text_length >= 0) {
-        selection_start = wc3_legacy_utf8_unit_offset(
-            guest_text, guest_text_length, guest_sel_start);
-        selection_end = wc3_legacy_utf8_unit_offset(
-            guest_text, guest_text_length, guest_sel_end);
-        if (selection_start > total_units) selection_start = total_units;
-        if (selection_end > total_units) selection_end = total_units;
-        if (selection_start > selection_end) {
-            const int swap = selection_start;
-            selection_start = selection_end;
-            selection_end = swap;
-        }
+    /* requestImeReset() and showSoftInput() are both posted to the UI thread.
+     * The reset replaces the Java editor state synchronously and then calls
+     * nativeImeResetComplete(), which releases g_ime_syncing.  Any text event
+     * queued before the reset belongs to the previous field and is ignored. */
+    if (!ime_request_reset(activity, generation)) {
+        pthread_mutex_lock(&g_ime_lock);
+        if (g_ime_sync_gen == generation)
+            g_ime_syncing = 0;
+        pthread_mutex_unlock(&g_ime_lock);
     }
 
-    /* Show first: setSoftKeyboardActive() creates the input connection and
-     * gives the surface focus.  Restoring the state after that keeps the
-     * editor mirror identical to the guest field and restores the guest
-     * selection.  Doing it in the opposite order restarts an inactive
-     * connection, which some IMEs do not recover from on the next show. */
     GameActivity_showSoftInput(activity,
                                GAMEACTIVITY_SHOW_SOFT_INPUT_IMPLICIT);
 
-    if (length > 0 && text) {
-        GameTextInputState state;
-        memset(&state, 0, sizeof state);
-        state.text_UTF8 = text;
-        state.text_length = length;
-        state.selection.start = selection_start;
-        state.selection.end = selection_end;
-        state.composingRegion.start = SPAN_UNDEFINED;
-        state.composingRegion.end = SPAN_UNDEFINED;
-        GameActivity_setTextInputState(activity, &state);
-    } else if (length == 0) {
-        GameTextInputState empty;
-        memset(&empty, 0, sizeof empty);
-        empty.text_UTF8 = "";
-        empty.text_length = 0;
-        empty.selection.start = 0;
-        empty.selection.end = 0;
-        empty.composingRegion.start = SPAN_UNDEFINED;
-        empty.composingRegion.end = SPAN_UNDEFINED;
-        GameActivity_setTextInputState(activity, &empty);
-    } else {
-        IME_LOGE("IME show: cannot mirror %d text bytes", length);
-    }
-    free(text);
-
     if (rect) {
-        IME_LOG("show field=%08X text=%d seeded=%d guest=%d sel=%d..%d "
-                "rect=%.3f,%.3f..%.3f,%.3f",
-                field_id, length, seeded, guest_text_length, selection_start,
-                selection_end, rect->left, rect->top, rect->right,
-                rect->bottom);
+        IME_LOG("show field=%08X rect=%.3f,%.3f..%.3f,%.3f",
+                field_id, rect->left, rect->top, rect->right, rect->bottom);
     } else {
-        IME_LOG("show field=%08X text=%d seeded=%d guest=%d sel=%d..%d "
-                "rect=none",
-                field_id, length, seeded, guest_text_length, selection_start,
-                selection_end);
+        IME_LOG("show field=%08X rect=none", field_id);
     }
-    LOGI("IME show field=%08X text=%d seeded=%d guest=%d sel=%d..%d",
-         field_id, length, seeded, guest_text_length, selection_start,
-         selection_end);
+    LOGI("IME show field=%08X empty", field_id);
     ime_pan_update(activity);
 }
 
@@ -1684,16 +1455,19 @@ static void ime_hide(void)
 
     pthread_mutex_lock(&g_ime_lock);
     g_ime_active = 0;
+    g_ime_syncing = 1;
+    g_ime_sync_gen++;
     g_ime_rect_valid = 0;
     const int length = g_ime_text_len;
+    ime_clear_locked();
     pthread_mutex_unlock(&g_ime_lock);
 
     if (activity) {
         GameActivity_hideSoftInput(activity,
                                    GAMEACTIVITY_HIDE_SOFT_INPUT_NOT_ALWAYS);
     }
-    IME_LOG("hide text=%d kept", length);
-    LOGI("IME hide requested (text=%d kept)", length);
+    IME_LOG("hide text=%d cleared", length);
+    LOGI("IME hide requested (text=%d cleared)", length);
     ime_pan_update(activity);
 }
 
@@ -1712,15 +1486,20 @@ static void ime_text_changed(GameActivity *activity,
          state->composingRegion.start, state->composingRegion.end);
 
     pthread_mutex_lock(&g_ime_lock);
-    if (!g_ime_active) {
-        /* Ignore a late event from a hidden editor, but keep the baseline:
-         * the next show restores the same state into the editor and any edit
-         * must still diff against what the guest has actually received. */
+    if (!g_ime_active || g_ime_syncing) {
+        /* A late event from a hidden editor, or from the editor that is being
+         * replaced by the current show, must not become a guest edit. */
+        const int syncing = g_ime_syncing;
         pthread_mutex_unlock(&g_ime_lock);
-        IME_LOG("text ignored inactive len=%d", length);
+        IME_LOG("text ignored %s len=%d",
+                syncing ? "syncing" : "inactive", length);
         return;
     }
 
+    /* The host editor is a staging buffer, not a copy of the guest field.  A
+     * removal becomes the same Backspace the guest field already handles, and
+     * additions become WM_CHAR units.  The guest field remains authoritative
+     * for pre-existing text and for the caret. */
     Wc3LegacyTextDiff diff;
     wc3_legacy_text_diff(g_ime_text ? g_ime_text : "", g_ime_text_len,
                          text, length, &diff);
@@ -1762,10 +1541,8 @@ static bool ime_editor_action(GameActivity *activity, int action)
 
 /* Insets-based visibility is advisory only.  GameTextInput propagates text
  * changes even when this callback says the IME is invisible, because the
- * platform's keyboard-visibility state is unreliable.  The bridge therefore
- * tracks its own show/hide lifetime and never clears the text baseline here:
- * doing so dropped keystrokes while the IME was actually up and made the next
- * state diff replay text the guest had already received. */
+ * platform's keyboard-visibility state is unreliable.  The bridge tracks its
+ * own show/hide lifetime and the editor state is reset by ime_show(). */
 static void ime_visibility(GameActivity *activity, bool visible)
 {
     wc3_legacy_set_keyboard_visible(visible ? 1 : 0);
@@ -1804,12 +1581,13 @@ static void ime_shutdown(struct android_app *app)
 
     pthread_mutex_lock(&g_ime_lock);
     ime_clear_locked();
-    ime_fields_clear_locked();
     free(g_ime_text);
     g_ime_text = NULL;
     g_ime_text_len = 0;
     g_ime_text_cap = 0;
     g_ime_active = 0;
+    g_ime_syncing = 1;
+    g_ime_sync_gen++;
     g_ime_rect_valid = 0;
     g_ime_inset_bottom = 0;
     g_ime_pan_px = 0.0f;
@@ -1817,6 +1595,49 @@ static void ime_shutdown(struct android_app *app)
 
     if (app && app->activity)
         ime_request_pan_refresh(app->activity);
+}
+
+/* The GameActivity input connection handles Backspace while its editor has
+ * text and emits a state change that the diff translates.  When the editor is
+ * empty it returns false and the key reaches the activity; this entry point
+ * forwards the same Backspace messages a hardware keyboard would produce.  A
+ * key-up is consumed without posting a second edit, so holding the key repeats
+ * exactly once per key-down. */
+JNIEXPORT jboolean JNICALL
+Java_wc3_recomp_Wc3GameActivity_nativeImeBackspace(
+    JNIEnv *env, jobject thiz, jboolean down)
+{
+    (void)env;
+    (void)thiz;
+
+    pthread_mutex_lock(&g_ime_lock);
+    const int active = g_ime_active;
+    pthread_mutex_unlock(&g_ime_lock);
+    if (!active)
+        return JNI_FALSE;
+
+    if (down) {
+        wc3_legacy_post_backspace();
+        IME_LOG("backspace");
+    }
+    return JNI_TRUE;
+}
+
+/* Runs on the UI thread after Wc3GameActivity.requestImeReset() has replaced the
+ * Java editor state synchronously.  Releasing the guard here gives
+ * ime_text_changed() a precise boundary: events after this point belong to the
+ * empty editor and can be diffed normally. */
+JNIEXPORT void JNICALL
+Java_wc3_recomp_Wc3GameActivity_nativeImeResetComplete(
+    JNIEnv *env, jobject thiz, jint generation)
+{
+    (void)env;
+    (void)thiz;
+
+    pthread_mutex_lock(&g_ime_lock);
+    if (g_ime_sync_gen == (uint32_t)generation)
+        g_ime_syncing = 0;
+    pthread_mutex_unlock(&g_ime_lock);
 }
 
 static void haptics_init(struct android_app *app)

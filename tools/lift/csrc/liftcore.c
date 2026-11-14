@@ -3537,16 +3537,11 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
     for (i = 0; i < n; i++)
         if (ins[i].insn.mnemonic[0] == 'f') { has_x87 = 1; break; }
 
-    L->x87_lazy = 0;
-    {
-        const char *s = getenv("WC3_LIFT_X87_LAZY");
-        if (s && strcmp(s, "0")) L->x87_lazy = 1;
-    }
+    /* D1 is part of the normal generator, not an opt-in experiment.  The
+     * per-function x87_lazy_check() still falls back to the eager path when
+     * the stack top is not provably zero at internal boundaries. */
+    L->x87_lazy = 1;
     L->flag_boundary = 1;
-    {
-        const char *s = getenv("WC3_LIFT_FLAG_BOUNDARY");
-        if (s && !strcmp(s, "0")) L->flag_boundary = 0;
-    }
     L->x87_lazy_safe = 0;
     if (has_x87 && L->x87_lazy)
         L->x87_lazy_safe = x87_lazy_check(L, ins, n, labels, nlabels);

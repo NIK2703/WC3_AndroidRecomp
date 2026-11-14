@@ -307,9 +307,9 @@ static uint8_t live_out_of(const LfFlagInsn *in, const uint8_t *live, int n,
      * boundary model enabled, reads of the boundary are modelled explicitly
      * by flag_use(): a ret carries its exit_flags_needed, a tail jump carries
      * the target's entry_reads and the caller's needs.  Only a call or a
-     * fallthrough whose continuation is unknown stays ALL.  With the model
-     * disabled, keep the old conservative ALL so WC3_LIFT_FLAG_BOUNDARY=0
-     * reproduces the previous liveness. */
+     * fallthrough whose continuation is unknown stays ALL.  The legacy
+     * disabled mode kept conservative ALL everywhere; D2 is now always on
+     * and that mode is removed. */
     if (in[idx].succ1 == -1) {
         if (in[idx].is_call || !in[idx].is_control || !in[idx].tail_exact)
             out |= LF_FLAG_ALL;

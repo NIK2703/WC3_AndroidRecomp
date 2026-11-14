@@ -843,7 +843,21 @@ static bool handle_engaged_element_move(TouchFinger* finger, float x, float y, u
         if (element->current_ptr_id != finger->ptr_id) continue;
         if ((element->flags & TOUCH_BIT_PASSTHROUGH_TOUCH) && !(element->flags & TOUCH_BIT_IS_HOVER))
             continue;
-        if (element->type == BUTTON && (element->flags & TOUCH_BIT_TOGGLE_SLIDE_OVER))
+        /*
+         * Slide-over buttons normally move through the hover/track state
+         * machine, which only forwards MOVE while the pointer is still inside
+         * the button and releases it on the first outside sample.  A button
+         * with a swipe binding must keep ownership of the pointer until UP:
+         * the gesture distance is measured from its original down point, and
+         * the part of the path outside the rect counts too.  Once such a
+         * button is left, feed it to element_button_move() directly so the
+         * hover transition cannot cancel recognition before the threshold is
+         * reached.  While the pointer is inside, keep the normal hover path.
+         */
+        if (element->type == BUTTON &&
+            (element->flags & TOUCH_BIT_TOGGLE_SLIDE_OVER) &&
+            (!(element->flags & TOUCH_BIT_CACHED_HAS_GESTURE) ||
+             point_in_element(x, y, element)))
             continue;
         handle_element_move(element, x, y, now_tick, result);
         had_element_move = true;

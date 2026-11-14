@@ -138,8 +138,7 @@ def refresh_hash(rev: int):
 
 def relift():
     env = os.environ.copy()
-    env["WC3_LIFT_FLAGLESS"] = "1"
-    env["WC3_LIFT_GPR_CACHE"] = "0"
+    # Flag fusion, flagless ALU, D1 and D2 are unconditional in the generator.
     run([TOOLS / "corpusclosure.exe",
          "--input-list", ROOT / "build" / "corpus-inputs" / "inputs.txt",
          "--out-root", ROOT / "build" / "corpus-full",

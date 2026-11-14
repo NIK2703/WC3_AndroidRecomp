@@ -259,24 +259,17 @@ $configure += "-DWC3_RELIFTED_CORPUS_ROOT=$CorpusRoot"
 $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
 $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
-# Optimization policy: every normal Android product build gets the full
-# implemented optimization set.  There are deliberately no per-optimization
-# command-line switches; the generated-corpus transformations always run.
-# Explicit -D values remain available to CMake for an intentional A/B, but an
-# ordinary build always passes ON here so a stale CMake cache cannot silently
-# disable an optimization.
+# Optimization policy: the generated-corpus transformations (P0-1/P0-2/P0-6,
+# D1, D2, D3b) are unconditional in CMake/liftcore.  There are no
+# per-optimization command-line switches to pass here.
 $packDynRelocsValue = 'ON'
 $packDynRelocsMode = 'android'
 $nativeTlsValue = 'ON'
-$liftOptValue = 'ON'
 $thinSkipCopyinValue = 'ON'
 $configure += "-DWC3_PACK_DYN_RELOCS=$packDynRelocsValue"
 $configure += "-DWC3_PACK_DYN_RELOCS_MODE=$packDynRelocsMode"
 $configure += "-DWC3_NATIVE_TLS=$nativeTlsValue"
 $configure += "-DWC3_TLS_MODEL=$TlsModel"
-$configure += "-DWC3_DEVIRTUALIZE_P0_1=$liftOptValue"
-$configure += "-DWC3_DEAD_FLAGS_P0_2=$liftOptValue"
-$configure += "-DWC3_RETURN_ADDRESS_ELIDE_P0_6=$liftOptValue"
 $configure += "-DWC3_THIN_SKIP_WRITEONLY_COPYIN=$thinSkipCopyinValue"
 $hostHardeningValue = if ($NoHostHardening) { 'OFF' } else { 'ON' }
 $configure += "-DWC3_HOST_HARDENING=$hostHardeningValue"
@@ -300,7 +293,7 @@ Write-Host "[app] pack_dyn_relocs $($packDynRelocsValue -eq 'ON') ($packDynReloc
 Write-Host "[app] icf $($icfValue -eq 'ON') (safe)"
 Write-Host "[app] fno_plt $($fnoPltValue -eq 'ON')"
 Write-Host "[app] native_tls $($nativeTlsValue -eq 'ON') model $TlsModel"
-Write-Host "[app] lift_p0_1/2/6 $($liftOptValue -eq 'ON')"
+Write-Host "[app] lift_p0_1/2/6 unconditional"
 Write-Host "[app] thin_skip_writeonly_copyin $($thinSkipCopyinValue -eq 'ON')"
 Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"

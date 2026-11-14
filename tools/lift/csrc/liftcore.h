@@ -59,10 +59,10 @@ typedef struct {
     size_t nreloc;
     int block_mode;             /* WC3_LIFT_BLOCK=1 */
     int x87_top;                /* compile-time virtual x87 top, 0..7 */
-    int x87_lazy;               /* WC3_LIFT_X87_LAZY: skip clean internal sync */
+    int x87_lazy;               /* D1: always try the clean internal x87 path */
     int x87_lazy_safe;          /* per-function: top==0 at internal boundaries */
     int x87_dirty;              /* emission-time: local x87 state changed */
-    int flag_boundary;          /* WC3_LIFT_FLAG_BOUNDARY: global call/ret model */
+    int flag_boundary;          /* D2: global call/ret flag model, always on */
     LfFlagSummary summary;      /* current function's flag summary */
     LfFlagSummary *summary_table; /* hash table of summaries */
     size_t summary_table_cap;
@@ -73,9 +73,9 @@ typedef struct {
     int summary_incomplete;     /* a summary step failed: every ret N is ALL */
     LfFuncSize *func_map;       /* sorted function size map from funcs.txt */
     size_t func_n;
-    int flag_fusion;            /* WC3_LIFT_FLAG_FUSION != "0" */
-    int flagless;               /* WC3_LIFT_FLAGLESS != "0" */
-    int gpr_cache;              /* WC3_LIFT_GPR_CACHE != "0" */
+    int flag_fusion;            /* fused compare/test + branch, always on */
+    int flagless;               /* write flagless ALU form when flags are dead */
+    int gpr_cache;              /* rejected prototype; always 0 */
     const void *flag_ins;       /* InsnCopy array of the current extent */
     int flag_current_index;     /* index of the instruction being translated */
     const uint8_t *flag_role;   /* per instruction: 0 normal, 1 producer, 2 end */

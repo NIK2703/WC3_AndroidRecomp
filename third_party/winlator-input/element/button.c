@@ -282,6 +282,23 @@ static inline bool button_up_handle_deferred(TouchElement* e, float x, float y,
         return true;
     }
 
+    /*
+     * HOVER normally releases a button as soon as the pointer leaves it.  A
+     * gesture button stays engaged so the whole swipe path can be measured
+     * outside the rect.  If the pointer lifts outside before the swipe
+     * threshold is reached, cancel the deferred tap; the finger already left
+     * the button, so turning the deferred press into a click would emit the
+     * wrong action and the wrong haptic.
+     */
+    if ((e->flags & TOUCH_BIT_IS_HOVER) &&
+        (e->flags & TOUCH_BIT_CACHED_HAS_GESTURE) &&
+        (e->flags & TOUCH_BIT_ENGAGED) && e->current_ptr_id >= 0 &&
+        !point_in_element(x, y, e)) {
+        e->flags &= ~(TOUCH_BIT_DEFER_PRIMARY | TOUCH_BIT_GESTURE_TIMER_ARMED);
+        finish_visual_update(e);
+        return true;
+    }
+
     if ((e->flags & TOUCH_BIT_CACHED_HAS_TOGGLE) && !(e->flags & TOUCH_BIT_CACHED_HAS_AUTO_REPEAT)) {
         bool qualifies = true;
         if (e->flags & TOUCH_BIT_CACHED_HAS_LONG_PRESS) {
@@ -345,6 +362,18 @@ static inline bool button_up_handle_toggle_non_ar(TouchElement* e, uint64_t now_
 // Toggle: skip release (binding stays held). Non-toggle: release binding.
 void element_button_up(TouchElement* e, float x, float y, uint64_t now_tick, TouchActionResult* restrict result) {
     bool has_primary = element_has_primary(e);
+
+    /*
+     * The UP point is the last sample of the swipe path.  Android can coalesce
+     * a fast swipe into DOWN and UP with no MOVE in between, so evaluate the
+     * threshold here as well; a move-triggered swipe is already guarded by
+     * TOUCH_BIT_GESTURE_SWIPE_TRIGGERED and will not fire twice.
+     */
+    if ((e->flags & TOUCH_BIT_DEFER_PRIMARY) &&
+        (e->flags & TOUCH_BIT_CACHED_HAS_GESTURE) &&
+        (e->flags & TOUCH_BIT_ENGAGED) && e->current_ptr_id >= 0) {
+        handle_gesture_swipe(e, x - e->down_x, y - e->down_y, has_primary, result);
+    }
 
     if ((e->flags & TOUCH_BIT_CACHED_HAS_TOGGLE) && (e->flags & TOUCH_BIT_CACHED_HAS_AUTO_REPEAT)) {
         if (e->flags & TOUCH_BIT_SELECTED) {

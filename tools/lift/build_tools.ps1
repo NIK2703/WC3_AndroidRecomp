@@ -96,6 +96,7 @@ $targets = @(
     @{ out = 'gen_boot_dispatch.exe'; src = @('gen_boot_dispatch.c'); dir = $csrcLocal },
     @{ out = 'save_list_display.exe'; src = @('save_list_display.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'dead_flags.exe'; src = @('dead_flags.c', 'sha256.c'); dir = $csrcLocal },
+    @{ out = 'xmm_local.exe'; src = @('xmm_local.c'); dir = $csrcLocal },
     @{ out = 'return_address_elide.exe'; src = @('return_address_elide.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'w3l_compat.exe'; src = @('w3l_compat.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'ccache_wrapper.exe'; src = @('ccache_wrapper.c'); dir = $csrcLocal },
@@ -335,6 +336,12 @@ void L_00401000(CPU *c)
     if ($LASTEXITCODE -ne 0 -or -not ($dfOut -match 'self-test: OK')) {
         $dfOut | ForEach-Object { Write-Host $_ }
         throw 'dead_flags self-test failed'
+    }
+    $xm = Join-Path $bin 'xmm_local.exe'
+    $xmOut = & $xm --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($xmOut -match 'self-test: OK')) {
+        $xmOut | ForEach-Object { Write-Host $_ }
+        throw 'xmm_local self-test failed'
     }
     $ra = Join-Path $bin 'return_address_elide.exe'
     $raOut = & $ra --self-test 2>&1
