@@ -316,6 +316,49 @@
                 android:progressTint="@color/launch_gold"
                 android:thumbTint="@color/launch_gold_light" />
 
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        style="@style/Wc3RowLabel"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/launch_tap_click_delay_label" />
+
+                    <TextView
+                        android:id="@+id/tap_click_delay_value"
+                        style="@style/Wc3RowLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:gravity="end"
+                        android:minWidth="72dp"
+                        android:textColor="@color/launch_gold_light" />
+                </LinearLayout>
+
+                <SeekBar
+                    android:id="@+id/tap_click_delay_slider"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:contentDescription="@string/launch_tap_click_delay_label"
+                    android:max="32"
+                    android:saveEnabled="false"
+                    android:progressBackgroundTint="@color/launch_muted"
+                    android:progressTint="@color/launch_gold"
+                    android:thumbTint="@color/launch_gold_light" />
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/driver_label"
                 style="@style/Wc3RowLabel"

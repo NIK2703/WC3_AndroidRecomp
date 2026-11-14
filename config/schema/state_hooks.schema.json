@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pinned 1.27.1.7085 game-state transition hooks",
+  "type": "object",
+  "required": ["schema", "image", "version", "image_base", "hooks"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": 1 },
+    "image": { "const": "game.dll" },
+    "version": { "const": "1.27.1.7085" },
+    "image_base": { "const": "0x6F000000" },
+    "hooks": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "required": ["name", "kind", "store_va", "after_va", "bytes",
+                     "width", "value", "guard", "cache_source"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["cgameui_created", "cgameui_seen",
+                     "cgameui_destroyed", "pause", "gameover",
+                     "gameover_cleared"]
+          },
+          "kind": { "type": "integer", "minimum": 0, "maximum": 5 },
+          "store_va": {
+            "type": "string",
+            "pattern": "^0x[0-9A-F]{8}$"
+          },
+          "after_va": {
+            "type": "string",
+            "pattern": "^0x[0-9A-F]{8}$"
+          },
+          "bytes": {
+            "type": "string",
+            "pattern": "^[0-9a-f]+$",
+            "minLength": 4
+          },
+          "width": { "type": "integer", "enum": [2, 4] },
+          "value": {
+            "type": "string",
+            "pattern": "^(c->[a-z][a-z0-9]*|0u)$"
+          },
+          "guard": {
+            "type": ["string", "null"],
+            "pattern": "^(c->[a-z][a-z0-9]*|0u)$"
+          },
+          "cache_source": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

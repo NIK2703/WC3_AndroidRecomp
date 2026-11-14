@@ -499,10 +499,11 @@ static int cmd_seal(int argc, char **argv)
     }
     text = replace_or_keep(text, "\"status\": \"not_generated\"",
                            "\"status\": \"generated\"");
-    text = replace_or_keep(text, "\"lift_rev\": 0", "\"lift_rev\": 5");
-    text = replace_or_keep(text, "\"lift_rev\": 2", "\"lift_rev\": 5");
-    text = replace_or_keep(text, "\"lift_rev\": 3", "\"lift_rev\": 5");
-    text = replace_or_keep(text, "\"lift_rev\": 4", "\"lift_rev\": 5");
+    text = replace_or_keep(text, "\"lift_rev\": 0", "\"lift_rev\": 6");
+    text = replace_or_keep(text, "\"lift_rev\": 2", "\"lift_rev\": 6");
+    text = replace_or_keep(text, "\"lift_rev\": 3", "\"lift_rev\": 6");
+    text = replace_or_keep(text, "\"lift_rev\": 4", "\"lift_rev\": 6");
+    text = replace_or_keep(text, "\"lift_rev\": 5", "\"lift_rev\": 6");
     snprintf(tmp, sizeof tmp, "\"sha256\": \"%s\"", hex);
     /* Re-find the object: replace_or_keep() may have reallocated text.  Check
      * inside corpus_manifest, not merely anywhere in the file (the image

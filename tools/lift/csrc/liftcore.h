@@ -59,9 +59,10 @@ typedef struct {
     size_t nreloc;
     int block_mode;             /* WC3_LIFT_BLOCK=1 */
     int x87_top;                /* compile-time virtual x87 top, 0..7 */
-    int x87_lazy;               /* D1: always try the clean internal x87 path */
-    int x87_lazy_safe;          /* per-function: top==0 at internal boundaries */
     int x87_dirty;              /* emission-time: local x87 state changed */
+    int x87_load_pending;       /* emission-time: local st stale; load before next use */
+    uint8_t *x87_callee_state;  /* per func_map: 0 unknown, 1 visiting, 2 done */
+    uint8_t *x87_callee_may;    /* per func_map: callee may read x87/MMX */
     int flag_boundary;          /* D2: global call/ret flag model, always on */
     LfFlagSummary summary;      /* current function's flag summary */
     LfFlagSummary *summary_table; /* hash table of summaries */
@@ -97,6 +98,15 @@ char  *lf_afmt(const char *fmt, ...);
 
 /* A.29 self-test used by lift32 --self-test-cond. */
 int    lf_cond_fold_selftest(void);
+
+/* x87/MMX callee-policy self-test used by lift32 --self-test-x87. */
+int    lf_x87_summary_selftest(void);
+
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+/* WC3_DEBUG_LIFT diagnostics: counters and optional per-call trace. */
+void   lf_x87_dbg_init(void);
+void   lf_x87_dbg_print(void);
+#endif
 
 /* Global call/ret flag summaries. */
 void   lf_summary_init(Lifter *L, size_t cap);

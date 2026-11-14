@@ -66,6 +66,15 @@ int input_ring_pop_batch(Wc3InputRing *ring, Wc3TouchEvent *out, int max)
     return n;
 }
 
+int input_ring_is_empty(Wc3InputRing *ring)
+{
+    if (!ring) return 1;
+    pthread_mutex_lock(&ring->lock);
+    int empty = ring->count == 0;
+    pthread_mutex_unlock(&ring->lock);
+    return empty;
+}
+
 void input_ring_clear(Wc3InputRing *ring)
 {
     if (!ring) return;

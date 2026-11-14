@@ -23,6 +23,7 @@
     <string name="launch_gesture_hint_single">• Одиночное касание — ЛКМ (без задержки)\n• Долгое нажатие — ПКМ\n• Перетаскивание одним пальцем — СКМ\n• Долгое нажатие с перетаскиванием — ЛКМ\n• Свайп двумя пальцами вверх/вниз — наклон камеры\n• Свайп двумя пальцами влево/вправо — поворот камеры</string>
     <string name="launch_double_tap_delay_label">Задержка двойного касания</string>
     <string name="launch_long_press_delay_label">Задержка долгого нажатия</string>
+    <string name="launch_tap_click_delay_label">Задержка зажатия клика в упрощённом профиле</string>
     <string name="launch_gesture_delay_value">%1$d мс</string>
 
     <string name="launch_driver_label">Драйвер Vulkan</string>

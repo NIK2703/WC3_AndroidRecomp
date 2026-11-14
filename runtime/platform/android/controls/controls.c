@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "wc3_debug.h"
 
@@ -23,6 +24,7 @@
 #include "profile/bind.h"
 #include "profile/convert.h"
 #include "profile/loader.h"
+#include "overlay_mode.h"
 #include "profile_mode.h"
 
 /*
@@ -43,6 +45,11 @@ void udp_mouse_send(int flags, int dx, int dy, int wheel) {
 static Wc3ActionSink g_sink;
 static void *g_sink_user;
 static char *g_profile_json;
+static ProfileData *g_profile_full;
+static ProfileData *g_profile_simple;
+static Wc3OverlayMode g_overlay_mode = WC3_OVERLAY_MODE_FULL;
+static uint32_t g_layout_id;
+static int g_simple_build_rc;
 static int g_width;
 static int g_height;
 static uint64_t g_last_engine_tick;
@@ -50,6 +57,7 @@ static bool g_initialized;
 static bool g_double_tap_enabled = true;
 static int g_double_tap_timeout_ms;
 static int g_long_press_timeout_ms;
+static int g_tap_click_delay_ms;
 static char g_error[256];
 static bool g_key_down[256];
 static bool g_button_down[8];
@@ -70,6 +78,28 @@ static void reset_action_filter(void) {
     memset(g_key_down, 0, sizeof(g_key_down));
     memset(g_button_down, 0, sizeof(g_button_down));
 }
+
+/*
+ * Touch taps click on finger-down.  The engine emits the cursor move before
+ * the button, but both actions are normally delivered in one input drain; the
+ * guest can process the click while the cursor is still at its old position.
+ * In the SIMPLE overlay keep a configurable wall-clock gap between the move
+ * and the LMB press.  This is not a timer tick: the tick engine still owns
+ * every other delay.
+ */
+#define WC3_TAP_CLICK_DELAY_DEFAULT_MS 10
+#define WC3_TAP_CLICK_DELAY_MIN_MS 8
+#define WC3_TAP_CLICK_DELAY_MAX_MS 40
+
+static int clamp_tap_click_delay_ms(int value) {
+    if (value <= 0) return WC3_TAP_CLICK_DELAY_DEFAULT_MS;
+    if (value < WC3_TAP_CLICK_DELAY_MIN_MS) return WC3_TAP_CLICK_DELAY_MIN_MS;
+    if (value > WC3_TAP_CLICK_DELAY_MAX_MS) return WC3_TAP_CLICK_DELAY_MAX_MS;
+    return value;
+}
+
+/* A move delivered by the engine, but not yet followed by an LMB press. */
+static bool g_pointer_move_pending;
 
 /*
  * The vendored engine can release the same binding twice, and can schedule
@@ -146,8 +176,39 @@ static void emit_actions(const TouchActionResult *result) {
         }
     }
 
-    if (filtered_count > 0) {
-        g_sink(filtered, filtered_count, g_sink_user);
+    if (filtered_count <= 0) return;
+
+    int press = -1;
+    bool move_before_press = false;
+    for (int i = 0; i < filtered_count; i++) {
+        if (filtered[i].type == ACT_POINTER_MOVE ||
+            filtered[i].type == ACT_POINTER_MOVE_DELTA)
+            move_before_press = true;
+        if (filtered[i].type == ACT_POINTER_BUTTON_PRESS &&
+            filtered[i].pointer_button.button == 0) {
+            press = i;
+            break;
+        }
+    }
+
+    if (press >= 0 && (g_pointer_move_pending || move_before_press) &&
+        g_overlay_mode == WC3_OVERLAY_MODE_SIMPLE) {
+        /* Deliver the pointer move first, then let the guest observe the new
+         * cursor position before the click is posted.  The delay is a
+         * product setting for the simplified overlay only. */
+        if (press > 0)
+            g_sink(filtered, press, g_sink_user);
+        usleep((useconds_t)g_tap_click_delay_ms * 1000u);
+        g_pointer_move_pending = false;
+        g_sink(filtered + press, filtered_count - press, g_sink_user);
+        return;
+    }
+
+    g_sink(filtered, filtered_count, g_sink_user);
+    for (int i = 0; i < filtered_count; i++) {
+        if (filtered[i].type == ACT_POINTER_MOVE ||
+            filtered[i].type == ACT_POINTER_MOVE_DELTA)
+            g_pointer_move_pending = true;
     }
 }
 
@@ -242,53 +303,111 @@ static void apply_profile_labels(const ProfileData *profile,
     }
 }
 
-static int controls_init_internal(const char *profile_json, int width,
-                                  int height, bool double_tap_enabled,
-                                  int double_tap_timeout_ms,
-                                  int long_press_timeout_ms) {
-    ProfileData *profile = NULL;
+static void capture_engine_transform(float *xform_x, float *xform_y,
+                                     float *view_x, float *view_y) {
+    *xform_x = 1.0f;
+    *xform_y = 1.0f;
+    *view_x = 0.0f;
+    *view_y = 0.0f;
+
+    if (!g_initialized) return;
+
+    TP_STATE_LOCK();
+    if (g_state.cfg.xform_scale_x > 0.0f)
+        *xform_x = g_state.cfg.xform_scale_x;
+    if (g_state.cfg.xform_scale_y > 0.0f)
+        *xform_y = g_state.cfg.xform_scale_y;
+    *view_x = g_state.cfg.view_offset_x;
+    *view_y = g_state.cfg.view_offset_y;
+    TP_STATE_UNLOCK();
+}
+
+/* Build both variants from one parse.  SIMPLE is derived from the authored
+ * profile before the product gesture mode rewrites FULL, so its ESC geometry
+ * is the authored one.  A missing/ambiguous ESC leaves SIMPLE unavailable;
+ * it never falls back to another element or a guessed key. */
+static int controls_build_variants(const char *profile_json,
+                                   ProfileData **out_full,
+                                   ProfileData **out_simple,
+                                   int *out_simple_rc) {
+    ProfileData *full = NULL;
+    ProfileData *simple = NULL;
+
+    if (!profile_json || !out_full || !out_simple || !out_simple_rc)
+        return -1;
+
+    full = (ProfileData *)calloc(1, sizeof(*full));
+    simple = (ProfileData *)calloc(1, sizeof(*simple));
+    if (!full || !simple) {
+        set_error("out of memory building profiles");
+        goto fail;
+    }
+
+    if (profile_load_from_string(profile_json, full) != 0) {
+        const char *detail = profile_last_error();
+        set_error("profile parse failed: %s", detail ? detail : "unknown");
+        goto fail;
+    }
+
+    int simple_rc = wc3_profile_build_simple(full, simple);
+    if (simple_rc != 0) {
+        free(simple);
+        simple = NULL;
+    }
+
+    wc3_profile_apply_gesture_mode(full, g_double_tap_enabled);
+    wc3_profile_apply_gesture_timings(full, g_double_tap_timeout_ms,
+                                      g_long_press_timeout_ms);
+
+    *out_full = full;
+    *out_simple = simple;
+    *out_simple_rc = simple_rc;
+    return 0;
+
+fail:
+    free(simple);
+    free(full);
+    return -1;
+}
+
+static int controls_apply_profile(const ProfileData *profile, int width,
+                                  int height, bool initial,
+                                  Wc3OverlayMode mode,
+                                  float xform_x, float xform_y,
+                                  float view_x, float view_y) {
     TouchProcessorConfig *config = NULL;
     TouchElement *elements = NULL;
+    int count = 0;
     int rc = -1;
 
-    if (!profile_json || width <= 0 || height <= 0) {
-        set_error("invalid init arguments");
+    if (!profile || width <= 0 || height <= 0) {
+        set_error("invalid profile apply arguments");
         return -1;
     }
 
-    profile = (ProfileData *)calloc(1, sizeof(*profile));
     config = (TouchProcessorConfig *)calloc(1, sizeof(*config));
     elements = (TouchElement *)calloc(MAX_ELEMENTS, sizeof(*elements));
-    if (!profile || !config || !elements) {
-        set_error("out of memory during init");
+    if (!config || !elements) {
+        set_error("out of memory applying profile");
         goto out;
     }
-
-    if (profile_load_from_string(profile_json, profile) != 0) {
-        const char *detail = profile_last_error();
-        set_error("profile parse failed: %s", detail ? detail : "unknown");
-        goto out;
-    }
-
-    wc3_profile_apply_gesture_mode(profile, double_tap_enabled);
-    wc3_profile_apply_gesture_timings(profile, double_tap_timeout_ms,
-                                      long_press_timeout_ms);
 
     g_timer_interval_ms = profile->timer_interval_ms > 0
                               ? profile->timer_interval_ms
                               : 16;
 
     profile_to_config(profile, width, height, 1.0f, config);
-    config->direct_gesture_mode = !double_tap_enabled;
-    touch_processor_init(config);
-    reset_action_filter();
+    config->direct_gesture_mode =
+        (mode == WC3_OVERLAY_MODE_SIMPLE) || !g_double_tap_enabled;
+    config->xform_scale_x = xform_x > 0.0f ? xform_x : 1.0f;
+    config->xform_scale_y = xform_y > 0.0f ? xform_y : 1.0f;
+    config->view_offset_x = view_x;
+    config->view_offset_y = view_y;
 
-    int snap = width / 100;
-    if (snap <= 0) snap = 10;
-    touch_processor_set_snapping_size((float)snap);
-
-    int count = profile_to_elements(profile, width, height, elements,
-                                    MAX_ELEMENTS);
+    /* Convert and validate before touching the live engine.  A bad profile
+     * leaves the current mode and its input state intact. */
+    count = profile_to_elements(profile, width, height, elements,
+                                MAX_ELEMENTS);
     if (count <= 0) {
         set_error("profile contains no elements");
         goto out;
@@ -305,17 +424,30 @@ static int controls_init_internal(const char *profile_json, int width,
             goto out;
         }
     }
-
     apply_profile_labels(profile, elements, count);
+
+    if (initial) {
+        touch_processor_init(config);
+    } else {
+        touch_processor_update_config(config);
+    }
+    reset_action_filter();
+
+    int snap = width / 100;
+    if (snap <= 0) snap = 10;
+    touch_processor_set_snapping_size((float)snap);
 
     touch_processor_set_elements(elements, count);
     touch_processor_set_resolution_scale(1.0f);
-    touch_processor_set_xform_scale(1.0f, 1.0f);
+    touch_processor_set_xform_scale(config->xform_scale_x,
+                                    config->xform_scale_y);
     touch_processor_set_sim_touch_screen(false);
 
     g_width = width;
     g_height = height;
-    g_last_engine_tick = 0;
+    if (initial) g_last_engine_tick = 0;
+    g_layout_id++;
+    g_overlay_mode = mode;
     g_initialized = true;
     clear_error();
     rc = 0;
@@ -323,14 +455,16 @@ static int controls_init_internal(const char *profile_json, int width,
 out:
     free(elements);
     free(config);
-    free(profile);
-    if (rc != 0) g_initialized = false;
     return rc;
 }
 
 int controls_init_ex(const char *profile_json, int width, int height,
                      bool double_tap_enabled, int double_tap_timeout_ms,
-                     int long_press_timeout_ms) {
+                     int long_press_timeout_ms, int tap_click_delay_ms) {
+    ProfileData *full = NULL;
+    ProfileData *simple = NULL;
+    int simple_rc = -1;
+
     if (!profile_json || width <= 0 || height <= 0) {
         set_error("invalid init arguments");
         return -1;
@@ -343,27 +477,41 @@ int controls_init_ex(const char *profile_json, int width, int height,
     }
     strcpy(copy, profile_json);
 
-    if (g_initialized) {
-        controls_cancel_all();
-    }
+    g_double_tap_enabled = double_tap_enabled;
+    g_double_tap_timeout_ms = double_tap_timeout_ms;
+    g_long_press_timeout_ms = long_press_timeout_ms;
+    g_tap_click_delay_ms = clamp_tap_click_delay_ms(tap_click_delay_ms);
 
-    if (controls_init_internal(profile_json, width, height,
-                               double_tap_enabled, double_tap_timeout_ms,
-                               long_press_timeout_ms) != 0) {
+    if (controls_build_variants(profile_json, &full, &simple, &simple_rc) != 0) {
         free(copy);
         return -1;
     }
 
+    if (g_initialized) {
+        controls_cancel_all();
+    }
+
+    if (controls_apply_profile(full, width, height, true,
+                               WC3_OVERLAY_MODE_FULL, 1.0f, 1.0f,
+                               0.0f, 0.0f) != 0) {
+        free(simple);
+        free(full);
+        free(copy);
+        return -1;
+    }
+
+    free(g_profile_simple);
+    free(g_profile_full);
     free(g_profile_json);
+    g_profile_full = full;
+    g_profile_simple = simple;
     g_profile_json = copy;
-    g_double_tap_enabled = double_tap_enabled;
-    g_double_tap_timeout_ms = double_tap_timeout_ms;
-    g_long_press_timeout_ms = long_press_timeout_ms;
+    g_simple_build_rc = simple_rc;
     return 0;
 }
 
 int controls_init(const char *profile_json, int width, int height) {
-    return controls_init_ex(profile_json, width, height, true, 0, 0);
+    return controls_init_ex(profile_json, width, height, true, 0, 0, 0);
 }
 
 void controls_set_action_sink(Wc3ActionSink sink, void *user) {
@@ -485,17 +633,91 @@ void controls_cancel_all(void) {
     emit_actions(&result);
 }
 
-void controls_resize(int width, int height) {
-    if (!g_initialized || !g_profile_json || width <= 0 || height <= 0) {
-        return;
+int controls_switch_safe(void) {
+    if (!g_initialized) return 0;
+
+    TP_STATE_LOCK();
+    int safe = g_state.active_finger_count == 0 &&
+               g_state.scheduled_action_count == 0 &&
+               g_state.gesture_deferred_tap_count == 0 &&
+               g_state.gesture_pending_double_count == 0 &&
+               g_state.gesture_pending_deferred_double_count == 0 &&
+               g_state.gesture_held_count == 0 &&
+               g_state.gesture_toggled_count == 0 &&
+               g_state.dt_waiting_count == 0 &&
+               g_state.sim_click_ptr_id < 0 &&
+               !g_state.sim_continue_click &&
+               g_state.pending_left_release_tick == 0 &&
+               g_state.pending_right_release_tick == 0 &&
+               !g_state.mouse_move_active &&
+               !g_state.scrolling &&
+               !g_state.gesture_second_active;
+    TP_STATE_UNLOCK();
+    return safe ? 1 : 0;
+}
+
+int controls_set_overlay_mode(Wc3OverlayMode mode) {
+    if (!g_initialized || !g_profile_full) {
+        set_error("mode switch before init");
+        return -1;
+    }
+    if (mode != WC3_OVERLAY_MODE_FULL && mode != WC3_OVERLAY_MODE_SIMPLE) {
+        set_error("invalid overlay mode %d", (int)mode);
+        return -1;
+    }
+    if (mode == g_overlay_mode) return 0;
+
+    const ProfileData *profile =
+        mode == WC3_OVERLAY_MODE_SIMPLE ? g_profile_simple : g_profile_full;
+    if (!profile) {
+        set_error("SIMPLE unavailable (builder rc %d)", g_simple_build_rc);
+        return -1;
+    }
+    if (!controls_switch_safe()) {
+        set_error("mode switch requires idle input");
+        return -2;
     }
 
+    float xform_x, xform_y, view_x, view_y;
+    capture_engine_transform(&xform_x, &xform_y, &view_x, &view_y);
+
+    /* The guard above means this releases nothing; it also makes the exact
+     * switch point explicit and keeps the engine contract in one place. */
     controls_cancel_all();
-    if (controls_init_internal(g_profile_json, width, height,
-                               g_double_tap_enabled, g_double_tap_timeout_ms,
-                               g_long_press_timeout_ms) != 0) {
-        g_initialized = false;
+
+    return controls_apply_profile(profile, g_width, g_height, false, mode,
+                                  xform_x, xform_y, view_x, view_y);
+}
+
+Wc3OverlayMode controls_overlay_mode(void) {
+    return g_overlay_mode;
+}
+
+uint32_t controls_layout_id(void) {
+    return g_layout_id;
+}
+
+int controls_resize(int width, int height) {
+    if (!g_initialized || !g_profile_full || width <= 0 || height <= 0) {
+        return -1;
     }
+    if (width == g_width && height == g_height) return 0;
+
+    const ProfileData *profile =
+        g_overlay_mode == WC3_OVERLAY_MODE_SIMPLE && g_profile_simple
+            ? g_profile_simple
+            : g_profile_full;
+
+    float xform_x, xform_y, view_x, view_y;
+    capture_engine_transform(&xform_x, &xform_y, &view_x, &view_y);
+    controls_cancel_all();
+
+    if (controls_apply_profile(profile, width, height, false, g_overlay_mode,
+                               xform_x, xform_y, view_x, view_y) != 0) {
+        set_error("resize profile apply failed");
+        return -1;
+    }
+    return 0;
 }
 
 static uint8_t visual_layers_from_engine(uint32_t layers) {
@@ -583,6 +805,7 @@ out_locked:
     TP_STATE_UNLOCK();
 
     if (rc == 0) {
+        overlay->layout_id = g_layout_id;
         /* add_element() promotes zero alphas to 255; restore engine values. */
         controls_sync_visuals(overlay);
         clear_error();
@@ -606,6 +829,7 @@ int controls_visual_dirty(void) {
 
 int controls_sync_visuals(Wc3Overlay *overlay) {
     if (!overlay || !g_initialized) return -1;
+    if (overlay->layout_id != g_layout_id) return -1;
 
     Wc3OverlayElement snapshot[WC3_OVERLAY_MAX_ELEMENTS];
     memset(snapshot, 0, sizeof(snapshot));

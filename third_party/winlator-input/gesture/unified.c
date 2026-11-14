@@ -159,6 +159,7 @@ GesturePairResult gesture_resolve(
     if (hx & (comp | hxd)) plan_flags |= PLAN_FLAG_PULSE_ON_UP;
     if (hx & comp & !hxd) plan_flags |= PLAN_FLAG_PRESS_ON_DRAG;
     if (hxd) plan_flags |= PLAN_FLAG_DRAG_AVAIL;
+
     r.plan = (GesturePairPlan){
         .hold_delay_ticks = 0,
         .flags = plan_flags,

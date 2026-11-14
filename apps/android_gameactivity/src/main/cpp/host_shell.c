@@ -30,6 +30,7 @@
 
 #include "app_boot.h"
 #include "controls.h"
+#include "game_state.h"
 #include "guest_layout.h"
 #include "vulkan_driver_android.h"
 #include "guest_memory.h"
@@ -291,6 +292,8 @@ static char g_vulkan_driver_hook_dir[1024];
 static int g_double_tap_gestures = 1;
 static int g_double_tap_timeout_ms;
 static int g_long_press_timeout_ms;
+/* Zero means "use the controls-layer default" for a direct diagnostic launch. */
+static int g_tap_click_delay_ms;
 
 #define SHARED_DATA_DIR_NAME "Warcraft 3"
 
@@ -557,7 +560,10 @@ static void cache_wake_render(void)
     pthread_mutex_unlock(&g_overlay_lock);
 }
 
-static void cache_publish(Wc3OverlayCache *built)
+/* Store a completed atlas.  The caller holds g_overlay_lock and verifies that
+ * the atlas still belongs to the published layout, then wakes the renderer
+ * after unlocking. */
+static int cache_store_locked(Wc3OverlayCache *built)
 {
     int store = -1;
 
@@ -582,9 +588,9 @@ static void cache_publish(Wc3OverlayCache *built)
 
     if (store < 0) {
         OVERLAY_LOGE("Canvas atlas dropped: all cache slots are in use");
-        return;
+        return 0;
     }
-    cache_wake_render();
+    return 1;
 }
 
 static void *cache_worker_main(void *arg)
@@ -627,7 +633,24 @@ static void *cache_worker_main(void *arg)
             if (overlay_canvas_build(&source) == 0) {
                 Wc3OverlayCache built = source.cache;
                 memset(&source.cache, 0, sizeof source.cache);
-                cache_publish(&built);
+
+                /* The layout can change while Canvas rasterises.  Publish only
+                 * if the active snapshot still has the same layout id, and do
+                 * it under g_overlay_lock so a switch cannot race the store. */
+                int published = 0;
+                pthread_mutex_lock(&g_overlay_lock);
+                if (atomic_load_explicit(&g_visual_ready,
+                                         memory_order_acquire)) {
+                    int active = atomic_load_explicit(
+                        &g_visual_active, memory_order_acquire);
+                    if (active >= 0 && active < OVERLAY_SNAPSHOTS &&
+                        g_visual[active].layout_id == built.layout_id &&
+                        g_visual[active].element_count == built.element_count)
+                        published = cache_store_locked(&built);
+                }
+                pthread_mutex_unlock(&g_overlay_lock);
+
+                if (published) cache_wake_render();
                 free(built.pixels);
             }
         }
@@ -754,6 +777,11 @@ static void publish_visual(void)
         return;
     }
     int active = atomic_load_explicit(&g_visual_active, memory_order_acquire);
+    if (active >= 0 && active < OVERLAY_SNAPSHOTS &&
+        g_visual[active].layout_id != controls_layout_id()) {
+        pthread_mutex_unlock(&g_overlay_lock);
+        return;
+    }
     int next = -1;
     for (int i = 0; i < OVERLAY_SNAPSHOTS; i++) {
         if (i != active) {
@@ -797,6 +825,62 @@ static void publish_visual(void)
 #endif
 
     if (changed > 0) visual_signal();
+}
+
+/*
+ * Rebuild every visual snapshot for the current engine layout.  This runs on
+ * the input thread; it must never stop the Canvas worker (that would join a
+ * thread which may be reading these snapshots).  The new overlays are built
+ * outside g_overlay_lock and swapped in one step.
+ */
+static int visual_rebuild_layout(int width, int height)
+{
+    if (width <= 0 || height <= 0) return -1;
+
+    /* Hide the previous profile while the new one is being prepared.  Input
+     * already uses the new geometry, so showing the old overlay would be a
+     * false picture of what a tap will hit. */
+    pthread_mutex_lock(&g_overlay_lock);
+    atomic_store_explicit(&g_visual_ready, 0, memory_order_release);
+    atomic_fetch_add_explicit(&g_visual_gen, 1u, memory_order_release);
+    pthread_mutex_unlock(&g_overlay_lock);
+    visual_signal();
+
+    Wc3Overlay rebuilt[OVERLAY_SNAPSHOTS];
+    memset(rebuilt, 0, sizeof rebuilt);
+
+    int failed = 0;
+    for (int i = 0; i < OVERLAY_SNAPSHOTS; i++) {
+        overlay_init(&rebuilt[i], width, height, NULL);
+        if (controls_populate_overlay(&rebuilt[i]) != 0) {
+            failed = 1;
+            break;
+        }
+        rebuilt[i].alpha_mode = WC3_OVERLAY_ALPHA_PREMULTIPLIED;
+    }
+    if (failed) {
+        OVERLAY_LOGE("overlay layout rebuild failed: %s",
+                     controls_last_error());
+        for (int i = 0; i < OVERLAY_SNAPSHOTS; i++)
+            overlay_destroy(&rebuilt[i]);
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_overlay_lock);
+    for (int i = 0; i < OVERLAY_SNAPSHOTS; i++) {
+        overlay_destroy(&g_visual[i]);
+        g_visual[i] = rebuilt[i];
+        memset(&rebuilt[i], 0, sizeof rebuilt[i]);
+    }
+    atomic_store_explicit(&g_visual_active, 0, memory_order_release);
+    atomic_store_explicit(&g_visual_reading, -1, memory_order_release);
+    atomic_fetch_add_explicit(&g_visual_gen, 1u, memory_order_release);
+    atomic_store_explicit(&g_visual_ready, 1, memory_order_release);
+    pthread_mutex_unlock(&g_overlay_lock);
+
+    cache_start();
+    visual_signal();
+    return 0;
 }
 
 static void present_blank(ANativeWindow *window, int width, int height)
@@ -1045,16 +1129,18 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     jboolean sound, jstring extra_args, jstring driver_id, jstring driver_root,
     jstring hook_dir, jstring dxvk_version, jstring dxvk_config_path,
     jboolean double_tap_gestures, jint double_tap_timeout_ms,
-    jint long_press_timeout_ms)
+    jint long_press_timeout_ms, jint tap_click_delay_ms)
 {
     /* JNI has no type checking between two jstring parameters.  Keep this
      * order identical to Wc3GameActivity.nativeApplyLaunchSettings: id before
-     * root, DXVK version and config path, then the gesture flag and timers
-     * last, or values are copied into the wrong slot. */
+     * root, DXVK version and config path, then the gesture flag and timers,
+     * and the SIMPLE tap delay last, or values are copied into the wrong
+     * slot. */
     (void)clazz;
     g_double_tap_gestures = double_tap_gestures ? 1 : 0;
     g_double_tap_timeout_ms = (int)double_tap_timeout_ms;
     g_long_press_timeout_ms = (int)long_press_timeout_ms;
+    g_tap_click_delay_ms = (int)tap_click_delay_ms;
 
     const char *dir = NULL;
     const char *user_args = NULL;
@@ -1593,6 +1679,44 @@ static void host_haptic_sink(int effect, void *user)
     if (g_haptics_ready) haptics_android_perform(effect);
 }
 
+/* A rejected transition (for example SIMPLE has no authored ESC) is retried
+ * only after the published bits change, not on every touch wake. */
+static uint32_t g_switch_rejected_bits;
+static int g_switch_rejected;
+
+/*
+ * Apply one exact guest-state transition on the input thread.  The wake is a
+ * signal only; the state bits are the source of truth.  If a finger is still
+ * live the switch waits for the next wake (the touch-up is one), so a profile
+ * is never swapped under an active gesture.
+ */
+static void input_apply_game_state_mode(void)
+{
+    uint32_t bits = wc3_game_state_get();
+    Wc3OverlayMode want = wc3_overlay_mode_for_state(bits);
+    if (want == controls_overlay_mode()) {
+        g_switch_rejected = 0;
+        return;
+    }
+    if (g_switch_rejected && bits == g_switch_rejected_bits) return;
+    /* Drain ran above; a non-empty ring means another control event arrived
+     * while this loop was busy.  Switch only when the queue is empty too. */
+    if (!input_ring_is_empty(&g_touch_ring)) return;
+    if (!controls_switch_safe()) return;
+
+    int rc = controls_set_overlay_mode(want);
+    if (rc == 0) {
+        g_switch_rejected = 0;
+        if (visual_rebuild_layout(g_input_width, g_input_height) != 0)
+            OVERLAY_LOGE("overlay rebuild after mode switch failed");
+        return;
+    }
+    if (rc == -2) return;
+    g_switch_rejected = 1;
+    g_switch_rejected_bits = bits;
+    OVERLAY_LOGE("overlay mode switch rejected: %s", controls_last_error());
+}
+
 static void *input_thread_main(void *arg)
 {
     (void)arg;
@@ -1604,6 +1728,7 @@ static void *input_thread_main(void *arg)
             WC3_TRACE_SCOPE("wc3.input.drain");
             input_adapter_drain(&g_input_adapter, now);
         }
+        input_apply_game_state_mode();
         const Wc3InputAdapterStats *input_stats =
             input_adapter_stats(&g_input_adapter);
         /* A move-only batch is published only when the engine marked the
@@ -1646,18 +1771,36 @@ static void *input_thread_main(void *arg)
     return NULL;
 }
 
+/*
+ * The wake object is process-lifetime.  Guest threads can call the state
+ * callback concurrently with overlay_input_stop(); destroying and NULLing the
+ * wake here would leave a loaded pointer in notify_wake() pointing at freed
+ * memory.  One eventfd for the process is cheaper than that race.
+ */
+static void game_state_wake(void *user)
+{
+    (void)user;
+    Wc3InputWake *wake = g_input_wake;
+    if (wake) input_wake_signal(wake);
+}
+
+static void apply_initial_game_state_mode(void)
+{
+    Wc3OverlayMode want =
+        wc3_overlay_mode_for_state(wc3_game_state_get());
+    if (want == controls_overlay_mode()) return;
+    if (controls_set_overlay_mode(want) != 0) {
+        OVERLAY_LOGE("initial overlay mode rejected: %s",
+                     controls_last_error());
+    }
+}
+
 static int overlay_input_start(int width, int height)
 {
     if (width <= 0 || height <= 0) return -1;
     if (atomic_load_explicit(&g_input_ready, memory_order_acquire)) {
         if (width == g_input_width && height == g_input_height) return 0;
         overlay_input_stop();
-    }
-
-    char *profile = load_controls_profile();
-    if (!profile) {
-        OVERLAY_LOGE("controls profile missing; using the one-finger fallback");
-        return -1;
     }
 
 #if WC3_WITH_ASBUILT_HLE
@@ -1668,25 +1811,53 @@ static int overlay_input_start(int width, int height)
     controls_set_action_sink(NULL, NULL);
 #endif
 
-    if (controls_init_ex(profile, width, height,
-                         g_double_tap_gestures != 0,
-                         g_double_tap_timeout_ms,
-                         g_long_press_timeout_ms) != 0) {
-        OVERLAY_LOGE("controls init failed: %s", controls_last_error());
-        free(profile);
-        controls_set_action_sink(NULL, NULL);
-#if WC3_WITH_ASBUILT_HLE
-        overlay_actions_set_haptic_sink(NULL, NULL);
-#endif
-        return -1;
+    /* A surface resize must not throw away the current FULL/SIMPLE layout or
+     * its transform.  controls_resize() rebuilds the active profile at the new
+     * size; only the first start parses the authored profile. */
+    int controls_ready = 0;
+    if (controls_layout_id() != 0) {
+        if (controls_resize(width, height) == 0) {
+            controls_ready = 1;
+        } else {
+            OVERLAY_LOGE("controls resize failed: %s",
+                         controls_last_error());
+        }
     }
-    free(profile);
+    if (!controls_ready) {
+        char *profile = load_controls_profile();
+        if (!profile) {
+            OVERLAY_LOGE("controls profile missing; using the one-finger fallback");
+            controls_set_action_sink(NULL, NULL);
+#if WC3_WITH_ASBUILT_HLE
+            overlay_actions_set_haptic_sink(NULL, NULL);
+#endif
+            return -1;
+        }
+        if (controls_init_ex(profile, width, height,
+                             g_double_tap_gestures != 0,
+                             g_double_tap_timeout_ms,
+                             g_long_press_timeout_ms,
+                             g_tap_click_delay_ms) != 0) {
+            OVERLAY_LOGE("controls init failed: %s", controls_last_error());
+            free(profile);
+            controls_set_action_sink(NULL, NULL);
+#if WC3_WITH_ASBUILT_HLE
+            overlay_actions_set_haptic_sink(NULL, NULL);
+#endif
+            return -1;
+        }
+        free(profile);
+    }
+
+    /* The first published overlay must already match the exact current guest
+     * state; otherwise a menu would flash the gameplay profile. */
+    apply_initial_game_state_mode();
 
     if (visual_initialize(width, height) != 0)
         OVERLAY_LOGE("overlay visual initialization failed; input continues");
 
     input_ring_init(&g_touch_ring);
-    g_input_wake = input_wake_create();
+    if (!g_input_wake) g_input_wake = input_wake_create();
     if (!g_input_wake) {
         OVERLAY_LOGE("cannot create the controls wake primitive");
         controls_cancel_all();
@@ -1702,6 +1873,7 @@ static int overlay_input_start(int width, int height)
         return -1;
     }
 
+    wc3_game_state_set_wake(game_state_wake, NULL);
     input_adapter_init(&g_input_adapter, &g_touch_ring);
     g_input_width = width;
     g_input_height = height;
@@ -1709,6 +1881,7 @@ static int overlay_input_start(int width, int height)
 
     if (pthread_create(&g_input_thread, NULL, input_thread_main, NULL) != 0) {
         OVERLAY_LOGE("cannot start the controls input thread");
+        wc3_game_state_set_wake(NULL, NULL);
         controls_cancel_all();
 #if WC3_WITH_ASBUILT_HLE
         overlay_actions_release_all();
@@ -1717,8 +1890,6 @@ static int overlay_input_start(int width, int height)
 #if WC3_WITH_ASBUILT_HLE
         overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
-        input_wake_destroy(g_input_wake);
-        g_input_wake = NULL;
         input_ring_destroy(&g_touch_ring);
         visual_destroy();
         return -1;
@@ -1733,6 +1904,7 @@ static int overlay_input_start(int width, int height)
 static void overlay_input_stop(void)
 {
     if (!atomic_exchange_explicit(&g_input_ready, 0, memory_order_acq_rel)) {
+        wc3_game_state_set_wake(NULL, NULL);
         visual_destroy();
         return;
     }
@@ -1743,6 +1915,7 @@ static void overlay_input_stop(void)
         g_input_thread_started = 0;
     }
 
+    wc3_game_state_set_wake(NULL, NULL);
     controls_cancel_all();
 #if WC3_WITH_ASBUILT_HLE
     overlay_actions_release_all();
@@ -1751,10 +1924,6 @@ static void overlay_input_stop(void)
 #if WC3_WITH_ASBUILT_HLE
     overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
-    if (g_input_wake) {
-        input_wake_destroy(g_input_wake);
-        g_input_wake = NULL;
-    }
     input_ring_destroy(&g_touch_ring);
     visual_destroy();
     g_input_width = 0;
@@ -2239,6 +2408,10 @@ void android_main(struct android_app *app)
     g_app = app;
     app->onAppCmd = on_app_cmd;
     ime_install(app);
+
+    /* Exact guest state is process-lifetime state.  The wake consumer is
+     * registered only while the overlay input thread exists. */
+    wc3_game_state_init();
 
     if (wc3_android_platform_init(&g_platform) != 0) {
         LOGE("platform init failed");

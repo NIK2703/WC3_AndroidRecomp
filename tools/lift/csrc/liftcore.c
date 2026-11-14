@@ -5,6 +5,7 @@
  */
 #include <stdarg.h>
 #include "liftcore.h"
+#include "state_hooks_gen.h"
 
 #define NOPS(insn)  ((insn)->detail ? (insn)->detail->x86.op_count : 0)
 #define OPS(insn)   ((insn)->detail->x86.operands)
@@ -27,6 +28,25 @@ static int in_list(const char *s, const char *const *list, size_t n)
 #define LST(s, ...) in_list((s), (const char *const[]){ __VA_ARGS__ }, \
                            sizeof((const char *const[]){ __VA_ARGS__ }) / sizeof(char *))
 
+/* The generated table is pinned to exact store VAs.  Emit the state hook after
+ * the translated store, never instead of it. */
+static void lf_state_hook_after(Emit *e, const cs_insn *insn)
+{
+    size_t i;
+    for (i = 0; i < WC3_STATE_HOOK_COUNT; i++) {
+        const Wc3StateHook *h = &wc3_state_hooks[i];
+        if (h->store_va != (uint32_t)insn->address)
+            continue;
+        if (strcmp(h->guard, "0") != 0)
+            lf_push(e, lf_afmt("if (!%s) wc3_game_state_hook(%uu, 0u);",
+                               h->guard, h->kind));
+        else
+            lf_push(e, lf_afmt("wc3_game_state_hook(%uu, %s);",
+                               h->kind, h->value));
+        return;
+    }
+}
+
 static char *strip_semi(const char *s)
 {
     size_t n = strlen(s);
@@ -45,6 +65,108 @@ static int label_has(const uint32_t *labels, int n, uint64_t v)
     }
     return 0;
 }
+
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+/* WC3_DEBUG_LIFT: x87/lift diagnostics for the compiled lifter.  Compiled only
+ * in debug builds; release builds are byte-identical because the whole block
+ * disappears.  Env:
+ *   WC3_DEBUG_LIFT=1        enable counters and the end-of-lift summary
+ *   WC3_DEBUG_LIFT_TRACE=1  print per-call decisions and callee summaries for
+ *                           the caller selected by WC3_DEBUG_LIFT_ADDR
+ *   WC3_DEBUG_LIFT_ADDR=HEX caller address (0 = all callers)
+ */
+typedef struct {
+    unsigned long long funcs_x87;
+    unsigned long long calls, calls_x87, calls_top0, calls_direct;
+    unsigned long long calls_known, calls_unknown, calls_may, calls_no_read;
+    unsigned long long flush_skipped, flush_clean_skipped, flush_emitted;
+    unsigned long long flush_top, flush_may, flush_unknown;
+    unsigned long long load_emitted, load_deferred, mmx_deferred;
+    unsigned long long sum_known, sum_unknown, sum_size0, sum_cut;
+    unsigned long long sum_barrier, sum_x87, sum_mmx, sum_xsave;
+    unsigned long long sum_transfer, sum_ind_call, sum_ind_jmp, sum_callee;
+    unsigned long long sum_stop_ret, sum_stop_jmp;
+} LfX87Dbg;
+
+static LfX87Dbg g_x87_dbg;
+static int g_x87_dbg_on;
+static int g_x87_dbg_trace;
+static uint32_t g_x87_dbg_addr;
+static uint32_t g_x87_dbg_may_addr;
+static const char *g_x87_dbg_may_reason;
+static char g_x87_dbg_may_mnem[32];
+static uint32_t g_x87_dbg_stop_addr;
+static const char *g_x87_dbg_stop_reason;
+
+void lf_x87_dbg_init(void)
+{
+    const char *s;
+    memset(&g_x87_dbg, 0, sizeof g_x87_dbg);
+    g_x87_dbg_on = 0;
+    g_x87_dbg_trace = 0;
+    g_x87_dbg_addr = 0;
+    s = getenv("WC3_DEBUG_LIFT");
+    if (s && *s == '1') g_x87_dbg_on = 1;
+    s = getenv("WC3_DEBUG_LIFT_TRACE");
+    if (s && *s == '1') g_x87_dbg_trace = 1;
+    s = getenv("WC3_DEBUG_LIFT_ADDR");
+    if (s && *s) g_x87_dbg_addr = (uint32_t)strtoul(s, NULL, 16);
+}
+
+static int lf_x87_dbg_sel(uint32_t addr)
+{
+    return g_x87_dbg_addr == 0 || g_x87_dbg_addr == addr;
+}
+
+void lf_x87_dbg_print(void)
+{
+    if (!g_x87_dbg_on) return;
+    fprintf(stderr,
+            "[x87dbg] funcs_x87=%llu\n",
+            g_x87_dbg.funcs_x87);
+    fprintf(stderr,
+            "[x87dbg] calls=%llu x87=%llu top0=%llu direct=%llu "
+            "known=%llu unknown=%llu may=%llu no_read=%llu\n",
+            g_x87_dbg.calls, g_x87_dbg.calls_x87, g_x87_dbg.calls_top0,
+            g_x87_dbg.calls_direct, g_x87_dbg.calls_known,
+            g_x87_dbg.calls_unknown, g_x87_dbg.calls_may,
+            g_x87_dbg.calls_no_read);
+    fprintf(stderr,
+            "[x87dbg] flush skipped=%llu clean_skip=%llu emitted=%llu "
+            "(top=%llu may_read=%llu unknown=%llu) "
+            "load emitted=%llu deferred=%llu mmx_deferred=%llu\n",
+            g_x87_dbg.flush_skipped, g_x87_dbg.flush_clean_skipped,
+            g_x87_dbg.flush_emitted,
+            g_x87_dbg.flush_top, g_x87_dbg.flush_may,
+            g_x87_dbg.flush_unknown,
+            g_x87_dbg.load_emitted, g_x87_dbg.load_deferred,
+            g_x87_dbg.mmx_deferred);
+    fprintf(stderr,
+            "[x87dbg] summary known=%llu unknown=%llu size0=%llu cut=%llu "
+            "may(barrier=%llu x87=%llu mmx=%llu xsave=%llu transfer=%llu "
+            "ind_call=%llu ind_jmp=%llu callee=%llu) "
+            "stop(ret=%llu jmp=%llu)\n",
+            g_x87_dbg.sum_known, g_x87_dbg.sum_unknown,
+            g_x87_dbg.sum_size0, g_x87_dbg.sum_cut,
+            g_x87_dbg.sum_barrier, g_x87_dbg.sum_x87, g_x87_dbg.sum_mmx,
+            g_x87_dbg.sum_xsave, g_x87_dbg.sum_transfer,
+            g_x87_dbg.sum_ind_call, g_x87_dbg.sum_ind_jmp,
+            g_x87_dbg.sum_callee, g_x87_dbg.sum_stop_ret,
+            g_x87_dbg.sum_stop_jmp);
+}
+
+#define X87_DBG_MAY(addr, reason, mnem) \
+    do { g_x87_dbg_may_addr = (uint32_t)(addr); \
+         g_x87_dbg_may_reason = (reason); \
+         snprintf(g_x87_dbg_may_mnem, sizeof g_x87_dbg_may_mnem, "%s", (mnem)); \
+    } while (0)
+#define X87_DBG_STOP(addr, reason) \
+    do { g_x87_dbg_stop_addr = (uint32_t)(addr); \
+         g_x87_dbg_stop_reason = (reason); } while (0)
+#else
+#define X87_DBG_MAY(addr, reason, mnem) ((void)0)
+#define X87_DBG_STOP(addr, reason) ((void)0)
+#endif
 
 /* Global call/ret flag summaries are defined after flag_use. */
 
@@ -134,6 +256,31 @@ static void x87_top_after(Lifter *L, const char *m)
 {
     L->x87_top = x87_top_after_value(m, L->x87_top);
 }
+/* Control/status transfers read or write c->fpu_cw/c->fpu_sw only.  They do
+ * not touch the virtual st[] stack, so they must not force a VS_LOAD or a
+ * VS_FLUSH.  fninit/finit are deliberately not in this list: lf_fpu() resets
+ * CPU state and then reloads the local frame for them. */
+static int x87_is_control_only(const char *m)
+{
+    return LST(m, "fnstcw", "fnstsw", "fldcw", "fnclex", "fclex");
+}
+static int x87_is_local_stack_op(const char *m)
+{
+    if (m[0] != 'f') return 0;
+    if (LST(m, "fwait", "fnop", "wait")) return 0;
+    if (x87_is_control_only(m)) return 0;
+    return 1;
+}
+/* Instructions that leave the virtual st[] values/tags unchanged even though
+ * they touch x87.  lf_fpu() handles finit/fninit by resetting CPU and loading
+ * the local frame; fxam flushes before reading CPU.  None of them should make
+ * a later transfer flush the frame again. */
+static int x87_modifies_local_stack(const char *m)
+{
+    if (!x87_is_local_stack_op(m)) return 0;
+    if (LST(m, "finit", "fninit", "fxam")) return 0;
+    return 1;
+}
 static int x87_is_barrier(const char *m)
 {
     return LST(m, "fnclex", "finit", "fninit",
@@ -141,35 +288,9 @@ static int x87_is_barrier(const char *m)
                "frstor", "fxsave", "fxrstor", "fprem", "fprem1",
                "frndint", "fscale", "fxtract", "fldcw", "fnstcw",
                "fxam", "fptan", "fpatan", "fyl2x", "fyl2xp1",
-               "fsincos", "int", "int3", "into", "syscall", "sysenter",
-               "hlt", "iret", "iretd");
-}
-static int x87_branch_internal(const cs_insn *in, const uint32_t *labels,
-                                int nlabels)
-{
-    const char *m = in->mnemonic;
-    if (m[0] != 'j' && strncmp(m, "loop", 4)) return 0;
-    if (NOPS(in) < 1 || OP(in, 0)->type != X86_OP_IMM) return 0;
-    return label_has(labels, nlabels, (uint32_t)OP(in, 0)->imm);
-}
-static int x87_lazy_check(Lifter *L, InsnCopy *ins, int n,
-                          const uint32_t *labels, int nlabels)
-{
-    int top = 0;
-    int i;
-    for (i = 0; i < n; i++) {
-        const char *m = ins[i].insn.mnemonic;
-        if (x87_is_barrier(m)) return 0;
-        if (lf_is_mmx(L, &ins[i].insn)) return 0;
-        if (m[0] == 'f') top = x87_top_after_value(m, top);
-        if (label_has(labels, nlabels, ins[i].insn.address) && top != 0)
-            return 0;
-        if (x87_branch_internal(&ins[i].insn, labels, nlabels) && top != 0)
-            return 0;
-        if (!strcmp(m, "call") || lf_is_mmx(L, &ins[i].insn))
-            top = 0;
-    }
-    return 1;
+               "fsincos", "int", "int1", "int3", "into", "syscall",
+               "sysenter", "hlt", "iret", "iretd", "xbegin", "xabort",
+               "rsm");
 }
 
 static void flag_tmp_name(uint32_t addr, const char *kind, char *buf, size_t cap)
@@ -900,6 +1021,7 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
             return e;
         }
         lf_push(&e, lf_dst_write(L, insn, OP(insn, 0), lf_src(L, insn, OP(insn, 1))));
+        lf_state_hook_after(&e, insn);
         return e;
     }
     if (!strcmp(m, "lea")) {
@@ -2815,6 +2937,541 @@ static int u32_cmp(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
+/* Transitive x87/MMX read summary for a direct callee.
+ *
+ * A callee that never reads the caller's x87/MMX state does not need the
+ * caller's dirty stack in CPU before the call; the caller can keep its local
+ * copy.  Unknown, indirect, recursive and partially decoded targets are
+ * conservative.  Any x87/MMX instruction in the body counts as a read, even a
+ * pure store or fnop: a function with any x87 mnemonic has a local
+ * VS_LOAD/VS_FLUSH frame, and its labels/ret could write stale local state
+ * back if the caller skipped the flush.  `wait` is capstone's mnemonic for
+ * 0x9B; the lifter emits it as a no-op and it does not touch the virtual
+ * stack, so it is not a read here.
+ */
+
+/* One target outside the current decoded extent.  Returns 1 when the target
+ * may read x87/MMX. */
+typedef int (*LfX87TargetFn)(void *ctx, uint32_t target);
+
+static int lf_x87_scan_may_read(Lifter *L, InsnCopy *ins, int n,
+                                const uint32_t *labels, int nlabels,
+                                LfX87TargetFn target_fn, void *ctx)
+{
+    uint32_t max_branch = 0;
+    int i;
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+    g_x87_dbg_may_reason = NULL;
+    g_x87_dbg_stop_reason = NULL;
+#endif
+
+    for (i = 0; i < n; i++) {
+        const char *m = ins[i].insn.mnemonic;
+        int is_mmx = lf_is_mmx(L, &ins[i].insn);
+
+        if (is_mmx || m[0] == 'f' || x87_is_barrier(m) ||
+            LST(m, "xsave", "xsave64", "xsaveopt", "xsaveopt64",
+                    "xsavec", "xsavec64", "xsaves", "xsaves64",
+                    "xrstor", "xrstor64", "xrstors", "xrstors64")) {
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+            const char *r = is_mmx ? "mmx" :
+                            (m[0] == 'f' ? "x87" :
+                             (x87_is_barrier(m) ? "barrier" : "xsave"));
+            X87_DBG_MAY(ins[i].insn.address, r, m);
+#endif
+            return 1;
+        }
+        /* Far returns/jumps, system returns and traps can switch to a context
+         * this summary cannot see.  xbegin/xabort can enter a fallback path
+         * that is not the direct successor scanned here. */
+        if (!strcmp(m, "lcall") || !strcmp(m, "ljmp") ||
+            !strcmp(m, "retf") || !strcmp(m, "lret") ||
+            LST(m, "sysret", "sysretq", "sysexit", "sysexitq",
+                    "ud0", "ud1", "ud2", "int1", "bound",
+                    "xbegin", "xabort")) {
+            X87_DBG_MAY(ins[i].insn.address, "transfer", m);
+            return 1;
+        }
+        if (!strcmp(m, "call")) {
+            if (NOPS(&ins[i].insn) != 1 ||
+                OP(&ins[i].insn, 0)->type != X86_OP_IMM) {
+                X87_DBG_MAY(ins[i].insn.address, "indirect_call", m);
+                return 1;
+            }
+            if (target_fn(ctx, (uint32_t)OP(&ins[i].insn, 0)->imm)) {
+                X87_DBG_MAY(ins[i].insn.address, "callee", m);
+                return 1;
+            }
+            continue;
+        }
+        if (m[0] == 'j' || !strncmp(m, "loop", 4)) {
+            uint32_t target;
+            if (NOPS(&ins[i].insn) != 1 ||
+                OP(&ins[i].insn, 0)->type != X86_OP_IMM) {
+                X87_DBG_MAY(ins[i].insn.address, "indirect_jump", m);
+                return 1;
+            }
+            target = (uint32_t)OP(&ins[i].insn, 0)->imm;
+            if (label_has(labels, nlabels, target)) {
+                if (target > max_branch) max_branch = target;
+                /* A backward unconditional jmp ends the linear path.  Only a
+                 * branch past it can make the following bytes reachable. */
+                if (!strcmp(m, "jmp") &&
+                    max_branch <= ins[i].insn.address) {
+                    X87_DBG_STOP(ins[i].insn.address, "jmp");
+                    break;
+                }
+                continue;
+            }
+            if (target_fn(ctx, target)) {
+                X87_DBG_MAY(ins[i].insn.address, "callee", m);
+                return 1;
+            }
+            if (!strcmp(m, "jmp") &&
+                max_branch <= ins[i].insn.address) {
+                X87_DBG_STOP(ins[i].insn.address, "jmp");
+                break;
+            }
+            continue;
+        }
+        /* A near return ends the reachable linear path.  The extent can still
+         * contain trailing int3 padding or the next function because it was
+         * sized to the next catalogue entry; that code cannot run unless an
+         * earlier branch targets past the return.  Treating the padding as a
+         * live trap made every padded leaf look like an x87 reader.  Far
+         * returns are handled as unknown transfers above. */
+        if (!strcmp(m, "ret") || !strcmp(m, "retn")) {
+            if (max_branch <= ins[i].insn.address) {
+                X87_DBG_STOP(ins[i].insn.address, "ret");
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+static int lf_x87_callee_may_read_depth(Lifter *L, uint32_t addr, int depth);
+
+typedef struct {
+    Lifter *L;
+    int depth;
+} LfX87Walk;
+
+static int lf_x87_walk_target(void *ctx, uint32_t target)
+{
+    LfX87Walk *w = (LfX87Walk *)ctx;
+    return lf_x87_callee_may_read_depth(w->L, target, w->depth + 1);
+}
+
+static int lf_x87_callee_may_read_depth(Lifter *L, uint32_t addr, int depth)
+{
+    int idx;
+    uint8_t state;
+    int may = 1;
+    uint32_t size;
+    InsnCopy *ins = NULL;
+    int n = 0;
+    uint32_t *labels = NULL;
+    int nlabels = 0;
+    int i;
+    int decode_ok;
+    int saved_block_mode;
+    LfX87Walk walk;
+
+    idx = lf_func_index(L, addr);
+    if (idx < 0 || !L->x87_callee_state || !L->x87_callee_may) {
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+        if (g_x87_dbg_on) g_x87_dbg.sum_unknown++;
+#endif
+        return 1;
+    }
+    state = L->x87_callee_state[idx];
+    if (state == 2) return L->x87_callee_may[idx];
+    if (state == 1 || depth > 128) return 1;
+    L->x87_callee_state[idx] = 1;
+
+    size = L->func_map[idx].size;
+    if (!size) {
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+        if (g_x87_dbg_on) g_x87_dbg.sum_size0++;
+#endif
+        may = 1;
+        goto done;
+    }
+    /* The summary needs every block of the callee, not only the first block
+     * before a terminator.  Emission may run in block mode, but a call enters
+     * the function entry and can dispatch into a later block that reads x87. */
+    saved_block_mode = L->block_mode;
+    L->block_mode = 0;
+    decode_ok = lf_decode_extent(L, addr, size, &ins, &n, NULL);
+    L->block_mode = saved_block_mode;
+    if (!decode_ok || n <= 0) {
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+        if (g_x87_dbg_on) g_x87_dbg.sum_cut++;
+#endif
+        may = 1;
+        goto done;
+    }
+    /* A cut extent has an unknown continuation. */
+    if (!last_word_is_term(ins[n - 1].insn.mnemonic)) {
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+        if (g_x87_dbg_on) g_x87_dbg.sum_cut++;
+#endif
+        may = 1;
+        goto done;
+    }
+
+    labels = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+    if (!labels) { may = 1; goto done; }
+    for (i = 0; i < n; i++) labels[i] = (uint32_t)ins[i].insn.address;
+    qsort(labels, (size_t)n, sizeof(uint32_t), u32_cmp);
+    nlabels = 1;
+    for (i = 1; i < n; i++)
+        if (labels[i] != labels[nlabels - 1]) labels[nlabels++] = labels[i];
+
+    walk.L = L;
+    walk.depth = depth;
+    may = lf_x87_scan_may_read(L, ins, n, labels, nlabels,
+                               lf_x87_walk_target, &walk);
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+    if (g_x87_dbg_on) {
+        g_x87_dbg.sum_known++;
+        if (may && g_x87_dbg_may_reason) {
+            if (!strcmp(g_x87_dbg_may_reason, "barrier")) g_x87_dbg.sum_barrier++;
+            else if (!strcmp(g_x87_dbg_may_reason, "x87")) g_x87_dbg.sum_x87++;
+            else if (!strcmp(g_x87_dbg_may_reason, "mmx")) g_x87_dbg.sum_mmx++;
+            else if (!strcmp(g_x87_dbg_may_reason, "xsave")) g_x87_dbg.sum_xsave++;
+            else if (!strcmp(g_x87_dbg_may_reason, "transfer")) g_x87_dbg.sum_transfer++;
+            else if (!strcmp(g_x87_dbg_may_reason, "indirect_call")) g_x87_dbg.sum_ind_call++;
+            else if (!strcmp(g_x87_dbg_may_reason, "indirect_jump")) g_x87_dbg.sum_ind_jmp++;
+            else if (!strcmp(g_x87_dbg_may_reason, "callee")) g_x87_dbg.sum_callee++;
+        } else if (!may && g_x87_dbg_stop_reason) {
+            if (!strcmp(g_x87_dbg_stop_reason, "ret")) g_x87_dbg.sum_stop_ret++;
+            else if (!strcmp(g_x87_dbg_stop_reason, "jmp")) g_x87_dbg.sum_stop_jmp++;
+        }
+        if (g_x87_dbg_trace && lf_x87_dbg_sel(L->func_start))
+            fprintf(stderr,
+                    "[x87dbg] callee %08X size=%u may=%d reason=%s at %08X %s "
+                    "stop=%s at %08X\n",
+                    addr, size, may,
+                    g_x87_dbg_may_reason ? g_x87_dbg_may_reason : "-",
+                    g_x87_dbg_may_addr, g_x87_dbg_may_mnem,
+                    g_x87_dbg_stop_reason ? g_x87_dbg_stop_reason : "-",
+                    g_x87_dbg_stop_addr);
+    }
+#endif
+
+done:
+    free(labels);
+    free(ins);
+    L->x87_callee_may[idx] = (uint8_t)may;
+    L->x87_callee_state[idx] = 2;
+    return may;
+}
+
+static int lf_x87_callee_may_read(Lifter *L, uint32_t addr)
+{
+    return lf_x87_callee_may_read_depth(L, addr, 0);
+}
+
+/* --- x87/MMX callee policy self-test (lift32 --self-test-x87) ------------ */
+
+typedef struct {
+    uint32_t addr;
+    const char *mn;
+    int nops;
+    int op0_type;
+    uint64_t imm;
+    unsigned reg;
+} LfX87TestInsn;
+
+typedef struct {
+    uint32_t seen[8];
+    int nseen;
+    uint32_t reads_addr;
+} LfX87TestCtx;
+
+static int lf_x87_test_target(void *ctx, uint32_t target)
+{
+    LfX87TestCtx *t = (LfX87TestCtx *)ctx;
+    if (t->nseen < (int)(sizeof t->seen / sizeof t->seen[0]))
+        t->seen[t->nseen++] = target;
+    return target == t->reads_addr;
+}
+
+static void lf_x87_test_fill(InsnCopy *ic, const LfX87TestInsn *t)
+{
+    memset(ic, 0, sizeof *ic);
+    ic->insn.address = t->addr;
+    snprintf(ic->insn.mnemonic, sizeof ic->insn.mnemonic, "%s", t->mn);
+    ic->insn.detail = &ic->det;
+    ic->det.x86.op_count = (uint8_t)t->nops;
+    if (t->nops > 0) {
+        cs_x86_op *op = &ic->det.x86.operands[0];
+        op->type = (x86_op_type)t->op0_type;
+        if (op->type == X86_OP_IMM) op->imm = (int64_t)t->imm;
+        else if (op->type == X86_OP_REG) op->reg = (x86_reg)t->reg;
+        op->size = 4;
+    }
+}
+
+static int lf_x87_test_scan(Lifter *L, const LfX87TestInsn *spec, int n,
+                            uint32_t reads_addr, uint32_t must_see, int expect)
+{
+    InsnCopy ins[16];
+    uint32_t labels[16];
+    LfX87TestCtx ctx;
+    int i, j, may;
+
+    if (n <= 0 || n > (int)(sizeof ins / sizeof ins[0])) return 1;
+    for (i = 0; i < n; i++) lf_x87_test_fill(&ins[i], &spec[i]);
+    for (i = 0; i < n; i++) labels[i] = spec[i].addr;
+    for (i = 1; i < n; i++) {
+        uint32_t v = labels[i];
+        for (j = i - 1; j >= 0 && labels[j] > v; j--) labels[j + 1] = labels[j];
+        labels[j + 1] = v;
+    }
+    memset(&ctx, 0, sizeof ctx);
+    ctx.reads_addr = reads_addr;
+    may = lf_x87_scan_may_read(L, ins, n, labels, n, lf_x87_test_target, &ctx);
+    if (may != expect) return 1;
+    if (must_see) {
+        if (ctx.nseen != 1 || ctx.seen[0] != must_see) return 1;
+    } else if (ctx.nseen != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/* FNSTSW reads TOP from c->fpu_sw.  A dirty local frame must publish the
+ * physical top before that read; a clean or pending frame must not. */
+static int lf_x87_test_fnstsw_sync(void)
+{
+    const LfX87TestInsn spec = {
+        0x1000, "fnstsw", 1, X86_OP_REG, 0, X86_REG_EAX
+    };
+    InsnCopy ic;
+    Lifter L;
+    Emit e;
+
+    memset(&L, 0, sizeof L);
+    lf_x87_test_fill(&ic, &spec);
+    L.x87_dirty = 1;
+    L.x87_top = 3;
+    lf_arena_reset();
+    e = lf_fpu(&L, &ic.insn);
+    if (e.n != 2) return 1;
+    if (strcmp(e.v[0],
+               "c->fpu_top = (x87_base + 3) & 7; x87_set_top(c);")) return 1;
+    if (strcmp(e.v[1], "SET16(c->eax, (uint16_t)c->fpu_sw);")) return 1;
+
+    L.x87_dirty = 0;
+    lf_arena_reset();
+    e = lf_fpu(&L, &ic.insn);
+    if (e.n != 1) return 1;
+    if (strcmp(e.v[0], "SET16(c->eax, (uint16_t)c->fpu_sw);")) return 1;
+    return 0;
+}
+
+int lf_x87_summary_selftest(void)
+{
+    static const LfX87TestInsn ret[] = {
+        { 0x1000, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn wait_ret[] = {
+        { 0x1000, "wait", 0, 0, 0, 0 },
+        { 0x1001, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn fwait_ret[] = {
+        { 0x1000, "fwait", 0, 0, 0, 0 },
+        { 0x1001, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn fnop_ret[] = {
+        { 0x1000, "fnop", 0, 0, 0, 0 },
+        { 0x1001, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn fld1_ret[] = {
+        { 0x1000, "fld1", 0, 0, 0, 0 },
+        { 0x1001, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn emms_ret[] = {
+        { 0x1000, "emms", 0, 0, 0, 0 },
+        { 0x1001, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn mmx_ret[] = {
+        { 0x1000, "movq", 2, X86_OP_REG, 0, X86_REG_MM0 },
+        { 0x1001, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn xsave_ret[] = {
+        { 0x1000, "xsave", 1, X86_OP_MEM, 0, 0 },
+        { 0x1001, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn xrstor_ret[] = {
+        { 0x1000, "xrstor", 1, X86_OP_MEM, 0, 0 },
+        { 0x1001, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn call_no_read[] = {
+        { 0x1000, "call", 1, X86_OP_IMM, 0x3000, 0 },
+        { 0x1005, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn call_read[] = {
+        { 0x1000, "call", 1, X86_OP_IMM, 0x2000, 0 },
+        { 0x1005, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn call_indirect[] = {
+        { 0x1000, "call", 1, X86_OP_MEM, 0, 0 },
+        { 0x1002, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn jmp_no_read[] = {
+        { 0x1000, "jmp", 1, X86_OP_IMM, 0x3000, 0 },
+    };
+    static const LfX87TestInsn jmp_read[] = {
+        { 0x1000, "jmp", 1, X86_OP_IMM, 0x2000, 0 },
+    };
+    static const LfX87TestInsn jmp_indirect[] = {
+        { 0x1000, "jmp", 1, X86_OP_MEM, 0, 0 },
+    };
+    static const LfX87TestInsn jcc_internal[] = {
+        { 0x1000, "jne", 1, X86_OP_IMM, 0x1005, 0 },
+        { 0x1005, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn jcc_external[] = {
+        { 0x1000, "jne", 1, X86_OP_IMM, 0x3000, 0 },
+        { 0x1005, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn loop_internal[] = {
+        { 0x1000, "loop", 1, X86_OP_IMM, 0x1005, 0 },
+        { 0x1005, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn loop_external[] = {
+        { 0x1000, "loop", 1, X86_OP_IMM, 0x2000, 0 },
+        { 0x1005, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn int1_ret[] = {
+        { 0x1000, "int1", 0, 0, 0, 0 },
+        { 0x1001, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn int3_ret[] = {
+        { 0x1000, "int3", 0, 0, 0, 0 },
+        { 0x1001, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn lret[] = {
+        { 0x1000, "lret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn retf[] = {
+        { 0x1000, "retf", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn ud2[] = {
+        { 0x1000, "ud2", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn bound_ret[] = {
+        { 0x1000, "bound", 2, X86_OP_REG, 0, X86_REG_EAX },
+        { 0x1002, "ret", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn sysenter[] = {
+        { 0x1000, "sysenter", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn rsm[] = {
+        { 0x1000, "rsm", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn xbegin[] = {
+        { 0x1000, "xbegin", 1, X86_OP_IMM, 0x3000, 0 },
+    };
+    static const LfX87TestInsn xabort[] = {
+        { 0x1000, "xabort", 1, X86_OP_IMM, 0x01, 0 },
+    };
+    static const LfX87TestInsn mov_ret[] = {
+        { 0x1000, "mov", 2, X86_OP_REG, 0, X86_REG_EAX },
+        { 0x1005, "ret", 0, 0, 0, 0 },
+    };
+    /* Code after a near return is unreachable unless an earlier branch
+     * targets past it.  Trailing int3 padding must not turn a padded leaf
+     * into an x87 reader. */
+    static const LfX87TestInsn ret_int3[] = {
+        { 0x1000, "ret", 0, 0, 0, 0 },
+        { 0x1001, "int3", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn ret_fld1[] = {
+        { 0x1000, "ret", 0, 0, 0, 0 },
+        { 0x1001, "fld1", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn jmp_int3[] = {
+        { 0x1000, "jmp", 1, X86_OP_IMM, 0x3000, 0 },
+        { 0x1005, "int3", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn jmp_fld1[] = {
+        { 0x1000, "jmp", 1, X86_OP_IMM, 0x3000, 0 },
+        { 0x1005, "fld1", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn jmp_back[] = {
+        { 0x1000, "jmp", 1, X86_OP_IMM, 0x1000, 0 },
+        { 0x1002, "int3", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn ret_branch_over[] = {
+        { 0x1000, "jne", 1, X86_OP_IMM, 0x1005, 0 },
+        { 0x1002, "ret", 0, 0, 0, 0 },
+        { 0x1005, "fld1", 0, 0, 0, 0 },
+    };
+    static const LfX87TestInsn ret_branch_over_no_read[] = {
+        { 0x1000, "jne", 1, X86_OP_IMM, 0x1005, 0 },
+        { 0x1002, "ret", 0, 0, 0, 0 },
+        { 0x1005, "mov", 2, X86_OP_REG, 0, X86_REG_EAX },
+    };
+    static const LfX87TestInsn call_ret_int3[] = {
+        { 0x1000, "call", 1, X86_OP_IMM, 0x3000, 0 },
+        { 0x1005, "ret", 0, 0, 0, 0 },
+        { 0x1006, "int3", 0, 0, 0, 0 },
+    };
+    Lifter L;
+    int rc = 0;
+
+    memset(&L, 0, sizeof L);
+    if (csg_open_x86(&L.h) != 0) return 2;
+
+    if (lf_x87_test_scan(&L, ret, 1, 0, 0, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, wait_ret, 2, 0, 0, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, fwait_ret, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, fnop_ret, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, fld1_ret, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, emms_ret, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, mmx_ret, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, xsave_ret, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, xrstor_ret, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, call_no_read, 2, 0x2000, 0x3000, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, call_read, 2, 0x2000, 0x2000, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, call_indirect, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, jmp_no_read, 1, 0x2000, 0x3000, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, jmp_read, 1, 0x2000, 0x2000, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, jmp_indirect, 1, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, jcc_internal, 2, 0, 0, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, jcc_external, 2, 0x2000, 0x3000, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, loop_internal, 2, 0, 0, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, loop_external, 2, 0x2000, 0x2000, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, int1_ret, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, int3_ret, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, lret, 1, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, retf, 1, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, ud2, 1, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, bound_ret, 2, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, sysenter, 1, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, rsm, 1, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, xbegin, 1, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, xabort, 1, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, mov_ret, 2, 0, 0, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, ret_int3, 2, 0, 0, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, ret_fld1, 2, 0, 0, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, jmp_int3, 2, 0, 0x3000, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, jmp_fld1, 2, 0, 0x3000, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, jmp_back, 2, 0, 0, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, ret_branch_over, 3, 0, 0, 1)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, ret_branch_over_no_read, 3, 0, 0, 0)) rc = 1;
+    if (!rc && lf_x87_test_scan(&L, call_ret_int3, 3, 0x2000, 0x3000, 0)) rc = 1;
+    if (!rc && lf_x87_test_fnstsw_sync()) rc = 1;
+
+    csg.close(&L.h);
+    return rc;
+}
+
 static void lf_summary_enqueue(Lifter *L, uint32_t addr)
 {
     LfFlagSummary *s = lf_summary_lookup(L, addr);
@@ -3000,6 +3657,20 @@ void lf_precompute_summaries(Lifter *L)
     size_t fi;
     uint8_t *addr_taken = NULL;
     uint8_t *phase1_done = NULL;
+
+    /* Per-function x87/MMX read summaries are built lazily at emission time.
+     * The arrays are keyed by func_map index so they do not disturb the flag
+     * summary table. */
+    if (L->func_n && !L->x87_callee_state) {
+        L->x87_callee_state = (uint8_t *)calloc(L->func_n, 1);
+        L->x87_callee_may = (uint8_t *)calloc(L->func_n, 1);
+        if (!L->x87_callee_state || !L->x87_callee_may) {
+            free(L->x87_callee_state);
+            free(L->x87_callee_may);
+            L->x87_callee_state = NULL;
+            L->x87_callee_may = NULL;
+        }
+    }
     if (!L->flag_boundary) {
         L->summary_precomputed = 1;
         return;
@@ -3583,6 +4254,7 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
     size_t out_len = 0, out_cap = 0;
     int i;
     int has_x87 = 0;
+    int has_x87_use = 0;
     uint8_t *flag_role = NULL;
     LfFlagFuse *flag_fuse = NULL;
     uint8_t *flag_live_out = NULL;
@@ -3659,18 +4331,31 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
      * ones decoded while growing the extent: a short seed extent can end
      * before the first fpu instruction, and deciding early left functions
      * using `st`/`x87_top` without declaring them. */
-    for (i = 0; i < n; i++)
-        if (ins[i].insn.mnemonic[0] == 'f') { has_x87 = 1; break; }
+    for (i = 0; i < n; i++) {
+        const char *m = ins[i].insn.mnemonic;
+        if (m[0] != 'f') continue;
+        has_x87 = 1;
+        if (x87_is_local_stack_op(m))
+            has_x87_use = 1;
+    }
+    /* MMX aliases the low 64 bits of st[], but the MMX translation reads and
+     * writes c->st[] directly.  A function whose only vector instructions are
+     * MMX needs no local x87 frame; a mixed function already sets has_x87_use
+     * from its real x87 stack instructions above. */
 
-    /* D1 is part of the normal generator, not an opt-in experiment.  The
-     * per-function x87_lazy_check() still falls back to the eager path when
-     * the stack top is not provably zero at internal boundaries. */
-    L->x87_lazy = 1;
+    /* A function whose only x87 mnemonics are control/status transfers (or
+     * fwait/fnop) has no virtual stack state to maintain.  Suppressing the
+     * frame here also suppresses stale-label/pending bookkeeping and keeps
+     * lf_fpu() from seeing an uninitialized local frame. */
+    if (!has_x87_use) has_x87 = 0;
+
     L->flag_boundary = 1;
-    L->x87_lazy_safe = 0;
-    if (has_x87 && L->x87_lazy)
-        L->x87_lazy_safe = x87_lazy_check(L, ins, n, labels, nlabels);
     L->x87_dirty = 0;
+    L->x87_load_pending = 0;
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+    if (g_x87_dbg_on && has_x87)
+        g_x87_dbg.funcs_x87++;
+#endif
 
     L->summary.addr = 0xffffffffu;
     lf_compute_summary(L, ins, n, start, &L->summary);
@@ -3716,10 +4401,16 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
     }
     if (has_x87) {
         append_str(&out, &out_len, &out_cap,
-                   "    double st[8]; int x87_base; uint16_t x87_tag;\n"
-                   "    VS_LOAD(c, st, x87_tag, x87_base);\n");
+                   "    double st[8]; int x87_base; uint16_t x87_tag;\n");
         L->x87_top = 0;
         L->x87_dirty = 0;
+        /* The CPU always owns the architectural x87 state on entry.  Defer
+         * the local copy until the first instruction/block that actually
+         * needs it.  A label/jump/use will load the frame before consuming
+         * it.  Keeping the frame uninitialized here also prevents a
+         * control/status-only function from paying for a stack copy it never
+         * reads. */
+        L->x87_load_pending = 1;
     }
     for (i = 0; i < n; i++) {
         cs_insn *in = &ins[i].insn;
@@ -3732,41 +4423,125 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
                         strstr(in->mnemonic, "iret") ||
                         LST(in->mnemonic, "loop", "loope", "loopz", "loopne", "loopnz");
         int is_label = label_has(labels, nlabels, in->address);
-        int x87_internal_branch = has_x87 &&
-                                  x87_branch_internal(in, labels, nlabels);
-        int x87_external_transfer = 0;
         /* MMX aliases the low 64 bits of the same physical st[8].  A mixed
-         * x87/MMX function must spill the virtual stack before the MMX
+         * x87/MMX function must spill a dirty virtual stack before the MMX
          * instruction and reload it afterwards, or MMX reads stale values and
-         * later x87 ops overwrite the MMX result. */
+         * later x87 ops overwrite the MMX result.  A clean/authoritative local
+         * frame already matches CPU and needs no pre-flush. */
         int is_mmx = has_x87 && lf_is_mmx(L, in);
-        if (has_x87) {
-            if (L->x87_lazy_safe) {
-                if (!strcmp(in->mnemonic, "call") ||
-                    !strcmp(in->mnemonic, "ret") ||
-                    !strcmp(in->mnemonic, "retn") ||
-                    !strcmp(in->mnemonic, "retf") ||
-                    !strcmp(in->mnemonic, "hlt") ||
-                    !strcmp(in->mnemonic, "iret") ||
-                    !strcmp(in->mnemonic, "iretd") ||
-                    (is_branch && !x87_internal_branch)) {
-                    x87_external_transfer = 1;
-                }
-                if (x87_external_transfer && L->x87_dirty) {
-                    char x87buf[128];
-                    snprintf(x87buf, sizeof x87buf,
-                             "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n",
-                             L->x87_top);
-                    append_str(&out, &out_len, &out_cap, x87buf);
-                    L->x87_dirty = 0;
-                }
-            } else if (is_branch || is_label) {
-                char x87buf[128];
-                snprintf(x87buf, sizeof x87buf,
-                         "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n", L->x87_top);
-                append_str(&out, &out_len, &out_cap, x87buf);
+        /* Only a real stack/control-flow-relevant x87 instruction needs the
+         * local st[] frame.  fnstcw/fnstsw/fldcw/fnclex/fclex operate on the
+         * CPU control/status words directly.  MMX also needs no VS_LOAD: it
+         * addresses the CPU-visible st[] aliases, and the pre-MMX flush below
+         * is the only required synchronization when the local frame is dirty. */
+        int x87_stack_use = has_x87 && x87_is_local_stack_op(in->mnemonic);
+        int x87_callee_no_read = 0;
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+        int x87_dbg_flush = 0;
+        int x87_dbg_known = 0;
+        int x87_dbg_may = -1;
+        int x87_dbg_top_in = 0;
+        int x87_dbg_dirty_in = 0;
+#endif
+
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+        x87_dbg_top_in = L->x87_top;
+        x87_dbg_dirty_in = L->x87_dirty;
+#endif
+
+        /* Demand-driven x87 load.  The CPU is the authoritative owner of the
+         * architectural state at every boundary.  After a call or MMX the
+         * local st/tag/base are stale, so defer the copy until the first
+         * instruction that actually needs the local stack.  A label with a
+         * local-stack instruction loads in the label block below; a jump has
+         * no local consumer of its own, and an external transfer leaves with
+         * the CPU already authoritative. */
+        if (has_x87 && L->x87_load_pending) {
+            int x87_demand = x87_stack_use && !is_label;
+            if (x87_demand) {
+                append_str(&out, &out_len, &out_cap,
+                           "    VS_LOAD(c, st, x87_tag, x87_base);\n");
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+                if (g_x87_dbg_on) g_x87_dbg.load_emitted++;
+#endif
+                L->x87_load_pending = 0;
+                L->x87_top = 0;
+                L->x87_dirty = 0;
             }
         }
+
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+        if (g_x87_dbg_on && has_x87 && !strcmp(in->mnemonic, "call")) {
+            uint32_t dbg_tgt = (NOPS(in) == 1 && OP(in, 0)->type == X86_OP_IMM)
+                               ? (uint32_t)OP(in, 0)->imm : 0;
+            g_x87_dbg.calls++;
+            g_x87_dbg.calls_x87++;
+            if (L->x87_top == 0) g_x87_dbg.calls_top0++;
+            if (dbg_tgt) {
+                g_x87_dbg.calls_direct++;
+                x87_dbg_known = lf_func_index(L, dbg_tgt) >= 0;
+                if (x87_dbg_known) g_x87_dbg.calls_known++;
+                else g_x87_dbg.calls_unknown++;
+                x87_dbg_may = lf_x87_callee_may_read(L, dbg_tgt);
+                if (x87_dbg_may) g_x87_dbg.calls_may++;
+                else g_x87_dbg.calls_no_read++;
+            }
+        }
+#endif
+
+        /* A direct callee that never reads x87/MMX does not need the local
+         * stack in CPU.  A call that is itself a label target is kept
+         * conservative because other incoming paths may carry a dirty frame;
+         * the label/transfer rule below flushes it before the call. */
+        if (has_x87 && !strcmp(in->mnemonic, "call") &&
+            NOPS(in) == 1 && OP(in, 0)->type == X86_OP_IMM && !is_label) {
+            x87_callee_no_read = !lf_x87_callee_may_read(
+                L, (uint32_t)OP(in, 0)->imm);
+        }
+
+        /* The local x87 frame is a cache, not the architectural copy.  At
+         * every control-flow join and every call/return the CPU must own the
+         * current values before another path or callee can observe them.  A
+         * dirty frame is therefore flushed before a branch target or label,
+         * and before any call/ret unless the callee provably never reads
+         * x87/MMX.  A clean or pending frame already matches CPU. */
+        if (has_x87 && (is_branch || is_label) && L->x87_dirty &&
+            !x87_callee_no_read) {
+            char x87buf[128];
+            snprintf(x87buf, sizeof x87buf,
+                     "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n", L->x87_top);
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+            if (!strcmp(in->mnemonic, "call")) x87_dbg_flush = 1;
+#endif
+            append_str(&out, &out_len, &out_cap, x87buf);
+            L->x87_dirty = 0;
+        }
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+        if (g_x87_dbg_on && has_x87 && !strcmp(in->mnemonic, "call")) {
+            if (x87_callee_no_read) {
+                g_x87_dbg.flush_skipped++;
+            } else if (!x87_dbg_flush && x87_dbg_dirty_in == 0) {
+                g_x87_dbg.flush_clean_skipped++;
+            } else if (x87_dbg_flush) {
+                g_x87_dbg.flush_emitted++;
+                if (x87_dbg_top_in != 0) g_x87_dbg.flush_top++;
+                else if (x87_dbg_known) g_x87_dbg.flush_may++;
+                else g_x87_dbg.flush_unknown++;
+            }
+            if (g_x87_dbg_trace && lf_x87_dbg_sel(start))
+                fprintf(stderr,
+                        "[x87dbg] L_%08X call %08X in_top=%d in_dirty=%d "
+                        "out_top=%d out_dirty=%d pending=%d known=%d "
+                        "may=%d no_read=%d flush=%d\n",
+                        start,
+                        (NOPS(in) == 1 && OP(in, 0)->type == X86_OP_IMM)
+                            ? (uint32_t)OP(in, 0)->imm : 0,
+                        x87_dbg_top_in, x87_dbg_dirty_in,
+                        L->x87_top, L->x87_dirty, L->x87_load_pending,
+                        x87_dbg_known, x87_dbg_may,
+                        x87_callee_no_read, x87_dbg_flush);
+        }
+#endif
         if (is_label) {
             char lb[32];
             int ln = snprintf(lb, sizeof lb, "L_%08X:\n", (uint32_t)in->address);
@@ -3774,35 +4549,38 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
             memcpy(out + out_len, lb, (size_t)ln);
             out_len += (size_t)ln;
             if (has_x87) {
-                if (!L->x87_lazy_safe) {
+                /* A label can be entered from a path whose local x87 copy is
+                 * stale.  If the label instruction itself is a local-stack
+                 * user, load now; otherwise remember that the local copy is
+                 * stale and defer the load to the first real use.  The transfer
+                 * rule above flushed any dirty fall-through state before this
+                 * label, and every branch into the label did the same at its
+                 * own site, so CPU is authoritative on all incoming paths.
+                 * MMX and control/status instructions need no local frame. */
+                if (x87_stack_use) {
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+                    if (g_x87_dbg_on) g_x87_dbg.load_emitted++;
+#endif
                     append_str(&out, &out_len, &out_cap,
                                "    VS_LOAD(c, st, x87_tag, x87_base);\n");
+                    L->x87_load_pending = 0;
                     L->x87_top = 0;
+                    L->x87_dirty = 0;
                 } else {
-                    /* A label may be entered from a dirty path.  Treat the
-                     * state as dirty so a later real transfer flushes. */
-                    L->x87_dirty = 1;
+                    L->x87_load_pending = 1;
                     L->x87_top = 0;
+                    L->x87_dirty = 0;
                 }
             }
         }
         if (is_mmx) {
-            if (has_x87) {
-                if (L->x87_lazy_safe) {
-                    if (L->x87_dirty) {
-                        char x87buf[128];
-                        snprintf(x87buf, sizeof x87buf,
-                                 "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n",
-                                 L->x87_top);
-                        append_str(&out, &out_len, &out_cap, x87buf);
-                        L->x87_dirty = 0;
-                    }
-                } else {
-                    char x87buf[128];
-                    snprintf(x87buf, sizeof x87buf,
-                             "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n", L->x87_top);
-                    append_str(&out, &out_len, &out_cap, x87buf);
-                }
+            if (has_x87 && L->x87_dirty) {
+                char x87buf[128];
+                snprintf(x87buf, sizeof x87buf,
+                         "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n",
+                         L->x87_top);
+                append_str(&out, &out_len, &out_cap, x87buf);
+                L->x87_dirty = 0;
             }
         }
         lf_arena_reset();
@@ -3821,15 +4599,38 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
             out_len += (size_t)ln;
         }
         if (has_x87) {
-            if (!strcmp(in->mnemonic, "call") || is_mmx) {
-                append_str(&out, &out_len, &out_cap,
-                           "    VS_LOAD(c, st, x87_tag, x87_base);\n");
+            if (!strcmp(in->mnemonic, "call")) {
+                if (!x87_callee_no_read) {
+                    /* The callee owns the authoritative x87 state.  Keep the
+                     * local copy stale until a real reader needs it: a
+                     * subsequent call reads CPU, not the caller's local copy,
+                     * and a label/real use will load it on demand. */
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+                    if (g_x87_dbg_on) g_x87_dbg.load_deferred++;
+#endif
+                    L->x87_load_pending = 1;
+                    L->x87_top = 0;
+                    L->x87_dirty = 0;
+                }
+                /* A no-read callee leaves st/top/dirty/pending untouched. */
+            } else if (is_mmx) {
+                /* MMX operates on the CPU-visible low 64 bits of st[]; the
+                 * pre-MMX flush (only when dirty) has synchronized them.  Do
+                 * not reload the local x87 frame now: the next x87 reader can
+                 * take the authoritative values from CPU on demand. */
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+                if (g_x87_dbg_on) g_x87_dbg.mmx_deferred++;
+#endif
+                L->x87_load_pending = 1;
                 L->x87_top = 0;
                 L->x87_dirty = 0;
             } else {
                 x87_top_after(L, in->mnemonic);
-                if (L->x87_lazy_safe && in->mnemonic[0] == 'f' &&
-                    !LST(in->mnemonic, "fwait", "fnop")) {
+                /* Only instructions that can change st[]/tag/top make the
+                 * CPU copy stale.  Control/status transfers, resets that
+                 * reload the frame, and fxam (which flushes first) must not
+                 * turn a still-pending or clean frame into a dirty one. */
+                if (x87_modifies_local_stack(in->mnemonic)) {
                     L->x87_dirty = 1;
                 }
             }
@@ -3843,7 +4644,7 @@ char *lf_lift_function(Lifter *L, uint32_t start, uint32_t size)
         uint32_t nxt = n ? (uint32_t)(ins[n - 1].insn.address + ins[n - 1].insn.size) : end;
         char tail[160];
         int tn;
-        if (has_x87 && (!L->x87_lazy_safe || L->x87_dirty)) {
+        if (has_x87 && L->x87_dirty) {
             char x87buf[128];
             snprintf(x87buf, sizeof x87buf,
                      "    VS_FLUSH(c, st, x87_tag, x87_base, %d);\n", L->x87_top);

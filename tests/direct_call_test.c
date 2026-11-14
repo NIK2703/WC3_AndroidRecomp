@@ -100,6 +100,14 @@ static void leaf_caller(CPU *c) {
     WC3_DIRECT_CALL_LEAF(leaf_probe, c);
 }
 
+/* A tail-free non-leaf may contain a nested direct call; the nested frame owns
+ * and drains its own tail.  The depth-only frame only has to restore depth. */
+static void depth_nested(CPU *c) {
+    note(c, 11);
+    WC3_DIRECT_CALL(nested_tail, c);
+    note(c, 12);
+}
+
 int main(void)
 {
     CPU c = { .n = 0, .hops = 0 };
@@ -163,6 +171,27 @@ int main(void)
     WC3_GUEST_DRAIN(&c);
     CHECK(c.disp_pending_valid == 0u);
 
-    printf("direct_call_test: OK (tail chain, nesting, leaf depth, 100000 hops)\n");
+    /* 9. depth-only frame: a nested full call drains its own tail */
+    c.n = 0;
+    WC3_DIRECT_CALL_DEPTH(depth_nested, &c);
+    CHECK(c.n == 4);
+    CHECK(c.log[0] == 11 && c.log[1] == 7 && c.log[2] == 8 &&
+          c.log[3] == 12);
+    CHECK(wc3_guest_depth_get(&c) == 0u);
+    CHECK(c.disp_pending_valid == 0u);
+
+    /* 10. clean frame: drain a tailful callee, restore the caller's draining */
+    c.n = 0;
+    c.disp_draining = 1u;
+    WC3_DIRECT_CALL_CLEAN(f_a, &c);
+    CHECK(c.n == 3);
+    CHECK(c.log[0] == 1 && c.log[1] == 2 && c.log[2] == 3);
+    CHECK(wc3_guest_depth_get(&c) == 0u);
+    CHECK(c.disp_pending_valid == 0u);
+    CHECK(c.disp_draining == 1u);
+    c.disp_draining = 0u;
+
+    printf("direct_call_test: OK (tail chain, nesting, depth/clean frames, "
+           "100000 hops)\n");
     return 0;
 }

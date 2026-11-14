@@ -38,7 +38,18 @@ class LaunchSettingsStore(context: Context) {
         longPressTimeoutMs = prefs.getInt(
             KEY_LONG_PRESS_TIMEOUT_MS,
             LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS
-        )
+        ),
+        tapClickDelayMs = prefs.getInt(
+            KEY_TAP_CLICK_DELAY_MS,
+            LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS
+        ).let {
+            if (it >= LaunchContract.MIN_TAP_CLICK_DELAY_MS &&
+                it <= LaunchContract.MAX_TAP_CLICK_DELAY_MS) {
+                it
+            } else {
+                LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS
+            }
+        }
     )
 
     fun save(settings: LaunchSettings): Boolean =
@@ -54,6 +65,13 @@ class LaunchSettingsStore(context: Context) {
             .putBoolean(KEY_DOUBLE_TAP_GESTURES, settings.doubleTapGestures)
             .putInt(KEY_DOUBLE_TAP_TIMEOUT_MS, settings.doubleTapTimeoutMs)
             .putInt(KEY_LONG_PRESS_TIMEOUT_MS, settings.longPressTimeoutMs)
+            .putInt(
+                KEY_TAP_CLICK_DELAY_MS,
+                settings.tapClickDelayMs.coerceIn(
+                    LaunchContract.MIN_TAP_CLICK_DELAY_MS,
+                    LaunchContract.MAX_TAP_CLICK_DELAY_MS
+                )
+            )
             .commit()
 
     private companion object {
@@ -69,5 +87,6 @@ class LaunchSettingsStore(context: Context) {
         const val KEY_DOUBLE_TAP_GESTURES = "double_tap_gestures"
         const val KEY_DOUBLE_TAP_TIMEOUT_MS = "double_tap_timeout_ms"
         const val KEY_LONG_PRESS_TIMEOUT_MS = "long_press_timeout_ms"
+        const val KEY_TAP_CLICK_DELAY_MS = "tap_click_delay_ms"
     }
 }

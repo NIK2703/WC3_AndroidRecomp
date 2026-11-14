@@ -96,7 +96,8 @@ static bool cache_ready(const Wc3Overlay *o) {
            cache->height > 0 && cache->stride_bytes >= cache->width * 4 &&
            cache->element_count == o->element_count &&
            cache->overlay_width == o->width &&
-           cache->overlay_height == o->height;
+           cache->overlay_height == o->height &&
+           cache->layout_id == o->layout_id;
 }
 
 static const Wc3OverlayCacheLayer *cache_find_layer(const Wc3Overlay *o,
@@ -333,6 +334,7 @@ int overlay_cache_set_atlas(Wc3Overlay *overlay, uint8_t *pixels,
     overlay->cache.element_count = element_count;
     overlay->cache.overlay_width = overlay->width;
     overlay->cache.overlay_height = overlay->height;
+    overlay->cache.layout_id = overlay->layout_id;
     for (int e = 0; e < WC3_OVERLAY_MAX_ELEMENTS; e++)
         for (int s = 0; s < WC3_OVERLAY_CACHE_SLOT_COUNT; s++)
             overlay->cache.layer_index[e][s] = -1;
@@ -544,6 +546,7 @@ bool overlay_visual_state_equal(const Wc3Overlay *shown,
     if (shown->width != candidate->width ||
         shown->height != candidate->height ||
         shown->alpha_mode != candidate->alpha_mode ||
+        shown->layout_id != candidate->layout_id ||
         shown->element_count != candidate->element_count ||
         shown->style.overlay_opacity != candidate->style.overlay_opacity ||
         shown->style.fill_alpha_inactive !=

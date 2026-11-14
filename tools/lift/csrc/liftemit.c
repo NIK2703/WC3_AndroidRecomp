@@ -335,7 +335,14 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
     }
 
     if (!strcmp(m, "fnstsw")) {
-        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
+        /* FNSTSW exposes the TOP field of the status word.  Local x87 stack
+         * operations change the virtual top but do not write c->fpu_sw, so a
+         * dirty local frame must publish only that field before the read.
+         * The full VS_FLUSH is unnecessary: FNSTSW observes neither st[] nor
+         * the tag word, and a pending/clean frame already has a correct TOP. */
+        if (L->x87_dirty)
+            lf_push(&e, lf_afmt("c->fpu_top = (x87_base + %d) & 7; x87_set_top(c);",
+                                L->x87_top));
         if (nops && OP(insn, 0)->type == X86_OP_REG) {
             lf_push(&e, "SET16(c->eax, (uint16_t)c->fpu_sw);");
             return e;
@@ -344,7 +351,6 @@ Emit lf_fpu(Lifter *L, cs_insn *insn)
         return e;
     }
     if (!strcmp(m, "fnstcw")) {
-        lf_push(&e, lf_afmt("VS_FLUSH(c, st, x87_tag, x87_base, %d);", L->x87_top));
         lf_push(&e, lf_wr(L, insn, OP(insn, 0), "c->fpu_cw"));
         return e;
     }

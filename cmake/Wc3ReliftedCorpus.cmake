@@ -475,11 +475,12 @@ if(NOT WC3_RELIFTED_SOURCES)
     message(FATAL_ERROR "relifted corpus has no translation units")
 endif()
 
-# D4: leaf calls need a complete-corpus summary, because a caller and its leaf
-# callee may be split into different translation units.  Run one text pass over
-# the final chunks after every other pass, then compile its outputs.  A function
-# is a leaf only when it contains no guest call, tail dispatch, HLE/W3L helper
-# or dispatcher-state access; the pass rewrites only calls to such targets.
+# D4/D4b: the call-frame ladder needs a complete-corpus summary, because a
+# caller and its callee may be split into different translation units.  Run one
+# text pass over the final chunks after every other pass, then compile its
+# outputs.  The pass selects a leaf, tail-free or draining frame per direct call
+# target; unknown targets and tailful calls in unproven caller bodies keep the
+# full WC3_DIRECT_CALL.
 set(_wc3_leaf_dir "${CMAKE_CURRENT_BINARY_DIR}/leaf_call")
 set(_wc3_leaf_list "${CMAKE_CURRENT_BINARY_DIR}/leaf_call_inputs.txt")
 set(_wc3_leaf_report "${WC3_ROOT}/reports/generated/leaf_call.json")

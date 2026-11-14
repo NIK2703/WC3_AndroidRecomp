@@ -167,6 +167,12 @@ _Static_assert(offsetof(CPU, xmm) == 216, "CPU.xmm offset changed");
 void dispatch(CPU *c, uint32_t target);
 void dispatch_jmp(CPU *c, uint32_t target);
 
+/* Exact game-state transition hook, emitted by the lifter after the pinned
+ * CGameUI/CEscMenu/CGameOverMenu stores.  The host implementation lives in
+ * runtime/ipc/game_state.c; keeping the declaration here makes generated C a
+ * complete translation unit without a second include. */
+void wc3_game_state_hook(unsigned kind, uint32_t value);
+
 /* ---- CPUID / RDTSC -------------------------------------------------------
  *
  * A fixed, documented CPU profile is part of the ABI: changing it can select

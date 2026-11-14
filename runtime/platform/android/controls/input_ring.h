@@ -67,6 +67,10 @@ int input_ring_push(Wc3InputRing *ring, const Wc3TouchEvent *event);
 /* Copies at most max events in FIFO order and returns the number copied. */
 int input_ring_pop_batch(Wc3InputRing *ring, Wc3TouchEvent *out, int max);
 
+/* 1 when no event is queued.  The input thread uses this as one of the exact
+ * preconditions for changing the overlay profile. */
+int input_ring_is_empty(Wc3InputRing *ring);
+
 void input_ring_clear(Wc3InputRing *ring);
 void input_ring_note_fault(Wc3InputRing *ring);
 void input_ring_get_stats(Wc3InputRing *ring, Wc3InputRingStats *out);

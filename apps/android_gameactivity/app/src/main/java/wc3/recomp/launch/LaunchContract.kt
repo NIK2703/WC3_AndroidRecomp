@@ -21,11 +21,19 @@ object LaunchContract {
     const val KEY_DOUBLE_TAP_GESTURES = "double_tap_gestures"
     const val KEY_DOUBLE_TAP_TIMEOUT_MS = "double_tap_timeout_ms"
     const val KEY_LONG_PRESS_TIMEOUT_MS = "long_press_timeout_ms"
+    const val KEY_TAP_CLICK_DELAY_MS = "tap_click_delay_ms"
 
     /* The authored .icp profile uses 120 ms for both gesture timers.  The
      * settings screen exposes only the product range 100..200 ms, step 10. */
     const val DEFAULT_DOUBLE_TAP_TIMEOUT_MS = 120
     const val DEFAULT_LONG_PRESS_TIMEOUT_MS = 120
+
+    /* Wall-clock delay between a pointer move and the LMB press in the
+     * simplified (non-gameplay) overlay.  The settings screen exposes the
+     * native clamp range 8..40 ms in 1 ms steps. */
+    const val DEFAULT_TAP_CLICK_DELAY_MS = 10
+    const val MIN_TAP_CLICK_DELAY_MS = 8
+    const val MAX_TAP_CLICK_DELAY_MS = 40
 
     /* The product default is DXVK 1.10.3 ("1").  An empty version is the
      * explicit "Auto" choice and keeps the driver-based compatibility gate. */

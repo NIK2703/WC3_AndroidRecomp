@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "overlay.h"
+#include "overlay_mode.h"
 #include "core/types/touch_action.h"
 
 #ifdef __cplusplus
@@ -36,13 +37,15 @@ int controls_init(const char *profile_json, int width, int height);
 /*
  * Same as controls_init(), but applies the product gesture mode and timers
  * before the profile is converted to the engine config.  A timer <= 0 keeps
- * the authored .icp value.  The legacy controls_init() keeps the profile
- * unchanged, which is also what a direct diagnostic launch without the
- * settings bundle receives.
+ * the authored .icp value.  tap_click_delay_ms is the SIMPLE-overlay delay
+ * between a pointer move and the LMB press; <= 0 selects the 10 ms default
+ * and any value is clamped to 8..40 ms.  The legacy controls_init() keeps the
+ * profile unchanged, which is also what a direct diagnostic launch without
+ * the settings bundle receives.
  */
 int controls_init_ex(const char *profile_json, int width, int height,
                      bool double_tap_enabled, int double_tap_timeout_ms,
-                     int long_press_timeout_ms);
+                     int long_press_timeout_ms, int tap_click_delay_ms);
 
 void controls_set_action_sink(Wc3ActionSink sink, void *user);
 
@@ -67,7 +70,27 @@ int controls_needs_tick(void);
 uint64_t controls_next_deadline_ms(uint64_t now_ms);
 void controls_cancel_all(void);
 
-void controls_resize(int width, int height);
+/*
+ * Exact switch guard.  Returns 1 only when no finger, held action, deferred
+ * tap, scheduled action or simulated click is live.  The host must also ensure
+ * its own action queue is empty before calling controls_set_overlay_mode().
+ */
+int controls_switch_safe(void);
+
+/*
+ * Switch between the authored FULL profile and the derived SIMPLE profile.
+ * The switch is rejected (negative result, current mode unchanged) when the
+ * engine is busy or SIMPLE could not be derived from the authored ESC.
+ * A successful switch releases held bindings and increments layout_id.
+ */
+int controls_set_overlay_mode(Wc3OverlayMode mode);
+Wc3OverlayMode controls_overlay_mode(void);
+
+/* Monotonic id of the current engine layout; 0 before the first init. */
+uint32_t controls_layout_id(void);
+
+/* Rebuild the current layout at a new size.  Returns 0 on success. */
+int controls_resize(int width, int height);
 
 /*
  * Fill overlay metadata from the engine.  Call after init and after every

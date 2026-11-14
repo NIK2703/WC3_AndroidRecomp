@@ -38,6 +38,7 @@ With no addresses given, lifts every function in funcs.txt.
 import os, sys, re
 from capstone import *
 from capstone.x86 import *
+from state_hooks import hook_at
 
 IMAGE_BASE = 0x11000000   # overridden from the PE's ImageBase in main()
 
@@ -535,7 +536,14 @@ class Lifter:
 
         # arithmetic / logic
         if m == "mov":
-            d, s = two(); return [self.dst_write(insn, d, self.src(insn, s))]
+            d, s = two()
+            out = [self.dst_write(insn, d, self.src(insn, s))]
+            # Exact game-state publication: the store above is the transition,
+            # so the hook must follow it in the same generated block.
+            hook = hook_at(insn.address)
+            if hook is not None:
+                out.append(hook.line)
+            return out
         if m == "lea":
             d, s = two(); return [reg_write(self.md.reg_name(d.reg), self.addr_expr(insn, s))]
         if m in ("add","sub","and","or","xor","adc","sbb"):

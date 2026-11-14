@@ -57,14 +57,14 @@ public class Wc3GameActivity extends GameActivity {
 
     /* JNI matches by name only; host_shell.c must keep the same parameter
      * order (driver id before driver root, DXVK version and config path, then
-     * the gesture flag and timers last).  These values are strings, so a swap
-     * compiles and fails only at runtime. */
+     * the gesture flag and timers, and the SIMPLE tap delay last).  These
+     * values are strings, so a swap compiles and fails only at runtime. */
     private static native void nativeApplyLaunchSettings(
             String gameDir, int width, int height, boolean sound,
             String extraArgs, String driverId, String driverRoot,
             String hookDir, String dxvkVersion, String dxvkConfigPath,
             boolean doubleTapGestures, int doubleTapTimeoutMs,
-            int longPressTimeoutMs);
+            int longPressTimeoutMs, int tapClickDelayMs);
 
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
@@ -195,7 +195,10 @@ public class Wc3GameActivity extends GameActivity {
                         LaunchContract.DEFAULT_DOUBLE_TAP_TIMEOUT_MS),
                 settings.getInt(
                         LaunchContract.KEY_LONG_PRESS_TIMEOUT_MS,
-                        LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS));
+                        LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS),
+                settings.getInt(
+                        LaunchContract.KEY_TAP_CLICK_DELAY_MS,
+                        LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS));
     }
 
     /**

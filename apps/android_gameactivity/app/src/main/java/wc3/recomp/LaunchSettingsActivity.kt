@@ -56,6 +56,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var doubleTapDelayValue: TextView
     private lateinit var longPressDelaySlider: SeekBar
     private lateinit var longPressDelayValue: TextView
+    private lateinit var tapClickDelaySlider: SeekBar
+    private lateinit var tapClickDelayValue: TextView
     private lateinit var argsInput: EditText
     private lateinit var driverStore: VulkanDriverStore
     private lateinit var driverSpinner: Spinner
@@ -185,6 +187,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         doubleTapDelayValue = findViewById(R.id.double_tap_delay_value)
         longPressDelaySlider = findViewById(R.id.long_press_delay_slider)
         longPressDelayValue = findViewById(R.id.long_press_delay_value)
+        tapClickDelaySlider = findViewById(R.id.tap_click_delay_slider)
+        tapClickDelayValue = findViewById(R.id.tap_click_delay_value)
         argsInput = findViewById(R.id.args_input)
         driverSpinner = findViewById(R.id.driver_spinner)
         driverStatus = findViewById(R.id.driver_status)
@@ -272,6 +276,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
             longPressDelayValue,
             settings.longPressTimeoutMs
         )
+        bindTapClickDelaySlider(settings.tapClickDelayMs)
         argsInput.setText(settings.extraArgs)
         rebuildDriverOptions(settings.driverId)
         updateDriverStatus()
@@ -331,6 +336,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
 
         wireDelaySlider(doubleTapDelaySlider, doubleTapDelayValue)
         wireDelaySlider(longPressDelaySlider, longPressDelayValue)
+        wireTapClickDelaySlider()
 
         resolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -863,7 +869,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
             doubleTapGestures = gestureModeOptions
                 .getOrNull(gestureModeSpinner.selectedItemPosition)?.doubleTap ?: true,
             doubleTapTimeoutMs = progressToDelay(doubleTapDelaySlider.progress),
-            longPressTimeoutMs = progressToDelay(longPressDelaySlider.progress)
+            longPressTimeoutMs = progressToDelay(longPressDelaySlider.progress),
+            tapClickDelayMs = tapClickDelayFromProgress(tapClickDelaySlider.progress)
         )
     }
 
@@ -944,6 +951,54 @@ class LaunchSettingsActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
         })
     }
+
+    private fun bindTapClickDelaySlider(ms: Int) {
+        tapClickDelaySlider.max =
+            LaunchContract.MAX_TAP_CLICK_DELAY_MS - LaunchContract.MIN_TAP_CLICK_DELAY_MS
+        val progress = tapClickDelayToProgress(ms)
+        tapClickDelaySlider.progress = progress
+        tapClickDelayValue.text = getString(
+            R.string.launch_gesture_delay_value,
+            tapClickDelayFromProgress(progress)
+        )
+    }
+
+    private fun wireTapClickDelaySlider() {
+        tapClickDelaySlider.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(
+                    seekBar: SeekBar?,
+                    progress: Int,
+                    fromUser: Boolean
+                ) {
+                    tapClickDelayValue.text = getString(
+                        R.string.launch_gesture_delay_value,
+                        tapClickDelayFromProgress(progress)
+                    )
+                    if (fromUser && !binding) {
+                        refreshValidation()
+                        saveIfValid()
+                    }
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            }
+        )
+    }
+
+    private fun tapClickDelayToProgress(ms: Int): Int =
+        ms.coerceIn(
+            LaunchContract.MIN_TAP_CLICK_DELAY_MS,
+            LaunchContract.MAX_TAP_CLICK_DELAY_MS
+        ) - LaunchContract.MIN_TAP_CLICK_DELAY_MS
+
+    private fun tapClickDelayFromProgress(progress: Int): Int =
+        LaunchContract.MIN_TAP_CLICK_DELAY_MS + progress.coerceIn(
+            0,
+            LaunchContract.MAX_TAP_CLICK_DELAY_MS - LaunchContract.MIN_TAP_CLICK_DELAY_MS
+        )
 
     /* The slider is an index, not milliseconds: max = 10 maps 100..200 ms in
      * exact 10 ms steps on every Android version. */

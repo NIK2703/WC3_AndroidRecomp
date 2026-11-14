@@ -34,7 +34,10 @@ data class LaunchSettings(
     /* Gesture timers in milliseconds.  The settings UI clamps them to
      * 100..200 in 10 ms steps; the native product helper repeats the clamp. */
     val doubleTapTimeoutMs: Int = LaunchContract.DEFAULT_DOUBLE_TAP_TIMEOUT_MS,
-    val longPressTimeoutMs: Int = LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS
+    val longPressTimeoutMs: Int = LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS,
+    /* Wall-clock delay before the LMB press in the SIMPLE overlay.  The
+     * native helper clamps it to 8..40 ms; 10 ms is the product default. */
+    val tapClickDelayMs: Int = LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS
 ) {
     fun toBundle(): Bundle = Bundle().apply {
         putString(LaunchContract.KEY_GAME_DIR, gameDir)
@@ -48,5 +51,6 @@ data class LaunchSettings(
         putBoolean(LaunchContract.KEY_DOUBLE_TAP_GESTURES, doubleTapGestures)
         putInt(LaunchContract.KEY_DOUBLE_TAP_TIMEOUT_MS, doubleTapTimeoutMs)
         putInt(LaunchContract.KEY_LONG_PRESS_TIMEOUT_MS, longPressTimeoutMs)
+        putInt(LaunchContract.KEY_TAP_CLICK_DELAY_MS, tapClickDelayMs)
     }
 }

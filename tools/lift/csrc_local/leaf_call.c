@@ -1,25 +1,39 @@
-/* leaf_call.c - D4 leaf-call fast path.
+/* leaf_call.c - D4/D4b call-frame ladder.
  *
- * A lifted leaf function has no guest call, tail dispatch, HLE call, W3L
- * helper or direct access to the dispatcher state.  A caller can therefore
- * enter it without the Wc3DispFrame/wc3_guest_enter/leave pair used by
- * WC3_DIRECT_CALL: nothing inside the callee can observe or create a pending
- * tail target, and the guest return address still lives at [esp] exactly as
- * before.  Only disp_depth is maintained for recursion diagnostics.
+ * Generated C replaces every `dispatch(c, VA)` with WC3_DIRECT_CALL.  The full
+ * macro saves five transition fields and drains a pending target after every
+ * call.  That is required only when the callee can publish a tail at its own
+ * level.  This pass classifies the complete corpus and chooses the smallest
+ * safe frame for every direct call:
+ *
+ *   leaf      no guest call, tail, HLE/W3L helper or dispatcher access:
+ *             WC3_DIRECT_CALL_LEAF, a depth-only frame.
+ *   tail-free may enter other guests, but cannot publish pending at its own
+ *             level: WC3_DIRECT_CALL_DEPTH, the same depth-only frame.
+ *   tailful   may publish pending, so the caller drains after the call:
+ *             WC3_DIRECT_CALL_CLEAN, which saves depth and draining only.
+ *   unknown   target did not parse as a known function: leave the full
+ *             WC3_DIRECT_CALL.
+ *
+ * The clean form relies on a structural invariant: at every reachable direct
+ * call site the pending slot is empty.  Generated tails are followed by
+ * `return;`, and a nested direct call owns and drains its own frame.  The pass
+ * checks the caller body and falls back to the full macro if it sees a manual
+ * pending write or a tail without its return, so a future corpus cannot
+ * silently break the invariant.  Leaf and depth calls do not touch pending and
+ * need no such check.
  *
  * This pass runs once over all final relifted chunks, after every other
- * corpus text pass.  It builds one global leaf set from the complete corpus,
- * then rewrites only calls whose target is in that set.  The set is global
- * because splitcorpus can place a caller and its leaf callee in different
- * translation units.
+ * corpus text pass.  Its sets are global because splitcorpus can place a
+ * caller and its callee in different translation units.
  *
  *   leaf_call --inputs FILE --out-dir DIR [--report JSON] [--quiet]
  *   leaf_call --self-test
  *
  * `--inputs` is a text file with one final chunk path per line.  Output files
- * keep the input basename.  A function that cannot be parsed is never treated
- * as a leaf, so an unfamiliar generated form can only miss an optimization,
- * not change dispatch semantics.
+ * keep the input basename.  A function that cannot be parsed is never used as
+ * a proof, so an unfamiliar generated form can only miss an optimization, not
+ * change dispatch semantics.
  */
 #include <ctype.h>
 #include <stdarg.h>
@@ -30,6 +44,9 @@
 
 #define CALL_MACRO "WC3_DIRECT_CALL"
 #define CALL_MACRO_LEN (sizeof(CALL_MACRO) - 1u)
+#define CALL_LEAF CALL_MACRO "_LEAF"
+#define CALL_DEPTH CALL_MACRO "_DEPTH"
+#define CALL_CLEAN CALL_MACRO "_CLEAN"
 
 typedef struct {
     char *p;
@@ -312,6 +329,76 @@ static int body_is_leaf(const char *s)
     return 1;
 }
 
+/* A tail-free callee may enter other guest functions, but cannot publish a
+ * pending target at its own level.  A nested WC3_DIRECT_CALL owns and drains
+ * its own frame; an indirect `dispatch` drains before returning.  Any textual
+ * pending write is rejected: even a clear could hide a more complex state
+ * change that the simple structural proof does not cover. */
+static int body_is_tail_free(const char *s)
+{
+    if (strstr(s, "WC3_DIRECT_TAIL")) return 0;
+    if (strstr(s, "dispatch_jmp")) return 0;
+    if (strstr(s, "wc3_guest_set_pending_fn")) return 0;
+    if (strstr(s, "disp_pending_")) return 0;
+    return 1;
+}
+
+static int word_at(const char *s, size_t n, size_t i, const char *w)
+{
+    size_t len = strlen(w);
+    if (i + len > n) return 0;
+    if (i > 0 && word_char((unsigned char)s[i - 1u])) return 0;
+    if (strncmp(s + i, w, len) != 0) return 0;
+    if (i + len < n && word_char((unsigned char)s[i + len])) return 0;
+    return 1;
+}
+
+/* True when the statement beginning at `i` (a tail macro or dispatch_jmp)
+ * ends at `;` and the next token is `return`.  This is the generated form that
+ * leaves the pending slot empty on every reachable fall-through path. */
+static int tail_followed_by_return(const char *s, size_t n, size_t i)
+{
+    size_t p = i;
+    size_t depth = 0;
+    while (p < n) {
+        int c = (unsigned char)s[p];
+        if (c == '(') {
+            depth++;
+        } else if (c == ')') {
+            if (depth) depth--;
+        } else if (c == ';' && depth == 0) {
+            p++;
+            break;
+        }
+        p++;
+    }
+    while (p < n && (s[p] == ' ' || s[p] == '\t' ||
+                     s[p] == '\r' || s[p] == '\n')) p++;
+    return word_at(s, n, p, "return");
+}
+
+/* The clean frame does not save pending_valid/kind/target, so the slot must be
+ * empty at every call in this body.  A tail is safe only in the generated
+ * `tail; return;` form; a manual pending write makes the body ineligible. */
+static int body_pending_safe(const char *s)
+{
+    size_t n = strlen(s);
+    const char *p;
+    if (strstr(s, "disp_pending_")) return 0;
+    if (strstr(s, "wc3_guest_set_pending_fn")) return 0;
+    for (p = s; (p = strstr(p, "WC3_DIRECT_TAIL")) != NULL; p++) {
+        size_t i = (size_t)(p - s);
+        if (word_at(s, n, i, "WC3_DIRECT_TAIL") &&
+            !tail_followed_by_return(s, n, i)) return 0;
+    }
+    for (p = s; (p = strstr(p, "dispatch_jmp")) != NULL; p++) {
+        size_t i = (size_t)(p - s);
+        if (word_at(s, n, i, "dispatch_jmp") &&
+            !tail_followed_by_return(s, n, i)) return 0;
+    }
+    return 1;
+}
+
 static int call_target(const char *masked, size_t n, size_t pos, uint32_t *out)
 {
     size_t p = pos + CALL_MACRO_LEN;
@@ -346,13 +433,13 @@ static int cmp_u32(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
-static int leaf_contains(const VaVec *v, uint32_t x)
+static int va_contains(const VaVec *v, uint32_t x)
 {
     if (!v->n) return 0;
     return bsearch(&x, v->p, v->n, sizeof x, cmp_u32) != NULL;
 }
 
-static void sort_leafs(VaVec *v)
+static void sort_vas(VaVec *v)
 {
     if (v->n > 1u) qsort(v->p, v->n, sizeof *v->p, cmp_u32);
 }
@@ -366,7 +453,8 @@ static const char *path_base(const char *path)
     return last ? last + 1 : path;
 }
 
-static void collect_leafs(const char *path, VaVec *leafs, size_t *funcs)
+static void collect_sets(const char *path, VaVec *leafs, VaVec *depths,
+                         VaVec *known, VaVec *unsafe, size_t *funcs)
 {
     size_t n;
     char *text = read_file(path, &n);
@@ -394,7 +482,10 @@ static void collect_leafs(const char *path, VaVec *leafs, size_t *funcs)
         if (func_va(masked, n, hdr, &va)) {
             saved = masked[close + 1u];
             masked[close + 1u] = 0;
+            vec_push(known, va);
             if (body_is_leaf(masked + open)) vec_push(leafs, va);
+            if (body_is_tail_free(masked + open)) vec_push(depths, va);
+            if (!body_pending_safe(masked + open)) vec_push(unsafe, va);
             masked[close + 1u] = saved;
         }
         scan = close + 1u;
@@ -403,8 +494,53 @@ static void collect_leafs(const char *path, VaVec *leafs, size_t *funcs)
     free(text);
 }
 
+static void rewrite_calls(const char *text, const char *masked,
+                          size_t begin, size_t end, int allow_clean,
+                          const VaVec *leafs, const VaVec *depths,
+                          const VaVec *known, Buf *out,
+                          size_t *calls, size_t *leaf_rw,
+                          size_t *depth_rw, size_t *clean_rw)
+{
+    size_t scan = begin;
+    size_t last = begin;
+    while (scan + CALL_MACRO_LEN <= end) {
+        const char *hit = strstr(masked + scan, CALL_MACRO);
+        size_t pos;
+        uint32_t va;
+        const char *repl = NULL;
+        if (!hit) break;
+        pos = (size_t)(hit - masked);
+        if (pos + CALL_MACRO_LEN > end) break;
+        if (call_target(masked, end, pos, &va)) {
+            (*calls)++;
+            if (va_contains(leafs, va)) {
+                repl = CALL_LEAF;
+                (*leaf_rw)++;
+            } else if (va_contains(depths, va)) {
+                repl = CALL_DEPTH;
+                (*depth_rw)++;
+            } else if (allow_clean && va_contains(known, va)) {
+                repl = CALL_CLEAN;
+                (*clean_rw)++;
+            }
+            if (repl) {
+                buf_add(out, text + last, pos - last);
+                buf_str(out, repl);
+                last = pos + CALL_MACRO_LEN;
+                scan = last;
+                continue;
+            }
+        }
+        scan = pos + CALL_MACRO_LEN;
+    }
+    buf_add(out, text + last, end - last);
+}
+
 static void rewrite_file(const char *path, const char *out_dir,
-                         const VaVec *leafs, size_t *calls, size_t *rewrites)
+                         const VaVec *leafs, const VaVec *depths,
+                         const VaVec *known, const VaVec *unsafe,
+                         size_t *calls, size_t *leaf_rw,
+                         size_t *depth_rw, size_t *clean_rw)
 {
     size_t n;
     char *text = read_file(path, &n);
@@ -424,24 +560,31 @@ static void rewrite_file(const char *path, const char *out_dir,
     memcpy(out_path + out_len, base, base_len + 1u);
 
     mask_code(text, n, masked);
-    while (scan + CALL_MACRO_LEN <= n) {
-        const char *hit = strstr(masked + scan, CALL_MACRO);
-        size_t pos;
+    while (scan < n) {
+        size_t hdr = find_func(masked, n, scan);
+        const char *nl;
+        size_t open, close;
         uint32_t va;
-        if (!hit) break;
-        pos = (size_t)(hit - masked);
-        if (call_target(masked, n, pos, &va)) {
-            (*calls)++;
-            if (leaf_contains(leafs, va)) {
-                buf_add(&out, text + last, pos - last);
-                buf_str(&out, CALL_MACRO "_LEAF");
-                last = pos + CALL_MACRO_LEN;
-                scan = last;
-                (*rewrites)++;
-                continue;
-            }
+        int allow_clean = 0;
+        if (hdr == SIZE_MAX) break;
+        nl = (const char *)memchr(masked + hdr, '\n', n - hdr);
+        if (!nl) break;
+        open = (size_t)(nl - masked) + 1u;
+        if (open + 1u < n && masked[open] == '\r' && masked[open + 1u] == '{') open++;
+        if (open >= n || masked[open] != '{') {
+            scan = open + 1u;
+            continue;
         }
-        scan = pos + CALL_MACRO_LEN;
+        close = matching_brace(text, n, open);
+        if (close == SIZE_MAX) break;
+        if (func_va(masked, n, hdr, &va) && !va_contains(unsafe, va))
+            allow_clean = 1;
+        buf_add(&out, text + last, open - last);
+        rewrite_calls(text, masked, open, close + 1u, allow_clean,
+                      leafs, depths, known, &out, calls,
+                      leaf_rw, depth_rw, clean_rw);
+        last = close + 1u;
+        scan = close + 1u;
     }
     buf_add(&out, text + last, n - last);
     write_file(out_path, out.p ? out.p : "", out.n);
@@ -509,6 +652,7 @@ static int self_test(void)
         "void L_00000008(CPU *restrict c)\n"
         "{\n"
         "    c->disp_pending_valid = 1u;\n"
+        "    WC3_DIRECT_CALL(L_0000000D, c);\n"
         "}\n"
         "void L_00000009(CPU *restrict c)\n"
         "{\n"
@@ -528,14 +672,36 @@ static int self_test(void)
         "    WC3_DIRECT_CALL(L_00000009, c);\n"
         "    WC3_DIRECT_CALL(L_0000000A, c);\n"
         "    WC3_DIRECT_CALL(L_0000000B, c);\n"
+        "}\n"
+        "void L_0000000D(CPU *restrict c)\n"
+        "{\n"
+        "    WC3_DIRECT_TAIL(L_00000001, c);\n"
+        "    return;\n"
+        "}\n"
+        "void L_0000000E(CPU *restrict c)\n"
+        "{\n"
+        "    WC3_DIRECT_CALL(L_0000000D, c);\n"
+        "}\n"
+        "void L_0000000F(CPU *restrict c)\n"
+        "{\n"
+        "    WC3_DIRECT_CALL(L_00000001, c);\n"
+        "}\n"
+        "void L_00000010(CPU *restrict c)\n"
+        "{\n"
+        "    WC3_DIRECT_CALL(L_0000000F, c);\n"
+        "}\n"
+        "void L_00000011(CPU *restrict c)\n"
+        "{\n"
+        "    WC3_DIRECT_CALL(L_00000099, c);\n"
         "}\n";
     size_t n = strlen(src);
     char *text = (char *)xmalloc(n + 1u);
     char *masked = (char *)xmalloc(n + 1u);
-    VaVec leafs = {0};
+    VaVec leafs = {0}, depths = {0}, known = {0}, unsafe = {0};
     size_t scan = 0, funcs = 0;
     Buf out = {0};
-    size_t last = 0, calls = 0, rewrites = 0;
+    size_t last = 0;
+    size_t calls = 0, leaf_rw = 0, depth_rw = 0, clean_rw = 0;
     memcpy(text, src, n + 1u);
     mask_code(text, n, masked);
     while (scan < n) {
@@ -555,51 +721,73 @@ static int self_test(void)
         if (func_va(masked, n, hdr, &va)) {
             saved = masked[close + 1u];
             masked[close + 1u] = 0;
+            vec_push(&known, va);
             if (body_is_leaf(masked + open)) vec_push(&leafs, va);
+            if (body_is_tail_free(masked + open)) vec_push(&depths, va);
+            if (!body_pending_safe(masked + open)) vec_push(&unsafe, va);
             masked[close + 1u] = saved;
         }
         scan = close + 1u;
     }
-    sort_leafs(&leafs);
+    sort_vas(&leafs);
+    sort_vas(&depths);
+    sort_vas(&known);
+    sort_vas(&unsafe);
     scan = 0;
-    while (scan + CALL_MACRO_LEN <= n) {
-        const char *hit = strstr(masked + scan, CALL_MACRO);
-        size_t pos;
+    last = 0;
+    while (scan < n) {
+        size_t hdr = find_func(masked, n, scan);
+        const char *nl;
+        size_t open, close;
         uint32_t va;
-        if (!hit) break;
-        pos = (size_t)(hit - masked);
-        if (call_target(masked, n, pos, &va)) {
-            calls++;
-            if (leaf_contains(&leafs, va)) {
-                buf_add(&out, text + last, pos - last);
-                buf_str(&out, CALL_MACRO "_LEAF");
-                last = pos + CALL_MACRO_LEN;
-                scan = last;
-                rewrites++;
-                continue;
-            }
-        }
-        scan = pos + CALL_MACRO_LEN;
+        int allow_clean = 0;
+        if (hdr == SIZE_MAX) break;
+        nl = (const char *)memchr(masked + hdr, '\n', n - hdr);
+        if (!nl) break;
+        open = (size_t)(nl - masked) + 1u;
+        if (open >= n || masked[open] != '{') break;
+        close = matching_brace(text, n, open);
+        if (close == SIZE_MAX) break;
+        if (func_va(masked, n, hdr, &va) && !va_contains(&unsafe, va))
+            allow_clean = 1;
+        buf_add(&out, text + last, open - last);
+        rewrite_calls(text, masked, open, close + 1u, allow_clean,
+                      &leafs, &depths, &known, &out, &calls,
+                      &leaf_rw, &depth_rw, &clean_rw);
+        last = close + 1u;
+        scan = close + 1u;
     }
     buf_add(&out, text + last, n - last);
-    if (funcs != 12u || leafs.n != 1u || leafs.p[0] != 1u ||
-        calls != 6u || rewrites != 1u ||
-        !strstr(out.p, "WC3_DIRECT_CALL_LEAF(L_00000001, c)") ||
-        !strstr(out.p, "WC3_DIRECT_CALL(L_00000003, c)") ||
-        !strstr(out.p, "WC3_DIRECT_CALL(L_00000008, c)") ||
-        !strstr(out.p, "WC3_DIRECT_CALL(L_00000009, c)") ||
-        !strstr(out.p, "WC3_DIRECT_CALL(L_0000000A, c)") ||
-        !strstr(out.p, "WC3_DIRECT_CALL(L_0000000B, c)") ||
+    if (funcs != 17u || leafs.n != 1u || leafs.p[0] != 1u ||
+        depths.n != 14u || known.n != 17u || unsafe.n != 2u ||
+        !va_contains(&unsafe, 7u) || !va_contains(&unsafe, 8u) ||
+        calls != 11u || leaf_rw != 2u || depth_rw != 5u ||
+        clean_rw != 2u ||
+        !strstr(out.p, "WC3_DIRECT_CALL_LEAF(L_00000001, c);") ||
+        !strstr(out.p, "WC3_DIRECT_CALL_DEPTH(L_00000003, c);") ||
+        !strstr(out.p, "WC3_DIRECT_CALL_DEPTH(L_00000009, c);") ||
+        !strstr(out.p, "WC3_DIRECT_CALL_DEPTH(L_0000000A, c);") ||
+        !strstr(out.p, "WC3_DIRECT_CALL_DEPTH(L_0000000B, c);") ||
+        !strstr(out.p, "WC3_DIRECT_CALL_DEPTH(L_0000000F, c);") ||
+        !strstr(out.p, "WC3_DIRECT_CALL_CLEAN(L_00000008, c);") ||
+        !strstr(out.p, "WC3_DIRECT_CALL_CLEAN(L_0000000D, c);") ||
+        !strstr(out.p, "c->disp_pending_valid = 1u;\n"
+                       "    WC3_DIRECT_CALL(L_0000000D, c);") ||
+        !strstr(out.p, "WC3_DIRECT_CALL(L_00000099, c);") ||
         !strstr(out.p, "/* WC3_DIRECT_CALL(L_0000000D, c); */") ||
-        strstr(out.p, "WC3_DIRECT_CALL_LEAF(L_0000000D") ||
+        strstr(out.p, "WC3_DIRECT_CALL_DEPTH(L_0000000D") ||
+        strstr(out.p, "WC3_DIRECT_CALL_CLEAN(L_00000099") ||
+        strstr(out.p, "WC3_DIRECT_CALL_DEPTH(L_00000007") ||
         strstr(out.p, "WC3_DIRECT_CALL_LEAF(L_00000003") ||
         strstr(out.p, "WC3_DIRECT_CALL_LEAF(L_00000008") ||
         strstr(out.p, "WC3_DIRECT_CALL_LEAF(L_00000009") ||
         strstr(out.p, "WC3_DIRECT_CALL_LEAF(L_0000000A") ||
         strstr(out.p, "WC3_DIRECT_CALL_LEAF(L_0000000B")) {
         fprintf(stderr, "leaf_call self-test failed: funcs=%zu leafs=%zu "
-                        "calls=%zu rewrites=%zu\n",
-                funcs, leafs.n, calls, rewrites);
+                        "depths=%zu known=%zu unsafe=%zu calls=%zu "
+                        "leaf_rw=%zu depth_rw=%zu clean_rw=%zu\n",
+                funcs, leafs.n, depths.n, known.n, unsafe.n, calls,
+                leaf_rw, depth_rw, clean_rw);
         return 1;
     }
     puts("leaf_call self-test: OK");
@@ -607,6 +795,9 @@ static int self_test(void)
     free(masked);
     free(text);
     free(leafs.p);
+    free(depths.p);
+    free(known.p);
+    free(unsafe.p);
     return 0;
 }
 
@@ -617,8 +808,9 @@ int main(int argc, char **argv)
     const char *report = NULL;
     int quiet = 0;
     PathVec paths = {0};
-    VaVec leafs = {0};
-    size_t funcs = 0, calls = 0, rewrites = 0;
+    VaVec leafs = {0}, depths = {0}, known = {0}, unsafe = {0};
+    size_t funcs = 0, rewrites = 0;
+    size_t calls = 0, leaf_rw = 0, depth_rw = 0, clean_rw = 0;
     size_t i;
 
     if (argc == 2 && !strcmp(argv[1], "--self-test")) return self_test();
@@ -639,11 +831,16 @@ int main(int argc, char **argv)
 
     read_paths(inputs, &paths);
     for (i = 0; i < paths.n; i++)
-        collect_leafs(paths.p[i], &leafs, &funcs);
+        collect_sets(paths.p[i], &leafs, &depths, &known, &unsafe, &funcs);
     if (!funcs) die("no canonical functions parsed from %zu inputs", paths.n);
-    sort_leafs(&leafs);
+    sort_vas(&leafs);
+    sort_vas(&depths);
+    sort_vas(&known);
+    sort_vas(&unsafe);
     for (i = 0; i < paths.n; i++)
-        rewrite_file(paths.p[i], out_dir, &leafs, &calls, &rewrites);
+        rewrite_file(paths.p[i], out_dir, &leafs, &depths, &known, &unsafe,
+                     &calls, &leaf_rw, &depth_rw, &clean_rw);
+    rewrites = leaf_rw + depth_rw + clean_rw;
 
     if (report) {
         FILE *f = fopen(report, "wb");
@@ -654,20 +851,32 @@ int main(int argc, char **argv)
                 "  \"inputs\": %zu,\n"
                 "  \"functions\": %zu,\n"
                 "  \"leaf_functions\": %zu,\n"
+                "  \"tail_free_functions\": %zu,\n"
+                "  \"known_functions\": %zu,\n"
+                "  \"unsafe_callers\": %zu,\n"
                 "  \"calls_seen\": %zu,\n"
                 "  \"calls_rewritten\": %zu,\n"
+                "  \"calls_leaf_rewritten\": %zu,\n"
+                "  \"calls_depth_rewritten\": %zu,\n"
+                "  \"calls_clean_rewritten\": %zu,\n"
                 "  \"verdict\": \"pass\"\n"
                 "}\n",
-                paths.n, funcs, leafs.n, calls, rewrites);
+                paths.n, funcs, leafs.n, depths.n, known.n, unsafe.n,
+                calls, rewrites, leaf_rw, depth_rw, clean_rw);
         if (fclose(f) != 0) die("cannot close report %s", report);
     }
     if (!quiet)
         printf("leaf_call: %zu inputs, %zu functions, %zu leafs, "
-               "%zu calls, %zu rewritten\n",
-               paths.n, funcs, leafs.n, calls, rewrites);
+               "%zu tail-free, %zu calls, %zu rewritten "
+               "(leaf %zu, depth %zu, clean %zu)\n",
+               paths.n, funcs, leafs.n, depths.n, calls, rewrites,
+               leaf_rw, depth_rw, clean_rw);
 
     for (i = 0; i < paths.n; i++) free(paths.p[i]);
     free(paths.p);
     free(leafs.p);
+    free(depths.p);
+    free(known.p);
+    free(unsafe.p);
     return 0;
 }

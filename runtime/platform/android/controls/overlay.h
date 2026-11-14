@@ -64,6 +64,9 @@ typedef struct {
      * usable while the consuming overlay has the same dimensions. */
     int overlay_width;
     int overlay_height;
+    /* Exact engine layout the atlas was rasterised from.  A cache is only
+     * usable by a snapshot with the same layout id. */
+    uint32_t layout_id;
     Wc3OverlayCacheLayer layers[WC3_OVERLAY_CACHE_MAX_LAYERS];
     /* Fast element/slot -> layer index.  -1 means "not built"; a cache made by
      * an older caller may leave this zeroed, so lookup falls back to a linear
@@ -180,6 +183,9 @@ typedef struct {
     int width;
     int height;
     float snapping_size;
+    /* Monotonic controls layout this snapshot was built from.  Rebuilt by the
+     * input thread on every FULL/SIMPLE/resize transition. */
+    uint32_t layout_id;
     Wc3OverlayCache cache;
     /*
      * Optional borrowed atlas.  The game host uses this to share one Canvas

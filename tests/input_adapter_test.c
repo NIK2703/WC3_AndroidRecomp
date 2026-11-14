@@ -96,8 +96,11 @@ int main(void) {
     expect("future deadline no tick", g_tick_calls, 0);
 
     reset(&adapter);
+    expect("ring starts empty", input_ring_is_empty(&g_ring), 1);
     push_event(WC3_TOUCH_DOWN, 100);
+    expect("ring sees event", input_ring_is_empty(&g_ring), 0);
     expect("event drain", input_adapter_drain(&adapter, 100), 0);
+    expect("ring drained", input_ring_is_empty(&g_ring), 1);
     expect("event ticks", g_tick_calls, 1);
     expect("event counted", (int)adapter.stats.events, 1);
     expect("control recorded", adapter.stats.last_control_events, 1);

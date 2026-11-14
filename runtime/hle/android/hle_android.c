@@ -6715,6 +6715,22 @@ static volatile int g_ime_hide_pending;
  * does not blur the guest control; every use validates the exact CEditBox
  * vtable, the click-path style bit and the current rectangle first. */
 static volatile uint32_t g_ime_field;
+/* ImmAssociateContext(hwnd, NULL) is the guest's own "this window has no IME
+ * context" signal.  CEditBox::OnKillFocus (0x6F103900) sends it before
+ * CControl::SetFocus installs the next control, and CEditBox's destructor
+ * sends it when the field goes away.  It is the exact opposite of the focus
+ * acquisition reported through ImmGetContext, so a later acquisition must
+ * open the keyboard even when it happens to repeat the same field and the
+ * same last click (the Enter-opened in-game chat does exactly that).  The
+ * marker survives until a field is actually shown. */
+static volatile int g_ime_blurred;
+/* Field whose OnSetFocus just associated an IME context through
+ * ImmAssociateContext(hwnd, himc != 0).  The guest always follows that call
+ * with the OnClick ImmGetContext, but the click that first opened the field
+ * may be long gone; this marker proves the acquisition is new and must win
+ * over the duplicate-click suppression.  A new button press, a blur, or a
+ * completed show clears it. */
+static volatile uint32_t g_ime_associate_field;
 /* Deferred fallback for a tap inside g_ime_field when ImmGetContext does not
  * arrive for that click sequence. */
 static volatile int g_ime_reopen_pending;
@@ -6991,6 +7007,7 @@ static void u_dispatch_message(CPU *c)
         g_ime_click_ms = hle_now_ms();
         click_seq = ++g_ime_click_seq;
         g_ime_hide_pending = 0;
+        g_ime_associate_field = 0;
 
         /* The guest asks IMM for a context when a field gains focus.  Tapping
          * the same field again after the platform dismissed the IME does not
@@ -7555,6 +7572,15 @@ static void u_set_cursor(CPU *c)
 #define CBATTLENET_CHAT_EDITBOX_VTABLE   0x6FAABF88u
 #define CCHAT_EDITBOX_VTABLE             0x6FABD4B8u
 
+/* CEditBox::OnClick (0x6F104E80) is the only focus path that asks IMM for a
+ * context.  Its call through the IAT thunk at 0x6F104EB3 returns to
+ * 0x6F104EB8.  The other ImmGetContext call sites belong to composition and
+ * candidate-list handling (return addresses 0x6F1032E7, 0x6F103BAD and
+ * 0x6F1044E5); they read an already-associated context and must never open
+ * the keyboard.  The return address is exact for this frozen image and does
+ * not depend on a time-of-last-click guess. */
+#define CEDITBOX_ONCLICK_IMM_RA          0x6F104EB8u
+
 static int keyboard_field_valid(uint32_t field)
 {
     if (field < 0x10000u || !hle_android_guest_ok(field, 4u))
@@ -7600,7 +7626,10 @@ static int keyboard_field_rect(uint32_t field, HleKeyboardRect *out)
  * viewport, so the hit test is a direct normalization. */
 static int keyboard_field_contains(uint32_t field, int x, int y)
 {
-    if (!field || g_win_w == 0 || g_win_h == 0)
+    /* A blurred field is no longer owned by the guest.  Do not touch its
+     * memory: the dialog may already have destroyed it and unmapped the
+     * page.  The next ImmGetContext publishes a fresh field. */
+    if (!field || g_ime_blurred || g_win_w == 0 || g_win_h == 0)
         return 0;
     if (x < 0 || y < 0 || (uint32_t)x > g_win_w || (uint32_t)y > g_win_h)
         return 0;
@@ -7632,6 +7661,8 @@ static void keyboard_show_field(uint32_t field)
 
     __atomic_store_n(&g_ime_field, field, __ATOMIC_RELEASE);
     g_ime_shown = 1;
+    g_ime_blurred = 0;
+    g_ime_associate_field = 0;
     g_ime_reopen_pending = 0;
 
 #if WC3_DEBUG && WC3_DEBUG_INPUT
@@ -7650,9 +7681,10 @@ static void keyboard_show_field(uint32_t field)
 static void u_imm_get_context(CPU *c)
 {
     uint32_t hwnd = arg32(c, 0);
+    const uint32_t ra = rd32g(c->esp);
 #if WC3_DEBUG
     fprintf(stderr, "[input] ImmGetContext(%08X) from %08X field=%08X\n",
-            hwnd, rd32g(c->esp), c->esi);
+            hwnd, ra, c->esi);
 #endif
     /* The game asks for an IME context when a click focuses one of its edit
      * fields.  It can do that inside the window procedure or immediately
@@ -7666,23 +7698,35 @@ static void u_imm_get_context(CPU *c)
      * dispatcher's hit test, because CEditBox does not ask for a new context
      * when focus has not changed.
      *
-     * The CEditBox::ImmGetContext wrapper (0x6F104EA7) keeps its `this` in
-     * ESI.  That pointer is the field identity used for repeat-tap hit testing;
-     * the host editor itself starts empty on every show. */
+     * Only the OnClick focus site opens the keyboard.  Composition and
+     * candidate-list calls may arrive while a non-text click is pending and
+     * must not make that click look like a text-field focus.  The CEditBox
+     * `this` pointer is passed in ESI at the OnClick wrapper; the host editor
+     * itself starts empty on every show. */
     const uint32_t now = hle_now_ms();
     const int recent_click = g_ime_click_ms != 0 &&
                              (uint32_t)(now - g_ime_click_ms) < 1000u;
-    if (g_ime_click_pending || recent_click) {
-        const uint32_t click_seq = g_ime_click_seq;
-        const uint32_t field = c->esi;
-        const int same_click = click_seq != 0 && click_seq == g_ime_focus_seq;
-        const int same_field = field == g_ime_field;
+    const uint32_t click_seq = g_ime_click_seq;
+    const uint32_t field = c->esi;
+    const int click_live = g_ime_click_pending || recent_click;
+    const int same_click = click_live && click_seq != 0 &&
+                           click_seq == g_ime_focus_seq;
+    const int same_field = field != 0 && field == g_ime_field;
+    const int just_associated = field != 0 && field == g_ime_associate_field;
+
+    if (ra == CEDITBOX_ONCLICK_IMM_RA && keyboard_field_valid(field)) {
         g_ime_click_pending = 0;
         g_ime_hide_pending = 0;
         /* A deferred ImmGetContext can arrive after the dispatcher already
-         * showed the repeat-tapped field.  Suppress only that duplicate; a
-         * different field is a real focus switch and must be shown. */
-        if (!same_click || !same_field) {
+         * showed the repeat-tapped field.  Suppress only that duplicate: a
+         * different field, a fresh click, an expired click window, a
+         * guest-visible blur (OnKillFocus), or an IME context just associated
+         * by OnSetFocus is a real focus acquisition and must show the
+         * keyboard.  Without these checks an Enter-opened chat repeats the
+         * previous click sequence and field, and the show would be
+         * swallowed. */
+        if (g_ime_blurred || just_associated ||
+            !same_click || !same_field) {
             g_ime_focus_seq = click_seq;
             keyboard_show_field(field);
         }
@@ -7696,9 +7740,35 @@ static void u_imm_associate_context(CPU *c)
 #if WC3_DEBUG
     fprintf(stderr, "[input] ImmAssociateContext(%08X, %08X)\n", hwnd, himc);
 #endif
-    /* This is a focus signal, not a blur signal: the game disassociates the
-     * old context immediately before asking for a new one.  Hiding here would
-     * close the keyboard that ImmGetContext is about to open. */
+    /* A non-NULL association installs a context and is followed by the
+     * OnClick ImmGetContext that opens the keyboard.  NULL is the guest's
+     * blur signal: CEditBox::OnKillFocus (0x6F103900) detaches the context
+     * before CControl::SetFocus installs the next control, and field
+     * destruction detaches it as well.  Mark the next acquisition as new and
+     * request the same deferred hide a non-text click uses, so a focus
+     * transfer inside one call stack can show the next field without racing
+     * the hide. */
+    if (himc == 0) {
+        /* NULL is the guest's blur/field-destruction signal.  Drop the cached
+         * CEditBox with it: keeping the pointer lets the next click hit-test a
+         * freed object, whose heap page may already be unmapped.  A repeat
+         * tap on the same still-focused field does not come through here; the
+         * next ImmGetContext republishes the field through keyboard_show_field. */
+        __atomic_store_n(&g_ime_field, 0u, __ATOMIC_RELEASE);
+        g_ime_reopen_pending = 0;
+        g_ime_reopen_field = 0;
+
+        g_ime_blurred = 1;
+        g_ime_associate_field = 0;
+        g_ime_focus_seq = 0;
+        g_ime_hide_pending = 1;
+    } else if (keyboard_field_valid(c->esi)) {
+        /* CEditBox::OnSetFocus (0x6F103880) keeps `this` in ESI across the
+         * wrapper call, so this is the field that just gained focus.  The
+         * following OnClick ImmGetContext is the show request; remember that
+         * this acquisition is new so a stale click cannot suppress it. */
+        g_ime_associate_field = c->esi;
+    }
     c->eax = 0;
 }
 

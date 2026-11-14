@@ -49,6 +49,13 @@ if (-not $Gcc) {
 if (-not (Test-Path $dll)) { throw "vendor runtime missing: $dll" }
 if (-not (Test-Path $bin)) { New-Item -ItemType Directory -Force -Path $bin | Out-Null }
 
+# The C lifter includes this generated table; the JSON is the single source.
+$stateHooksHeader = Join-Path $bin 'state_hooks_gen.h'
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $python) { throw 'python not found (needed for state hook table)' }
+& $python.Source (Join-Path $toolRoot 'gen_state_hooks.py') --out $stateHooksHeader
+if ($LASTEXITCODE -ne 0) { throw 'state hook table generation failed' }
+
 $ccache = Get-Wc3Ccache -Explicit $Ccache
 if (-not $ccache) {
     Write-Warning 'ccache not found; lift tools will build without a compiler cache'
@@ -97,6 +104,7 @@ $targets = @(
     @{ out = 'save_list_display.exe'; src = @('save_list_display.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'dead_flags.exe'; src = @('dead_flags.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'xmm_local.exe'; src = @('xmm_local.c'); dir = $csrcLocal },
+    @{ out = 'xmm_lane.exe'; src = @('xmm_lane.c'); dir = $csrcLocal },
     @{ out = 'leaf_call.exe'; src = @('leaf_call.c'); dir = $csrcLocal },
     @{ out = 'return_address_elide.exe'; src = @('return_address_elide.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'w3l_compat.exe'; src = @('w3l_compat.c', 'sha256.c'); dir = $csrcLocal },
@@ -113,6 +121,8 @@ $targets = @(
 )
 
 $scriptTime = [IO.File]::GetLastWriteTimeUtc($PSCommandPath)
+$hookTime = [IO.File]::GetLastWriteTimeUtc($stateHooksHeader)
+if ($hookTime -gt $scriptTime) { $scriptTime = $hookTime }
 foreach ($t in $targets) {
     $srcdir = if ($t.dir) { $t.dir } else { $csrc }
     $srcs = if ($t.srcfull) { @($t.srcfull) } else { @($t.src | ForEach-Object { Join-Path $srcdir $_ }) }
@@ -130,7 +140,7 @@ foreach ($t in $targets) {
     }
     $flags = @($common)
     if ($t.def) { $flags += "-D$($t.def)" }
-    $includeArgs = @('-I', $srcdir, '-I', $csrcLocal, '-I', $csrc, '-I', $inc)
+    $includeArgs = @('-I', $srcdir, '-I', $csrcLocal, '-I', $csrc, '-I', $inc, '-I', $bin)
     Write-Host ("gcc -> {0}" -f $t.out)
 
     # Compile separately from linking.  ccache cannot cache a compiler call
@@ -185,6 +195,13 @@ if ($Smoke) {
         throw 'lift32 cond-fold self-test failed'
     }
     Write-Host 'smoke: cond-fold self-test OK'
+
+    $x87 = & (Join-Path $bin 'lift32.exe') --self-test-x87 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $x87 | ForEach-Object { Write-Host $_ }
+        throw 'lift32 x87 summary self-test failed'
+    }
+    Write-Host 'smoke: x87 summary self-test OK'
 
     $outList = Join-Path $bin 'smoke_known.h'
     $merge = & (Join-Path $bin 'lift.exe') known $outList $fixtures 2>&1
@@ -350,6 +367,12 @@ void L_00401000(CPU *c)
     if ($LASTEXITCODE -ne 0 -or -not ($xmOut -match 'self-test: OK')) {
         $xmOut | ForEach-Object { Write-Host $_ }
         throw 'xmm_local self-test failed'
+    }
+    $xl = Join-Path $bin 'xmm_lane.exe'
+    $xlOut = & $xl --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($xlOut -match 'self-test: OK')) {
+        $xlOut | ForEach-Object { Write-Host $_ }
+        throw 'xmm_lane self-test failed'
     }
     $lc = Join-Path $bin 'leaf_call.exe'
     $lcOut = & $lc --self-test 2>&1

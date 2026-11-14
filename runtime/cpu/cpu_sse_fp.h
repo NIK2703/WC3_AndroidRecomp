@@ -26,6 +26,8 @@
 #ifndef WC3_CPU_SSE_FP_H
 #define WC3_CPU_SSE_FP_H
 
+#include <math.h>
+
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif

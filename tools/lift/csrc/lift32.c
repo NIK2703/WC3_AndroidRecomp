@@ -102,6 +102,9 @@ int lf_lift_files(const char *module, const char *funcs_path, const char *out_c,
     size_t written = 0;
 
     memset(&L, 0, sizeof L);
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+    lf_x87_dbg_init();
+#endif
     if (!pe_open(&pe, module)) {
         fprintf(stderr, "[!] cannot open %s\n", module);
         return 1;
@@ -186,9 +189,14 @@ int lf_lift_files(const char *module, const char *funcs_path, const char *out_c,
     free(sizes);
     free(L.func_map);
     free(L.summary_table);
+    free(L.x87_callee_state);
+    free(L.x87_callee_may);
     free(L.reloc);
     csg.close(&L.h);
     pe_close(&pe);
+#if WC3_DEBUG && WC3_DEBUG_LIFT
+    lf_x87_dbg_print();
+#endif
     return written ? 0 : 1;
 }
 
@@ -206,6 +214,21 @@ int main(int argc, char **argv)
             return 1;
         }
         puts("lift32: cond-fold self-test OK");
+        return 0;
+    }
+
+    if (argc == 2 && !strcmp(argv[1], "--self-test-x87")) {
+        int rc = lf_x87_summary_selftest();
+        if (rc == 2) {
+            fprintf(stderr, "lift32: x87 summary self-test unavailable "
+                            "(capstone)\n");
+            return 2;
+        }
+        if (rc != 0) {
+            fprintf(stderr, "lift32: x87 summary self-test FAIL\n");
+            return 1;
+        }
+        puts("lift32: x87 summary self-test OK");
         return 0;
     }
 

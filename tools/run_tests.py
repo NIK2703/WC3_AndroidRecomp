@@ -1257,6 +1257,11 @@ def test_lift_cond_fold() -> int:
     return run_host_tool("lift32", ["--self-test-cond"])
 
 
+def test_lift_x87_summary() -> int:
+    """D1 source check: only proven x87/MMX-free callees skip the flush."""
+    return run_host_tool("lift32", ["--self-test-x87"])
+
+
 def test_save_list_display_pass() -> int:
     """V10/T2-save: the save-list LiftPass is idempotent and emits its marker."""
     return run_host_tool("save_list_display", ["--self-test"])
@@ -3120,6 +3125,74 @@ def test_hle_bridge() -> int:
     return 0
 
 
+def test_game_state() -> int:
+    """T0: atomic game-state bits, transitions and wake publication."""
+    cc = gcc()
+    if not cc:
+        print("game_state: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "game_state_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "ipc"),
+        str(ROOT / "tests" / "game_state_test.c"),
+        str(ROOT / "runtime" / "ipc" / "game_state.c"),
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_state_hooks() -> int:
+    """T0: JSON hooks match game.dll and both lifters emit them."""
+    return run([sys.executable, str(ROOT / "tests" / "state_hooks_test.py")])
+
+
+def test_overlay_mode() -> int:
+    """T0: product mode precedence, including replay/observer over cinematic."""
+    cc = gcc()
+    if not cc:
+        print("overlay_mode: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "overlay_mode_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "platform" / "android" / "controls"),
+        "-I" + str(ROOT / "runtime" / "ipc"),
+        str(ROOT / "tests" / "overlay_mode_test.c"),
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_profile_simple() -> int:
+    """T0: SIMPLE keeps authored ESC geometry and exactly one LMB tap."""
+    cc = gcc()
+    if not cc:
+        print("profile_simple: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "profile_simple_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "platform" / "android" / "controls"),
+        "-I" + str(ROOT / "third_party" / "winlator-input"),
+        str(ROOT / "tests" / "profile_simple_test.c"),
+        str(ROOT / "runtime" / "platform" / "android" / "controls" /
+            "profile_mode.c"),
+        str(ROOT / "third_party" / "winlator-input" / "profile" / "bind.c"),
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
 def test_mailbox_set() -> int:
     """P0-8: four concurrent producers, one consumer, zero loss, FIFO."""
     cc = gcc()
@@ -3332,6 +3405,53 @@ def test_gesture_mode() -> int:
     return run([str(exe), str(profile)])
 
 
+def test_controls_mode() -> int:
+    """T0: FULL/SIMPLE switch, idle guard, resize and transform preservation."""
+    cc = gcc()
+    if not cc:
+        print("controls_mode: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    vendor = ROOT / "third_party" / "winlator-input"
+    controls = ROOT / "runtime" / "platform" / "android" / "controls"
+    profile = (ROOT / "apps" / "android_gameactivity" / "app" / "src"
+               / "main" / "assets" / "Warcraft 3.icp")
+    sources = sorted(str(path) for path in vendor.rglob("*.c"))
+    sources += [
+        str(controls / "controls.c"),
+        str(controls / "profile_mode.c"),
+        str(controls / "overlay.c"),
+        str(ROOT / "tests" / "host_shims" / "gesture_host.c"),
+        str(ROOT / "tests" / "controls_mode_test.c"),
+    ]
+    exe = BUILD / "controls_mode_test.exe"
+    rc = run([
+        cc,
+        "-std=gnu11",
+        "-O2",
+        "-w",
+        "-DWC3_DEBUG=0",
+        "-I" + str(vendor),
+        "-I" + str(controls),
+        "-I" + str(ROOT / "runtime" / "ipc"),
+        "-I" + str(ROOT / "runtime" / "diag"),
+        "-I" + str(ROOT / "runtime" / "platform"),
+        "-I" + str(ROOT / "runtime" / "platform" / "android"),
+        "-I" + str(ROOT / "tests" / "host_shims"),
+        "-include", str(ROOT / "tests" / "host_shims" / "open_memstream.h"),
+        "-Dclock_gettime=wc3_test_clock_gettime",
+        "-Dopen_memstream=wc3_host_open_memstream",
+        *sources,
+        "-lpthread",
+        "-lm",
+        "-o",
+        str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe), str(profile)])
+
+
 def test_input_adapter() -> int:
     """T0: the input adapter ticks on a batch/fault or a due deadline only."""
     cc = gcc()
@@ -3349,6 +3469,7 @@ def test_input_adapter() -> int:
         "-Wextra",
         "-Werror",
         "-I" + str(controls),
+        "-I" + str(ROOT / "runtime" / "ipc"),
         "-I" + str(ROOT / "third_party" / "winlator-input"),
         str(controls / "input_ring.c"),
         str(controls / "input_adapter.c"),
@@ -3402,6 +3523,7 @@ TESTS = {
     "dead_flags_pass": test_dead_flags_pass,
     "leaf_call_pass": test_leaf_call_pass,
     "lift_cond_fold": test_lift_cond_fold,
+    "lift_x87_summary": test_lift_x87_summary,
     "save_list_display_pass": test_save_list_display_pass,
     "required_save_fixes": test_required_save_fixes,
     "w3l_compat": test_w3l_compat,
@@ -3427,6 +3549,10 @@ TESTS = {
     "lift_equivalence_checker": test_lift_equivalence_checker,
     "module_registry": test_module_registry,
     "corpus_binding": test_corpus_binding,
+    "game_state": test_game_state,
+    "state_hooks": test_state_hooks,
+    "overlay_mode": test_overlay_mode,
+    "profile_simple": test_profile_simple,
     "mailbox_set": test_mailbox_set,
     "hle_time": test_hle_time,
     "hle_process": test_hle_process,
@@ -3462,6 +3588,7 @@ TESTS = {
     "hle_bridge": test_hle_bridge,
     "pass4_build": test_pass4_build,
     "controls_idle": test_controls_idle,
+    "controls_mode": test_controls_mode,
     "gesture_lifetime": test_gesture_lifetime,
     "gesture_button_swipe": test_gesture_button_swipe,
     "gesture_mode": test_gesture_mode,

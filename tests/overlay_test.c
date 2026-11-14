@@ -498,6 +498,26 @@ int main(void)
           "borrowed cache rejects a resized overlay");
 
     overlay_destroy(&view);
+
+    /* Equal element count is not enough: a cache from another engine layout
+     * must not be used even when its geometry and count match. */
+    Wc3Overlay layout_view;
+    memset(&layout_view, 0, sizeof layout_view);
+    overlay_init(&layout_view, 32, 32, NULL);
+    CHECK(add_test_button(&layout_view) == 0, "add layout button");
+    layout_view.elements[0].visual_layers = WC3_OVERLAY_LAYER_FILL;
+    layout_view.cache_view = &borrowed;
+    layout_view.layout_id = 2;
+    borrowed.layout_id = 1;
+    overlay_render(&layout_view, frame, 32 * 4);
+    CHECK(all_transparent(frame, 32, 32, 32 * 4),
+          "layout mismatch rejects a same-count cache");
+    borrowed.layout_id = 2;
+    overlay_render(&layout_view, frame, 32 * 4);
+    center = frame + (size_t)12 * 32 * 4 + 12u * 4u;
+    CHECK(center[3] != 0, "matching layout cache renders");
+    overlay_destroy(&layout_view);
+
     CHECK(borrowed.pixels != NULL && borrowed.pixels[0] == 255,
           "destroy does not free a borrowed cache");
 

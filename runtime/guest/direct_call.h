@@ -15,14 +15,14 @@
  *
  * WC3_DIRECT_TAIL publishes a function pointer (not a VA), so the drain loop
  * calls it directly.  The loop, not recursion, bounds host stack growth.
- * Pending targets are drained at EVERY direct-call boundary, because an x86
- * tail jump from a callee returns to its caller, and that caller must not
- * continue until the tail target has run.
+ * Pending targets are drained at every direct-call boundary where the callee
+ * can publish one; a callee proven tail-free is entered with the depth-only
+ * WC3_DIRECT_CALL_DEPTH/LEAF frame instead.
  *
  * State is per guest thread and lives in CPU (ABI-4).  Do not add a TLS copy
  * here: the corpus is split into translation units, and one header-level
  * `static` copy per TU would make a tail target from a neighbour invisible.
- * WC3_DIRECT_CALL also keeps a saved transition frame on the *host stack*
+ * Full and clean calls also keep a saved transition frame on the *host stack*
  * (TA-13): a nested direct call owns its pending slot, drains it before
  * returning, and cannot leak a tail target into the caller's drain loop.
  * The saved frame is a local of the macro, so call depth is limited by the
@@ -141,17 +141,44 @@ static inline void wc3_guest_leave(CPU *c, const Wc3DispFrame *saved)
         wc3_guest_leave((c), &wc3_saved_frame_);                             \
     } while (0)
 
-/* D4: a callee with no guest call, tail dispatch, HLE/W3L helper or dispatcher
- * state access cannot observe or publish a pending target.  The transition
- * frame and drain are therefore dead; keep the guest return address and the
- * depth counter only.  leaf_call emits this form only for a target proven by
- * the complete-corpus leaf scan. */
-#define WC3_DIRECT_CALL_LEAF(fn, c)                                          \
+/* D4/D4b: a tail-free callee cannot publish a pending target at its own
+ * level.  Every nested direct call owns and drains its own transition frame,
+ * and the callee itself has no tail dispatch or pending write.  The full
+ * transition frame and drain are therefore dead; keep the guest return
+ * address and the depth counter only.  leaf_call emits this form only for a
+ * target proven by the complete-corpus tail-free scan.
+ *
+ * WC3_DIRECT_CALL_LEAF is the strict subset whose callee contains no guest
+ * call at all.  It is kept as a separate name so the two proofs stay
+ * distinguishable in the generated C and in the pass report. */
+#define WC3_DIRECT_CALL_DEPTH(fn, c)                                         \
     do {                                                                     \
         uint32_t wc3_saved_depth_ = (c)->disp_depth;                         \
         (c)->disp_depth = wc3_saved_depth_ + 1u;                             \
         (fn)(c);                                                             \
         (c)->disp_depth = wc3_saved_depth_;                                  \
+    } while (0)
+
+#define WC3_DIRECT_CALL_LEAF(fn, c) WC3_DIRECT_CALL_DEPTH(fn, c)
+
+/* D4b: a tailful callee may publish a pending target, so its caller must
+ * drain after the call.  The pending slot is empty at every generated direct
+ * call site: a generated tail is followed by its own `return;`, and every
+ * nested direct call drains its own slot before returning.  Save the two
+ * transition fields that the drain still needs; pending kind/target are
+ * runtime metadata read only while pending_valid is set.  leaf_call emits
+ * this form only after its caller-body check proves the empty slot. */
+#define WC3_DIRECT_CALL_CLEAN(fn, c)                                         \
+    do {                                                                     \
+        uint32_t wc3_saved_depth_ = (c)->disp_depth;                         \
+        uint32_t wc3_saved_draining_ = (c)->disp_draining;                   \
+        (c)->disp_depth = wc3_saved_depth_ + 1u;                             \
+        (c)->disp_draining = 0u;                                             \
+        (fn)(c);                                                             \
+        (c)->disp_depth = wc3_saved_depth_;                                  \
+        wc3_guest_drain(c);                                                  \
+        (c)->disp_depth = wc3_saved_depth_;                                  \
+        (c)->disp_draining = wc3_saved_draining_;                            \
     } while (0)
 
 /* Generated C keeps its own `return;` immediately after this macro. */

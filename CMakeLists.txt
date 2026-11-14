@@ -304,6 +304,7 @@ set(WC3_INCLUDES
     "${WC3_ROOT}/runtime/guest"
     "${WC3_ROOT}/runtime/boot"
     "${WC3_ROOT}/runtime/hle"
+    "${WC3_ROOT}/runtime/ipc"
     "${WC3_ROOT}/runtime/platform"
     "${WC3_ROOT}/runtime/platform/android")
 
@@ -311,8 +312,10 @@ add_library(wc3_platform STATIC
     "${WC3_ROOT}/runtime/platform/platform.c"
     "${WC3_ROOT}/runtime/platform/android/asset_snapshot.c"
     "${WC3_ROOT}/runtime/platform/android/net_android.c"
-    "${WC3_ROOT}/runtime/platform/android/platform_android.c")
+    "${WC3_ROOT}/runtime/platform/android/platform_android.c"
+    "${WC3_ROOT}/runtime/ipc/game_state.c")
 target_include_directories(wc3_platform PUBLIC
+    "${WC3_ROOT}/runtime/ipc"
     "${WC3_ROOT}/runtime/platform"
     "${WC3_ROOT}/runtime/platform/android")
 target_compile_definitions(wc3_platform PUBLIC WC3_DEBUG=${WC3_DEBUG_DEFINE})
@@ -382,6 +385,7 @@ if(WC3_BUILD_APP)
         "${WC3_ROOT}/runtime/platform/android/controls/profile_mode.c")
     target_include_directories(wc3_overlay PUBLIC
         "${WC3_ROOT}/runtime/platform/android/controls"
+        "${WC3_ROOT}/runtime/ipc"
         "${WC3_ROOT}/runtime/diag"
         "${WC3_ROOT}/third_party/winlator-input")
     target_link_libraries(wc3_overlay PUBLIC winlator_input android log

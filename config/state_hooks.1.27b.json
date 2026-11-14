@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "image": "game.dll",
+  "version": "1.27.1.7085",
+  "image_base": "0x6F000000",
+  "hooks": [
+    {
+      "name": "cgameui_created",
+      "kind": 0,
+      "store_va": "0x6F367A74",
+      "after_va": "0x6F367A7A",
+      "bytes": "893db8a8d66f",
+      "width": 4,
+      "value": "c->edi",
+      "guard": null,
+      "cache_source": "CGameUI ctor/factory stores the new singleton at 0x6FD6A8B8"
+    },
+    {
+      "name": "cgameui_seen",
+      "kind": 1,
+      "store_va": "0x6F36CB90",
+      "after_va": "0x6F36CB96",
+      "bytes": "890db8a8d66f",
+      "width": 4,
+      "value": "0u",
+      "guard": "c->ecx",
+      "cache_source": "CGameUI::Get rewrites the same singleton; only ecx == 0 is a clear"
+    },
+    {
+      "name": "cgameui_destroyed",
+      "kind": 2,
+      "store_va": "0x6F36974B",
+      "after_va": "0x6F369751",
+      "bytes": "893db8a8d66f",
+      "width": 4,
+      "value": "c->edi",
+      "guard": null,
+      "cache_source": "CGameUI teardown clears the singleton after the field-clear loop"
+    },
+    {
+      "name": "pause",
+      "kind": 3,
+      "store_va": "0x6F3CFF5B",
+      "after_va": "0x6F3CFF61",
+      "bytes": "899f70010000",
+      "width": 4,
+      "value": "c->ebx",
+      "guard": null,
+      "cache_source": "CEscMenu::Show writes CEscMenuMainPanel+0x170"
+    },
+    {
+      "name": "gameover",
+      "kind": 4,
+      "store_va": "0x6F36CAD2",
+      "after_va": "0x6F36CAD8",
+      "bytes": "89be2c020000",
+      "width": 4,
+      "value": "c->edi",
+      "guard": null,
+      "cache_source": "CGameOverMenu factory stores CGameUI+0x22C"
+    },
+    {
+      "name": "gameover_cleared",
+      "kind": 5,
+      "store_va": "0x6F3695C1",
+      "after_va": "0x6F3695CB",
+      "bytes": "c7862c02000000000000",
+      "width": 4,
+      "value": "0u",
+      "guard": null,
+      "cache_source": "CGameUI teardown clears CGameUI+0x22C with a constant zero"
+    }
+  ]
+}

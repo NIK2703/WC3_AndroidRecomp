@@ -33,6 +33,7 @@
     <string name="launch_gesture_hint_single">• Single tap — LMB (immediately)\n• Long press — RMB\n• Single-finger drag — MMB\n• Long-press drag — LMB\n• Two-finger swipe up/down — camera tilt\n• Two-finger swipe left/right — camera rotation</string>
     <string name="launch_double_tap_delay_label">Double-tap delay</string>
     <string name="launch_long_press_delay_label">Long-press delay</string>
+    <string name="launch_tap_click_delay_label">Click press delay in simplified profile</string>
     <string name="launch_gesture_delay_value">%1$d ms</string>
 
     <string name="launch_driver_label">Vulkan driver</string>
