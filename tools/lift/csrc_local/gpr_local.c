@@ -107,11 +107,12 @@ static const char *const reg_names[8] = {
     "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"
 };
 
-/* ecx, edx, ebp, esi and edi.  eax and ebx are deliberately omitted: the
- * object-level A/B on the hot functions showed no gain for them and eax is
- * frequently written, which made the cache interval too short to pay for the
- * declaration. */
-static const int reg_allowed[8] = { 0, 1, 1, 0, 0, 1, 1, 1 };
+/* All GPRs except esp.  esp is not cached: push32/pop32 and the generated
+ * stack adjustments write it through helpers that are otherwise safe to call
+ * between cached reads.  eax and ebx are included; the final object A/B on the
+ * hot functions shows a further size reduction, and the read-only interval
+ * rules are the same for every register. */
+static const int reg_allowed[8] = { 1, 1, 1, 1, 0, 1, 1, 1 };
 
 static void die(const char *msg)
 {
@@ -1536,6 +1537,33 @@ static int self_test(void)
         "    foo((uint32_t)&c->eax);\n"
         "    c->edx = c->ecx;\n"
         "}\n";
+    static const char *preprocessor =
+        "void L_00000016(CPU *restrict c)\n"
+        "{\n"
+        "    c->eax = rd32(c->ecx);\n"
+        "    /* selection24 evt2 trace */\n"
+        "#if WC3_DEBUG && WC3_DEBUG_SELECT24\n"
+        "    wc3_sel24_trace_evt2(c, c->ecx, c->ebp);\n"
+        "#endif\n"
+        "    c->edx = c->ecx;\n"
+        "}\n";
+    static const char *esp_only =
+        "void L_00000014(CPU *restrict c)\n"
+        "{\n"
+        "    c->eax = c->esp;\n"
+        "    c->edx = c->esp;\n"
+        "}\n";
+    static const char *all_regs =
+        "void L_00000015(CPU *restrict c)\n"
+        "{\n"
+        "    c->eax = rd32(c->ecx);\n"
+        "    c->ebx = c->eax;\n"
+        "    c->edx = c->ebx;\n"
+        "    c->esi = c->edx;\n"
+        "    c->edi = c->esi;\n"
+        "    c->ebp = c->edi;\n"
+        "    c->eax = c->ebp;\n"
+        "}\n";
     static const char *bitwise_and =
         "void L_0000000E(CPU *restrict c)\n"
         "{\n"
@@ -1658,12 +1686,40 @@ static int self_test(void)
     free(out.p); out.p = NULL; out.n = out.cap = 0;
     changes_free(&cs);
 
+    transform_text(preprocessor, strlen(preprocessor), &out, &funcs, &changed,
+                   &cs);
+    ok &= funcs == 1 && changed == 0;
+    ok &= out.n == strlen(preprocessor) &&
+          memcmp(out.p, preprocessor, out.n) == 0;
+    ok &= check_not_contains("preprocessor", out.p, "_wc3_gpr_");
+    free(out.p); out.p = NULL; out.n = out.cap = 0;
+    changes_free(&cs);
+
+    transform_text(esp_only, strlen(esp_only), &out, &funcs, &changed, &cs);
+    ok &= funcs == 1 && changed == 0;
+    ok &= check_not_contains("esp_only", out.p, "_wc3_gpr_");
+    free(out.p); out.p = NULL; out.n = out.cap = 0;
+    changes_free(&cs);
+
+    transform_text(all_regs, strlen(all_regs), &out, &funcs, &changed, &cs);
+    ok &= funcs == 1 && changed == 1;
+    ok &= cs.n == 1 && cs.v[0].mask == 0xEFu && cs.v[0].reads == 7;
+    ok &= check_contains("all_regs", out.p, "_wc3_gpr_eax");
+    ok &= check_contains("all_regs", out.p, "_wc3_gpr_ebx");
+    ok &= check_contains("all_regs", out.p, "_wc3_gpr_ecx");
+    ok &= check_not_contains("all_regs", out.p, "_wc3_gpr_esp");
+    free(out.p); out.p = NULL; out.n = out.cap = 0;
+    changes_free(&cs);
+
     transform_text(bitwise_and, strlen(bitwise_and), &out, &funcs, &changed,
                    &cs);
     ok &= funcs == 1 && changed == 1;
     ok &= check_contains("bitwise_and", out.p,
                          "uint32_t _wc3_gpr_ecx = c->ecx;");
-    ok &= check_not_contains("bitwise_and", out.p, "_wc3_gpr_eax");
+    ok &= check_contains("bitwise_and", out.p,
+                         "uint32_t _wc3_gpr_eax = c->eax;");
+    ok &= check_contains("bitwise_and", out.p,
+                         "flags_logicz(c, _wc3_gpr_eax & _wc3_gpr_eax, 4);");
     free(out.p); out.p = NULL; out.n = out.cap = 0;
     changes_free(&cs);
 
@@ -1672,6 +1728,8 @@ static int self_test(void)
     ok &= funcs == 1 && changed == 1;
     ok &= check_contains("paren_bitwise_and", out.p,
                          "uint32_t _wc3_gpr_ecx = c->ecx;");
+    ok &= check_contains("paren_bitwise_and", out.p,
+                         "flags_logicz(c, (_wc3_gpr_eax) & _wc3_gpr_eax, 4);");
     free(out.p); out.p = NULL; out.n = out.cap = 0;
     changes_free(&cs);
 
