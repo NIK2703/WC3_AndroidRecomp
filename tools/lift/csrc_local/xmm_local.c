@@ -48,13 +48,16 @@
  *   - at least three XMM accesses, so tiny functions are left alone.
  *
  * The JSON report carries a function-level change set (ABI-11.2): one row per
- * transformed function with access count, used-register mask, lazy mask and
- * body sizes.  The default pass is part of the normal relifted-corpus pipeline
- * and runs unconditionally after dead_flags.  --planner and --lazy are
- * calibration switches: both remain opt-in until their object A/B is accepted.
+ * transformed function with access count, used-register mask, lazy mask, block
+ * mask and body sizes.  The default whole-function pass is part of the normal
+ * relifted-corpus pipeline and runs unconditionally after dead_flags.
+ * --planner and --lazy remain calibration switches.  The canonical build
+ * additionally enables the block fallback and its entry-load elision with
+ * --block --block-lazy; the switches stay explicit so a manual A/B can omit
+ * either one.
  *
  *   xmm_local --lift IN --out OUT [--json REPORT] [--planner] [--lazy]
- *             [--quiet]
+ *             [--block] [--block-lazy] [--quiet]
  *   xmm_local --self-test
  */
 #include <ctype.h>
@@ -80,6 +83,7 @@ typedef struct {
     unsigned used_mask;
     unsigned plan_mask;
     unsigned lazy_mask;
+    unsigned block_mask;
     int plan_score;
 } Change;
 
@@ -120,6 +124,8 @@ static void *xrealloc(void *p, size_t n)
  * carries the planner proposal for calibration. */
 static int planner_enabled;
 static int lazy_enabled;
+static int block_enabled;
+static int block_lazy_enabled;
 
 static void changes_free(Changes *cs)
 {
@@ -133,7 +139,8 @@ static void changes_free(Changes *cs)
 
 static void changes_add(Changes *cs, const char *func, size_t accesses,
                         size_t before, size_t after, unsigned mask,
-                        unsigned plan_mask, unsigned lazy_mask, int plan_score)
+                        unsigned plan_mask, unsigned lazy_mask,
+                        unsigned block_mask, int plan_score)
 {
     Change *ch;
     size_t len;
@@ -151,6 +158,7 @@ static void changes_add(Changes *cs, const char *func, size_t accesses,
     ch->used_mask = mask;
     ch->plan_mask = plan_mask;
     ch->lazy_mask = lazy_mask;
+    ch->block_mask = block_mask;
     ch->plan_score = plan_score;
 }
 
@@ -1598,6 +1606,584 @@ static size_t find_func(const char *s, size_t n, size_t start)
     return SIZE_MAX;
 }
 
+/* The whole-function transform above needs dominating load points.  Functions
+ * with labels, loops, switches or nested guest calls are left alone.  The
+ * fallback below instead treats every straight-line run between control-flow
+ * statements as an independent region: it loads at the region entry and
+ * writes back at the region exit.  A region never spans a branch, a label, a
+ * guest call or a brace, so no value is live across a path join.  This is a
+ * deliberately conservative subset of block-local promotion; it is opt-in
+ * until its object A/B is accepted. */
+
+static int starts_macro_prefix(const char *s, size_t n, size_t i, const char *w)
+{
+    size_t wl = strlen(w);
+    if (i + wl > n) return 0;
+    if (i > 0 && word_char(s[i - 1])) return 0;
+    return strncmp(s + i, w, wl) == 0;
+}
+
+/* The generated macros have several suffixes (WC3_DIRECT_CALL_CLEAN,
+ * WC3_DIRECT_CALL_DEPTH, WC3_DIRECT_CALL_LEAF).  The full-function transform
+ * predates those suffixes; the block fallback must recognize the prefix. */
+static int line_has_guest_call(const char *s, size_t n, size_t ls, size_t le)
+{
+    size_t i;
+    for (i = ls; i < le; i++) {
+        size_t p;
+        if (starts_macro_prefix(s, n, i, "WC3_DIRECT_CALL") ||
+            starts_macro_prefix(s, n, i, "WC3_DIRECT_TAIL") ||
+            starts_macro_prefix(s, n, i, "WC3_GUEST_DRAIN") ||
+            starts_macro_prefix(s, n, i, "dispatch_jmp") ||
+            starts_macro_prefix(s, n, i, "wc3_guest_"))
+            return 1;
+        if (starts_word(s, n, i, "dispatch")) {
+            p = i + 8;
+            while (p < le && (s[p] == ' ' || s[p] == '\t')) p++;
+            if (p < le && s[p] == '(') return 1;
+        }
+        if (starts_word(s, n, i, "dispatch_common")) {
+            p = i + 15;
+            while (p < le && (s[p] == ' ' || s[p] == '\t')) p++;
+            if (p < le && s[p] == '(') return 1;
+        }
+    }
+    return 0;
+}
+
+static int line_indent(const char *s, size_t ls, size_t le)
+{
+    int n = 0;
+    size_t i = ls;
+    while (i < le) {
+        if (s[i] == ' ') n++;
+        else if (s[i] == '\t') n += 4;
+        else break;
+        i++;
+    }
+    return n;
+}
+
+/* Control keywords may follow an earlier statement on the same generated
+ * line, as in `c->eax = 1; if (cond) goto L;`.  A region must end before any
+ * such line: otherwise a goto or return could skip the region's writeback.
+ * Scan only top-level tokens, so control words inside a call argument or an
+ * initializer do not matter. */
+static int line_has_top_level_control(const char *s, size_t n, size_t ls,
+                                      size_t le)
+{
+    size_t p;
+    int paren = 0;
+    int brace = 0;
+    p = ls;
+    while (p < le && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r')) p++;
+    if (p < le && s[p] == '#') return 0;
+    for (p = ls; p < le; p++) {
+        char c = s[p];
+        if (c == '(') {
+            paren++;
+            continue;
+        }
+        if (c == ')') {
+            if (paren) paren--;
+            continue;
+        }
+        if (c == '{') {
+            brace++;
+            continue;
+        }
+        if (c == '}') {
+            if (brace) brace--;
+            continue;
+        }
+        if (paren || brace) continue;
+        if (label_at(s, n, p, le)) return 1;
+        if (starts_word(s, n, p, "if") ||
+            starts_word(s, n, p, "else") ||
+            starts_word(s, n, p, "switch") ||
+            starts_word(s, n, p, "while") ||
+            starts_word(s, n, p, "for") ||
+            starts_word(s, n, p, "do") ||
+            starts_word(s, n, p, "goto") ||
+            starts_word(s, n, p, "return") ||
+            starts_word(s, n, p, "break") ||
+            starts_word(s, n, p, "continue") ||
+            starts_word(s, n, p, "case") ||
+            starts_word(s, n, p, "default"))
+            return 1;
+    }
+    return 0;
+}
+
+/* A region may not contain a control-flow statement, a label, a brace or a
+ * guest-visible call.  Braces are rejected anywhere on the line, not only at
+ * the first non-space character: an inline block would otherwise let a region
+ * cross a scope or a conditional boundary. */
+static int line_is_barrier(const char *masked, size_t n, size_t ls, size_t le)
+{
+    size_t p = ls;
+    while (p < le && (masked[p] == ' ' || masked[p] == '\t' ||
+                      masked[p] == '\r'))
+        p++;
+    if (p >= le) return 0;
+    if (masked[p] == '#') return 1;
+    if (label_at(masked, n, p, le)) return 1;
+    if (line_has_top_level_control(masked, n, ls, le)) return 1;
+    if (memchr(masked + ls, '{', le - ls) ||
+        memchr(masked + ls, '}', le - ls))
+        return 1;
+    return line_has_guest_call(masked, n, ls, le);
+}
+
+/* A control line without a `{` or a complete `;` statement owns the following
+ * indented lines.  Those lines are copied without a local cache: inserting a
+ * load or a writeback before an unbraced body would make it unconditional. */
+static int line_is_unbraced_control(const char *s, size_t n, size_t ls,
+                                    size_t le)
+{
+    size_t p;
+    size_t q;
+    int paren = 0;
+    int brace = 0;
+    int control = 0;
+    p = ls;
+    while (p < le && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r')) p++;
+    if (p < le && s[p] == '#') return 0;
+    for (p = ls; p < le; p++) {
+        char c = s[p];
+        if (c == '(') {
+            paren++;
+            continue;
+        }
+        if (c == ')') {
+            if (paren) paren--;
+            continue;
+        }
+        if (c == '{') {
+            brace++;
+            continue;
+        }
+        if (c == '}') {
+            if (brace) brace--;
+            continue;
+        }
+        if (paren || brace) continue;
+        if (starts_word(s, n, p, "if") ||
+            starts_word(s, n, p, "else") ||
+            starts_word(s, n, p, "while") ||
+            starts_word(s, n, p, "for") ||
+            starts_word(s, n, p, "do") ||
+            starts_word(s, n, p, "switch")) {
+            control = 1;
+            p += 1;
+        }
+    }
+    if (!control) return 0;
+    q = le;
+    while (q > ls && (s[q - 1] == ' ' || s[q - 1] == '\t' ||
+                      s[q - 1] == '\r' || s[q - 1] == '\n'))
+        q--;
+    if (q == ls) return 0;
+    /* A complete statement ends in `;` or `}`.  A braced control opens with
+     * `{`.  The only remaining shape is a control line whose body follows. */
+    return s[q - 1] != '{' && s[q - 1] != ';' && s[q - 1] != '}';
+}
+
+static int low_lane_suffix(const char *s, size_t re, size_t p, const char *lane)
+{
+    size_t n = strlen(lane);
+    if (p + n > re) return 0;
+    if (strncmp(s + p, lane, n) != 0) return 0;
+    if (p + n < re) {
+        char c = s[p + n];
+        if (word_char(c) || c == '.' || c == '[') return 0;
+    }
+    return 1;
+}
+
+/* Does the range [p, end) contain another access to the same XMM register?
+ * Used to reject a lazy entry load when the first write also reads the old
+ * value, for example `c->xmm[0] = c->xmm[0]`. */
+static int xmm_same_access(const char *s, size_t n, size_t p, size_t end,
+                           int idx)
+{
+    while (p < end) {
+        const char *hit = strstr(s + p, "c->xmm[");
+        size_t pos;
+        size_t after;
+        int other;
+        if (!hit) return 0;
+        pos = (size_t)(hit - s);
+        if (pos >= end) return 0;
+        if (pos > 0 && word_char(s[pos - 1])) {
+            p = pos + 7;
+            continue;
+        }
+        other = parse_xmm_access(s, n, pos, &after);
+        if (other < 0) {
+            p = pos + 7;
+            continue;
+        }
+        if (other == idx) return 1;
+        p = after;
+    }
+    return 0;
+}
+
+/* The generated form `sse_load_ss(&c->xmm[i], value)` writes the whole
+ * register, upper lanes zero included.  Recognize the helper immediately
+ * before the address-of operator. */
+static int xmm_full_write_helper(const char *s, size_t pos)
+{
+    size_t p = pos;
+    size_t e;
+    while (p > 0 && (s[p - 1] == ' ' || s[p - 1] == '\t')) p--;
+    if (p == 0 || s[p - 1] != '&') return 0;
+    p--;
+    while (p > 0 && (s[p - 1] == ' ' || s[p - 1] == '\t')) p--;
+    if (p > 0 && s[p - 1] == '(') p--;
+    e = p;
+    while (p > 0 && word_char(s[p - 1])) p--;
+    if (e - p == 11 && strncmp(s + p, "sse_load_ss", 11) == 0) return 1;
+    if (e - p == 11 && strncmp(s + p, "sse_load_sd", 11) == 0) return 1;
+    return 0;
+}
+
+/* Decide whether the first access to one register makes an entry load dead.
+ * full is set for a complete 16-byte overwrite; lane is 1/2 for a simple
+ * low-f32/low-f64 store.  The final region kind decides which of those covers
+ * every later read, so the caller applies that check after the scan. */
+static void xmm_first_write(const char *s, size_t n, size_t pos, size_t after,
+                            size_t re, int idx, int *full, int *lane)
+{
+    size_t le = after;
+    size_t p;
+    size_t q;
+    *full = 0;
+    *lane = 0;
+    while (le < re && s[le] != '\n') le++;
+    if (!xmm_write_access(s, n, pos, after)) return;
+    if (xmm_full_write_helper(s, pos)) {
+        if (!xmm_same_access(s, n, after, le, idx)) *full = 1;
+        return;
+    }
+    p = after;
+    while (p < le && (s[p] == ' ' || s[p] == '\t')) p++;
+    if (p < le && s[p] == '=' && !(p + 1 < le && s[p + 1] == '=')) {
+        if (!xmm_same_access(s, n, p + 1, le, idx)) *full = 1;
+        return;
+    }
+    if (low_lane_suffix(s, le, p, ".f32[0]")) {
+        q = p + 7;
+        while (q < le && (s[q] == ' ' || s[q] == '\t')) q++;
+        if (q < le && s[q] == '=' && !(q + 1 < le && s[q + 1] == '=') &&
+            !xmm_same_access(s, n, q + 1, le, idx))
+            *lane = 1;
+    } else if (low_lane_suffix(s, le, p, ".f64[0]")) {
+        q = p + 7;
+        while (q < le && (s[q] == ' ' || s[q] == '\t')) q++;
+        if (q < le && s[q] == '=' && !(q + 1 < le && s[q + 1] == '=') &&
+            !xmm_same_access(s, n, q + 1, le, idx))
+            *lane = 2;
+    }
+}
+
+/* Classify the accesses of one region.  kind is 1 for a low f32 lane, 2 for a
+ * low f64 lane and 3 for a whole register or any other lane.  A low-lane
+ * access can use a 4/8-byte load and store; a whole register uses a full
+ * 16-byte copy.  Dynamic accesses make the whole region untransformable.
+ * no_load marks registers whose first access overwrites the whole value that
+ * the region could read, so the entry load can be elided. */
+static int block_region_scan(const char *s, size_t n, size_t rs, size_t re,
+                             unsigned char sel[8], int kind[8],
+                             unsigned char no_load[8])
+{
+    int count[8];
+    int k[8];
+    unsigned char first[8];
+    unsigned char first_full[8];
+    unsigned char first_lane[8];
+    size_t i = rs;
+    int any = 0;
+    memset(count, 0, sizeof count);
+    memset(k, 0, sizeof k);
+    memset(sel, 0, 8);
+    memset(no_load, 0, 8);
+    memset(first, 0, sizeof first);
+    memset(first_full, 0, sizeof first_full);
+    memset(first_lane, 0, sizeof first_lane);
+    while (i < re) {
+        const char *hit = strstr(s + i, "c->xmm[");
+        size_t pos;
+        size_t after;
+        size_t p;
+        int idx;
+        if (!hit) break;
+        pos = (size_t)(hit - s);
+        if (pos >= re) break;
+        if (pos > 0 && word_char(s[pos - 1])) {
+            i = pos + 7;
+            continue;
+        }
+        idx = parse_xmm_access(s, n, pos, &after);
+        if (idx < 0 || after > re) return 0;
+        if (!first[idx]) {
+            int full = 0;
+            int lane = 0;
+            first[idx] = 1;
+            xmm_first_write(s, n, pos, after, re, idx, &full, &lane);
+            first_full[idx] = (unsigned char)full;
+            first_lane[idx] = (unsigned char)lane;
+        }
+        count[idx]++;
+        p = pos;
+        while (p > 0 && (s[p - 1] == ' ' || s[p - 1] == '\t')) p--;
+        if (p > 0 && s[p - 1] == '&') {
+            k[idx] = 3;
+        } else {
+            int ak = 3;
+            p = after;
+            while (p < re && (s[p] == ' ' || s[p] == '\t')) p++;
+            if (low_lane_suffix(s, re, p, ".f32[0]")) ak = 1;
+            else if (low_lane_suffix(s, re, p, ".f64[0]")) ak = 2;
+            if (k[idx] == 0) k[idx] = ak;
+            else if (k[idx] != ak) k[idx] = 3;
+        }
+        i = after;
+    }
+    for (i = 0; i < 8; i++) {
+        kind[i] = k[i];
+        if (count[i] >= ((k[i] == 1 || k[i] == 2) ? 2 : 3)) {
+            sel[i] = 1;
+            any = 1;
+            if ((k[i] == 3 && first_full[i]) ||
+                (k[i] == 1 && first_lane[i] == 1) ||
+                (k[i] == 2 && first_lane[i] == 2))
+                no_load[i] = 1;
+        }
+    }
+    return any;
+}
+
+static void block_write_dirty(Buf *b, const unsigned char dirty[8],
+                              const int kind[8])
+{
+    int i;
+    int full = 0;
+    for (i = 0; i < 8; i++)
+        if (dirty[i] && kind[i] == 3) full++;
+    for (i = 0; i < 8; i++) {
+        if (!dirty[i]) continue;
+        if (kind[i] == 1)
+            buf_printf(b,
+                       "    c->xmm[%d].f32[0] = _wc3_xmm_local[%d].f32[0];\n",
+                       i, i);
+        else if (kind[i] == 2)
+            buf_printf(b,
+                       "    c->xmm[%d].f64[0] = _wc3_xmm_local[%d].f64[0];\n",
+                       i, i);
+        else if (full >= XMM_WRITEBACK_VECTOR_MIN)
+            buf_printf(b,
+                       "    xmm_store_full(&c->xmm[%d], &_wc3_xmm_local[%d]);\n",
+                       i, i);
+        else
+            buf_printf(b, "    c->xmm[%d] = _wc3_xmm_local[%d];\n", i, i);
+    }
+}
+
+/* Emit one region with a local cache.  On any unexpected shape the output is
+ * rolled back and the caller copies the original text. */
+static int block_emit_region(const char *body, size_t n, const char *masked,
+                             size_t rs, size_t re, Buf *out,
+                             unsigned *out_mask)
+{
+    unsigned char sel[8];
+    unsigned char no_load[8];
+    unsigned char dirty[8];
+    int kind[8];
+    size_t start = out->n;
+    size_t i;
+    size_t last;
+    int any;
+
+    if (rs >= re) return 0;
+    any = block_region_scan(masked, n, rs, re, sel, kind, no_load);
+    if (!any) return 0;
+    memset(dirty, 0, sizeof dirty);
+    if (out->n > 0 && out->p[out->n - 1] != '\n') buf_str(out, "\n");
+    for (i = 0; i < 8; i++) {
+        if (!sel[i]) continue;
+        if (block_lazy_enabled && no_load[i]) {
+            if (out_mask) *out_mask |= 1u << i;
+            continue;
+        }
+        if (kind[i] == 1)
+            buf_printf(out,
+                       "    _wc3_xmm_local[%zu].f32[0] = c->xmm[%zu].f32[0];\n",
+                       i, i);
+        else if (kind[i] == 2)
+            buf_printf(out,
+                       "    _wc3_xmm_local[%zu].f64[0] = c->xmm[%zu].f64[0];\n",
+                       i, i);
+        else
+            buf_printf(out, "    _wc3_xmm_local[%zu] = c->xmm[%zu];\n", i, i);
+        if (out_mask) *out_mask |= 1u << i;
+    }
+    last = rs;
+    i = rs;
+    while (i < re) {
+        const char *hit = strstr(masked + i, "c->xmm[");
+        size_t pos;
+        size_t after;
+        int idx;
+        if (!hit) break;
+        pos = (size_t)(hit - masked);
+        if (pos >= re) break;
+        if (pos > 0 && word_char(masked[pos - 1])) {
+            i = pos + 7;
+            continue;
+        }
+        idx = parse_xmm_access(masked, n, pos, &after);
+        if (idx < 0 || after > re) {
+            out->n = start;
+            return 0;
+        }
+        if (!sel[idx]) {
+            i = after;
+            continue;
+        }
+        buf_add(out, body + last, pos - last);
+        buf_printf(out, "_wc3_xmm_local[%d]", idx);
+        if (xmm_write_access(masked, n, pos, after)) dirty[idx] = 1;
+        last = after;
+        i = after;
+    }
+    buf_add(out, body + last, re - last);
+    if (out->n > 0 && out->p[out->n - 1] != '\n') buf_str(out, "\n");
+    block_write_dirty(out, dirty, kind);
+    return 1;
+}
+
+/* The outer closing brace is handled separately so a writeback can never be
+ * emitted after it.  If the closing brace shares a line with code, that whole
+ * line is copied unchanged; this loses one line of promotion but keeps the
+ * grammar and scope rules simple. */
+static int transform_blocks(const char *body, size_t n, const char *masked,
+                            Buf *out, unsigned *out_mask)
+{
+    size_t body_start = out->n;
+    size_t final_close = n;
+    size_t final_ls;
+    size_t i;
+    size_t region_start = SIZE_MAX;
+    int skip_indent = -1;
+    int replaced = 0;
+    unsigned mask = 0;
+
+    while (final_close > 0 && (body[final_close - 1] == ' ' ||
+                               body[final_close - 1] == '\t' ||
+                               body[final_close - 1] == '\r' ||
+                               body[final_close - 1] == '\n'))
+        final_close--;
+    if (final_close > 0) final_close--;
+    final_ls = final_close;
+    while (final_ls > 0 && body[final_ls - 1] != '\n') final_ls--;
+
+    buf_str(out, "{\n    XMM _wc3_xmm_local[8];\n");
+    i = 1;
+    if (i + 1 < n && body[i] == '\r' && body[i + 1] == '\n') i += 2;
+    else if (i < n && body[i] == '\n') i++;
+    while (i < final_ls) {
+        size_t ls = i;
+        size_t le = i;
+        size_t next;
+        size_t p;
+        int blank;
+        int indent;
+        while (le < final_ls && body[le] != '\n') le++;
+        next = (le < final_ls) ? le + 1 : final_ls;
+        p = ls;
+        while (p < le && (masked[p] == ' ' || masked[p] == '\t' ||
+                          masked[p] == '\r'))
+            p++;
+        blank = p >= le;
+        indent = line_indent(body, ls, le);
+
+        if (skip_indent >= 0) {
+            if (blank || indent > skip_indent) {
+                buf_add(out, body + ls, next - ls);
+                i = next;
+                continue;
+            }
+            skip_indent = -1;
+        }
+        if (blank) {
+            if (region_start != SIZE_MAX) {
+                i = next;
+                continue;
+            }
+            buf_add(out, body + ls, next - ls);
+            i = next;
+            continue;
+        }
+        if (line_is_unbraced_control(masked, n, ls, le)) {
+            if (region_start != SIZE_MAX) {
+                unsigned rmask = 0;
+                if (block_emit_region(body, n, masked, region_start, ls, out,
+                                      &rmask)) {
+                    mask |= rmask;
+                    replaced = 1;
+                } else {
+                    buf_add(out, body + region_start, ls - region_start);
+                }
+                region_start = SIZE_MAX;
+            }
+            buf_add(out, body + ls, next - ls);
+            skip_indent = indent;
+            i = next;
+            continue;
+        }
+        if (line_is_barrier(masked, n, ls, le)) {
+            if (region_start != SIZE_MAX) {
+                unsigned rmask = 0;
+                if (block_emit_region(body, n, masked, region_start, ls, out,
+                                      &rmask)) {
+                    mask |= rmask;
+                    replaced = 1;
+                } else {
+                    buf_add(out, body + region_start, ls - region_start);
+                }
+                region_start = SIZE_MAX;
+            }
+            buf_add(out, body + ls, next - ls);
+            i = next;
+            continue;
+        }
+        if (region_start == SIZE_MAX) region_start = ls;
+        i = next;
+    }
+    if (region_start != SIZE_MAX) {
+        unsigned rmask = 0;
+        if (block_emit_region(body, n, masked, region_start, final_ls, out,
+                              &rmask)) {
+            mask |= rmask;
+            replaced = 1;
+        } else {
+            buf_add(out, body + region_start, final_ls - region_start);
+        }
+    }
+    buf_add(out, body + final_ls, n - final_ls);
+    if (!replaced) {
+        out->n = body_start;
+        buf_add(out, body, n);
+        if (out_mask) *out_mask = 0;
+        return 0;
+    }
+    if (out->n > 0 && out->p[out->n - 1] != '\n') buf_str(out, "\n");
+    if (out_mask) *out_mask = mask;
+    return 1;
+}
+
 static void transform_text(const char *text, size_t n, Buf *out,
                            size_t *out_funcs, size_t *out_changed,
                            Changes *changes)
@@ -1694,7 +2280,35 @@ static void transform_text(const char *text, size_t n, Buf *out,
             if (body_changed) {
                 if (changes)
                     changes_add(changes, fname, accesses, blen, out->n - before,
-                                mask, plan_mask, lazy_mask, plan_score);
+                                mask, plan_mask, lazy_mask, 0u, plan_score);
+                (*out_changed)++;
+            }
+        } else if (block_enabled &&
+                   !has_multiline_comment(text + open, blen) &&
+                   !has_preprocessor_line(masked, blen) &&
+                   !parens_cross_lines(masked, blen) &&
+                   strstr(masked, "_wc3_xmm_local") == NULL &&
+                   collect_indices(masked, blen, used) == 0) {
+            size_t before = out->n;
+            size_t accesses = count_xmm_accesses(masked, blen);
+            unsigned bmask = 0;
+            char fname[64];
+            const char *fstart = text + hdr + 5;
+            const char *fend = (const char *)memchr(fstart, '(',
+                                                    (size_t)(nl - fstart));
+            size_t flen;
+            int body_changed;
+            if (!fend) fend = nl;
+            flen = (size_t)(fend - fstart);
+            if (flen >= sizeof fname) flen = sizeof fname - 1;
+            memcpy(fname, fstart, flen);
+            fname[flen] = 0;
+            body_changed = transform_blocks(text + open, blen, masked, out,
+                                            &bmask);
+            if (body_changed) {
+                if (changes)
+                    changes_add(changes, fname, accesses, blen, out->n - before,
+                                bmask, 0u, 0u, bmask, 0);
                 (*out_changed)++;
             }
         } else {
@@ -1723,10 +2337,11 @@ static void write_report(const char *path, size_t funcs, size_t changed,
         fprintf(f,
                 "{\"function\":\"%s\",\"xmm_accesses\":%zu,"
                 "\"used_mask\":%u,\"plan_mask\":%u,\"lazy_mask\":%u,"
-                "\"plan_score\":%d,\"body_before\":%zu,\"body_after\":%zu}",
+                "\"block_mask\":%u,\"plan_score\":%d,"
+                "\"body_before\":%zu,\"body_after\":%zu}",
                 ch->func, ch->accesses, ch->used_mask, ch->plan_mask,
-                ch->lazy_mask, ch->plan_score, ch->bytes_before,
-                ch->bytes_after);
+                ch->lazy_mask, ch->block_mask, ch->plan_score,
+                ch->bytes_before, ch->bytes_after);
     }
     fputs("]}\n", f);
     if (fclose(f) != 0) die("cannot close json report");
@@ -2012,6 +2627,131 @@ static int self_test(void)
         "    c->xmm[0].f32[0] = c->xmm[2].f32[0];\n"
         "    c->xmm[0].f32[1] = c->xmm[2].f32[1];\n"
         "    return;\n"
+        "}\n";
+    static const char *block_scalar =
+        "void L_00000030(CPU *restrict c)\n"
+        "{\n"
+        "    switch (c->eax) {\n"
+        "    case 0:\n"
+        "        c->xmm[0].f32[0] = c->xmm[1].f32[0];\n"
+        "        c->xmm[2].f32[0] = c->xmm[1].f32[0];\n"
+        "        c->xmm[0].f32[0] = c->xmm[0].f32[0] + c->xmm[2].f32[0];\n"
+        "        break;\n"
+        "    default:\n"
+        "        c->xmm[3] = c->xmm[4];\n"
+        "        c->xmm[5] = c->xmm[3];\n"
+        "        c->xmm[4] = c->xmm[5];\n"
+        "        c->xmm[3] = c->xmm[4];\n"
+        "        break;\n"
+        "    }\n"
+        "}\n";
+    static const char *block_call =
+        "void L_00000031(CPU *restrict c)\n"
+        "{\n"
+        "    switch (c->eax) {\n"
+        "    case 0:\n"
+        "        c->xmm[0].f32[0] = c->xmm[1].f32[0];\n"
+        "        c->xmm[2].f32[0] = c->xmm[0].f32[0];\n"
+        "        WC3_DIRECT_CALL_CLEAN(L_00000032, c);\n"
+        "        c->xmm[0].f32[0] = c->xmm[2].f32[0];\n"
+        "        c->xmm[1].f32[0] = c->xmm[0].f32[0];\n"
+        "        break;\n"
+        "    }\n"
+        "}\n";
+    static const char *block_unbraced =
+        "void L_00000032(CPU *restrict c)\n"
+        "{\n"
+        "    if (c->eax)\n"
+        "        c->xmm[0] = c->xmm[1];\n"
+        "    c->xmm[2] = c->xmm[3];\n"
+        "    c->xmm[2] = c->xmm[3];\n"
+        "    c->xmm[2] = c->xmm[3];\n"
+        "    return;\n"
+        "}\n";
+    static const char *block_else_if =
+        "void L_00000033(CPU *restrict c)\n"
+        "{\n"
+        "    switch (c->eax) {\n"
+        "    case 0:\n"
+        "        if (c->ebx) {\n"
+        "            c->xmm[0].f32[0] = c->xmm[1].f32[0];\n"
+        "        } else if (c->ecx)\n"
+        "            c->xmm[2].f32[0] = c->xmm[2].f32[0] + c->xmm[3].f32[0];\n"
+        "        else\n"
+        "            c->xmm[4].f32[0] = c->xmm[4].f32[0] + c->xmm[5].f32[0];\n"
+        "        c->xmm[6].f32[0] = c->xmm[7].f32[0];\n"
+        "        c->xmm[6].f32[0] = c->xmm[7].f32[0];\n"
+        "        break;\n"
+        "    }\n"
+        "}\n";
+    static const char *block_midline_goto =
+        "void L_00000034(CPU *restrict c)\n"
+        "{\n"
+        "    switch (c->eax) {\n"
+        "    case 0:\n"
+        "        c->xmm[0].f32[0] = c->xmm[1].f32[0];\n"
+        "        c->xmm[0].f32[0] = c->xmm[1].f32[0];\n"
+        "        c->eax = 0; if (c->ecx) goto L_00000034_end;\n"
+        "        c->xmm[2].f32[0] = c->xmm[3].f32[0];\n"
+        "        c->xmm[2].f32[0] = c->xmm[3].f32[0];\n"
+        "L_00000034_end:\n"
+        "        break;\n"
+        "    }\n"
+        "}\n";
+    static const char *block_lazy_full =
+        "void L_00000035(CPU *restrict c)\n"
+        "{\n"
+        "    switch (c->eax) {\n"
+        "    case 0:\n"
+        "        sse_load_ss(&c->xmm[0], 1.0f);\n"
+        "        c->xmm[0].f32[0] = c->xmm[0].f32[0] * 2.0f;\n"
+        "        c->xmm[1].f32[0] = c->xmm[0].f32[0];\n"
+        "        c->xmm[1].f32[0] = c->xmm[0].f32[0];\n"
+        "        break;\n"
+        "    }\n"
+        "}\n";
+    static const char *block_lazy_lane_read =
+        "void L_00000036(CPU *restrict c)\n"
+        "{\n"
+        "    switch (c->eax) {\n"
+        "    case 0:\n"
+        "        c->xmm[0].f32[0] = c->xmm[0].f32[0] + 1.0f;\n"
+        "        c->xmm[0].f32[0] = c->xmm[0].f32[0] + 2.0f;\n"
+        "        break;\n"
+        "    }\n"
+        "}\n";
+    static const char *block_lazy_unsafe =
+        "void L_00000037(CPU *restrict c)\n"
+        "{\n"
+        "    switch (c->eax) {\n"
+        "    case 0:\n"
+        "        c->xmm[0].f32[0] = 1.0f;\n"
+        "        c->xmm[0] = c->xmm[1];\n"
+        "        c->xmm[0].f32[0] = c->xmm[2].f32[0];\n"
+        "        break;\n"
+        "    }\n"
+        "}\n";
+    static const char *block_lazy_self =
+        "void L_00000038(CPU *restrict c)\n"
+        "{\n"
+        "    switch (c->eax) {\n"
+        "    case 0:\n"
+        "        c->xmm[0] = c->xmm[0];\n"
+        "        c->xmm[0].f32[0] = 2.0f;\n"
+        "        c->xmm[1].f32[0] = c->xmm[0].f32[0];\n"
+        "        break;\n"
+        "    }\n"
+        "}\n";
+    static const char *block_lazy_direct_full =
+        "void L_00000039(CPU *restrict c)\n"
+        "{\n"
+        "    switch (c->eax) {\n"
+        "    case 0:\n"
+        "        c->xmm[0] = c->xmm[1];\n"
+        "        c->xmm[0].f32[0] = c->xmm[0].f32[0] + 1.0f;\n"
+        "        c->xmm[2].f32[0] = c->xmm[0].f32[0];\n"
+        "        break;\n"
+        "    }\n"
         "}\n";
     Buf out;
     Changes changes;
@@ -2377,6 +3117,179 @@ static int self_test(void)
                          "_wc3_xmm_local[2] = c->xmm[2];");
     RESET_CASE();
 
+    /* The block fallback is opt-in.  Without --block the switch function is
+     * left byte-identical. */
+    block_enabled = 0;
+    transform_text(block_scalar, strlen(block_scalar), &out, &funcs, &changed,
+                   &changes);
+    ok &= funcs == 1 && changed == 0;
+    ok &= out.n == strlen(block_scalar) &&
+          memcmp(out.p, block_scalar, out.n) == 0;
+    RESET_CASE();
+
+    /* Low-lane accesses in a switch case use a scalar local and only write
+     * the low lane back.  Whole-register accesses in the other case use the
+     * XMM local and its normal writeback. */
+    block_enabled = 1;
+    transform_text(block_scalar, strlen(block_scalar), &out, &funcs, &changed,
+                   &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].block_mask == 0x1Fu;
+    ok &= check_contains("block_scalar", out.p,
+                         "_wc3_xmm_local[0].f32[0] = c->xmm[0].f32[0];");
+    ok &= check_contains("block_scalar", out.p,
+                         "c->xmm[2].f32[0] = _wc3_xmm_local[2].f32[0];");
+    ok &= check_contains("block_scalar", out.p,
+                         "_wc3_xmm_local[3] = c->xmm[3];");
+    ok &= check_not_contains("block_scalar", out.p, "xmm_store_full(");
+    RESET_CASE();
+
+    /* A guest call with the newer _CLEAN suffix is a real boundary.  The
+     * block fallback must store before it and reload afterwards; a local may
+     * not stay live across the call. */
+    transform_text(block_call, strlen(block_call), &out, &funcs, &changed,
+                   &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].block_mask == 0x1u;
+    ok &= count_substr(out.p,
+                       "_wc3_xmm_local[0].f32[0] = c->xmm[0].f32[0];") == 2;
+    ok &= count_substr(out.p,
+                       "c->xmm[0].f32[0] = _wc3_xmm_local[0].f32[0];") == 2;
+    ok &= check_contains("block_call", out.p,
+                         "WC3_DIRECT_CALL_CLEAN(L_00000032, c);");
+    RESET_CASE();
+
+    /* The body of an unbraced if is copied untouched.  The straight-line
+     * statements after it are still promoted. */
+    transform_text(block_unbraced, strlen(block_unbraced), &out, &funcs,
+                   &changed, &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].block_mask == 0x0Cu;
+    ok &= check_contains("block_unbraced", out.p,
+                         "        c->xmm[0] = c->xmm[1];");
+    ok &= check_not_contains("block_unbraced", out.p,
+                             "_wc3_xmm_local[0]");
+    ok &= check_not_contains("block_unbraced", out.p,
+                             "_wc3_xmm_local[1]");
+    ok &= check_contains("block_unbraced", out.p,
+                         "_wc3_xmm_local[2] = c->xmm[2];");
+    RESET_CASE();
+
+    /* A `} else if (...)` line owns an unbraced body even though the line
+     * starts with a closing brace.  The body must not receive an entry load or
+     * an exit writeback, or it would execute unconditionally. */
+    transform_text(block_else_if, strlen(block_else_if), &out, &funcs,
+                   &changed, &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].block_mask == 0xC0u;
+    ok &= check_contains("block_else_if", out.p,
+                         "        } else if (c->ecx)");
+    ok &= check_contains("block_else_if", out.p,
+                         "            c->xmm[2].f32[0] = c->xmm[2].f32[0] + c->xmm[3].f32[0];");
+    ok &= check_not_contains("block_else_if", out.p,
+                             "_wc3_xmm_local[2]");
+    ok &= check_not_contains("block_else_if", out.p,
+                             "_wc3_xmm_local[4]");
+    ok &= check_contains("block_else_if", out.p,
+                         "_wc3_xmm_local[6].f32[0] = c->xmm[6].f32[0];");
+    RESET_CASE();
+
+    /* A goto after another statement on the same line is still a barrier.
+     * The preceding region must flush before it, not after the jump target. */
+    transform_text(block_midline_goto, strlen(block_midline_goto), &out,
+                   &funcs, &changed, &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].block_mask == 0x0Fu;
+    {
+        const char *wb = strstr(out.p,
+            "c->xmm[0].f32[0] = _wc3_xmm_local[0].f32[0];");
+        const char *go = strstr(out.p,
+            "        c->eax = 0; if (c->ecx) goto L_00000034_end;");
+        ok &= wb != NULL && go != NULL && wb < go;
+    }
+    ok &= check_contains("block_midline_goto", out.p,
+                         "        c->eax = 0; if (c->ecx) goto L_00000034_end;");
+    RESET_CASE();
+
+    /* --block-lazy elides block entry loads when the first access covers every
+     * value the region can read.  A full helper store creates the local, and
+     * a low-lane store does the same for a lane-only region. */
+    block_lazy_enabled = 1;
+    transform_text(block_lazy_full, strlen(block_lazy_full), &out, &funcs,
+                   &changed, &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].block_mask == 0x3u;
+    ok &= check_not_contains("block_lazy_full", out.p,
+                             "_wc3_xmm_local[0] = c->xmm[0];");
+    ok &= check_not_contains("block_lazy_full", out.p,
+                             "_wc3_xmm_local[1].f32[0] = c->xmm[1].f32[0];");
+    ok &= check_contains("block_lazy_full", out.p,
+                         "sse_load_ss(&_wc3_xmm_local[0], 1.0f);");
+    ok &= check_contains("block_lazy_full", out.p,
+                         "c->xmm[1].f32[0] = _wc3_xmm_local[1].f32[0];");
+    RESET_CASE();
+
+    /* The first lane store reads the old lane on its right-hand side.  That
+     * read must keep the entry load. */
+    transform_text(block_lazy_lane_read, strlen(block_lazy_lane_read), &out,
+                   &funcs, &changed, &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].block_mask == 0x1u;
+    ok &= count_substr(out.p,
+                       "_wc3_xmm_local[0].f32[0] = c->xmm[0].f32[0];") == 1;
+    RESET_CASE();
+
+    /* A lane write followed by a full-register access makes the region
+     * full-width.  The lane write alone does not initialize the upper lanes,
+     * so the entry load must remain. */
+    transform_text(block_lazy_unsafe, strlen(block_lazy_unsafe), &out, &funcs,
+                   &changed, &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].block_mask == 0x1u;
+    ok &= count_substr(out.p, "_wc3_xmm_local[0] = c->xmm[0];") == 1;
+    RESET_CASE();
+
+    /* A full write that reads the same register cannot create the local: the
+     * old value is still needed. */
+    transform_text(block_lazy_self, strlen(block_lazy_self), &out, &funcs,
+                   &changed, &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].block_mask == 0x1u;
+    ok &= count_substr(out.p, "_wc3_xmm_local[0] = c->xmm[0];") == 1;
+    RESET_CASE();
+
+    /* A direct full assignment from another register needs no entry load. */
+    transform_text(block_lazy_direct_full, strlen(block_lazy_direct_full), &out,
+                   &funcs, &changed, &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].block_mask == 0x1u;
+    ok &= check_not_contains("block_lazy_direct_full", out.p,
+                             "_wc3_xmm_local[0] = c->xmm[0];");
+    ok &= check_contains("block_lazy_direct_full", out.p,
+                         "_wc3_xmm_local[0] = c->xmm[1];");
+    RESET_CASE();
+    block_lazy_enabled = 0;
+
+    /* The fallback is idempotent: the generated local array makes the
+     * function ineligible, and the fallback skips an already transformed
+     * body. */
+    block_enabled = 1;
+    transform_text(block_scalar, strlen(block_scalar), &out, &funcs, &changed,
+                   &changes);
+    {
+        char *first = (char *)xmalloc(out.n + 1);
+        size_t first_n = out.n;
+        memcpy(first, out.p, out.n);
+        first[out.n] = 0;
+        RESET_CASE();
+        transform_text(first, first_n, &out, &funcs, &changed, &changes);
+        ok &= funcs == 1 && changed == 0;
+        ok &= out.n == first_n && memcmp(out.p, first, first_n) == 0;
+        free(first);
+        RESET_CASE();
+    }
+    block_enabled = 0;
+
 #undef RESET_CASE
     changes_free(&changes);
     if (!ok) {
@@ -2390,7 +3303,7 @@ static int self_test(void)
 static void usage(void)
 {
     fputs("xmm_local: use --lift IN --out OUT [--json REPORT] [--planner] "
-          "[--lazy] [--quiet]\n"
+          "[--lazy] [--block] [--block-lazy] [--quiet]\n"
           "           or --self-test\n", stderr);
     exit(2);
 }
@@ -2415,6 +3328,14 @@ int main(int argc, char **argv)
         }
         if (strcmp(argv[i], "--lazy") == 0) {
             lazy_enabled = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--block") == 0) {
+            block_enabled = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--block-lazy") == 0) {
+            block_lazy_enabled = 1;
             continue;
         }
         if (strcmp(argv[i], "--quiet") == 0) { quiet = 1; continue; }

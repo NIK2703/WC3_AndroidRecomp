@@ -26,7 +26,7 @@
 #include "sha256.h"
 
 #define PASS "selection24"
-#define PASS_REV 1
+#define PASS_REV 3
 
 typedef enum {
     K_GROUP_ALLOC = 0,
@@ -39,6 +39,13 @@ typedef enum {
     K_NOTE_SELECTION,
     K_HIDE_ALL,
     K_ADDUNIT_CAP,
+    K_CAP_LOCAL_LIST,
+    K_CAP_COPY_LIST,
+    K_CAP_SYNC_ADD,
+    K_CAP_NET_RECV,
+    K_CAP_NET_APPLY,
+    K_CAP_NET_SEND,
+    K_CAP_SELECT_ALL,
     K_COUNT
 } Kind;
 
@@ -52,7 +59,14 @@ static const char *const kind_name[K_COUNT] = {
     "fill_grid",
     "note_selection",
     "hide_all",
-    "addunit_cap"
+    "addunit_cap",
+    "cap_local_list",
+    "cap_copy_list",
+    "cap_sync_add",
+    "cap_net_recv",
+    "cap_net_apply",
+    "cap_net_send",
+    "cap_select_all"
 };
 
 /* Fixed union totals for the whole relifted game corpus. */
@@ -66,17 +80,24 @@ static const unsigned expected_total[K_COUNT] = {
     1, /* fill_grid     */
     1, /* note_selection*/
     1, /* hide_all      */
-    1  /* addunit_cap   */
+    1, /* addunit_cap   */
+    5, /* cap_local_list*/
+    3, /* cap_copy_list */
+    1, /* cap_sync_add  */
+    1, /* cap_net_recv  */
+    5, /* cap_net_apply */
+    1, /* cap_net_send  */
+    1  /* cap_select_all*/
 };
 
 /* Whole-file expectations.  seed.c carries the update prologue only. */
 static const unsigned expected_seed[K_COUNT] = {
-    0, 0, 1, 1, 1, 0, 0, 1, 1, 0
+    0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0
 };
 
 /* closed.c carries the split fragments and the UI allocation/fill code. */
 static const unsigned expected_closed[K_COUNT] = {
-    1, 2, 1, 1, 1, 2, 1, 0, 0, 1
+    1, 2, 1, 1, 1, 2, 1, 0, 0, 1, 5, 3, 1, 0, 5, 1, 1
 };
 
 typedef struct {
@@ -338,6 +359,13 @@ static void sites_add(Sites *s, Kind k, uint32_t va, const char *action,
 #define VA_NOTE_SELECTION   0x6F3C7D35u
 #define VA_HIDE_ALL         0x6F3ACCA3u
 #define VA_ADDUNIT_CAP      0x6F28DC30u
+#define VA_CAP_LOCAL_LIST   0x6F28EB97u
+#define VA_CAP_COPY_LIST    0x6F391AD2u
+#define VA_CAP_SYNC_ADD     0x6F28D667u
+#define VA_CAP_NET_RECV     0x6F6BC82Au
+#define VA_CAP_NET_APPLY    0x6F6BCAC9u
+#define VA_CAP_NET_SEND     0x6F6BCF1Du
+#define VA_CAP_SELECT_ALL   0x6F390293u
 
 static const char *const INIT_GROUP_DISPATCH =
     "push32(c, 0x6F39EDA9u); dispatch(c, 0x6F3B91B0u);";
@@ -794,11 +822,12 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                     "/* selection24 addunit trace */",
                     "#endif"
                 };
-                const char *ns;
-                const char *ne;
                 const char *term;
                 size_t tlen;
                 size_t ti;
+                const char *scan;
+                int trace_present = 0;
+                int scan_i;
 
                 if (handle_subst(out, p, le,
                                  "0xCu", "0x18u",
@@ -806,10 +835,21 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                  K_ADDUNIT_CAP, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
                     return -1;
-                ns = le;
-                ne = line_end(ns, end);
-                if (!contains_sub(ns, (size_t)(ne - ns),
-                                  "wc3_sel24_trace_addunit")) {
+                /* The trace block starts with #if and carries its marker on
+                 * the helper line, so inspect the whole short block rather
+                 * than only the immediately following line. */
+                scan = le;
+                for (scan_i = 0; scan_i < 4 && scan < end; ++scan_i) {
+                    const char *se = line_end(scan, end);
+
+                    if (contains_sub(scan, (size_t)(se - scan),
+                                     "wc3_sel24_trace_addunit")) {
+                        trace_present = 1;
+                        break;
+                    }
+                    scan = se;
+                }
+                if (!trace_present) {
                     tlen = term_len(p, le);
                     term = (tlen == 2) ? "\r\n" : "\n";
                     if (tlen == 0)
@@ -825,6 +865,67 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 }
                 break;
             }
+            case VA_CAP_LOCAL_LIST:
+                if (handle_subst(out, p, le,
+                                 "push32(c, 0xCu);", "push32(c, 0x18u);",
+                                 "push 0xc */", "push 0x18 */",
+                                 K_CAP_LOCAL_LIST, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_CAP_COPY_LIST:
+                if (handle_subst(out, p, le,
+                                 "c->edx = 0xCu;", "c->edx = 0x18u;",
+                                 "mov edx, 0xc */", "mov edx, 0x18 */",
+                                 K_CAP_COPY_LIST, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_CAP_SYNC_ADD:
+                if (handle_subst(out, p, le,
+                                 "flags_sub(c, rd32((c->ebx + 0x00000010u)), "
+                                 "0xCu, 4);",
+                                 "flags_sub(c, rd32((c->ebx + 0x00000010u)), "
+                                 "0x18u, 4);",
+                                 "cmp dword ptr [ebx + 0x10], 0xc */",
+                                 "cmp dword ptr [ebx + 0x10], 0x18 */",
+                                 K_CAP_SYNC_ADD, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_CAP_NET_RECV:
+                if (handle_subst(out, p, le,
+                                 "flags_sub(c, c->eax, 0xCu, 4);",
+                                 "flags_sub(c, c->eax, 0x18u, 4);",
+                                 "cmp eax, 0xc */", "cmp eax, 0x18 */",
+                                 K_CAP_NET_RECV, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_CAP_NET_APPLY:
+                if (handle_subst(out, p, le,
+                                 "c->edx = 0xCu;", "c->edx = 0x18u;",
+                                 "mov edx, 0xc */", "mov edx, 0x18 */",
+                                 K_CAP_NET_APPLY, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_CAP_NET_SEND:
+                if (handle_subst(out, p, le,
+                                 "c->ebx = 0xCu;", "c->ebx = 0x18u;",
+                                 "mov ebx, 0xc */", "mov ebx, 0x18 */",
+                                 K_CAP_NET_SEND, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_CAP_SELECT_ALL:
+                if (handle_subst(out, p, le,
+                                 "push32(c, 0xCu);", "push32(c, 0x18u);",
+                                 "push 0xc */", "push 0x18 */",
+                                 K_CAP_SELECT_ALL, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
             default:
                 break;
             }
@@ -1377,6 +1478,23 @@ static const char SELF_FIXTURE[] =
 "    push32(c, 0x6F3C7E99u); WC3_DIRECT_CALL(L_6F3DA470, c);            /* 6F3C7E94: call 0x6f3da470 */\n"
 "    c->eax = rd32((c->ecx + 0x00000130u));                       /* 6F3DA47F: mov eax, dword ptr [ecx + 0x130] */\n"
 "    flags_sub(c, c->eax, 0xCu, 4);                               /* 6F28DC30: cmp eax, 0xc */\n"
+"    push32(c, 0xCu);                                             /* 6F28EB97: push 0xc */\n"
+"    push32(c, 0xCu);                                             /* 6F28EB97: push 0xc */\n"
+"    push32(c, 0xCu);                                             /* 6F28EB97: push 0xc */\n"
+"    push32(c, 0xCu);                                             /* 6F28EB97: push 0xc */\n"
+"    push32(c, 0xCu);                                             /* 6F28EB97: push 0xc */\n"
+"    push32(c, 0xCu);                                             /* 6F390293: push 0xc */\n"
+"    c->edx = 0xCu;                                               /* 6F391AD2: mov edx, 0xc */\n"
+"    c->edx = 0xCu;                                               /* 6F391AD2: mov edx, 0xc */\n"
+"    c->edx = 0xCu;                                               /* 6F391AD2: mov edx, 0xc */\n"
+"    flags_sub(c, rd32((c->ebx + 0x00000010u)), 0xCu, 4);         /* 6F28D667: cmp dword ptr [ebx + 0x10], 0xc */\n"
+"    flags_sub(c, c->eax, 0xCu, 4);                               /* 6F6BC82A: cmp eax, 0xc */\n"
+"    c->edx = 0xCu;                                               /* 6F6BCAC9: mov edx, 0xc */\n"
+"    c->edx = 0xCu;                                               /* 6F6BCAC9: mov edx, 0xc */\n"
+"    c->edx = 0xCu;                                               /* 6F6BCAC9: mov edx, 0xc */\n"
+"    c->edx = 0xCu;                                               /* 6F6BCAC9: mov edx, 0xc */\n"
+"    c->edx = 0xCu;                                               /* 6F6BCAC9: mov edx, 0xc */\n"
+"    c->ebx = 0xCu;                                               /* 6F6BCF1D: mov ebx, 0xc */\n"
 "    c->ebx = c->ecx;                                             /* 6F3ACCA3: mov ebx, ecx */\n"
 "}\n";
 
@@ -1420,7 +1538,7 @@ static int self_test(char *err, size_t errsz)
         count_occurrences(out1.p, out1.n, "wc3_sel24_fill") != 2 ||
         count_occurrences(out1.p, out1.n, "0x144u") != 1 ||
         count_occurrences(out1.p, out1.n, "0x00000138u") != 1 ||
-        count_occurrences(out1.p, out1.n, "0x18u") != 5 ||
+        count_occurrences(out1.p, out1.n, "0x18u") != 22 ||
         count_occurrences(out1.p, out1.n,
                           "wc3_sel24_trace_addunit") != 1) {
         snprintf(err, errsz, "self-test first pass content mismatch");
@@ -1473,11 +1591,14 @@ static int self_test(char *err, size_t errsz)
 
     {
         const char json[] =
-            "{\"pass\":\"" PASS "\",\"pass_rev\":1,\"counts\":{"
+            "{\"pass\":\"" PASS "\",\"pass_rev\":3,\"counts\":{"
             "\"group_alloc\":1,\"init_group\":2,\"select\":2,"
             "\"cap_outer\":2,\"cap_inner\":2,\"fill_block\":2,"
             "\"fill_grid\":1,\"note_selection\":1,\"hide_all\":1,"
-            "\"addunit_cap\":1},\"total\":15}";
+            "\"addunit_cap\":1,\"cap_local_list\":5,\"cap_copy_list\":3,"
+            "\"cap_sync_add\":1,\"cap_net_recv\":1,\"cap_net_apply\":5,"
+            "\"cap_net_send\":1,\"cap_select_all\":1},"
+            "\"total\":32}";
         Counts c3;
 
         if (json_counts_parse(json, &c3, err2, sizeof(err2)) != 0 ||

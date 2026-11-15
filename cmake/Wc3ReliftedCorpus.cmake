@@ -363,16 +363,19 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
         # D3b first increment: a label-free leaf function without a guest
         # call can keep its XMM values in a local XMM[8] and write them back
         # only before an exit.  Host helpers are allowed; they must not read
-        # CPU.xmm directly.  This pass is part of the normal relifted-corpus
-        # pipeline and has no opt-in switch.  It runs after P0-2 and before the
-        # W3L profile, which must see the final instruction text.
+        # CPU.xmm directly.  The block fallback and its lazy entry-load
+        # elision are always enabled in the canonical relifted-corpus
+        # pipeline.  The profile component in the output path makes a change
+        # of these flags regenerate cached chunks.  It runs after P0-2 and
+        # before the W3L profile, which must see the final instruction text.
         if(NOT WC3_XMM_LOCAL_EXE)
             message(FATAL_ERROR
                 "xmm_local.exe missing; run tools/lift/build_tools.ps1 "
                 "before configuring")
         endif()
+        set(_xmm_profile "block_lazy")
         set(_xmm_dir
-            "${CMAKE_CURRENT_BINARY_DIR}/xmm_local/${_name}/${_kind}")
+            "${CMAKE_CURRENT_BINARY_DIR}/xmm_local/${_xmm_profile}/${_name}/${_kind}")
         file(MAKE_DIRECTORY "${_xmm_dir}")
         set(_xmm_chunks)
         foreach(_chunk IN LISTS _chunks)
@@ -388,6 +391,8 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                             --lift "${_chunk}"
                             --out "${_xmm_out}"
                             --json "${_xmm_json}"
+                            --block
+                            --block-lazy
                             --quiet
                     RESULT_VARIABLE _xmm_rc
                     OUTPUT_VARIABLE _xmm_stdout
