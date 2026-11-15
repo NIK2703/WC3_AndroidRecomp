@@ -269,7 +269,10 @@ if (-not (Test-Path $readelf)) {
 # Java_* entry points, android_main and JNI_OnLoad.  Crash triage uses the module
 # base plus the unstripped .symtab through tools/symbolize_crash.py.
 # The debug copy intentionally keeps symbols for the wc3.recomp.debug package.
-if ($isRelease) {
+# The release_optimized_pgo training APK is not a product: keep its symbols and
+# profile-name metadata so the raw counters remain mergeable.
+$stripProduct = $isRelease -and ($variant -ne 'release_optimized_pgo')
+if ($stripProduct) {
     $strip = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe'
     if (-not (Test-Path $strip) -or -not (Test-Path $readelf)) {
         Write-Host '[apk] unavailable: NDK llvm-strip/llvm-readelf not found'

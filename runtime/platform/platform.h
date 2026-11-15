@@ -525,6 +525,18 @@ typedef struct Wc3SyncApi {
     int (*critical_section_leave)(void *ctx, Wc3SyncHandle cs);
 } Wc3SyncApi;
 
+/* Movie playback is owned by the host UI, not by the guest.  The DirectShow
+ * facade calls play() once per IMediaControl::Run and stop() when the graph is
+ * stopped; play() must return 0 after the UI player has accepted the path and
+ * -1 when the host cannot start it.  Completion is delivered separately by the
+ * host through wc3_hle_ole32_video_finished(); this interface never blocks on
+ * the movie.  The path is an absolute host path. */
+typedef struct Wc3VideoApi {
+    void *ctx;
+    int (*play)(void *ctx, const char *host_path);
+    void (*stop)(void *ctx);
+} Wc3VideoApi;
+
 typedef struct Wc3Platform {
     Wc3MemApi mem;
     Wc3FileApi file;
@@ -542,6 +554,7 @@ typedef struct Wc3Platform {
     Wc3ThreadApi thread;
     Wc3SyncApi sync;
     Wc3VulkanDriverApi vulkan_driver;
+    Wc3VideoApi video;
 } Wc3Platform;
 
 /* The Android target installs one immutable table before guest startup. */

@@ -329,6 +329,41 @@ if(WC3_W3L_COMPAT)
         "w3l compat: profile ${WC3_W3L_PROFILE}, latency ${WC3_W3L_LATENCY} ms")
 endif()
 
+# 24-unit selection profile (gameplay/UI, not HLE).  The product build gets it
+# by default; the exact baseline (W3LCompat off) and the headless DUT keep the
+# original 12-unit cap and the 6x2 grid.  The pass edits generated C through
+# the compiled selection24 LiftPass; no source file under build/corpus-full is
+# modified in place.  See docs/research/SELECTION_24_ANALYSIS.md.
+if(WC3_RELIFTED_CORPUS_ROOT AND WC3_BUILD_APP AND
+   WC3_WITH_ASBUILT_HLE AND WC3_W3L_COMPAT)
+    set(WC3_SELECTION_24_DEFAULT ON)
+else()
+    set(WC3_SELECTION_24_DEFAULT OFF)
+endif()
+option(WC3_SELECTION_24
+       "Apply the 24-unit selection / 8x3 panel profile to the relifted corpus"
+       ${WC3_SELECTION_24_DEFAULT})
+if(WC3_SELECTION_24)
+    if(NOT WC3_RELIFTED_CORPUS_ROOT)
+        message(FATAL_ERROR
+            "WC3_SELECTION_24=ON requires WC3_RELIFTED_CORPUS_ROOT; the legacy "
+            "prebuilt corpus cannot be patched through a LiftPass.  Pass "
+            "-DWC3_SELECTION_24=OFF for the exact baseline.")
+    endif()
+    if(NOT WC3_BUILD_APP)
+        message(FATAL_ERROR
+            "WC3_SELECTION_24=ON is a product profile; the headless DUT must "
+            "keep the original 12-unit cap.  Pass -DWC3_SELECTION_24=OFF.")
+    endif()
+    if(NOT WC3_WITH_ASBUILT_HLE)
+        message(FATAL_ERROR
+            "WC3_SELECTION_24=ON requires WC3_WITH_ASBUILT_HLE=ON; the helper "
+            "is linked into wc3gameactivity, which does not exist otherwise.")
+    endif()
+    message(STATUS
+        "selection24: 24-unit selection profile, 6x2 for <=12, 8x3 for 13..24")
+endif()
+
 include("${WC3_ROOT}/cmake/Wc3CompilerCache.cmake")
 # O-51/O-52: this must be a directory-level option, before every target that
 # can contain a THREAD_LOCAL object (corpus, boot, shim, HLE, platform and the

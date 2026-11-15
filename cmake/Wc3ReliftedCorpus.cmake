@@ -63,6 +63,11 @@ find_program(WC3_W3L_COMPAT_EXE
     HINTS "${WC3_ROOT}/build/lift-tools"
     NO_DEFAULT_PATH)
 
+find_program(WC3_SELECTION24_EXE
+    NAMES selection24 selection24.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+
 find_program(WC3_LEAF_CALL_EXE
     NAMES leaf_call leaf_call.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -91,6 +96,7 @@ endif()
 set(WC3_RELIFTED_SOURCES)
 set(_wc3_check_commands)
 set(_wc3_compat_jsons)
+set(_wc3_sel24_jsons)
 math(EXPR _wc3_last_mod "${_wc3_nmod} - 1")
 
 if(WC3_W3L_COMPAT)
@@ -435,6 +441,71 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             endforeach()
             set(_chunks "${_compat_chunks}")
         endif()
+        if(WC3_SELECTION_24)
+            # The 24-unit selection profile runs after every other enabled
+            # pass, so it sees the final instruction text.  The pass edits the
+            # generated C only; no source file under build/corpus-full is
+            # modified in place.  Each chunk reports its own site counts and
+            # the union is verified after all modules.
+            if(NOT WC3_SELECTION24_EXE)
+                message(FATAL_ERROR
+                    "selection24.exe missing; run tools/lift/build_tools.ps1 "
+                    "before configuring")
+            endif()
+            # A stale pass silently re-emits the old source text while the
+            # configure still reports success.  Refuse that state instead of
+            # letting an executable older than its source define the product.
+            set(_sel24_pass_src
+                "${WC3_ROOT}/tools/lift/csrc_local/selection24.c")
+            if(EXISTS "${_sel24_pass_src}" AND
+               "${_sel24_pass_src}" IS_NEWER_THAN "${WC3_SELECTION24_EXE}")
+                message(FATAL_ERROR
+                    "selection24.exe is older than tools/lift/csrc_local/"
+                    "selection24.c; run tools/lift/build_tools.ps1 -Force "
+                    "before configuring")
+            endif()
+            # The input chunk comes from the w3l_compat directory, whose path
+            # already carries the profile and latency.  Mirror that tag here:
+            # otherwise a rubattle build could reuse a pvpgn-patched chunk
+            # whose mtime happens to be newer than the new input.
+            if(WC3_W3L_COMPAT)
+                set(_sel24_tag "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}")
+            else()
+                set(_sel24_tag "plain")
+            endif()
+            set(_sel24_dir
+                "${CMAKE_CURRENT_BINARY_DIR}/selection24/${_name}/${_kind}/${_sel24_tag}")
+            file(MAKE_DIRECTORY "${_sel24_dir}")
+            set(_sel24_chunks)
+            foreach(_chunk IN LISTS _chunks)
+                get_filename_component(_chunk_name "${_chunk}" NAME)
+                set(_sel24_out "${_sel24_dir}/${_chunk_name}")
+                set(_sel24_json "${_sel24_out}.json")
+                if(NOT EXISTS "${_sel24_out}" OR
+                   NOT EXISTS "${_sel24_json}" OR
+                   "${_chunk}" IS_NEWER_THAN "${_sel24_out}" OR
+                   "${WC3_SELECTION24_EXE}" IS_NEWER_THAN "${_sel24_out}")
+                    execute_process(
+                        COMMAND "${WC3_SELECTION24_EXE}"
+                                --lift "${_chunk}"
+                                --out "${_sel24_out}"
+                                --json "${_sel24_json}"
+                                --quiet
+                        RESULT_VARIABLE _sel24_rc
+                        OUTPUT_VARIABLE _sel24_stdout
+                        ERROR_VARIABLE _sel24_stderr)
+                    if(NOT _sel24_rc EQUAL 0)
+                        message(FATAL_ERROR
+                            "selection24 failed for ${_chunk} "
+                            "(rc=${_sel24_rc}):\n"
+                            "${_sel24_stdout}\n${_sel24_stderr}")
+                    endif()
+                endif()
+                list(APPEND _sel24_chunks "${_sel24_out}")
+                list(APPEND _wc3_sel24_jsons "${_sel24_json}")
+            endforeach()
+            set(_chunks "${_sel24_chunks}")
+        endif()
         list(APPEND WC3_RELIFTED_SOURCES ${_chunks})
     endforeach()
 
@@ -471,6 +542,30 @@ if(WC3_W3L_COMPAT)
     endif()
 endif()
 
+if(WC3_SELECTION_24)
+    # The 24-unit selection profile is spread over several chunks, so the
+    # union of the per-chunk counts must match the fixed totals of the whole
+    # game corpus.  A missing or duplicated site fails the configure.
+    set(_wc3_sel24_manifest
+        "${CMAKE_CURRENT_BINARY_DIR}/selection24_change_sets.txt")
+    file(WRITE "${_wc3_sel24_manifest}" "")
+    foreach(_json IN LISTS _wc3_sel24_jsons)
+        file(APPEND "${_wc3_sel24_manifest}" "${_json}\n")
+    endforeach()
+    execute_process(
+        COMMAND "${WC3_SELECTION24_EXE}"
+                --verify-coverage "@${_wc3_sel24_manifest}"
+                --quiet
+        RESULT_VARIABLE _wc3_sel24_cov_rc
+        OUTPUT_VARIABLE _wc3_sel24_cov_stdout
+        ERROR_VARIABLE _wc3_sel24_cov_stderr)
+    if(NOT _wc3_sel24_cov_rc EQUAL 0)
+        message(FATAL_ERROR
+            "selection24 coverage check failed (rc=${_wc3_sel24_cov_rc}):\n"
+            "${_wc3_sel24_cov_stdout}\n${_wc3_sel24_cov_stderr}")
+    endif()
+endif()
+
 if(NOT WC3_RELIFTED_SOURCES)
     message(FATAL_ERROR "relifted corpus has no translation units")
 endif()
@@ -481,7 +576,20 @@ endif()
 # outputs.  The pass selects a leaf, tail-free or draining frame per direct call
 # target; unknown targets and tailful calls in unproven caller bodies keep the
 # full WC3_DIRECT_CALL.
-set(_wc3_leaf_dir "${CMAKE_CURRENT_BINARY_DIR}/leaf_call")
+# Tag the leaf_call tree with every pass that changes the chunk text.  With a
+# fixed leaf_call/<basename> path an incremental build kept an object compiled
+# from a pre-selection24 chunk, even though the regenerated source was newer:
+# the linked product then had the helper library but no calls to it.  A
+# distinct directory gives the generated source and its object a distinct
+# identity instead of relying on timestamp invalidation alone.
+set(_wc3_leaf_tag "plain")
+if(WC3_W3L_COMPAT)
+    set(_wc3_leaf_tag "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}")
+endif()
+if(WC3_SELECTION_24)
+    string(APPEND _wc3_leaf_tag "-sel24")
+endif()
+set(_wc3_leaf_dir "${CMAKE_CURRENT_BINARY_DIR}/leaf_call/${_wc3_leaf_tag}")
 set(_wc3_leaf_list "${CMAKE_CURRENT_BINARY_DIR}/leaf_call_inputs.txt")
 set(_wc3_leaf_report "${WC3_ROOT}/reports/generated/leaf_call.json")
 set(_wc3_leaf_stamp "${_wc3_leaf_dir}/.stamp")
@@ -561,6 +669,14 @@ if(_wc3_leaf_need)
         "${_wc3_leaf_fingerprint}\n")
     file(TOUCH "${_wc3_leaf_stamp}")
 endif()
+# Belt-and-braces invalidation: every generated chunk depends on the stamp
+# written after the complete leaf_call run.  This also covers generators that
+# do not compare a source file against an object reliably after configure-time
+# regeneration.
+if(_wc3_leaf_outputs)
+    set_property(SOURCE ${_wc3_leaf_outputs}
+        PROPERTY OBJECT_DEPENDS "${_wc3_leaf_stamp}")
+endif()
 set(WC3_RELIFTED_SOURCES "${_wc3_leaf_outputs}")
 
 add_library(wc3_corpus_relifted STATIC ${WC3_RELIFTED_SOURCES})
@@ -605,8 +721,25 @@ if(WC3_W3L_COMPAT)
         "${WC3_ROOT}/runtime/compat")
     target_compile_definitions(wc3_corpus_relifted PRIVATE
         WC3_W3L_LATENCY=${WC3_W3L_LATENCY})
+    # CMake de-duplicates option tokens when it generates the compile command:
+    # two separate "-include <path>" entries collapse into one "-include"
+    # followed by both paths, and clang then treats the second header as a
+    # second input file.  SHELL: keeps the flag and its path as one unit, so
+    # ccache receives the two arguments it understands; a joined
+    # "-includeE:/..." token is rewritten by MSYS2 ccache into a broken path.
     target_compile_options(wc3_corpus_relifted PRIVATE
-        -include "${WC3_ROOT}/runtime/compat/w3l_compat.h")
+        "SHELL:-include ${WC3_ROOT}/runtime/compat/w3l_compat.h")
+endif()
+
+if(WC3_SELECTION_24)
+    # The 24-unit selection pass emits direct calls to the native helpers in
+    # runtime/features.  Force-include the declarations instead of editing the
+    # include block of every chunk; the header exists only in a
+    # selection24 build.
+    target_include_directories(wc3_corpus_relifted PRIVATE
+        "${WC3_ROOT}/runtime/features")
+    target_compile_options(wc3_corpus_relifted PRIVATE
+        "SHELL:-include ${WC3_ROOT}/runtime/features/selection24.h")
 endif()
 
 if(_wc3_check_commands)

@@ -1,0 +1,502 @@
+package wc3.recomp;
+
+import android.app.Activity;
+import android.graphics.Color;
+import android.graphics.PixelFormat;
+import android.media.AudioAttributes;
+import android.media.MediaCodec;
+import android.media.MediaFormat;
+import android.media.MediaPlayer;
+import android.os.Process;
+import android.util.DisplayMetrics;
+import android.view.Gravity;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * Campaign movie player.
+ *
+ * <p>The game talks to a DirectShow facade in native code.  This class is the
+ * host side of that facade: it parses the AVI (Android has no AVI extractor),
+ * decodes the MPEG-4 Part 2 video with MediaCodec directly to a SurfaceView,
+ * and plays the extracted MP3 track with MediaPlayer.  Audio and video are
+ * clocked from the same start instant; MediaCodec supplies presentation
+ * timestamps in display order, which already accounts for B-frames.
+ *
+ * <p>The movie layer is a separate SurfaceView above GameActivity's surface.
+ * There is no per-frame bridge and no copy into a Java Bitmap.
+ */
+final class MoviePlayer {
+    interface Host {
+        void setOverlayVisible(boolean visible);
+
+        void onFinished(int status);
+    }
+
+    private static final String VIDEO_MIME = "video/mp4v-es";
+    private static final long SURFACE_WAIT_NS = 10_000_000_000L;
+    private static final long MAX_IDLE_AFTER_EOS_NS = 15_000_000_000L;
+    private static final long EXTRA_RUN_NS = 30_000_000_000L;
+
+    private final Activity activity;
+    private final Host host;
+    private final FrameLayout layer;
+    private final SurfaceView surfaceView;
+    private final Object surfaceLock = new Object();
+    private final Object audioLock = new Object();
+    private final AtomicInteger generation = new AtomicInteger();
+    private final AtomicBoolean finished = new AtomicBoolean();
+
+    private boolean surfaceReady;
+    private volatile boolean surfaceLost;
+    private MediaPlayer audio;
+
+    private final SurfaceHolder.Callback surfaceCallback =
+            new SurfaceHolder.Callback() {
+                @Override
+                public void surfaceCreated(SurfaceHolder holder) {
+                    synchronized (surfaceLock) {
+                        surfaceReady = true;
+                        surfaceLost = false;
+                        surfaceLock.notifyAll();
+                    }
+                }
+
+                @Override
+                public void surfaceChanged(SurfaceHolder holder, int format,
+                                           int width, int height) {
+                }
+
+                @Override
+                public void surfaceDestroyed(SurfaceHolder holder) {
+                    synchronized (surfaceLock) {
+                        surfaceReady = false;
+                        surfaceLost = true;
+                        surfaceLock.notifyAll();
+                    }
+                }
+            };
+
+    MoviePlayer(Activity activity, Host host) {
+        this.activity = activity;
+        this.host = host;
+
+        FrameLayout frame = new FrameLayout(activity);
+        frame.setBackgroundColor(Color.BLACK);
+
+        surfaceView = new SurfaceView(activity);
+        surfaceView.setZOrderOnTop(true);
+        surfaceView.setFocusable(false);
+        surfaceView.setFocusableInTouchMode(false);
+        surfaceView.getHolder().setFormat(PixelFormat.OPAQUE);
+        surfaceView.getHolder().addCallback(surfaceCallback);
+
+        frame.addView(surfaceView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        frame.setVisibility(View.GONE);
+        activity.addContentView(frame, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        layer = frame;
+    }
+
+    /** Called from the DirectShow facade on the guest thread. */
+    void play(final String path) {
+        final int gen = generation.incrementAndGet();
+        finished.set(false);
+        surfaceLost = false;
+
+        activity.runOnUiThread(() -> {
+            if (gen != generation.get()) return;
+            releaseAudio();
+        });
+
+        Thread worker = new Thread(() -> run(path, gen), "wc3-movie");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    /** Called when the guest stops the graph or the activity is destroyed. */
+    void stop() {
+        generation.incrementAndGet();
+        wakeSurface();
+        activity.runOnUiThread(() -> {
+            layer.setVisibility(View.GONE);
+            host.setOverlayVisible(true);
+            releaseAudio();
+        });
+    }
+
+    private void finish(int gen, int status) {
+        if (gen != generation.get()) return;
+        if (!finished.compareAndSet(false, true)) return;
+        generation.incrementAndGet();
+        wakeSurface();
+
+        activity.runOnUiThread(() -> {
+            layer.setVisibility(View.GONE);
+            host.setOverlayVisible(true);
+            releaseAudio();
+        });
+        host.onFinished(status);
+    }
+
+    /**
+     * Size the SurfaceView to the movie's aspect ratio inside the full-screen
+     * layer, then make the layer visible and wait for its surface.  The layer
+     * must stay GONE until the final LayoutParams are set: resizing a
+     * SurfaceView that already owns a surface destroys that surface, and a
+     * decoder configured with the old Surface then sees surfaceLost and
+     * reports an immediate failure.  Parsing first also means the layer is
+     * shown at its letterboxed size from the first frame.
+     */
+    private boolean showSurface(int videoWidth, int videoHeight, int gen) {
+        if (videoWidth <= 0 || videoHeight <= 0) return false;
+        CountDownLatch changed = new CountDownLatch(1);
+        activity.runOnUiThread(() -> {
+            try {
+                if (gen != generation.get()) return;
+                DisplayMetrics dm = activity.getResources().getDisplayMetrics();
+                int containerWidth = layer.getWidth() > 0
+                        ? layer.getWidth() : dm.widthPixels;
+                int containerHeight = layer.getHeight() > 0
+                        ? layer.getHeight() : dm.heightPixels;
+                if (containerWidth <= 0 || containerHeight <= 0) return;
+                double scale = Math.min(containerWidth / (double) videoWidth,
+                        containerHeight / (double) videoHeight);
+                int width = Math.max(1, (int) Math.round(videoWidth * scale));
+                int height = Math.max(1, (int) Math.round(videoHeight * scale));
+                synchronized (surfaceLock) {
+                    surfaceReady = false;
+                    surfaceLost = false;
+                }
+                surfaceView.setLayoutParams(new FrameLayout.LayoutParams(
+                        width, height, Gravity.CENTER));
+                host.setOverlayVisible(false);
+                layer.setVisibility(View.VISIBLE);
+            } finally {
+                changed.countDown();
+            }
+        });
+
+        try {
+            if (!changed.await(2L, TimeUnit.SECONDS)) return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        return awaitSurface(gen);
+    }
+
+    private boolean current(int gen) {
+        return gen == generation.get() && !Thread.currentThread().isInterrupted();
+    }
+
+    private void wakeSurface() {
+        synchronized (surfaceLock) {
+            surfaceLock.notifyAll();
+        }
+    }
+
+    private void run(String path, int gen) {
+        // Priority is a hint only; losing it must not skip finish() and leave
+        // the guest blocked in its movie pump forever.
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY);
+        } catch (Throwable ignored) {
+        }
+
+        RandomAccessFile raf = null;
+        MediaCodec codec = null;
+        try {
+            File movie = new File(path);
+            AviFile avi = AviFile.parse(movie);
+            File audioFile = avi.audio.isEmpty()
+                    ? null : extractAudio(movie, avi);
+
+            if (!showSurface(avi.width, avi.height, gen)) {
+                finish(gen, 1);
+                return;
+            }
+            if (!current(gen)) return;
+
+            Surface surface = surfaceView.getHolder().getSurface();
+            if (surface == null || !surface.isValid()) {
+                finish(gen, 1);
+                return;
+            }
+
+            MediaFormat format = MediaFormat.createVideoFormat(
+                    VIDEO_MIME, avi.width, avi.height);
+            format.setByteBuffer("csd-0", ByteBuffer.wrap(avi.csd));
+            if (avi.maxVideoSize > 0) {
+                format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE,
+                        avi.maxVideoSize);
+            }
+
+            codec = MediaCodec.createDecoderByType(VIDEO_MIME);
+            codec.configure(format, surface, null, 0);
+            codec.start();
+
+            raf = new RandomAccessFile(movie, "r");
+            if (audioFile != null) startAudio(audioFile, gen);
+            if (!current(gen)) return;
+
+            boolean ok = decode(raf, avi, codec, gen);
+            finish(gen, ok ? 0 : 1);
+        } catch (Throwable ignored) {
+            finish(gen, 1);
+        } finally {
+            if (codec != null) {
+                try {
+                    codec.stop();
+                } catch (Throwable ignored) {
+                }
+                try {
+                    codec.release();
+                } catch (Throwable ignored) {
+                }
+            }
+            if (raf != null) {
+                try {
+                    raf.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    private boolean decode(RandomAccessFile raf, AviFile avi,
+                           MediaCodec codec, int gen)
+            throws IOException, InterruptedException {
+        int count = avi.video.size();
+        if (count == 0) return false;
+
+        byte[] input = new byte[Math.max(1, avi.maxVideoSize)];
+        MediaCodec.BufferInfo outputInfo = new MediaCodec.BufferInfo();
+        int queued = 0;
+        int rendered = 0;
+        boolean eosQueued = false;
+        boolean outputEos = false;
+        long startNs = System.nanoTime();
+        long lastOutputNs = startNs;
+        long movieNs = (long) count * 1_000_000_000L * avi.fpsDen / avi.fpsNum;
+        long deadlineNs = startNs + movieNs + EXTRA_RUN_NS;
+
+        while (current(gen) && !surfaceLost) {
+            for (int i = 0; i < 8 && !eosQueued; i++) {
+                int inIndex = codec.dequeueInputBuffer(0);
+                if (inIndex < 0) break;
+
+                if (queued >= count) {
+                    codec.queueInputBuffer(inIndex, 0, 0, 0,
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                    eosQueued = true;
+                    break;
+                }
+
+                AviFile.Sample sample = avi.video.get(queued);
+                if (sample.size > input.length) return false;
+
+                raf.seek(sample.offset);
+                raf.readFully(input, 0, sample.size);
+                ByteBuffer buffer = codec.getInputBuffer(inIndex);
+                if (buffer == null || sample.size > buffer.capacity()) {
+                    return false;
+                }
+                buffer.clear();
+                buffer.put(input, 0, sample.size);
+
+                long ptsUs = avi.presentationTimeUs(sample.display);
+                int flags = sample.type == AviFile.TYPE_I
+                        ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0;
+                codec.queueInputBuffer(inIndex, 0, sample.size, ptsUs, flags);
+                queued++;
+            }
+
+            int outIndex = codec.dequeueOutputBuffer(outputInfo, 10_000);
+            if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                long now = System.nanoTime();
+                if (eosQueued
+                        && now - lastOutputNs > MAX_IDLE_AFTER_EOS_NS) {
+                    return rendered > 0;
+                }
+                if (now > deadlineNs) return false;
+                continue;
+            }
+            if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) continue;
+            if (outIndex < 0) continue;
+
+            lastOutputNs = System.nanoTime();
+            if ((outputInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                outputEos = true;
+            }
+
+            if (outputInfo.size > 0) {
+                long targetNs = startNs
+                        + outputInfo.presentationTimeUs * 1_000L;
+                waitUntil(targetNs, gen);
+                if (!current(gen) || surfaceLost) {
+                    codec.releaseOutputBuffer(outIndex, false);
+                    break;
+                }
+                codec.releaseOutputBuffer(outIndex, true);
+                rendered++;
+            } else {
+                codec.releaseOutputBuffer(outIndex, false);
+            }
+
+            if (outputEos) break;
+        }
+
+        return rendered > 0 && (outputEos || eosQueued)
+                && current(gen) && !surfaceLost;
+    }
+
+    private void waitUntil(long targetNs, int gen) throws InterruptedException {
+        while (current(gen) && !surfaceLost) {
+            long now = System.nanoTime();
+            if (now >= targetNs) return;
+            long sleepMs = Math.min(10L,
+                    Math.max(1L, (targetNs - now) / 1_000_000L));
+            Thread.sleep(sleepMs);
+        }
+    }
+
+    private boolean awaitSurface(int gen) {
+        long deadline = System.nanoTime() + SURFACE_WAIT_NS;
+        synchronized (surfaceLock) {
+            // A destroy callback can race the first create: keep waiting for
+            // the replacement instead of treating the transient loss as the
+            // final failure.
+            while ((!surfaceReady || surfaceLost) && current(gen)) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0L) break;
+                try {
+                    surfaceLock.wait(Math.max(1L,
+                            remaining / 1_000_000L));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            return surfaceReady && current(gen) && !surfaceLost;
+        }
+    }
+
+    private boolean startAudio(final File file, final int gen) {
+        final CountDownLatch latch = new CountDownLatch(1);
+        final AtomicBoolean started = new AtomicBoolean(false);
+
+        activity.runOnUiThread(() -> {
+            MediaPlayer player = null;
+            try {
+                player = new MediaPlayer();
+                player.setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                        .build());
+                player.setDataSource(file.getAbsolutePath());
+                player.prepare();
+                if (gen != generation.get()) {
+                    player.release();
+                    latch.countDown();
+                    return;
+                }
+                player.start();
+                synchronized (audioLock) {
+                    audio = player;
+                    player = null;
+                }
+                started.set(true);
+            } catch (Throwable ignored) {
+                if (player != null) {
+                    try {
+                        player.release();
+                    } catch (Throwable ignoredAgain) {
+                    }
+                }
+            } finally {
+                latch.countDown();
+            }
+        });
+
+        try {
+            latch.await(10L, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return started.get();
+    }
+
+    private void releaseAudio() {
+        MediaPlayer player;
+        synchronized (audioLock) {
+            player = audio;
+            audio = null;
+        }
+        if (player == null) return;
+        try {
+            player.stop();
+        } catch (Throwable ignored) {
+        }
+        try {
+            player.release();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private File extractAudio(File movie, AviFile avi) throws IOException {
+        File directory = new File(activity.getCacheDir(), "movies");
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IOException("movie cache");
+        }
+
+        String key = Integer.toHexString(movie.getAbsolutePath().hashCode())
+                + "-" + movie.length() + "-" + movie.lastModified() + ".mp3";
+        File output = new File(directory, key);
+        if (output.isFile() && output.length() > 0L) return output;
+
+        File temporary = new File(directory, key + ".tmp");
+        try (FileOutputStream stream = new FileOutputStream(temporary);
+             RandomAccessFile raf = new RandomAccessFile(movie, "r")) {
+            byte[] buffer = new byte[64 * 1024];
+            for (AviFile.Sample sample : avi.audio) {
+                raf.seek(sample.offset);
+                int left = sample.size;
+                while (left > 0) {
+                    int take = Math.min(left, buffer.length);
+                    int read = raf.read(buffer, 0, take);
+                    if (read <= 0) throw new IOException("truncated audio");
+                    stream.write(buffer, 0, read);
+                    left -= read;
+                }
+            }
+            stream.getFD().sync();
+        } catch (IOException e) {
+            temporary.delete();
+            throw e;
+        }
+
+        if (!temporary.renameTo(output)) {
+            temporary.delete();
+            throw new IOException("movie cache rename");
+        }
+        return output;
+    }
+}

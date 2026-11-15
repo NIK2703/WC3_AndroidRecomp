@@ -13,6 +13,7 @@ import android.view.KeyEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
@@ -46,6 +47,7 @@ public class Wc3GameActivity extends GameActivity {
     }
 
     private SurfaceView overlayView;
+    private MoviePlayer moviePlayer;
 
     /* True once this process has started android_main.  The launch overrides
      * are process environment variables, so applying a second bundle while the
@@ -69,6 +71,7 @@ public class Wc3GameActivity extends GameActivity {
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
     private native void nativeClearOverlaySurface(Surface surface);
+    private static native void nativeMovieFinished(int status);
 
     /* Current host-side IME translation in physical pixels.  The native input
      * path adds it back before hit-testing, so this getter must return exactly
@@ -157,6 +160,40 @@ public class Wc3GameActivity extends GameActivity {
                         | EditorInfo.IME_FLAG_NO_FULLSCREEN);
 
         installOverlaySurface();
+        installMoviePlayer();
+    }
+
+    /**
+     * Called through JNI from the ole32/DirectShow facade.  The method is
+     * public because JNI lookup uses the activity class; it is not part of the
+     * guest ABI.
+     */
+    public boolean playMovie(final String path) {
+        final MoviePlayer player = moviePlayer;
+        if (player == null || path == null || path.isEmpty()) return false;
+        player.play(path);
+        return true;
+    }
+
+    public void stopMovie() {
+        final MoviePlayer player = moviePlayer;
+        if (player != null) player.stop();
+    }
+
+    private void installMoviePlayer() {
+        moviePlayer = new MoviePlayer(this, new MoviePlayer.Host() {
+            @Override
+            public void setOverlayVisible(final boolean visible) {
+                if (overlayView == null) return;
+                overlayView.setVisibility(visible
+                        ? View.VISIBLE : View.INVISIBLE);
+            }
+
+            @Override
+            public void onFinished(final int status) {
+                nativeMovieFinished(status);
+            }
+        });
     }
 
     /**
@@ -239,6 +276,7 @@ public class Wc3GameActivity extends GameActivity {
 
     @Override
     protected void onDestroy() {
+        if (moviePlayer != null) moviePlayer.stop();
         if (isFinishing()) {
             sNativeStarted = false;
         }

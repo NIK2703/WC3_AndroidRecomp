@@ -11,6 +11,7 @@
 #define WC3_HLE_ANDROID_H
 
 #include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -220,6 +221,22 @@ void wc3_android_hide_keyboard(void);
 void hle_android_post_char(uint32_t ch);
 void hle_android_post_backspace(void);
 void hle_android_post_enter(void);
+
+/* Queue an arbitrary Win32 message from a host thread.  The movie completion
+ * callback uses this to deliver WMU_CALL after the Java MediaCodec player has
+ * reached end of stream. */
+void hle_android_post_message(uint32_t hwnd, uint32_t msg, uint32_t wp,
+                              uint32_t lp);
+
+/* Idle hook for the blocking GetMessageA path.  The winmm timer module
+ * registers its mixer tick here; it runs on the waiting guest thread with no
+ * HLE lock held.  Passing NULL clears it. */
+void hle_android_set_message_wait_tick(void (*fn)(CPU *c));
+
+/* Translate a guest path into an absolute POSIX path.  The lookup applies the
+ * same Z:/backslash/cwd rules as every file import and resolves the leaf case
+ * when the pushed file differs from the spelling the guest used. */
+int hle_android_resolve_path(const char *guest, char *out, size_t cap);
 
 /* Register a module the probe mapped itself (war3.exe, Storm.dll) so that
  * GetModuleHandleA and GetProcAddress see it. */

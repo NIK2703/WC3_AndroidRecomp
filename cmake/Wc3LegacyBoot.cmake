@@ -165,6 +165,7 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts"
     "${WC3_ROOT}/runtime/hle/win32/winmm"
     "${WC3_ROOT}/runtime/hle/win32/dsound"
+    "${WC3_ROOT}/runtime/hle/win32/ole32"
     "${WC3_ROOT}/runtime/hle/win32/ws2_32"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest")
@@ -229,6 +230,33 @@ if(WC3_W3L_COMPAT)
     set_target_properties(wc3_compat PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
+# --- optional 24-unit selection helpers -----------------------------------
+# Gameplay/UI code, not HLE: this library exists only when
+# WC3_SELECTION_24=ON, and the generated corpus calls it through the
+# selection24 LiftPass.  The exact baseline and the headless DUT keep the
+# original 12-unit cap and the 6x2 grid.
+if(WC3_SELECTION_24)
+    add_library(wc3_selection24 STATIC
+        "${WC3_ROOT}/runtime/features/selection24.c")
+    target_include_directories(wc3_selection24 PRIVATE
+        "${WC3_ROOT}/runtime/features"
+        "${WC3_ROOT}/runtime/cpu"
+        "${WC3_ROOT}/runtime/guest"
+        "${WC3_ROOT}/runtime/diag")
+    target_compile_definitions(wc3_selection24 PRIVATE
+        GVA_DELTA=0
+        WC3_DEBUG=${WC3_DEBUG_DEFINE})
+    target_compile_options(wc3_selection24 PRIVATE
+        -fno-strict-aliasing
+        -fwrapv
+        -ffp-contract=off
+        -Wno-unused-parameter
+        -Wno-sign-compare
+        -U_FORTIFY_SOURCE
+        -D_FORTIFY_SOURCE=0)
+    set_target_properties(wc3_selection24 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # --- target HLE modules (M5 migration, H6.2 order) -------------------------
 # Each module is a normal target translation unit: no as-built headers, OS
 # services only through Wc3Platform, and registration over the shared table
@@ -269,6 +297,7 @@ add_library(wc3_hle_modules STATIC
     "${WC3_ROOT}/runtime/hle/win32/winmm/mss_timer_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/winmm/winmm_guard_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/dsound/dsound_hle.c"
+    "${WC3_ROOT}/runtime/hle/win32/ole32/ole32_hle.c"
     "${WC3_ROOT}/runtime/hle/win32/ws2_32/ws2_32_hle.c")
 
 # DirectSound audio architecture: DirectSound is the only transport.
@@ -313,6 +342,7 @@ target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/user32/window_facts"
     "${WC3_ROOT}/runtime/hle/win32/winmm"
     "${WC3_ROOT}/runtime/hle/win32/dsound"
+    "${WC3_ROOT}/runtime/hle/win32/ole32"
     "${WC3_ROOT}/runtime/hle/win32/ws2_32"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
@@ -407,6 +437,14 @@ target_compile_options(wc3_hle_d3d9 PRIVATE
     -Wno-sign-compare
     -U_FORTIFY_SOURCE
     -D_FORTIFY_SOURCE=0)
+if(_wc3_lto_upper STREQUAL "THIN")
+    # -fshort-wchar changes the wchar_size module flag to 2.  The rest of the
+    # product (C HLE and the lifted corpus) keeps the platform default of 4,
+    # and LLVM refuses to ThinLTO-link modules whose flags disagree.  Keep
+    # PGO for this bridge but leave its two objects native at link time; the
+    # rest of the product still gets ThinLTO.
+    target_compile_options(wc3_hle_d3d9 PRIVATE -fno-lto)
+endif()
 set_target_properties(wc3_hle_d3d9 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # --- DXVK entry point ------------------------------------------------------
@@ -554,6 +592,15 @@ target_link_libraries(wc3gameactivity PRIVATE
 if(WC3_W3L_COMPAT)
     # Static link order: after the corpus that references wc3_w3l_*.
     target_link_libraries(wc3gameactivity PRIVATE wc3_compat)
+endif()
+
+if(WC3_SELECTION_24)
+    # Static link order: after the corpus that references wc3_sel24_*.
+    target_link_libraries(wc3gameactivity PRIVATE wc3_selection24)
+    # The marker is otherwise a candidate for section GC; keep the member and
+    # the string visible for the build_app.ps1 artifact check.
+    target_link_options(wc3gameactivity PRIVATE
+        -Wl,--undefined=wc3_selection24_build_marker)
 endif()
 
 # The widescreen wrapper is linked with --wrap so neither the generated

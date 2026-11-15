@@ -421,6 +421,22 @@ void wc3_legacy_guest_zero(uint32_t dst, uint32_t size)
     memset((void *)(uintptr_t)dst, 0, size);
 }
 
+void wc3_legacy_post_message(uint32_t hwnd, uint32_t msg, uint32_t wp,
+                             uint32_t lp)
+{
+    hle_android_post_message(hwnd, msg, wp, lp);
+}
+
+void wc3_legacy_set_message_wait_tick(void (*fn)(CPU *c))
+{
+    hle_android_set_message_wait_tick(fn);
+}
+
+int wc3_legacy_resolve_path(const char *guest, char *out, size_t cap)
+{
+    return hle_android_resolve_path(guest, out, cap);
+}
+
 void wc3_legacy_set_screen_size(uint32_t width, uint32_t height)
 {
     hle_android_set_screen_size(width, height);

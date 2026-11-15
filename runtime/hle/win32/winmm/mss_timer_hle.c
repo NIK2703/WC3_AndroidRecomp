@@ -270,6 +270,35 @@ static void h_mss_set_timer(CPU *c)
 
     wc3_lifted_fn callback_fn = cb ? wc3_dispatch_resolve(cb) : NULL;
 
+    /* A NULL callback is a WM_TIMER channel: USER32 posts WM_TIMER to the
+     * owner window instead of calling into the guest.  This seam has no
+     * window-queue producer for WM_TIMER, so such a timer is accepted but
+     * never fires.  It must not occupy a table slot: game.dll's movie player
+     * re-arms SetTimer(hwnd, 0, 100, NULL) from WM_CREATE, and the Mss32
+     * mixer uses the same fixed table for the only timers that do fire.
+     * A non-zero id that previously held a callback is still replaced, as
+     * SetTimer would do on Windows. */
+    if (!cb) {
+        uint32_t reply = id;
+        mss_lock();
+        if (id) {
+            for (unsigned i = 0; i < MSS_TIMER_MAX; i++) {
+                MssTimer *q = &g_timers[i];
+                if (q->used && q->owner_gid == gid &&
+                    q->hwnd == hwnd && q->id == id)
+                    memset(q, 0, sizeof *q);
+            }
+        } else {
+            reply = ++g_timer_next_id;
+            if (!reply) reply = ++g_timer_next_id;
+        }
+        mss_unlock();
+        c->eax = reply;
+        MSS_LOG("timer set (message-only) hwnd=%u id=%u elapse=%u gid=%u",
+                hwnd, reply, elapse, gid);
+        return;
+    }
+
     mss_lock();
     MssTimer *t = NULL;
     if (id) {
@@ -345,6 +374,11 @@ static int mss_bind_or_add(const char *name, int argc, void (*impl)(CPU *c))
     return wc3_legacy_hle_add("USER32.dll", name, argc, 0, impl);
 }
 
+static void mss_wait_tick(CPU *c)
+{
+    mss_wall_tick(c);
+}
+
 int wc3_hle_mss_timer_install(void)
 {
     static int installed = 0;
@@ -366,6 +400,10 @@ int wc3_hle_mss_timer_install(void)
         MSS_LOG("USER32/KERNEL32 timer or pump row missing");
         return -1;
     }
+    /* GetMessageA blocks while the queue is empty.  The mixer timer is owned
+     * by a guest thread that may be the one waiting, so keep it ticking from
+     * the wait loop instead of only at pump entry. */
+    wc3_legacy_set_message_wait_tick(mss_wait_tick);
     installed = 1;
     MSS_LOG("installed USER32 timer + message/wait pump");
     return 6;

@@ -1352,7 +1352,86 @@ static void h_set_current_directory(CPU *c)
     char host[512];
     win_path(gstr(arg32(c, 0)), host, sizeof host);
     int rc = chdir(host);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    fprintf(stderr, "[file] chdir \"%s\" -> %d\n", host, rc);
+#endif
     c->eax = rc == 0 ? 1u : 0u;
+}
+
+/* GetTempPathA/W: the game asks for a writable directory right before it
+ * opens a movie, appends the movie name to that buffer, and passes the result
+ * to DirectShow.  The previous unbound import got argc 0, so hle_call() popped
+ * four bytes instead of twelve and left the caller's stack eight bytes low on
+ * every call; the handler also never wrote the buffer, so the game's static
+ * path buffer kept growing ("IntroX.mpq" + "IntroX.mpq" + ...).  The guest is
+ * already running with its working directory at the data/movie directory, and
+ * that is the directory whose contents it expects here (the Windows build
+ * extracted the movie there); prefer it over the app cache so appending the
+ * movie name resolves to the file that actually exists.  TMPDIR remains the
+ * fallback when cwd is not writable.  Both are resolved through the same Z:
+ * mapping as every other absolute guest path. */
+static int h_temp_path_win(char *out, size_t cap)
+{
+    char host[512];
+    const char *tmp = getenv("TMPDIR");
+    struct stat st;
+
+    if (!getcwd(host, sizeof host) || access(host, W_OK) != 0) {
+        if (!tmp || !tmp[0] || stat(tmp, &st) != 0 || !S_ISDIR(st.st_mode) ||
+            access(tmp, W_OK) != 0)
+            return -1;
+        snprintf(host, sizeof host, "%s", tmp);
+    }
+
+    posix_to_win(host, out, cap);
+    size_t len = strlen(out);
+    if (!len || len + 2 > cap) return -1;
+    if (out[len - 1] != '\\') {
+        out[len++] = '\\';
+        out[len] = 0;
+    }
+    return (int)len;
+}
+
+static void h_get_temp_path_a(CPU *c)
+{
+    /* Win32 order is (nBufferLength, lpBuffer), not the other way round.  The
+     * reversed read made the handler treat the size (260) as a guest pointer
+     * and the buffer pointer as a size, so guest_ok() rejected the call and
+     * the caller's path buffer kept its stale contents. */
+    uint32_t n = arg32(c, 0), buf = arg32(c, 1);
+    char win[600];
+    int len = h_temp_path_win(win, sizeof win);
+    if (len < 0) { c->eax = 0; return; }
+    uint32_t need = (uint32_t)len + 1;
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    fprintf(stderr, "[hle] GetTempPathA(n=%u, buf=%08X) -> \"%s\" (%d)\n",
+            n, buf, win, len);
+#endif
+    if (!buf || !n || !guest_ok(buf, n) || n < need) {
+        /* Windows returns the required size *including* the terminator when
+         * the caller's buffer is too small. */
+        c->eax = need;
+        return;
+    }
+    memcpy((void *)(uintptr_t)buf, win, (size_t)len + 1);
+    c->eax = (uint32_t)len;
+}
+
+static void h_get_temp_path_w(CPU *c)
+{
+    uint32_t n = arg32(c, 0), buf = arg32(c, 1);
+    char win[600];
+    int len = h_temp_path_win(win, sizeof win);
+    if (len < 0) { c->eax = 0; return; }
+    uint32_t need = (uint32_t)len + 1;
+    if (!buf || !n || n > 0x10000u || !guest_ok(buf, n * 2u) || n < need) {
+        c->eax = need;
+        return;
+    }
+    for (uint32_t i = 0; i <= (uint32_t)len; i++)
+        wr16g(buf + i * 2u, (uint16_t)(unsigned char)win[i]);
+    c->eax = (uint32_t)len;
 }
 
 static void h_get_full_path_name(CPU *c)
@@ -1417,6 +1496,42 @@ static int ci_resolve(const char *path, char *out, size_t cap)
     closedir(d);
     if (rc != 0) snprintf(out, cap, "%s", path);
     return rc;
+}
+
+/* Resolve a guest path to an absolute host path for a host-side consumer
+ * (the movie player is a Java process component).  The guest path may be
+ * relative to the current game directory, may use Windows separators, and may
+ * differ in leaf case from the pushed file.  The returned path is not required
+ * to exist: the caller reports the open failure with its own diagnostic. */
+int hle_android_resolve_path(const char *guest, char *out, size_t cap)
+{
+    if (!guest || !out || cap == 0) return -1;
+
+    char host[2048];
+    win_path(guest, host, sizeof host);
+
+    char resolved[2048];
+    if (ci_resolve(host, resolved, sizeof resolved) != 0)
+        snprintf(resolved, sizeof resolved, "%s", host);
+
+    char real[2048];
+    if (realpath(resolved, real) != NULL) {
+        snprintf(out, cap, "%s", real);
+        return 0;
+    }
+
+    if (resolved[0] == '/') {
+        snprintf(out, cap, "%s", resolved);
+        return 0;
+    }
+
+    char cwd[1024];
+    if (getcwd(cwd, sizeof cwd) != NULL) {
+        snprintf(out, cap, "%s/%s", cwd, resolved);
+        return 0;
+    }
+    snprintf(out, cap, "%s", resolved);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2049,6 +2164,9 @@ static void h_copy_file(CPU *c)
     while ((n = read(in, buf, sizeof buf)) > 0)
         if (write(out, buf, (size_t)n) != n) { ok = 0; break; }
     close(in); close(out);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    fprintf(stderr, "[file] copy \"%s\" -> \"%s\" = %d\n", a, b, ok);
+#endif
     c->eax = ok ? 1u : 0u;
 }
 
@@ -4211,32 +4329,127 @@ static void h_multibyte_to_widechar(CPU *c)
      * The guest writes save and map names as UTF-8; read them back as UTF-8
      * instead of widening each byte.  CP1251 remains the fallback for
      * non-UTF-8 ANSI data, so a Windows save copied to the device still
-     * decodes. */
+     * decodes.
+     *
+     * cbMultiByte == -1 means the input is null-terminated and the terminator
+     * is part of the conversion: the returned character count and the written
+     * string both include it.  Treating it as strlen() returned one character
+     * too few, so a caller that sized its buffer from the query wrote the
+     * path without a terminator and RenderFile read uninitialised heap after
+     * it. */
     uint32_t cp = arg32(c, 0), flags = arg32(c, 1), src = arg32(c, 2),
              n = arg32(c, 3), dst = arg32(c, 4), cap = arg32(c, 5);
     if (!src || !guest_ok(src, 1)) { c->eax = 0; return; }
     const uint8_t *s = (const uint8_t *)(uintptr_t)src;
-    uint32_t len = (n == 0xFFFFFFFFu)
-                       ? (uint32_t)strlen((const char *)s)
-                       : n;
-    if (len && !guest_ok(src, len)) { c->eax = 0; return; }
+    size_t scan = 0;
+    if (n == 0xFFFFFFFFu) {
+        while (scan < 0x7FFFFFFFu && guest_ok(src + (uint32_t)scan, 1) &&
+               s[scan] != 0)
+            scan++;
+        if (scan >= 0x7FFFFFFFu || !guest_ok(src + (uint32_t)scan, 1)) {
+            c->eax = 0;
+            return;
+        }
+    }
+    uint32_t len = (n == 0xFFFFFFFFu) ? (uint32_t)scan + 1u : n;
+    if (!len) { c->eax = 0; return; }
+    if (!guest_ok(src, len)) { c->eax = 0; return; }
     if (cap > 0x7FFFFFFFu) { c->eax = 0; return; }
-    uint32_t max_out = len < cap ? len : cap;
-    if (dst && cap && max_out && !guest_ok(dst, max_out * 2)) {
-        c->eax = 0;
+
+    /* Query first: Windows either writes the whole converted string or
+     * nothing, and never truncates a too-small destination. */
+    uint32_t need = mb_to_wide(cp, flags, s, len, 0, 0);
+    if (!need) { c->eax = 0; return; }
+    if (dst && cap) {
+        if (need > cap || !guest_ok(dst, need * 2u)) {
+            c->eax = 0;
+            return;
+        }
+        uint32_t wrote = mb_to_wide(cp, flags, s, len, dst, cap);
+        c->eax = wrote == need ? need : 0;
         return;
     }
-#if WC3_DEBUG && WC3_DEBUG_HLE
-    static unsigned mb2wc_logs;
-    if (len && s[0] >= 0x80u && mb2wc_logs < 64) {
-        mb2wc_logs++;
-        fprintf(stderr,
-                "[mb2wc] cp=%u flags=%u len=%u first=%02X%02X%02X%02X\n",
-                cp, flags, len, s[0], len > 1 ? s[1] : 0,
-                len > 2 ? s[2] : 0, len > 3 ? s[3] : 0);
+    c->eax = need;
+}
+
+static uint32_t wide_utf8_count(uint32_t src, uint32_t len)
+{
+    uint32_t need = 0;
+    for (uint32_t i = 0; i < len; i++) {
+        uint16_t w = rd16g(src + i * 2u);
+        if (w >= 0xD800u && w <= 0xDBFFu) {
+            if (i + 1u < len) {
+                uint16_t low = rd16g(src + (i + 1u) * 2u);
+                if (low >= 0xDC00u && low <= 0xDFFFu) {
+                    need += 4u;
+                    i++;
+                    continue;
+                }
+            }
+            need += 3u;                       /* U+FFFD */
+        } else if (w >= 0xDC00u && w <= 0xDFFFu) {
+            need += 3u;                       /* lone low surrogate */
+        } else if (w < 0x80u) {
+            need += 1u;
+        } else if (w < 0x800u) {
+            need += 2u;
+        } else {
+            need += 3u;
+        }
     }
-#endif
-    c->eax = mb_to_wide(cp, flags, s, len, dst, cap);
+    return need;
+}
+
+static uint32_t wide_utf8_write(uint32_t src, uint32_t len, uint32_t dst,
+                                uint32_t cap)
+{
+    uint32_t o = 0;
+    for (uint32_t i = 0; i < len; i++) {
+        uint16_t w = rd16g(src + i * 2u);
+        uint32_t cp = w;
+        if (w >= 0xD800u && w <= 0xDBFFu) {
+            if (i + 1u < len) {
+                uint16_t low = rd16g(src + (i + 1u) * 2u);
+                if (low >= 0xDC00u && low <= 0xDFFFu) {
+                    cp = 0x10000u + (((uint32_t)w - 0xD800u) << 10) +
+                         ((uint32_t)low - 0xDC00u);
+                    i++;
+                } else {
+                    cp = 0xFFFDu;
+                }
+            } else {
+                cp = 0xFFFDu;
+            }
+        } else if (w >= 0xDC00u && w <= 0xDFFFu) {
+            cp = 0xFFFDu;
+        }
+
+        uint8_t b[4];
+        uint32_t need;
+        if (cp < 0x80u) {
+            b[0] = (uint8_t)cp;
+            need = 1;
+        } else if (cp < 0x800u) {
+            b[0] = (uint8_t)(0xC0u | (cp >> 6));
+            b[1] = (uint8_t)(0x80u | (cp & 0x3Fu));
+            need = 2;
+        } else if (cp < 0x10000u) {
+            b[0] = (uint8_t)(0xE0u | (cp >> 12));
+            b[1] = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu));
+            b[2] = (uint8_t)(0x80u | (cp & 0x3Fu));
+            need = 3;
+        } else {
+            b[0] = (uint8_t)(0xF0u | (cp >> 18));
+            b[1] = (uint8_t)(0x80u | ((cp >> 12) & 0x3Fu));
+            b[2] = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu));
+            b[3] = (uint8_t)(0x80u | (cp & 0x3Fu));
+            need = 4;
+        }
+        if (o + need > cap) return 0;
+        for (uint32_t k = 0; k < need; k++) wr8g(dst + o + k, b[k]);
+        o += need;
+    }
+    return o;
 }
 
 static void h_widechar_to_multibyte(CPU *c)
@@ -4245,19 +4458,15 @@ static void h_widechar_to_multibyte(CPU *c)
      *                     defaultChar, usedDefaultChar) - src is argument 2,
      * not 3.  Reading one slot late made src land on cchWideChar, so every
      * conversion returned 0 and wrote nothing; the launcher's fatal-error
-     * dialog then displayed an empty message. */
-    uint32_t cp = arg32(c, 0), src = arg32(c, 2), n = arg32(c, 3),
-             dst = arg32(c, 4), cap = arg32(c, 5);
-    (void)cp;
-    if (!src || !guest_ok(src, 2)) { c->eax = 0; return; }
-    uint32_t len = 0;
-    if (n == 0xFFFFFFFFu) { while (rd16g(src + len * 2)) len++; }
-    else len = n;
-    if (!dst || !cap) { c->eax = len; return; }
-    /* The host console is UTF-8, so anything above ASCII is encoded as UTF-8
-     * rather than mapped to '?' - that keeps Cyrillic error text readable.
+     * dialog then displayed an empty message.
      *
-     * Two rules the caller depends on, and the loop used to break both:
+     * cchWideChar == -1 includes the terminating null in both the returned
+     * byte count and the output, exactly as MultiByteToWideChar does for
+     * cbMultiByte == -1.  The host console and the HLE file layer are UTF-8,
+     * so anything above ASCII is encoded as UTF-8 rather than mapped to '?' -
+     * that keeps Cyrillic error text readable.
+     *
+     * Two rules the caller depends on, and the old loop broke both:
      *
      *  - a character is written when it *fits*, not when the buffer is at
      *    least four bytes bigger than what has been written.  The old guard
@@ -4269,31 +4478,47 @@ static void h_widechar_to_multibyte(CPU *c)
      *    returned NULL.  _environ ([0x60053DF0]) stayed NULL, and the CRT's
      *    own walk of it at 0x600494E4 (`mov al, byte ptr [esi]`) faulted at
      *    address 0 - which is the whole round-7 crash.
-     *  - the return value is the number of bytes written, and 0 has to mean
-     *    "this failed", never "there was nothing to copy". */
-    uint32_t o = 0;
-    for (uint32_t i = 0; i < len; i++) {
-        uint16_t w = rd16g(src + i * 2);
-        uint8_t b[3];
-        uint32_t need;
-        if (w < 0x80u) {
-            b[0] = (uint8_t)w;
-            need = 1;
-        } else if (w < 0x800u) {
-            b[0] = (uint8_t)(0xC0u | (w >> 6));
-            b[1] = (uint8_t)(0x80u | (w & 0x3Fu));
-            need = 2;
-        } else {
-            b[0] = (uint8_t)(0xE0u | (w >> 12));
-            b[1] = (uint8_t)(0x80u | ((w >> 6) & 0x3Fu));
-            b[2] = (uint8_t)(0x80u | (w & 0x3Fu));
-            need = 3;
+     *  - a supplied destination is all-or-nothing.  The returned count is the
+     *    number of bytes required (including the terminator for -1) and 0
+     *    means failure, never "there was nothing to copy". */
+    uint32_t cp = arg32(c, 0), src = arg32(c, 2), n = arg32(c, 3),
+             dst = arg32(c, 4), cap = arg32(c, 5);
+    (void)cp;
+    if (!src || !guest_ok(src, 2)) { c->eax = 0; return; }
+
+    uint32_t len = 0;
+    if (n == 0xFFFFFFFFu) {
+        while (len < 0x3FFFFFFFu && guest_ok(src + len * 2u, 2u) &&
+               rd16g(src + len * 2u))
+            len++;
+        if (len >= 0x3FFFFFFFu || !guest_ok(src + len * 2u, 2u)) {
+            c->eax = 0;
+            return;
         }
-        if (o + need > cap) break;
-        for (uint32_t k = 0; k < need; k++) wr8g(dst + o + k, b[k]);
-        o += need;
+        len++;                                  /* include the terminator */
+    } else {
+        len = n;
     }
-    c->eax = o;
+    if (!len) { c->eax = 0; return; }
+    if (len > 0x3FFFFFFFu || !guest_ok(src, len * 2u)) {
+        c->eax = 0;
+        return;
+    }
+
+    /* Query first: Windows either writes the whole converted string or
+     * nothing, and never truncates a too-small destination. */
+    uint32_t need = wide_utf8_count(src, len);
+    if (!need) { c->eax = 0; return; }
+    if (dst && cap) {
+        if (need > cap || !guest_ok(dst, need)) {
+            c->eax = 0;
+            return;
+        }
+        uint32_t wrote = wide_utf8_write(src, len, dst, cap);
+        c->eax = wrote == need ? need : 0;
+        return;
+    }
+    c->eax = need;
 }
 
 static void h_get_acp(CPU *c) { c->eax = 1251; }
@@ -6349,17 +6574,182 @@ static void h_get_file_type(CPU *c) { (void)c; c->eax = 1; }   /* FILE_TYPE_DISK
  * CreateWindowExA below remembers the handle the game will pass back to
  * GetMessage/PeekMessage/DispatchMessage. */
 static uint32_t g_wndproc;
-static uint32_t g_main_hwnd;
+/* The Android input thread reads the target while the guest thread creates,
+ * activates or destroys windows, so the handles it reads are volatile. */
+static volatile uint32_t g_main_hwnd;
 static uint32_t g_main_userdata;
+/* The guest only has fake handles.  Track the ones it explicitly activates or
+ * focuses so GetActiveWindow/GetFocus can answer with the same value instead
+ * of a hard-coded handle that never matches g_main_hwnd. */
+static volatile uint32_t g_active_hwnd, g_focus_hwnd;
+
+/* Win32 dispatches a message to the procedure registered by the window's
+ * class, not to one global procedure.  The engine registers "Warcraft III"
+ * for the game window and "BlizPlay" for the campaign movie window; the movie
+ * graph is created from BlizPlay's WM_CREATE and torn down from its
+ * WM_DESTROY.  Keep the small class and window tables the guest actually
+ * uses.  The main window stays on g_wndproc so the existing input path is
+ * unchanged. */
+#define HLE_CLASS_MAX  16
+#define HLE_WINDOW_MAX 32
+
+typedef struct {
+    char name[64];
+    uint32_t proc;
+} HleClassEntry;
+
+typedef struct {
+    uint32_t hwnd;
+    uint32_t proc;
+    uint32_t userdata;
+} HleWindowEntry;
+
+static HleClassEntry g_classes[HLE_CLASS_MAX];
+static int g_class_count;
+static HleWindowEntry g_windows[HLE_WINDOW_MAX];
+static int g_window_count;
+/* Name of the game's top-level window class.  The engine destroys and
+ * re-creates that window when a campaign mission starts, and the new window
+ * must take over g_main_hwnd; otherwise GetForegroundWindow/GetActiveWindow
+ * keep reporting the old handle and the rebuilt window procedure cannot find
+ * its UI object through GWL_USERDATA. */
+static char g_main_class[64];
+/* Set once the first top-level window exists.  A later main-class window must
+ * still receive WM_CREATE even when the old main was destroyed first; only the
+ * very first window uses the legacy "no WM_CREATE" path. */
+static int g_main_seen;
+/* The Android input thread resolves its target through hle_window_proc()
+ * while a guest thread binds or unbinds the movie window.  The critical
+ * sections copy or scan a few words and never call into the guest. */
+static pthread_mutex_t g_window_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void hle_class_add(const char *name, uint32_t proc)
+{
+    if (!name || !name[0] || !proc) return;
+    pthread_mutex_lock(&g_window_lock);
+    for (int i = 0; i < g_class_count; i++) {
+        if (strcasecmp(g_classes[i].name, name) == 0) {
+            g_classes[i].proc = proc;
+            pthread_mutex_unlock(&g_window_lock);
+            return;
+        }
+    }
+    if (g_class_count < HLE_CLASS_MAX) {
+        snprintf(g_classes[g_class_count].name,
+                 sizeof g_classes[g_class_count].name, "%s", name);
+        g_classes[g_class_count].proc = proc;
+        g_class_count++;
+    }
+    pthread_mutex_unlock(&g_window_lock);
+}
+
+static uint32_t hle_class_proc(const char *name)
+{
+    if (!name || !name[0]) return 0;
+    uint32_t proc = 0;
+    pthread_mutex_lock(&g_window_lock);
+    for (int i = 0; i < g_class_count; i++) {
+        if (strcasecmp(g_classes[i].name, name) == 0) {
+            proc = g_classes[i].proc;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_window_lock);
+    return proc;
+}
+
+static void hle_window_bind(uint32_t hwnd, uint32_t proc, uint32_t userdata)
+{
+    if (!hwnd || !proc) return;
+    pthread_mutex_lock(&g_window_lock);
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_windows[i].hwnd == hwnd) {
+            g_windows[i].proc = proc;
+            g_windows[i].userdata = userdata;
+            pthread_mutex_unlock(&g_window_lock);
+            return;
+        }
+    }
+    if (g_window_count < HLE_WINDOW_MAX) {
+        g_windows[g_window_count].hwnd = hwnd;
+        g_windows[g_window_count].proc = proc;
+        g_windows[g_window_count].userdata = userdata;
+        g_window_count++;
+    }
+    pthread_mutex_unlock(&g_window_lock);
+}
+
+static uint32_t hle_window_proc(uint32_t hwnd)
+{
+    uint32_t proc = 0;
+    pthread_mutex_lock(&g_window_lock);
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_windows[i].hwnd == hwnd) {
+            proc = g_windows[i].proc;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_window_lock);
+    return proc;
+}
+
+/* GWL_USERDATA belongs to the window, not to the process.  The engine
+ * re-creates its top-level window when a campaign mission starts and the new
+ * window procedure stores a different UI object in that slot; a single global
+ * slot leaves every message on the rebuilt window without its object. */
+static int hle_window_userdata(uint32_t hwnd, uint32_t *value)
+{
+    int found = 0;
+    pthread_mutex_lock(&g_window_lock);
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_windows[i].hwnd == hwnd) {
+            if (value) *value = g_windows[i].userdata;
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_window_lock);
+    return found;
+}
+
+static int hle_window_set_userdata(uint32_t hwnd, uint32_t value,
+                                   uint32_t *old)
+{
+    int found = 0;
+    pthread_mutex_lock(&g_window_lock);
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_windows[i].hwnd == hwnd) {
+            if (old) *old = g_windows[i].userdata;
+            g_windows[i].userdata = value;
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_window_lock);
+    return found;
+}
+
+static void hle_window_unbind(uint32_t hwnd)
+{
+    pthread_mutex_lock(&g_window_lock);
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_windows[i].hwnd != hwnd) continue;
+        g_windows[i] = g_windows[--g_window_count];
+        break;
+    }
+    pthread_mutex_unlock(&g_window_lock);
+}
 
 static void h_register_class_ex(CPU *c)
 {
     uint32_t p = arg32(c, 0);
     if (p && guest_ok(p, 48)) {
+        const char *name = gstr(rd32g(p + 40));
         g_wndproc = rd32g(p + 8);
+        hle_class_add(name, g_wndproc);
 #if WC3_DEBUG
         fprintf(stderr, "[ui] RegisterClassExA(\"%s\") wndproc=%08X\n",
-                gstr(rd32g(p + 40)), g_wndproc);
+                name, g_wndproc);
 #endif
     } else {
         fprintf(stderr, "[ui] RegisterClassExA(%08X): bad pointer\n", p);
@@ -6646,6 +7036,7 @@ static void u_register_class(CPU *c)
 #if WC3_DEBUG
     fprintf(stderr, "[ui] RegisterClassA(\"%s\") wndproc=%08X\n", name, proc);
 #endif
+    hle_class_add(name, proc);
     if (proc && (!g_wndproc || strstr(name, "Warcraft")))
         g_wndproc = proc;
     c->eax = 1;
@@ -6745,6 +7136,16 @@ typedef struct {
 static UMsg g_uq[UMSG_MAX];
 static int g_uq_head, g_uq_count;
 static pthread_mutex_t g_uq_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_uq_cond = PTHREAD_COND_INITIALIZER;
+/* GetMessageA blocks, as it does on Windows.  The Mss32 mixer timer is pumped
+ * from the same guest thread, so the wait loop calls this hook between slices;
+ * the winmm module installs it. */
+static void (*g_msg_wait_tick)(CPU *c);
+
+void hle_android_set_message_wait_tick(void (*fn)(CPU *c))
+{
+    g_msg_wait_tick = fn;
+}
 
 static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
 {
@@ -6779,14 +7180,25 @@ static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
     m->x = x;
     m->y = y;
     g_uq_count++;
+    pthread_cond_broadcast(&g_uq_cond);
     pthread_mutex_unlock(&g_uq_lock);
 }
 
-static int u_msg_take(uint32_t out, uint32_t hwnd_filter, uint32_t lo,
-                      uint32_t hi, int remove)
+/* PUBLIC: post a Win32 message into the guest queue.  The DirectShow movie
+ * bridge runs its completion callback on the Java UI thread and uses this
+ * entry point; u_msg_post already owns the queue lock and is safe there. */
+void hle_android_post_message(uint32_t hwnd, uint32_t msg, uint32_t wp,
+                              uint32_t lp)
+{
+    u_msg_post(hwnd, msg, wp, lp);
+}
+
+/* Queue lookup with g_uq_lock already held.  GetMessageA needs the atomic
+ * "try then wait" pair, so the lock stays in the caller. */
+static int u_msg_take_locked(uint32_t out, uint32_t hwnd_filter, uint32_t lo,
+                             uint32_t hi, int remove)
 {
     if (!out) return 0;
-    pthread_mutex_lock(&g_uq_lock);
     int found = -1;
     for (int i = 0; i < g_uq_count; i++) {
         UMsg *m = &g_uq[(g_uq_head + i) % UMSG_MAX];
@@ -6795,10 +7207,8 @@ static int u_msg_take(uint32_t out, uint32_t hwnd_filter, uint32_t lo,
         found = i;
         break;
     }
-    if (found < 0) {
-        pthread_mutex_unlock(&g_uq_lock);
-        return 0;
-    }
+    if (found < 0) return 0;
+
     UMsg m = g_uq[(g_uq_head + found) % UMSG_MAX];
     if (remove) {
         for (int i = found; i < g_uq_count - 1; i++)
@@ -6806,7 +7216,6 @@ static int u_msg_take(uint32_t out, uint32_t hwnd_filter, uint32_t lo,
                 g_uq[(g_uq_head + i + 1) % UMSG_MAX];
         g_uq_count--;
     }
-    pthread_mutex_unlock(&g_uq_lock);
 
     wr32g(out + 0, m.hwnd);
     wr32g(out + 4, m.msg);
@@ -6818,21 +7227,140 @@ static int u_msg_take(uint32_t out, uint32_t hwnd_filter, uint32_t lo,
     return 1;
 }
 
+static int u_msg_take(uint32_t out, uint32_t hwnd_filter, uint32_t lo,
+                      uint32_t hi, int remove)
+{
+    if (!out) return 0;
+    pthread_mutex_lock(&g_uq_lock);
+    int found = u_msg_take_locked(out, hwnd_filter, lo, hi, remove);
+    pthread_mutex_unlock(&g_uq_lock);
+    return found;
+}
+
+static uint32_t u_call_guest(CPU *c, uint32_t fn, int argc, const uint32_t *args);
+
 static void u_create_window(CPU *c)
 {
     uint32_t hwnd = 0x00020000u + (g_fake_next += 4);
     uint32_t param = arg32(c, 11);
+    uint32_t class_ptr = arg32(c, 1);
+    const char *class_name = gstr(class_ptr);
+    uint32_t class_proc = hle_class_proc(class_name);
 #if WC3_DEBUG
     fprintf(stderr, "[ui] CreateWindowExA(\"%s\", \"%s\", lp=%08X) -> %08X\n",
-            gstr(arg32(c, 1)), gstr(arg32(c, 2)), param, hwnd);
+            class_name, gstr(arg32(c, 2)), param, hwnd);
 #endif
-    if (!g_main_hwnd) {
+    const int first_main = !g_main_seen;
+    /* The engine re-creates its top-level "Warcraft III" window when a
+     * campaign mission starts.  That window is the new input target and owns a
+     * new UI object in GWL_USERDATA.  Treat a second window of the recorded
+     * main class as the replacement main window; "BlizPlay" has a different
+     * class and stays a normal secondary window. */
+    const int new_main = !first_main && class_name && class_name[0] &&
+        g_main_class[0] && strcasecmp(class_name, g_main_class) == 0 &&
+        class_proc && (!g_wndproc || class_proc == g_wndproc);
+    int main_window = first_main || new_main;
+    uint32_t old_main = g_main_hwnd;
+    uint32_t old_userdata = g_main_userdata;
+    uint32_t old_active = g_active_hwnd;
+    uint32_t old_focus = g_focus_hwnd;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (new_main)
+        fprintf(stderr, "[ui] main window replaced %08X -> %08X class=\"%s\"\n",
+                old_main, hwnd, class_name);
+#endif
+
+    if (main_window) {
         g_main_hwnd = hwnd;
-        /* CreateWindowExA would deliver WM_CREATE with a CREATESTRUCT whose
-         * lpCreateParams is this argument, and the game's window procedure
-         * stores that pointer as GWL_USERDATA.  It is the object the mouse
-         * handler lives in, so install it here instead of sending WM_CREATE. */
         g_main_userdata = param;
+        if (first_main) {
+            snprintf(g_main_class, sizeof g_main_class, "%s", class_name);
+            g_main_seen = 1;
+        } else {
+            /* The replacement main window takes over host input now: its
+             * procedure receives WM_CREATE below, and anything queued during
+             * creation must already target the new window rather than the
+             * old main or the movie window. */
+            g_active_hwnd = hwnd;
+            g_focus_hwnd = hwnd;
+        }
+        if (class_proc)
+            hle_window_bind(hwnd, class_proc, first_main ? param : 0);
+    } else if (class_proc) {
+        hle_window_bind(hwnd, class_proc, 0);
+    }
+
+    if (!first_main && class_proc) {
+        /* The campaign movie is a top-level "BlizPlay" window.  Its WM_CREATE
+         * builds the DirectShow graph and calls Run; the matching WM_DESTROY
+         * (sent by DestroyWindow below) is what lets the movie pump return.
+         * The replacement main window also needs WM_CREATE: that is where its
+         * procedure stores the new UI object as GWL_USERDATA.  Deliver the real
+         * Win32 notification with a real CREATESTRUCTA. */
+        uint32_t cs = hle_guest_alloc(48);
+        if (!cs) {
+            /* Without CREATESTRUCTA the movie window cannot build its graph,
+             * and its pump would block forever on an empty queue.  Fail the
+             * creation instead of returning a half-built window. */
+            hle_window_unbind(hwnd);
+            if (main_window) {
+                g_main_hwnd = old_main;
+                g_main_userdata = old_userdata;
+                g_active_hwnd = old_active;
+                g_focus_hwnd = old_focus;
+            }
+            c->eax = 0;
+            return;
+        }
+        memset((void *)(uintptr_t)cs, 0, 48);
+        wr32g(cs + 0, param);            /* lpCreateParams */
+        wr32g(cs + 4, arg32(c, 10));     /* hInstance */
+        wr32g(cs + 8, arg32(c, 9));      /* hMenu */
+        wr32g(cs + 12, arg32(c, 8));     /* hwndParent */
+        wr32g(cs + 16, arg32(c, 7));     /* cy */
+        wr32g(cs + 20, arg32(c, 6));     /* cx */
+        wr32g(cs + 24, arg32(c, 5));     /* y */
+        wr32g(cs + 28, arg32(c, 4));     /* x */
+        wr32g(cs + 32, arg32(c, 3));     /* style */
+        wr32g(cs + 36, arg32(c, 2));     /* lpszName */
+        wr32g(cs + 40, class_ptr);       /* lpszClass */
+        wr32g(cs + 44, arg32(c, 0));     /* dwExStyle */
+        uint32_t args[4] = { hwnd, 1u /* WM_CREATE */, 0u, cs };
+        int32_t r = (int32_t)u_call_guest(c, class_proc, 4, args);
+        hle_guest_free(cs);
+        if (r == -1) {
+            /* The window procedure rejected the window. */
+            hle_window_unbind(hwnd);
+            if (main_window) {
+                g_main_hwnd = old_main;
+                g_main_userdata = old_userdata;
+                g_active_hwnd = old_active;
+                g_focus_hwnd = old_focus;
+            }
+            c->eax = 0;
+            return;
+        }
+    }
+    if (new_main) {
+        /* Real USER32 starts GWL_USERDATA at zero and WM_CREATE stores the
+         * object from CREATESTRUCT.lpCreateParams.  If this procedure does not
+         * do that, fall back to the creation parameter so the rebuilt window
+         * still has the UI object its message handler expects. */
+        uint32_t ud = 0;
+        if (hle_window_userdata(hwnd, &ud) && !ud) {
+            hle_window_set_userdata(hwnd, param, NULL);
+            g_main_userdata = param;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+            fprintf(stderr, "[ui] main window %08X had no GWL_USERDATA; using lp=%08X\n",
+                    hwnd, param);
+#endif
+        }
+    }
+    if (new_main && old_main && old_main != hwnd) {
+        /* The replacement is live.  The old top-level window is no longer the
+         * input target; drop its binding so a later DestroyWindow on it keeps
+         * the pre-existing "no WM_DESTROY for the game window" behaviour. */
+        hle_window_unbind(old_main);
     }
     c->eax = hwnd;
 }
@@ -6919,31 +7447,47 @@ static void u_get_message(CPU *c)
     WC3_TRACE_SCOPE("wc3.msg.get");
     if (!out) { c->eax = 0xFFFFFFFFu; return; }
 
-    service_settings_save(c);
-    keyboard_service();
-    if (u_msg_take(out, hwnd, lo, hi, 1)) {
-        c->eax = rd32g(out + 4) == 0x0012u ? 0 : 1;   /* WM_QUIT */
-#if WC3_DEBUG
-        {
-            static unsigned n;
-            if (n++ < 16)
-                fprintf(stderr, "[input] GetMessage -> %04X hwnd=%08X at %d,%d\n",
-                        rd32g(out + 4), hwnd,
-                        (int)(int16_t)(rd32g(out + 12) & 0xFFFF),
-                        (int)(int16_t)((rd32g(out + 12) >> 16) & 0xFFFF));
+    for (;;) {
+        service_settings_save(c);
+        keyboard_service();
+
+        int got;
+        pthread_mutex_lock(&g_uq_lock);
+        got = u_msg_take_locked(out, hwnd, lo, hi, 1);
+        if (!got) {
+            /* Real GetMessage blocks until a message arrives.  The movie
+             * window's own pump depends on that: a zero return means WM_QUIT,
+             * and returning it for an empty queue made the pump exit before
+             * the graph had played a frame.  The timeout is only the idle
+             * tick for the Mss32 mixer; host input and the movie completion
+             * wake the wait immediately through g_uq_cond. */
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 10 * 1000 * 1000;
+            if (ts.tv_nsec >= 1000000000L) {
+                ts.tv_sec++;
+                ts.tv_nsec -= 1000000000L;
+            }
+            pthread_cond_timedwait(&g_uq_cond, &g_uq_lock, &ts);
         }
-#endif
-        return;
-    }
-    c->eax = 0;
+        pthread_mutex_unlock(&g_uq_lock);
+
+        if (got) {
+            c->eax = rd32g(out + 4) == 0x0012u ? 0 : 1;   /* WM_QUIT */
 #if WC3_DEBUG
-    {
-        static unsigned n;
-        if (n++ < 12)
-            fprintf(stderr, "[input] GetMessage call hwnd=%08X range=%u..%u empty\n",
-                    hwnd, lo, hi);
-    }
+            {
+                static unsigned n;
+                if (n++ < 16)
+                    fprintf(stderr, "[input] GetMessage -> %04X hwnd=%08X at %d,%d\n",
+                            rd32g(out + 4), hwnd,
+                            (int)(int16_t)(rd32g(out + 12) & 0xFFFF),
+                            (int)(int16_t)((rd32g(out + 12) >> 16) & 0xFFFF));
+            }
 #endif
+            return;
+        }
+        if (g_msg_wait_tick) g_msg_wait_tick(c);
+    }
 }
 
 static void u_peek_message(CPU *c)
@@ -6982,16 +7526,40 @@ static void u_dispatch_message(CPU *c)
 
     /* Only the messages this HLE itself produces are dispatched.  Injecting
      * the game's own posted messages here changed startup behaviour, so the
-     * queue is deliberately mouse, key and soft-keyboard chars only. */
+     * queue is deliberately mouse, key, soft-keyboard chars, the synthetic
+     * movie click and the DirectShow completion notification only. */
     if (msg != WM_MOUSEMOVE && msg != WM_LBUTTONDOWN && msg != WM_LBUTTONUP &&
         msg != WM_RBUTTONDOWN && msg != WM_RBUTTONUP &&
         msg != WM_MBUTTONDOWN && msg != WM_MBUTTONUP && msg != WM_MOUSEWHEEL &&
         msg != WM_KEYDOWN && msg != WM_KEYUP &&
-        msg != WM_SYSKEYDOWN && msg != WM_SYSKEYUP && msg != WM_CHAR) {
+        msg != WM_SYSKEYDOWN && msg != WM_SYSKEYUP && msg != WM_CHAR &&
+        msg != 0x8001u /* WMU_CALL: DirectShow graph notification */) {
         c->eax = 0;
         return;
     }
-    if (!hwnd) hwnd = g_main_hwnd;
+    if (!hwnd) {
+        hwnd = g_main_hwnd;
+        /* The engine may destroy the old top-level window before it creates
+         * the replacement.  There is no window to dispatch an input message
+         * to in that gap; drop it instead of calling g_wndproc with hwnd 0. */
+        if (!hwnd) { c->eax = 0; return; }
+    }
+
+    /* The movie is a separate top-level "BlizPlay" window with its own
+     * window procedure.  Its WMU_CALL handler reads the DirectShow event and
+     * posts the 0x202 that destroys the window; the main game procedure must
+     * not receive either message.  A message addressed to any other window
+     * that has already been destroyed is dropped, as USER32 drops messages
+     * for invalid windows: the shared queue can still hold a tap or a graph
+     * notification that lost the race with DestroyWindow. */
+    uint32_t wndproc = hle_window_proc(hwnd);
+    if (!wndproc) {
+        if (hwnd != g_main_hwnd) {
+            c->eax = 0;
+            return;
+        }
+        wndproc = g_wndproc;
+    }
 
     /* The button and key state belongs to the message being dispatched, not
      * to the moment the finger was queued.  A tap can enqueue DOWN and UP in
@@ -7060,7 +7628,7 @@ static void u_dispatch_message(CPU *c)
     }
 
     RES_LOG("dispatch msg=%04X hwnd=%08X wndproc=%08X at=%d,%d buttons=%d",
-            msg, hwnd, g_wndproc, g_mouse_x, g_mouse_y, g_mouse_buttons);
+            msg, hwnd, wndproc, g_mouse_x, g_mouse_y, g_mouse_buttons);
 
     /* Two lines per click, and they answer the only question a synthetic
      * click raises: did the guest's window procedure ever see it? */
@@ -7068,31 +7636,31 @@ static void u_dispatch_message(CPU *c)
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
         msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
         msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP)
-        fprintf(stderr, "[input] wndproc %08X msg=%04X wp=%08X at %d,%d\n",
-                g_wndproc, msg, wp,
+        fprintf(stderr, "[input] wndproc %08X hwnd=%08X msg=%04X wp=%08X at %d,%d\n",
+                wndproc, hwnd, msg, wp,
                 (int)(int16_t)(lp & 0xFFFF),
                 (int)(int16_t)((lp >> 16) & 0xFFFF));
     else if (msg == WM_KEYDOWN || msg == WM_KEYUP ||
              msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) {
         static unsigned n;
         if (n++ < 12)
-            fprintf(stderr, "[input] wndproc %08X msg=%04X vk=%02X lp=%08X\n",
-                    g_wndproc, msg, wp, lp);
+            fprintf(stderr, "[input] wndproc %08X hwnd=%08X msg=%04X vk=%02X lp=%08X\n",
+                    wndproc, hwnd, msg, wp, lp);
     } else {
         static unsigned n;
         if (n++ < 12)
-            fprintf(stderr, "[input] wndproc %08X move at %d,%d\n",
-                    g_wndproc,
+            fprintf(stderr, "[input] wndproc %08X hwnd=%08X move at %d,%d\n",
+                    wndproc, hwnd,
                     (int)(int16_t)(lp & 0xFFFF),
                     (int)(int16_t)((lp >> 16) & 0xFFFF));
     }
 #endif
 
     uint32_t args[4] = { hwnd, msg, wp, lp };
-    c->eax = u_call_guest(c, g_wndproc, 4, args);
+    c->eax = u_call_guest(c, wndproc, 4, args);
 #if WC3_DEBUG
-    fprintf(stderr, "[input] wndproc %08X msg=%04X returned\n",
-            g_wndproc, msg);
+    fprintf(stderr, "[input] wndproc %08X hwnd=%08X msg=%04X returned\n",
+            wndproc, hwnd, msg);
 #endif
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)
         RES_LOG("dispatch msg=%04X returned eax=%08X buttons=%d",
@@ -7168,7 +7736,19 @@ void hle_android_set_keyboard_visible(int visible)
 
 static void u_translate_message(CPU *c) { (void)c; c->eax = 0; }
 static void u_def_window_proc(CPU *c) { (void)c; c->eax = 0; }
-static void u_post_message(CPU *c) { (void)c; c->eax = 1; }
+static void u_post_message(CPU *c)
+{
+    /* The movie event handler posts WM_LBUTTONUP (0x202) to the movie window
+     * when DirectShow reports EC_COMPLETE/EC_USERABORT.  This used to return
+     * success without enqueueing anything, so the synthetic click that leaves
+     * the movie was lost.  Queue only that click: the engine posts other
+     * internal messages as well, and returning them through the HLE queue
+     * changed message-pump behaviour before the movie path existed. */
+    uint32_t msg = arg32(c, 1);
+    if (msg == WM_LBUTTONUP)
+        u_msg_post(arg32(c, 0), msg, arg32(c, 2), arg32(c, 3));
+    c->eax = 1;
+}
 static void u_send_message(CPU *c) { (void)c; c->eax = 0; }
 static void u_get_dc(CPU *c) { c->eax = 0x00030000u + (g_fake_next += 4); }
 static void u_release_dc(CPU *c) { (void)c; c->eax = 1; }
@@ -7215,10 +7795,20 @@ static volatile int      g_mouse_down;
  * been handed to the guest window procedure.  The automation hook waits on
  * this, so a slow frame cannot turn a tap into a hover. */
 static volatile int      g_mouse_dispatched_down;
-/* The guest only has fake handles.  Track the ones it explicitly activates or
- * focuses so GetActiveWindow/GetFocus can answer with the same value instead
- * of a hard-coded handle that never matches g_main_hwnd. */
-static uint32_t g_active_hwnd, g_focus_hwnd;
+
+/* Host input follows the foreground window.  Before the movie path existed
+ * every event targeted g_main_hwnd; the campaign cinematic is a separate
+ * top-level "BlizPlay" window, and clicks/keys must reach it or the movie
+ * cannot be skipped.  A handle only becomes a target once ShowWindow or the
+ * guest activated it, and only while its class procedure is known. */
+static uint32_t input_target(void)
+{
+    uint32_t active = g_active_hwnd;
+    if (active &&
+        (active == g_main_hwnd || hle_window_proc(active)))
+        return active;
+    return g_main_hwnd;
+}
 
 static void mouse_poll(void)
 {
@@ -7240,7 +7830,7 @@ void hle_android_mouse_move(float nx, float ny)
     g_mouse_x = (int32_t)(nx * (float)(w - 1) + 0.5f);
     g_mouse_y = (int32_t)(ny * (float)(h - 1) + 0.5f);
     uint32_t lp = ((uint32_t)g_mouse_y << 16) | (uint16_t)g_mouse_x;
-    u_msg_post(g_main_hwnd, WM_MOUSEMOVE, mouse_mk(), lp);
+    u_msg_post(input_target(), WM_MOUSEMOVE, mouse_mk(), lp);
 #if WC3_DEBUG
     {
         static unsigned n;
@@ -7281,11 +7871,11 @@ void hle_android_mouse_button_ex(int button, int down)
          * procedure see "button already up" while handling DOWN. */
         g_mouse_buttons |= bit;
         if (button == 0) g_mouse_down = 1;
-        u_msg_post(g_main_hwnd, mouse_button_down_msg(button), mouse_mk(), lp);
+        u_msg_post(input_target(), mouse_button_down_msg(button), mouse_mk(), lp);
     } else {
         if (!(g_mouse_buttons & bit)) return;
         uint32_t wp = mouse_mk() & ~mouse_button_mk(button);
-        u_msg_post(g_main_hwnd, mouse_button_up_msg(button), wp, lp);
+        u_msg_post(input_target(), mouse_button_up_msg(button), wp, lp);
     }
 #if WC3_DEBUG
     {
@@ -7318,7 +7908,7 @@ void hle_android_mouse_move_delta(int dx, int dy)
     g_mouse_x = x;
     g_mouse_y = y;
     uint32_t lp = ((uint32_t)g_mouse_y << 16) | (uint16_t)g_mouse_x;
-    u_msg_post(g_main_hwnd, WM_MOUSEMOVE, mouse_mk(), lp);
+    u_msg_post(input_target(), WM_MOUSEMOVE, mouse_mk(), lp);
 #if WC3_DEBUG
     {
         static unsigned n;
@@ -7336,7 +7926,7 @@ void hle_android_mouse_wheel(int delta)
     if (delta == 0) return;
     uint32_t wp = ((uint32_t)(uint16_t)delta << 16) | mouse_mk();
     uint32_t lp = ((uint32_t)g_mouse_y << 16) | (uint16_t)g_mouse_x;
-    u_msg_post(g_main_hwnd, WM_MOUSEWHEEL, wp, lp);
+    u_msg_post(input_target(), WM_MOUSEWHEEL, wp, lp);
 #if WC3_DEBUG
     {
         static unsigned n;
@@ -7355,7 +7945,7 @@ void hle_android_key_event(int vk, int down)
     uint32_t msg = msg_vk == HLE_VK_MENU
         ? (down ? WM_SYSKEYDOWN : WM_SYSKEYUP)
         : (down ? WM_KEYDOWN : WM_KEYUP);
-    u_msg_post(g_main_hwnd, msg, (uint32_t)msg_vk, hle_key_lparam(vk, down));
+    u_msg_post(input_target(), msg, (uint32_t)msg_vk, hle_key_lparam(vk, down));
 #if WC3_DEBUG
     {
         static unsigned n;
@@ -7427,7 +8017,7 @@ int hle_android_wait_mouse(int down, int timeout_ms)
 void hle_android_post_char(uint32_t ch)
 {
     if (!g_main_hwnd) return;
-    u_msg_post(g_main_hwnd, WM_CHAR, ch & 0xFFFFu, 1u);
+    u_msg_post(input_target(), WM_CHAR, ch & 0xFFFFu, 1u);
 #if WC3_DEBUG
     {
         static unsigned n;
@@ -7440,9 +8030,9 @@ void hle_android_post_char(uint32_t ch)
 void hle_android_post_backspace(void)
 {
     if (!g_main_hwnd) return;
-    u_msg_post(g_main_hwnd, WM_KEYDOWN, 0x08u, 1u);
-    u_msg_post(g_main_hwnd, WM_CHAR, 0x08u, 1u);
-    u_msg_post(g_main_hwnd, WM_KEYUP, 0x08u, 0xC0000001u);
+    u_msg_post(input_target(), WM_KEYDOWN, 0x08u, 1u);
+    u_msg_post(input_target(), WM_CHAR, 0x08u, 1u);
+    u_msg_post(input_target(), WM_KEYUP, 0x08u, 0xC0000001u);
 #if WC3_DEBUG
     fprintf(stderr, "[input] WM_CHAR backspace\n");
 #endif
@@ -7451,9 +8041,9 @@ void hle_android_post_backspace(void)
 void hle_android_post_enter(void)
 {
     if (!g_main_hwnd) return;
-    u_msg_post(g_main_hwnd, WM_KEYDOWN, 0x0Du, 1u);
-    u_msg_post(g_main_hwnd, WM_CHAR, 0x0Du, 1u);
-    u_msg_post(g_main_hwnd, WM_KEYUP, 0x0Du, 0xC0000001u);
+    u_msg_post(input_target(), WM_KEYDOWN, 0x0Du, 1u);
+    u_msg_post(input_target(), WM_CHAR, 0x0Du, 1u);
+    u_msg_post(input_target(), WM_KEYUP, 0x0Du, 0xC0000001u);
 #if WC3_DEBUG
     fprintf(stderr, "[input] WM_CHAR enter\n");
 #endif
@@ -7839,8 +8429,60 @@ static void u_set_focus(CPU *c)
     c->eax = old ? old : (g_main_hwnd ? g_main_hwnd : 0x00020000u);
 }
 static void u_enable_window(CPU *c) { (void)c; c->eax = 1; }
-static void u_destroy_window(CPU *c) { (void)c; c->eax = 1; }
-static void u_show_window(CPU *c) { (void)c; c->eax = 1; }
+/* DestroyWindow delivers WM_DESTROY synchronously.  The movie window uses it
+ * to set the flag its own message pump checks before returning, so a stub here
+ * leaves the pump spinning and the graph alive. */
+static void u_destroy_window(CPU *c)
+{
+    uint32_t hwnd = arg32(c, 0);
+    int was_main = hwnd && hwnd == g_main_hwnd;
+    uint32_t proc = hle_window_proc(hwnd);
+    /* The main window keeps the old procedure-only dispatch path: sending it
+     * WM_DESTROY here would add a shutdown notification the previous HLE never
+     * delivered.  Secondary windows (the movie) need it to end their pump. */
+    if (proc && !was_main) {
+        uint32_t args[4] = { hwnd, 2u /* WM_DESTROY */, 0u, 0u };
+        u_call_guest(c, proc, 4, args);
+    }
+    hle_window_unbind(hwnd);
+    if (was_main) {
+        /* The engine may destroy the old top-level window before it creates
+         * the replacement.  Clear the main slot so the next CreateWindowExA
+         * of the main class becomes the main window and the input target is
+         * never a dead handle. */
+        g_main_hwnd = 0;
+        g_main_userdata = 0;
+        /* Keep g_main_class and g_main_seen: if the engine creates the
+         * replacement window after destroying the old one, that window must
+         * still receive WM_CREATE (g_main_seen is set) and must be recognized
+         * by its class name. */
+        if (g_active_hwnd == hwnd) g_active_hwnd = 0;
+        if (g_focus_hwnd == hwnd) g_focus_hwnd = 0;
+    } else {
+        if (g_active_hwnd == hwnd) g_active_hwnd = g_main_hwnd;
+        if (g_focus_hwnd == hwnd) g_focus_hwnd = g_main_hwnd;
+    }
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    fprintf(stderr, "[ui] DestroyWindow(%08X) was_main=%d main=%08X\n",
+            hwnd, was_main, g_main_hwnd);
+#endif
+    c->eax = 1;
+}
+/* ShowWindow makes a top-level window the foreground one.  Only windows with a
+ * known class procedure can own host input; the main window keeps its existing
+ * path. */
+static void u_show_window(CPU *c)
+{
+    uint32_t hwnd = arg32(c, 0);
+    uint32_t cmd = arg32(c, 1);
+    if (cmd != 0 /* SW_HIDE */ && hle_window_proc(hwnd))
+        g_active_hwnd = hwnd;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    fprintf(stderr, "[ui] ShowWindow(%08X, %u) active=%08X main=%08X\n",
+            hwnd, cmd, g_active_hwnd, g_main_hwnd);
+#endif
+    c->eax = 1;
+}
 static void u_update_window(CPU *c) { (void)c; c->eax = 1; }
 static void u_begin_paint(CPU *c) { c->eax = 0x00030000u + (g_fake_next += 4); }
 static void u_end_paint(CPU *c) { (void)c; c->eax = 1; }
@@ -7956,12 +8598,29 @@ static void u_get_window_long(CPU *c)
 {
     uint32_t hwnd = arg32(c, 0);
     int32_t index = (int32_t)arg32(c, 1);
-    /* GWL_USERDATA / GWLP_USERDATA are -21 (0xFFFFFFEB).  The main window's
-     * procedure reads it on every message to find its UI object. */
-    if (index == -21 && (!hwnd || hwnd == g_main_hwnd))
-        c->eax = g_main_userdata;
-    else
-        c->eax = 0;
+    /* GWL_USERDATA / GWLP_USERDATA are -21 (0xFFFFFFEB).  The window
+     * procedure reads it on every message to find its UI object.  The engine
+     * creates a second main-class window when a campaign mission starts, and
+     * that window has its own object; answer from the per-window table, with
+     * the process-wide main slot only for hwnd 0. */
+    uint32_t value = 0;
+    if (index == -21) {
+        if (!hwnd) {
+            value = g_main_userdata;
+        } else if (!hle_window_userdata(hwnd, &value) &&
+                   hwnd == g_main_hwnd) {
+            value = g_main_userdata;
+        }
+    }
+    c->eax = value;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (index == -21 && hwnd && !value) {
+        static unsigned n;
+        if (n++ < 8)
+            fprintf(stderr, "[ui] GWL_USERDATA(%08X) -> 0 main=%08X\n",
+                    hwnd, g_main_hwnd);
+    }
+#endif
 }
 static void u_set_window_long(CPU *c)
 {
@@ -7969,11 +8628,27 @@ static void u_set_window_long(CPU *c)
     int32_t index = (int32_t)arg32(c, 1);
     uint32_t value = arg32(c, 2);
     uint32_t old = 0;
-    if (index == -21 && (!hwnd || hwnd == g_main_hwnd)) {
-        old = g_main_userdata;
-        g_main_userdata = value;
+    if (index == -21) {
+        if (!hwnd) {
+            old = g_main_userdata;
+            g_main_userdata = value;
+        } else {
+            uint32_t prev = 0;
+            if (hle_window_set_userdata(hwnd, value, &prev)) {
+                old = prev;
+                if (hwnd == g_main_hwnd) g_main_userdata = value;
+            } else if (hwnd == g_main_hwnd) {
+                old = g_main_userdata;
+                g_main_userdata = value;
+            }
+        }
     }
     c->eax = old;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (index == -21)
+        fprintf(stderr, "[ui] SetWindowLongA(%08X, -21, %08X) old=%08X\n",
+                hwnd, value, old);
+#endif
 }
 /* Class-long values belong to the real window class, which this host does not
  * have.  They must not share the window-long path: GWL_USERDATA is index -21,
@@ -9131,6 +9806,8 @@ static const HleDef g_defs[] = {
     K("GetSystemDirectoryA", h_get_system_directory, 2),
     K("GetCurrentDirectoryA", h_get_current_directory, 2),
     K("SetCurrentDirectoryA", h_set_current_directory, 1),
+    K("GetTempPathA", h_get_temp_path_a, 2),
+    K("GetTempPathW", h_get_temp_path_w, 2),
     K("GetFullPathNameA", h_get_full_path_name, 4),
     K("GetModuleHandleA", h_get_module_handle, 1),
     K("LoadLibraryA", h_load_library, 1),

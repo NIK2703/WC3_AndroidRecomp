@@ -29,6 +29,7 @@
 #include "display_hle.h"
 #include "dragdrop_hle.h"
 #include "dsound_hle.h"
+#include "ole32_hle.h"
 #include "heap_hle.h"
 #include "imagelist_hle.h"
 #include "kernel32_file_hle.h"
@@ -155,6 +156,11 @@ void wc3_dispatch_init(void)
      * reaches these rows through KERNEL32!LoadLibraryA/GetProcAddress, so no
      * corpus re-lift is required. */
     WC3_INSTALL_STEP(wc3_hle_dsound_install());
+    /* The campaign cinematics are DirectShow; the guest imports only the
+     * three ole32 entry points, while the graph/event/control/video methods
+     * are appended here and reach the Java MediaCodec player through
+     * Wc3Platform.video. */
+    WC3_INSTALL_STEP(wc3_hle_ole32_install());
 #undef WC3_INSTALL_STEP
 
 #if WC3_DEBUG && WC3_DEBUG_HLE

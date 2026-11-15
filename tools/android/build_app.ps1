@@ -44,7 +44,12 @@ param(
     [ValidateSet('auto', 'rubattle', 'pvpgn', 'off')]
     [string]$W3LCompat = 'rubattle',
     [ValidateRange(30, 255)]
-    [int]$W3LLatency = 100
+    [int]$W3LLatency = 100,
+    # 24-unit selection / adaptive 8x3 panel (gameplay/UI, not HLE).  auto
+    # follows the product profile: on with a W3L product corpus, off for the
+    # exact baseline.  The headless DUT never receives this profile.
+    [ValidateSet('auto', 'on', 'off')]
+    [string]$Selection24 = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -166,6 +171,21 @@ if ($w3lCompatValue -eq 'ON' -and -not $CorpusRoot) {
     exit 1
 }
 
+# The selection profile edits generated C too, so an explicit on without a
+# corpus is a caller error.  auto keeps the exact baseline and any headless
+# configure at 12 units.
+$selection24Value = switch ($Selection24) {
+    'on' { 'ON' }
+    'off' { 'OFF' }
+    default {
+        if ($CorpusRoot -and $w3lCompatValue -eq 'ON') { 'ON' } else { 'OFF' }
+    }
+}
+if ($selection24Value -eq 'ON' -and -not $CorpusRoot) {
+    Write-Host '[app] -Selection24 on requires -CorpusRoot'
+    exit 1
+}
+
 function Get-AndroidSdk {
     $candidates = @()
     if ($env:ANDROID_SDK_ROOT) { $candidates += $env:ANDROID_SDK_ROOT }
@@ -283,6 +303,7 @@ $configure += "-DWC3_RELIFTED_CORPUS_ROOT=$CorpusRoot"
 $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
 $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
+$configure += "-DWC3_SELECTION_24=$selection24Value"
 # release_optimized is the release product plus ThinLTO and PGO.  The training
 # build deliberately skips LTO; it exists only to collect counters.  The final
 # build uses both flags and the same release product inputs.
@@ -298,7 +319,7 @@ if ($isOptimized) {
         if (-not (Test-Path -LiteralPath $profilePath)) {
             throw "PGO profile not found: $profilePath (run the training build first)"
         }
-        $PgoProfile = (Resolve-Path -LiteralPath $profilePath).Path
+        $PgoProfile = ((Resolve-Path -LiteralPath $profilePath).Path) -replace '\\', '/'
         $configure += '-DWC3_PGO_MODE=use'
         $configure += "-DWC3_PGO_PROFILE=$PgoProfile"
     } else {
@@ -346,6 +367,7 @@ Write-Host "[app] native_tls $($nativeTlsValue -eq 'ON') model $TlsModel"
 Write-Host "[app] lift_p0_1/2/6 unconditional"
 Write-Host "[app] thin_skip_writeonly_copyin $($thinSkipCopyinValue -eq 'ON')"
 Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"
+Write-Host "[app] selection24 $selection24Value"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
 Write-Host "[app] hide_dynsym $hideDynsym"
 Write-Host "[app] lto   $ltoValue"
@@ -396,6 +418,33 @@ if (-not ($hasMain -and $hasJni -and $hasGa)) {
     exit 1
 }
 
+# A linked helper library is not evidence that the generated corpus actually
+# calls it.  An incremental build once reused pre-selection24 leaf_call
+# objects, so the .so contained wc3_sel24_* but every call site still had the
+# original 12-unit code.  The corpus archive is the artifact that must carry
+# the undefined references; check it before trusting the product marker.
+if ($selection24Value -eq 'ON') {
+    $nm = Join-Path $ndk.Root 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-nm.exe'
+    $corpusArchive = Join-Path $out 'cmake\libwc3_corpus_relifted.a'
+    if (-not (Test-Path -LiteralPath $corpusArchive)) {
+        Write-Host "[app] selection24 corpus archive missing: $corpusArchive"
+        exit 1
+    }
+    $corpusSyms = (& $nm -u $corpusArchive 2>&1) -join "`n"
+    foreach ($sym in @(
+        'wc3_sel24_init_group',
+        'wc3_sel24_note_selection',
+        'wc3_sel24_select',
+        'wc3_sel24_hide_buttons',
+        'wc3_sel24_fill')) {
+        if ($corpusSyms -notmatch ('\b' + [regex]::Escape($sym) + '\b')) {
+            Write-Host "[app] selection24 call site is absent from the corpus archive: $sym"
+            exit 1
+        }
+    }
+    Write-Host '[app] selection24 corpus calls present'
+}
+
 # V10/T2-save: a rebuild is not "the product" unless both known save fixes are
 # in the artifact.  The CMake configure step writes the corpus/fix contract;
 # these checks read the actual .so instead of trusting the command line.
@@ -425,10 +474,15 @@ if ($soStrings -notmatch 'WC3_SAVE_LIST_STRIP_W3Z') {
     Write-Host '[app] save-list display fix marker is absent from the product .so'
     exit 1
 }
+if ($selection24Value -eq 'ON' -and
+    $soStrings -notmatch 'WC3_SELECTION_24') {
+    Write-Host '[app] selection24 marker is absent from the product .so'
+    exit 1
+}
 if ($dynSyms -notmatch '\bpwrite\b' -or $dynSyms -notmatch '\bpread\b') {
     Write-Host '[app] overlapped save I/O is absent from the product .so'
     exit 1
 }
-Write-Host "[app] fixes save-list=$($fixes.fixes.save_list_display.sites) site(s), overlapped-save-io=present"
+Write-Host "[app] fixes save-list=$($fixes.fixes.save_list_display.sites) site(s), overlapped-save-io=present, selection24=$($selection24Value -eq 'ON')"
 Write-Host '[app] built'
 exit 0

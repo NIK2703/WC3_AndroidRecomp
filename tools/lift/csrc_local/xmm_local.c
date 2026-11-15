@@ -48,11 +48,13 @@
  *   - at least three XMM accesses, so tiny functions are left alone.
  *
  * The JSON report carries a function-level change set (ABI-11.2): one row per
- * transformed function with access count, used-register mask and body sizes.
- * The pass is part of the normal relifted-corpus pipeline and runs
- * unconditionally after dead_flags; there is no opt-in switch.
+ * transformed function with access count, used-register mask, lazy mask and
+ * body sizes.  The default pass is part of the normal relifted-corpus pipeline
+ * and runs unconditionally after dead_flags.  --planner and --lazy are
+ * calibration switches: both remain opt-in until their object A/B is accepted.
  *
- *   xmm_local --lift IN --out OUT [--json REPORT] [--quiet]
+ *   xmm_local --lift IN --out OUT [--json REPORT] [--planner] [--lazy]
+ *             [--quiet]
  *   xmm_local --self-test
  */
 #include <ctype.h>
@@ -76,6 +78,9 @@ typedef struct {
     size_t bytes_before;
     size_t bytes_after;
     unsigned used_mask;
+    unsigned plan_mask;
+    unsigned lazy_mask;
+    int plan_score;
 } Change;
 
 typedef struct {
@@ -109,6 +114,13 @@ static void *xrealloc(void *p, size_t n)
     return q;
 }
 
+/* The planner is opt-in until its selection model has a full-corpus object
+ * A/B.  Without the flag the pass keeps the live-in-only policy for
+ * packed-double functions and the full cache elsewhere; the report still
+ * carries the planner proposal for calibration. */
+static int planner_enabled;
+static int lazy_enabled;
+
 static void changes_free(Changes *cs)
 {
     size_t i;
@@ -120,7 +132,8 @@ static void changes_free(Changes *cs)
 }
 
 static void changes_add(Changes *cs, const char *func, size_t accesses,
-                        size_t before, size_t after, unsigned mask)
+                        size_t before, size_t after, unsigned mask,
+                        unsigned plan_mask, unsigned lazy_mask, int plan_score)
 {
     Change *ch;
     size_t len;
@@ -136,6 +149,9 @@ static void changes_add(Changes *cs, const char *func, size_t accesses,
     ch->bytes_before = before;
     ch->bytes_after = after;
     ch->used_mask = mask;
+    ch->plan_mask = plan_mask;
+    ch->lazy_mask = lazy_mask;
+    ch->plan_score = plan_score;
 }
 
 static void buf_need(Buf *b, size_t extra)
@@ -766,6 +782,432 @@ static int tails_at_statement_boundary(const char *s, size_t n)
     return 1;
 }
 
+/* A multi-register flush is where a plain union assignment gets scalarised
+ * into one 32-bit store plus two zero stores per register.  At three or more
+ * live XMM registers that is more expensive than one explicit 128-bit
+ * load/store pair, so use the named helper for that case.  Fewer registers
+ * stay as assignments: there the scalar form is smaller and the helper only
+ * adds a vector build.  The helper copies the complete register, so lane
+ * semantics and upper lanes are unchanged. */
+#define XMM_WRITEBACK_VECTOR_MIN 3
+
+static int has_any_sse_op(const char *s, size_t n,
+                          const char *const *ops, size_t count)
+{
+    size_t i;
+    for (i = 0; i < count; i++)
+        if (has_word(s, n, ops[i])) return 1;
+    return 0;
+}
+
+/* True when the function's SSE work is packed double and nothing else.  Such
+ * functions keep the pass, but only for registers that are live-in: a full
+ * cache made every written-first register live across the function and paid
+ * more for its writeback than it saved.  Scalar and packed-single operations
+ * keep the full cache: that is where the plain assignment scalarises into
+ * per-lane stores and the helper pays off.  `shufps` is deliberately not
+ * treated as packed-single work: it is a lane shuffle that also appears in
+ * double/integer code. */
+static int packed_double_only(const char *s, size_t n)
+{
+    static const char *const scalar_ops[] = {
+        "movss", "movsd", "addss", "addsd", "subss", "subsd",
+        "mulss", "mulsd", "divss", "divsd", "comiss", "comisd",
+        "ucomiss", "ucomisd", "cvtsi2ss", "cvtsi2sd", "cvtss2sd",
+        "cvtsd2ss", "cvttss2si", "cvttsd2si", "sqrtss", "sqrtsd",
+        "minss", "maxss", "minsd", "maxsd", "rsqrtss", "rcpss"
+    };
+    static const char *const single_ops[] = {
+        "movaps", "movups", "movhps", "movlps", "addps", "subps",
+        "mulps", "divps", "andps", "andnps", "orps", "xorps",
+        "cmpps", "unpcklps", "unpckhps", "cvtdq2ps",
+        "cvtps2dq", "cvttps2dq", "cvtps2pd", "cvtpd2ps",
+        "sqrtps", "maxps", "minps", "rcpps", "rsqrtps", "movntps",
+        "movhlps", "movlhps"
+    };
+    static const char *const double_ops[] = {
+        "movapd", "movupd", "movhpd", "movlpd", "addpd", "subpd",
+        "mulpd", "divpd", "andpd", "andnpd", "orpd", "xorpd",
+        "cmppd", "shufpd", "unpcklpd", "unpckhpd", "cvtdq2pd",
+        "cvtpd2dq", "cvttpd2dq", "sqrtpd", "maxpd", "minpd",
+        "movntpd"
+    };
+    return has_any_sse_op(s, n, double_ops,
+                          sizeof double_ops / sizeof double_ops[0]) &&
+           !has_any_sse_op(s, n, scalar_ops,
+                           sizeof scalar_ops / sizeof scalar_ops[0]) &&
+           !has_any_sse_op(s, n, single_ops,
+                           sizeof single_ops / sizeof single_ops[0]);
+}
+
+/* For packed-double-only functions, keep only registers that are read before
+ * their first write.  Those are the only ones that can avoid a real guest
+ * load; a written-first register already has a store, and keeping it live in
+ * the local cache only adds a writeback at every exit.  A register must also
+ * be accessed at least twice, otherwise the entry load cannot pay for itself.
+ * The scan is lexical, so it is conservative around branches: a register is
+ * selected only when its first textual access is a read, and selecting it is
+ * always safe because the existing preload path loads it at function entry. */
+static int select_live_in(const char *s, size_t n,
+                          const unsigned char used[8],
+                          unsigned char cache[8])
+{
+    unsigned char seen[8];
+    size_t count[8];
+    size_t i = 0;
+    int any = 0;
+
+    memset(seen, 0, sizeof seen);
+    memset(count, 0, sizeof count);
+    memset(cache, 0, 8);
+    while (i + 7 <= n) {
+        const char *hit = strstr(s + i, "c->xmm[");
+        size_t pos;
+        size_t after;
+        int idx;
+        if (!hit) break;
+        pos = (size_t)(hit - s);
+        if (pos > 0 && word_char(s[pos - 1])) {
+            i = pos + 7;
+            continue;
+        }
+        idx = parse_xmm_access(s, n, pos, &after);
+        if (idx < 0) {
+            i = pos + 7;
+            continue;
+        }
+        if (!used[idx]) {
+            i = after;
+            continue;
+        }
+        count[idx]++;
+        if (!seen[idx]) {
+            seen[idx] = 1;
+            if (!xmm_write_access(s, n, pos, after)) cache[idx] = 1;
+        }
+        i = after;
+    }
+    for (i = 0; i < 8; i++) {
+        if (cache[i] && count[i] < 2) cache[i] = 0;
+        if (cache[i]) any = 1;
+    }
+    return any;
+}
+
+/* Per-register facts for the planner.  These are deliberately independent of
+ * SSE mnemonic classes: the planner sees reads, writes, lane accesses and
+ * control-flow join/exit sites, not `movapd` versus `movss`. */
+typedef struct {
+    size_t reads;
+    size_t writes;
+    size_t lane_reads;
+    size_t lane_writes;
+    size_t full_writes;
+    size_t first_pos;
+    int first_write;
+    int first_lane;
+    int lazy_safe;
+    int seen;
+} XmmRegFacts;
+
+typedef struct {
+    XmmRegFacts reg[8];
+    size_t calls;
+    size_t labels;
+    size_t gotos;
+    size_t exits;
+} XmmFacts;
+
+/* During P1 the model is intentionally small and provisional:
+ *   - a read before the first write can avoid the entry load;
+ *   - a lane read benefits more from scalar replacement than a full-register
+ *     read, which is already one vector load/store;
+ *   - a written-first register is cheap only when its lane reads dominate its
+ *     full-register writes; otherwise the local copy just adds pressure;
+ *   - one fixed entry/pressure allowance keeps tiny ranges out.
+ * The values are object-code weights, not guest semantics.  They are kept in
+ * one place so the full-corpus A/B can replace them with measured costs. */
+#define PLAN_ENTRY_COST 1
+#define PLAN_FIRST_WRITE_COST 2
+#define PLAN_FULL_WRITE_WEIGHT 2
+#define PLAN_LANE_READ_WEIGHT 4
+#define PLAN_REMOVE_GAIN (-1)
+
+/* A lane access is a member/index access after the register itself, e.g.
+ * `c->xmm[3].f32[0]`.  A whole-register access or an address-taken register
+ * (`&c->xmm[3]`) is a full access. */
+static int xmm_lane_access(const char *s, size_t n, size_t after)
+{
+    size_t p = after;
+    while (p < n && (s[p] == ' ' || s[p] == '\t')) p++;
+    if (p < n && s[p] == '.') return 1;
+    if (p + 1 < n && s[p] == '-' && s[p + 1] == '>') return 1;
+    return 0;
+}
+
+/* A lazy local may be created by its first write instead of by an entry load.
+ * That is safe only when the first access is a full-register store at the
+ * function's top level and no branch, join or early exit precedes it.  A call
+ * is allowed: it flushes the cache, and the store that follows still runs on
+ * every path that reaches later code. */
+static int prefix_has_control(const char *s, size_t end)
+{
+    static const char *const words[] = {
+        "if", "else", "goto", "return", "switch", "while", "for", "do",
+        "break", "continue"
+    };
+    size_t i;
+    size_t j;
+    for (i = 0; i < sizeof words / sizeof words[0]; i++) {
+        if (has_word(s, end, words[i])) return 1;
+    }
+    for (j = 0; j < end; ) {
+        size_t le = j;
+        size_t p;
+        while (le < end && s[le] != '\n') le++;
+        p = j;
+        while (p < le && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r')) p++;
+        if (p < le && label_at(s, end, p, le)) return 1;
+        j = le + (le < end ? 1 : 0);
+    }
+    return 0;
+}
+
+/* Count accesses to one register on [ls, le) and report whether the first one
+ * is a plain full-register assignment.  A lazy first write is accepted only
+ * when it is the sole access on the line, so an RHS read cannot observe an
+ * uninitialized local. */
+static int line_xmm_access(const char *s, size_t n, size_t ls, size_t le,
+                           int idx, int *first_full_write)
+{
+    size_t i = ls;
+    int count = 0;
+    int first_full = 0;
+    while (i < le) {
+        const char *hit = strstr(s + i, "c->xmm[");
+        size_t pos;
+        size_t after;
+        int got;
+        if (!hit) break;
+        pos = (size_t)(hit - s);
+        if (pos >= le) break;
+        if (pos > 0 && word_char(s[pos - 1])) {
+            i = pos + 7;
+            continue;
+        }
+        got = parse_xmm_access(s, n, pos, &after);
+        if (got < 0 || after > le) {
+            i = pos + 7;
+            continue;
+        }
+        if (got == idx) {
+            size_t p;
+            int full;
+            if (count == 0) {
+                full = !xmm_lane_access(s, n, after) &&
+                       xmm_write_access(s, n, pos, after);
+                if (full) {
+                    p = after;
+                    while (p < le && (s[p] == ' ' || s[p] == '\t')) p++;
+                    if (p >= le || s[p] != '=' ||
+                        (p + 1 < le && s[p + 1] == '='))
+                        full = 0;
+                }
+                first_full = full;
+            }
+            count++;
+        }
+        i = after;
+    }
+    *first_full_write = first_full;
+    return count;
+}
+
+static int lazy_first_write_safe(const char *s, size_t n, size_t pos, int idx)
+{
+    size_t p = pos;
+    size_t after;
+    size_t ls;
+    size_t le;
+    size_t j;
+    int depth = 0;
+    int count;
+    int first_full;
+    while (p > 0 && s[p - 1] != '\n') p--;
+    ls = p;
+    while (p < n && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r')) p++;
+    if (p != pos) return 0;
+    le = p;
+    while (le < n && s[le] != '\n') le++;
+    if (parse_xmm_access(s, n, pos, &after) != idx) return 0;
+    if (line_xmm_access(s, n, ls, le, idx, &first_full) != 1 ||
+        !first_full)
+        return 0;
+    for (j = 0; j < pos; j++) {
+        if (s[j] == '{') depth++;
+        else if (s[j] == '}') depth--;
+    }
+    if (depth != 1) return 0;
+    return !prefix_has_control(s, pos);
+}
+
+static void collect_xmm_facts(const char *s, size_t n, XmmFacts *f)
+{
+    size_t i = 0;
+    size_t ls = 0;
+
+    memset(f, 0, sizeof *f);
+    while (i + 7 <= n) {
+        const char *hit = strstr(s + i, "c->xmm[");
+        size_t pos;
+        size_t after;
+        int idx;
+        int write;
+        if (!hit) break;
+        pos = (size_t)(hit - s);
+        if (pos > 0 && word_char(s[pos - 1])) {
+            i = pos + 7;
+            continue;
+        }
+        idx = parse_xmm_access(s, n, pos, &after);
+        if (idx < 0) {
+            i = pos + 7;
+            continue;
+        }
+        write = xmm_write_access(s, n, pos, after);
+        if (!f->reg[idx].seen) {
+            f->reg[idx].seen = 1;
+            f->reg[idx].first_write = write;
+            f->reg[idx].first_pos = pos;
+            f->reg[idx].first_lane = xmm_lane_access(s, n, after);
+        }
+        if (write) {
+            f->reg[idx].writes++;
+            if (xmm_lane_access(s, n, after))
+                f->reg[idx].lane_writes++;
+            else
+                f->reg[idx].full_writes++;
+        } else {
+            f->reg[idx].reads++;
+            if (xmm_lane_access(s, n, after)) f->reg[idx].lane_reads++;
+        }
+        i = after;
+    }
+    for (i = 0; i < 8; i++) {
+        if (f->reg[i].seen && f->reg[i].first_write &&
+            !f->reg[i].first_lane)
+            f->reg[i].lazy_safe = lazy_first_write_safe(
+                s, n, f->reg[i].first_pos, (int)i);
+    }
+
+    /* Count the points where the existing transform flushes or invalidates
+     * the cache.  A line may contain a tail and its generated return; that is
+     * one exit, not two. */
+    while (ls < n) {
+        size_t le = ls;
+        size_t p = ls;
+        int line_exit = 0;
+        int line_goto = 0;
+        size_t q;
+        while (le < n && s[le] != '\n') le++;
+        while (p < le && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r')) p++;
+        if (p < le) {
+            if (label_at(s, n, p, le)) f->labels++;
+            if (is_call_at(s, n, p)) f->calls++;
+        }
+        for (q = p; q < le; q++) {
+            if (!line_goto && starts_word(s, n, q, "goto")) {
+                line_goto = 1;
+                f->gotos++;
+            }
+            if (starts_word(s, n, q, "return") ||
+                is_dispatch_exit(s, n, q)) {
+                line_exit = 1;
+                break;
+            }
+        }
+        if (line_exit) f->exits++;
+        ls = le + (le < n ? 1 : 0);
+    }
+}
+
+/* Start from the current policy's mask and remove only a register whose facts
+ * make the local copy strongly unprofitable.  Keeping the current mask as the
+ * baseline makes this first planner step monotone: a model error can leave a
+ * store in place, but cannot silently drop a register that the existing
+ * live-in/full policy already selected.  Adding profitable registers and a
+ * full 2^8 search need pressure/lazy-load facts and are later stages. */
+static int select_planned(const char *s, size_t n,
+                          const unsigned char used[8],
+                          const unsigned char current[8],
+                          unsigned char cache[8], unsigned char lazy_out[8],
+                          unsigned *mask_out)
+{
+    XmmFacts f;
+    unsigned mask = 0;
+    unsigned current_mask = 0;
+    long score = 0;
+    long current_score = 0;
+    int k;
+
+    collect_xmm_facts(s, n, &f);
+    for (k = 0; k < 8; k++) {
+        long g;
+        if (!used[k] || !current[k] || !f.reg[k].seen) continue;
+        current_mask |= 1u << k;
+        g = (long)f.reg[k].reads +
+            (long)PLAN_LANE_READ_WEIGHT * (long)f.reg[k].lane_reads;
+        if (f.reg[k].first_write) {
+            g -= PLAN_FIRST_WRITE_COST;
+            g -= (long)PLAN_FULL_WRITE_WEIGHT *
+                 (long)f.reg[k].full_writes;
+        }
+        g -= PLAN_ENTRY_COST;
+        current_score += g;
+        if (g < PLAN_REMOVE_GAIN) continue;
+        mask |= 1u << k;
+        score += g;
+    }
+
+    /* A full mask means the established policy deliberately promoted every
+     * used register.  Partial selection changes LLVM's alias/register
+     * allocation much more than the text size suggests, and the object A/B
+     * rejected it.  Keep the proven full mask until the model can price that
+     * pressure.  Likewise an empty proposal keeps the current mask instead of
+     * replacing it with one arbitrary "least bad" register. */
+    if (current_mask == 0xFFu || mask == 0) {
+        mask = current_mask;
+        score = current_score;
+    }
+
+    memset(cache, 0, 8);
+    memset(lazy_out, 0, 8);
+    for (k = 0; k < 8; k++) {
+        if (!(mask & (1u << k))) continue;
+        cache[k] = 1;
+        if (f.reg[k].lazy_safe) lazy_out[k] = 1;
+    }
+    *mask_out = mask;
+    return (int)score;
+}
+
+/* Lazy promotion is independent of the mask decision.  The current cache can
+ * skip an entry load when its first access is a dominating full-register
+ * store, exactly like a planner-selected register. */
+static void select_lazy_current(const char *s, size_t n,
+                                const unsigned char current[8],
+                                unsigned char lazy[8])
+{
+    XmmFacts f;
+    int k;
+    collect_xmm_facts(s, n, &f);
+    memset(lazy, 0, 8);
+    for (k = 0; k < 8; k++) {
+        if (current[k] && f.reg[k].seen && f.reg[k].lazy_safe)
+            lazy[k] = 1;
+    }
+}
+
 /* Write dirty locals to c->xmm without clearing the dirty mask.  A conditional
  * exit can be taken on one path while the other path still needs its own
  * dirty set; leaving the mask intact lets the fall-through path write later. */
@@ -774,10 +1216,24 @@ static void write_dirty(Buf *b, const unsigned char loaded[8],
 {
     int i;
     int wrote = 0;
-    for (i = 0; i < 8; i++) {
-        if (loaded[i] && dirty[i]) {
-            buf_printf(b, " c->xmm[%d] = _wc3_xmm_local[%d];", i, i);
-            wrote = 1;
+    int ndirty = 0;
+    for (i = 0; i < 8; i++)
+        if (loaded[i] && dirty[i]) ndirty++;
+    if (ndirty >= XMM_WRITEBACK_VECTOR_MIN) {
+        for (i = 0; i < 8; i++) {
+            if (loaded[i] && dirty[i]) {
+                buf_printf(b,
+                           " xmm_store_full(&c->xmm[%d], &_wc3_xmm_local[%d]);",
+                           i, i);
+                wrote = 1;
+            }
+        }
+    } else {
+        for (i = 0; i < 8; i++) {
+            if (loaded[i] && dirty[i]) {
+                buf_printf(b, " c->xmm[%d] = _wc3_xmm_local[%d];", i, i);
+                wrote = 1;
+            }
         }
     }
     if (wrote) buf_str(b, " ");
@@ -794,22 +1250,29 @@ static void flush_and_invalidate(Buf *b, unsigned char loaded[8],
     memset(dirty, 0, 8);
 }
 
-static int used_loaded(const unsigned char loaded[8],
-                       const unsigned char used[8])
+/* Preload one top-level line.  Ordinary locals are loaded eagerly at the
+ * first line, preserving the established transform.  A lazy local is loaded
+ * only when this line actually reads it; a sole plain full-register store can
+ * create the local in place and skip the entry load entirely. */
+static void preload_line(Buf *b, unsigned char loaded[8],
+                         unsigned char dirty[8], const unsigned char used[8],
+                         const unsigned char lazy[8], const char *masked,
+                         size_t n, size_t ls, size_t le)
 {
     int i;
     for (i = 0; i < 8; i++) {
-        if (used[i] && !loaded[i]) return 0;
-    }
-    return 1;
-}
-
-static void preload_needed(Buf *b, unsigned char loaded[8],
-                           unsigned char dirty[8], const unsigned char need[8])
-{
-    int i;
-    for (i = 0; i < 8; i++) {
-        if (!need[i] || loaded[i]) continue;
+        int count;
+        int first_full;
+        if (!used[i] || loaded[i]) continue;
+        if (lazy[i]) {
+            count = line_xmm_access(masked, n, ls, le, i, &first_full);
+            if (count == 0) continue;
+            if (count == 1 && first_full) {
+                loaded[i] = 1;
+                dirty[i] = 0;
+                continue;
+            }
+        }
         if (b->n > 0 && b->p[b->n - 1] != '\n') buf_str(b, "\n");
         buf_printf(b, "    _wc3_xmm_local[%d] = c->xmm[%d];\n", i, i);
         loaded[i] = 1;
@@ -925,7 +1388,8 @@ static void drop_cache(unsigned char loaded[8], unsigned char dirty[8])
 }
 
 static int transform_body(const char *body, size_t n, const char *masked,
-                          const unsigned char used[8], Buf *out)
+                          const unsigned char used[8],
+                          const unsigned char lazy[8], Buf *out)
 {
     size_t i;
     size_t body_start = out->n;
@@ -1017,8 +1481,8 @@ static int transform_body(const char *body, size_t n, const char *masked,
             preload = 0;
         }
 
-        if (preload && line_live && !used_loaded(loaded, used))
-            preload_needed(out, loaded, dirty, used);
+        if (preload && line_live)
+            preload_line(out, loaded, dirty, used, lazy, masked, n, ls, le);
 
         while (i < le) {
             if (i == final_close && !unreachable)
@@ -1151,6 +1615,12 @@ static void transform_text(const char *text, size_t n, Buf *out,
         size_t blen;
         char *masked;
         unsigned char used[8];
+        unsigned char cache[8];
+        unsigned char lazy[8];
+        unsigned char plan_cache[8];
+        unsigned char plan_lazy[8];
+        unsigned plan_mask = 0;
+        int plan_score = 0;
         int ok;
         if (hdr == SIZE_MAX) break;
         nl = (const char *)memchr(text + hdr, '\n', n - hdr);
@@ -1170,8 +1640,34 @@ static void transform_text(const char *text, size_t n, Buf *out,
         masked = (char *)xmalloc(blen + 1);
         mask_code(text + open, blen, masked);
         memset(used, 0, sizeof used);
+        memset(cache, 0, sizeof cache);
+        memset(lazy, 0, sizeof lazy);
+        memset(plan_cache, 0, sizeof plan_cache);
+        memset(plan_lazy, 0, sizeof plan_lazy);
         ok = !has_multiline_comment(text + open, blen) &&
              eligible(masked, blen, used);
+        if (ok) {
+            if (packed_double_only(text + open, blen)) {
+                if (!select_live_in(masked, blen, used, cache)) ok = 0;
+            } else {
+                memcpy(cache, used, sizeof cache);
+            }
+        }
+        if (ok) {
+            /* The planner decision is always collected for the report.  Full
+             * masks and empty proposals collapse to the current mask; the
+             * decision only drives code generation under --planner.  The
+             * default policy remains live-in/full until object A/B accepts
+             * the model. */
+            plan_score = select_planned(masked, blen, used, cache, plan_cache,
+                                        plan_lazy, &plan_mask);
+            if (planner_enabled) {
+                memcpy(cache, plan_cache, sizeof cache);
+                memcpy(lazy, plan_lazy, sizeof lazy);
+            } else if (lazy_enabled) {
+                select_lazy_current(masked, blen, cache, lazy);
+            }
+        }
         if (ok) {
             size_t before = out->n;
             size_t accesses = count_xmm_accesses(masked, blen);
@@ -1181,6 +1677,7 @@ static void transform_text(const char *text, size_t n, Buf *out,
             const char *fend = (const char *)memchr(fstart, '(',
                                                     (size_t)(nl - fstart));
             size_t flen;
+            unsigned lazy_mask = 0;
             int k;
             int body_changed;
             if (!fend) fend = nl;
@@ -1188,14 +1685,16 @@ static void transform_text(const char *text, size_t n, Buf *out,
             if (flen >= sizeof fname) flen = sizeof fname - 1;
             memcpy(fname, fstart, flen);
             fname[flen] = 0;
-            for (k = 0; k < 8; k++)
-                if (used[k]) mask |= 1u << k;
-            body_changed = transform_body(text + open, blen, masked, used,
-                                          out);
+            for (k = 0; k < 8; k++) {
+                if (cache[k]) mask |= 1u << k;
+                if (lazy[k]) lazy_mask |= 1u << k;
+            }
+            body_changed = transform_body(text + open, blen, masked, cache,
+                                          lazy, out);
             if (body_changed) {
                 if (changes)
                     changes_add(changes, fname, accesses, blen, out->n - before,
-                                mask);
+                                mask, plan_mask, lazy_mask, plan_score);
                 (*out_changed)++;
             }
         } else {
@@ -1223,8 +1722,10 @@ static void write_report(const char *path, size_t funcs, size_t changed,
         if (i) fputc(',', f);
         fprintf(f,
                 "{\"function\":\"%s\",\"xmm_accesses\":%zu,"
-                "\"used_mask\":%u,\"body_before\":%zu,\"body_after\":%zu}",
-                ch->func, ch->accesses, ch->used_mask, ch->bytes_before,
+                "\"used_mask\":%u,\"plan_mask\":%u,\"lazy_mask\":%u,"
+                "\"plan_score\":%d,\"body_before\":%zu,\"body_after\":%zu}",
+                ch->func, ch->accesses, ch->used_mask, ch->plan_mask,
+                ch->lazy_mask, ch->plan_score, ch->bytes_before,
                 ch->bytes_after);
     }
     fputs("]}\n", f);
@@ -1441,6 +1942,75 @@ static int self_test(void)
         "    if ((c->xmm[2] = c->xmm[0]).f32[0] > 0.0f) goto L_0000001D;\n"
         "    c->xmm[1] = c->xmm[2];\n"
         "L_0000001D:\n"
+        "    return;\n"
+        "}\n";
+    static const char *wide_return =
+        "void L_0000001E(CPU *restrict c)\n"
+        "{\n"
+        "    c->xmm[0] = c->xmm[3]; /* 00000000: movaps xmm0, xmm3 */\n"
+        "    c->xmm[1] = c->xmm[3];\n"
+        "    c->xmm[2] = c->xmm[3];\n"
+        "    return;\n"
+        "}\n";
+    static const char *packed_double_return =
+        "void L_0000001F(CPU *restrict c)\n"
+        "{\n"
+        "    c->xmm[0] = c->xmm[3]; /* 00000000: movapd xmm0, xmm3 */\n"
+        "    c->xmm[1] = c->xmm[3];\n"
+        "    c->xmm[2] = c->xmm[3];\n"
+        "    return;\n"
+        "}\n";
+    static const char *packed_double_no_live =
+        "void L_00000020(CPU *restrict c)\n"
+        "{\n"
+        "    c->xmm[0].u64[0] = 1u; /* 00000000: movapd xmm0, xmm1 */\n"
+        "    c->xmm[1] = c->xmm[0];\n"
+        "    c->xmm[2] = c->xmm[1];\n"
+        "    return;\n"
+        "}\n";
+    static const char *planner_live =
+        "void L_00000021(CPU *restrict c)\n"
+        "{\n"
+        "    c->xmm[1].f32[0] = c->xmm[0].f32[0];\n"
+        "    c->xmm[1].f32[1] = c->xmm[0].f32[1];\n"
+        "    c->xmm[2].f32[0] = c->xmm[0].f32[0];\n"
+        "    c->xmm[2].f32[1] = c->xmm[0].f32[1];\n"
+        "    c->xmm[1].f32[0] = c->xmm[0].f32[2];\n"
+        "    c->xmm[2].f32[0] = c->xmm[0].f32[3];\n"
+        "    return;\n"
+        "}\n";
+    static const char *planner_lazy =
+        "void L_00000022(CPU *restrict c)\n"
+        "{\n"
+        "    c->xmm[2] = c->xmm[1];\n"
+        "    c->xmm[0].f32[0] = c->xmm[2].f32[0];\n"
+        "    c->xmm[0].f32[1] = c->xmm[2].f32[1];\n"
+        "    c->xmm[0].f32[2] = c->xmm[2].f32[2];\n"
+        "    c->xmm[0].f32[3] = c->xmm[2].f32[3];\n"
+        "    c->xmm[3].f32[0] = c->xmm[2].f32[0];\n"
+        "    return;\n"
+        "}\n";
+    static const char *planner_lazy_branch =
+        "void L_00000023(CPU *restrict c)\n"
+        "{\n"
+        "    if (c->eax != 0) {\n"
+        "        c->xmm[3] = c->xmm[1];\n"
+        "    }\n"
+        "    c->xmm[2] = c->xmm[1];\n"
+        "    c->xmm[0].f32[0] = c->xmm[2].f32[0];\n"
+        "    c->xmm[0].f32[1] = c->xmm[2].f32[1];\n"
+        "    c->xmm[0].f32[2] = c->xmm[2].f32[2];\n"
+        "    c->xmm[0].f32[3] = c->xmm[2].f32[3];\n"
+        "    c->xmm[3].f32[0] = c->xmm[2].f32[0];\n"
+        "    return;\n"
+        "}\n";
+    static const char *planner_lazy_lane =
+        "void L_00000024(CPU *restrict c)\n"
+        "{\n"
+        "    c->xmm[2].f32[0] = 1.0f;\n"
+        "    c->xmm[2].f32[1] = c->xmm[1].f32[0];\n"
+        "    c->xmm[0].f32[0] = c->xmm[2].f32[0];\n"
+        "    c->xmm[0].f32[1] = c->xmm[2].f32[1];\n"
         "    return;\n"
         "}\n";
     Buf out;
@@ -1677,6 +2247,136 @@ static int self_test(void)
                          "_wc3_xmm_local[1] = _wc3_xmm_local[2];");
     RESET_CASE();
 
+    transform_text(wide_return, strlen(wide_return), &out, &funcs, &changed,
+                   &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].used_mask == 0xFu;
+    ok &= check_contains("wide_return", out.p,
+                         "xmm_store_full(&c->xmm[0], &_wc3_xmm_local[0]);");
+    ok &= check_contains("wide_return", out.p,
+                         "xmm_store_full(&c->xmm[1], &_wc3_xmm_local[1]);");
+    ok &= check_contains("wide_return", out.p,
+                         "xmm_store_full(&c->xmm[2], &_wc3_xmm_local[2]);");
+    ok &= check_not_contains("wide_return", out.p,
+                             "c->xmm[0] = _wc3_xmm_local[0];");
+    ok &= count_substr(out.p, "xmm_store_full(") == 3;
+    RESET_CASE();
+
+    transform_text(packed_double_return, strlen(packed_double_return), &out,
+                   &funcs, &changed, &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].used_mask == 0x8u;
+    ok &= check_contains("packed_double_return", out.p,
+                         "_wc3_xmm_local[3] = c->xmm[3];");
+    ok &= check_contains("packed_double_return", out.p,
+                         "c->xmm[0] = _wc3_xmm_local[3];");
+    ok &= check_not_contains("packed_double_return", out.p,
+                             "c->xmm[0] = _wc3_xmm_local[0];");
+    ok &= check_not_contains("packed_double_return", out.p,
+                             "xmm_store_full(");
+    RESET_CASE();
+
+    transform_text(packed_double_no_live, strlen(packed_double_no_live), &out,
+                   &funcs, &changed, &changes);
+    ok &= funcs == 1 && changed == 0;
+    ok &= changes.n == 0;
+    ok &= strcmp(out.p, packed_double_no_live) == 0;
+    ok &= check_not_contains("packed_double_no_live", out.p,
+                             "_wc3_xmm_local");
+    RESET_CASE();
+
+    /* Report-only mode keeps the existing full cache for non-packed code but
+     * records the planner proposal: only xmm0 is read-first and pays for the
+     * entry load; xmm1/xmm2 are written first. */
+    transform_text(planner_live, strlen(planner_live), &out, &funcs, &changed,
+                   &changes);
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].used_mask == 7u;
+    ok &= changes.n == 1 && changes.v[0].plan_mask == 1u;
+    ok &= changes.n == 1 && changes.v[0].plan_score > 0;
+    ok &= check_contains("planner_report", out.p,
+                         "_wc3_xmm_local[1] = c->xmm[1];");
+    RESET_CASE();
+
+    /* --planner applies the same decision: written-first xmm1/xmm2 stay in
+     * c->xmm, while xmm0 keeps the local copy. */
+    planner_enabled = 1;
+    transform_text(planner_live, strlen(planner_live), &out, &funcs, &changed,
+                   &changes);
+    planner_enabled = 0;
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].used_mask == 1u;
+    ok &= changes.n == 1 && changes.v[0].plan_mask == 1u;
+    ok &= check_contains("planner_apply", out.p,
+                         "_wc3_xmm_local[0] = c->xmm[0];");
+    ok &= check_not_contains("planner_apply", out.p,
+                             "_wc3_xmm_local[1] = c->xmm[1];");
+    ok &= check_contains("planner_apply", out.p,
+                         "c->xmm[1].f32[0] = _wc3_xmm_local[0].f32[0];");
+    RESET_CASE();
+
+    /* A top-level full write may create the local in place.  xmm2 is written
+     * before it is read, so the entry load is skipped while the later lane
+     * reads still use the local. */
+    planner_enabled = 1;
+    transform_text(planner_lazy, strlen(planner_lazy), &out, &funcs, &changed,
+                   &changes);
+    planner_enabled = 0;
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].used_mask == 6u;
+    ok &= changes.n == 1 && changes.v[0].plan_mask == 6u;
+    ok &= changes.n == 1 && changes.v[0].lazy_mask == 4u;
+    ok &= check_not_contains("planner_lazy", out.p,
+                             "_wc3_xmm_local[2] = c->xmm[2];");
+    ok &= check_contains("planner_lazy", out.p,
+                         "_wc3_xmm_local[2] = _wc3_xmm_local[1];");
+    ok &= check_contains("planner_lazy", out.p,
+                         "c->xmm[0].f32[0] = _wc3_xmm_local[2].f32[0];");
+    RESET_CASE();
+
+    /* --lazy applies the same entry-load elision to the current full mask
+     * without changing which registers are promoted. */
+    lazy_enabled = 1;
+    transform_text(planner_lazy, strlen(planner_lazy), &out, &funcs, &changed,
+                   &changes);
+    lazy_enabled = 0;
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].used_mask == 15u;
+    ok &= changes.n == 1 && changes.v[0].lazy_mask == 4u;
+    ok &= check_not_contains("lazy_flag", out.p,
+                             "_wc3_xmm_local[2] = c->xmm[2];");
+    ok &= check_contains("lazy_flag", out.p,
+                         "_wc3_xmm_local[2] = _wc3_xmm_local[1];");
+    RESET_CASE();
+
+    /* The same written-first register is not lazy when a branch precedes its
+     * first write: the entry load must remain, because a skipped branch would
+     * otherwise leave the local uninitialized. */
+    planner_enabled = 1;
+    transform_text(planner_lazy_branch, strlen(planner_lazy_branch), &out,
+                   &funcs, &changed, &changes);
+    planner_enabled = 0;
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].used_mask == 6u;
+    ok &= changes.n == 1 && changes.v[0].plan_mask == 6u;
+    ok &= changes.n == 1 && changes.v[0].lazy_mask == 0u;
+    ok &= check_contains("planner_lazy_branch", out.p,
+                         "_wc3_xmm_local[2] = c->xmm[2];");
+    RESET_CASE();
+
+    /* A lane write preserves the upper lanes, so it cannot create the local
+     * without loading the previous guest value. */
+    planner_enabled = 1;
+    transform_text(planner_lazy_lane, strlen(planner_lazy_lane), &out, &funcs,
+                   &changed, &changes);
+    planner_enabled = 0;
+    ok &= funcs == 1 && changed == 1;
+    ok &= changes.n == 1 && changes.v[0].used_mask == 6u;
+    ok &= changes.n == 1 && changes.v[0].lazy_mask == 0u;
+    ok &= check_contains("planner_lazy_lane", out.p,
+                         "_wc3_xmm_local[2] = c->xmm[2];");
+    RESET_CASE();
+
 #undef RESET_CASE
     changes_free(&changes);
     if (!ok) {
@@ -1689,7 +2389,8 @@ static int self_test(void)
 
 static void usage(void)
 {
-    fputs("xmm_local: use --lift IN --out OUT [--json REPORT] [--quiet]\n"
+    fputs("xmm_local: use --lift IN --out OUT [--json REPORT] [--planner] "
+          "[--lazy] [--quiet]\n"
           "           or --self-test\n", stderr);
     exit(2);
 }
@@ -1708,6 +2409,14 @@ int main(int argc, char **argv)
     size_t funcs, changed;
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--self-test") == 0) return self_test();
+        if (strcmp(argv[i], "--planner") == 0) {
+            planner_enabled = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--lazy") == 0) {
+            lazy_enabled = 1;
+            continue;
+        }
         if (strcmp(argv[i], "--quiet") == 0) { quiet = 1; continue; }
         if (strcmp(argv[i], "--lift") == 0 && i + 1 < argc) {
             lift = argv[++i];

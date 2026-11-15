@@ -1449,6 +1449,20 @@ static inline void   wrxm(uint32_t a, XMM    v) { memcpy((void *)(uintptr_t)a, &
 static inline void sse_load_ss(XMM *d, float  v) { d->u64[0] = 0; d->u64[1] = 0; d->f32[0] = v; }
 static inline void sse_load_sd(XMM *d, double v) { d->u64[0] = 0; d->u64[1] = 0; d->f64[0] = v; }
 
+/* Full 128-bit writeback for the function-local XMM cache.  The generic
+ * union assignment is enough semantically, but LLVM often scalarises a
+ * multi-register flush into one store per lane.  AArch64 has a single 16-byte
+ * load/store pair; spell it as one vector copy so a flush site with several
+ * live XMM registers does not turn into 24 scalar stores.  This copies the
+ * complete guest state, including the upper lanes; it is not a lane write. */
+static inline void xmm_store_full(XMM *d, const XMM *s) {
+#if defined(__aarch64__)
+    vst1q_u32(d->u32, vld1q_u32(s->u32));
+#else
+    *d = *s;
+#endif
+}
+
 /* UCOMISS/COMISS/UCOMISD/COMISD: the comparison lands in ZF/PF/CF, and clears
  * OF/SF/AF. An unordered compare - either operand NaN - sets all three, which
  * is exactly what makes `ucomiss; jp` a NaN test and `ucomiss; jbe` mean

@@ -1309,6 +1309,124 @@ static GameActivity *host_activity(void)
     return g_app && g_app->activity ? g_app->activity : NULL;
 }
 
+/* Implemented by runtime/hle/win32/ole32/ole32_hle.c.  The Java player calls
+ * this after it has hidden the movie surface; the HLE then queues the
+ * DirectShow completion event into the guest message loop. */
+extern void wc3_hle_ole32_video_finished(int status);
+
+static JNIEnv *video_attach_env(GameActivity *activity, int *attached)
+{
+    *attached = 0;
+    if (!activity || !activity->vm) return NULL;
+
+    JNIEnv *env = NULL;
+    if ((*activity->vm)->GetEnv(activity->vm, (void **)&env,
+                                JNI_VERSION_1_6) != JNI_OK) {
+        if ((*activity->vm)->AttachCurrentThread(activity->vm, &env, NULL) !=
+            JNI_OK)
+            return NULL;
+        *attached = 1;
+    }
+    return env;
+}
+
+static int video_play(void *ctx, const char *host_path)
+{
+    (void)ctx;
+    GameActivity *activity = host_activity();
+    if (!activity || !activity->javaGameActivity || !host_path ||
+        !host_path[0])
+        return -1;
+#if WC3_DEBUG && WC3_DEBUG_JNI
+    fprintf(stderr, "[jni] video_play path=%s\n", host_path);
+#endif
+
+    int attached = 0;
+    JNIEnv *env = video_attach_env(activity, &attached);
+    if (!env) return -1;
+
+    int rc = -1;
+    jclass cls = (*env)->GetObjectClass(env, activity->javaGameActivity);
+    if (cls) {
+        jmethodID method = (*env)->GetMethodID(
+            env, cls, "playMovie", "(Ljava/lang/String;)Z");
+        if (method) {
+            jstring path = (*env)->NewStringUTF(env, host_path);
+            if (path) {
+                jboolean started = (*env)->CallBooleanMethod(
+                    env, activity->javaGameActivity, method, path);
+                if ((*env)->ExceptionCheck(env)) {
+#if WC3_DEBUG && WC3_DEBUG_JNI
+                    fprintf(stderr, "[jni] video_play: Java exception in playMovie\n");
+                    (*env)->ExceptionDescribe(env);
+#endif
+                    (*env)->ExceptionClear(env);
+                    started = JNI_FALSE;
+                }
+#if WC3_DEBUG && WC3_DEBUG_JNI
+                if (!started)
+                    fprintf(stderr, "[jni] video_play: playMovie returned false\n");
+#endif
+                if (started) rc = 0;
+                (*env)->DeleteLocalRef(env, path);
+            } else {
+#if WC3_DEBUG && WC3_DEBUG_JNI
+                fprintf(stderr, "[jni] video_play: NewStringUTF failed\n");
+                (*env)->ExceptionDescribe(env);
+#endif
+                (*env)->ExceptionClear(env);
+            }
+        } else {
+#if WC3_DEBUG && WC3_DEBUG_JNI
+            fprintf(stderr, "[jni] video_play: playMovie method not found\n");
+#endif
+            (*env)->ExceptionClear(env);
+        }
+        (*env)->DeleteLocalRef(env, cls);
+    } else {
+        (*env)->ExceptionClear(env);
+    }
+
+    if (attached) (*activity->vm)->DetachCurrentThread(activity->vm);
+    return rc;
+}
+
+static void video_stop(void *ctx)
+{
+    (void)ctx;
+    GameActivity *activity = host_activity();
+    if (!activity || !activity->javaGameActivity) return;
+
+    int attached = 0;
+    JNIEnv *env = video_attach_env(activity, &attached);
+    if (!env) return;
+
+    jclass cls = (*env)->GetObjectClass(env, activity->javaGameActivity);
+    if (cls) {
+        jmethodID method = (*env)->GetMethodID(env, cls, "stopMovie", "()V");
+        if (method)
+            (*env)->CallVoidMethod(env, activity->javaGameActivity, method);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        (*env)->DeleteLocalRef(env, cls);
+    } else {
+        (*env)->ExceptionClear(env);
+    }
+
+    if (attached) (*activity->vm)->DetachCurrentThread(activity->vm);
+}
+
+JNIEXPORT void JNICALL
+Java_wc3_recomp_Wc3GameActivity_nativeMovieFinished(JNIEnv *env, jclass clazz,
+                                                    jint status)
+{
+    (void)env;
+    (void)clazz;
+#if WC3_DEBUG && WC3_DEBUG_JNI
+    fprintf(stderr, "[jni] movie_finished status=%d\n", (int)status);
+#endif
+    wc3_hle_ole32_video_finished((int)status);
+}
+
 static void ime_clear_locked(void)
 {
     g_ime_text_len = 0;
@@ -2419,6 +2537,9 @@ void android_main(struct android_app *app)
         GPU_LOG("platform init ok; installing Vulkan driver api");
         wc3_android_vulkan_driver_install(&g_platform.vulkan_driver);
         GPU_LOG("Vulkan driver api installed");
+        g_platform.video.ctx = &g_platform;
+        g_platform.video.play = video_play;
+        g_platform.video.stop = video_stop;
         if (wc3_platform_install(&g_platform) != 0)
             LOGE("platform install failed");
         else

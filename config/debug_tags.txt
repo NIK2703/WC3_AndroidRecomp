@@ -7,6 +7,9 @@ ASSETS
 INPUT
 GRAPHICS
 JNI
+# DirectShow/ole32 HLE diagnostics for campaign movies (RenderFile, Run,
+# GetEvent, finish).  Debug only; release tags are empty (BV-5).
+HLE
 MEMORY
 CRASH
 BATTLE_NET
@@ -18,3 +21,6 @@ GPU_DRIVERS
 DXVK_DEBUG
 # ATrace slices for simpleperf/Perfetto captures (runtime/diag/wc3_trace.h).
 PERF
+# 24-unit selection: init/note/select/hide/fill and the AddUnit cap trace.
+# Noisy on every selection update; debug only, release tags are empty (BV-5).
+SELECT24

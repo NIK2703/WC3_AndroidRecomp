@@ -9,6 +9,7 @@
 #ifndef WC3_HLE_BRIDGE_H
 #define WC3_HLE_BRIDGE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "cpu.h"
@@ -128,6 +129,20 @@ uint32_t display_refresh_hz(void);
  * the registry.  Safe from any host thread; the save itself runs on the guest
  * thread at the next PeekMessage/GetMessage boundary. */
 void wc3_android_request_settings_save(void);
+
+/* Queue a Win32 message from any host thread.  DirectShow graph notifications
+ * use the same guest message queue as host input, but arrive from the Java
+ * media callback rather than the input thread. */
+void wc3_legacy_post_message(uint32_t hwnd, uint32_t msg, uint32_t wp,
+                             uint32_t lp);
+
+/* Register the idle hook run while a guest thread blocks in GetMessageA.
+ * The winmm timer module uses it to keep the Mss32 mixer ticking; passing NULL
+ * clears it.  Called once during registry bootstrap. */
+void wc3_legacy_set_message_wait_tick(void (*fn)(CPU *c));
+
+/* Resolve a guest path to an absolute host path for a platform consumer. */
+int wc3_legacy_resolve_path(const char *guest, char *out, size_t cap);
 
 void wc3_legacy_mouse_move(float nx, float ny);
 void wc3_legacy_mouse_move_delta(int dx, int dy);
