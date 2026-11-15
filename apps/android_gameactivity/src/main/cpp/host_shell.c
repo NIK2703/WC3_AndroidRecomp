@@ -88,6 +88,7 @@
 #endif
 
 static Wc3Platform g_platform;
+static _Atomic int g_movie_active;
 static int g_platform_ready;
 static int g_guest_ready;
 static int g_config_ready;
@@ -1330,6 +1331,12 @@ static JNIEnv *video_attach_env(GameActivity *activity, int *attached)
     return env;
 }
 
+static int video_active(void *ctx)
+{
+    (void)ctx;
+    return atomic_load_explicit(&g_movie_active, memory_order_acquire);
+}
+
 static int video_play(void *ctx, const char *host_path)
 {
     (void)ctx;
@@ -1353,6 +1360,12 @@ static int video_play(void *ctx, const char *host_path)
         if (method) {
             jstring path = (*env)->NewStringUTF(env, host_path);
             if (path) {
+                /* Publish the gate before the player can finish.  The worker
+                 * runs as soon as playMovie() posts it, so a fast parse
+                 * failure would otherwise clear the flag from
+                 * nativeMovieFinished() and then be overwritten here. */
+                atomic_store_explicit(&g_movie_active, 1,
+                                      memory_order_release);
                 jboolean started = (*env)->CallBooleanMethod(
                     env, activity->javaGameActivity, method, path);
                 if ((*env)->ExceptionCheck(env)) {
@@ -1367,7 +1380,12 @@ static int video_play(void *ctx, const char *host_path)
                 if (!started)
                     fprintf(stderr, "[jni] video_play: playMovie returned false\n");
 #endif
-                if (started) rc = 0;
+                if (started) {
+                    rc = 0;
+                } else {
+                    atomic_store_explicit(&g_movie_active, 0,
+                                          memory_order_release);
+                }
                 (*env)->DeleteLocalRef(env, path);
             } else {
 #if WC3_DEBUG && WC3_DEBUG_JNI
@@ -1394,6 +1412,7 @@ static int video_play(void *ctx, const char *host_path)
 static void video_stop(void *ctx)
 {
     (void)ctx;
+    atomic_store_explicit(&g_movie_active, 0, memory_order_release);
     GameActivity *activity = host_activity();
     if (!activity || !activity->javaGameActivity) return;
 
@@ -1424,6 +1443,7 @@ Java_wc3_recomp_Wc3GameActivity_nativeMovieFinished(JNIEnv *env, jclass clazz,
 #if WC3_DEBUG && WC3_DEBUG_JNI
     fprintf(stderr, "[jni] movie_finished status=%d\n", (int)status);
 #endif
+    atomic_store_explicit(&g_movie_active, 0, memory_order_release);
     wc3_hle_ole32_video_finished((int)status);
 }
 
@@ -2540,6 +2560,7 @@ void android_main(struct android_app *app)
         g_platform.video.ctx = &g_platform;
         g_platform.video.play = video_play;
         g_platform.video.stop = video_stop;
+        g_platform.video.active = video_active;
         if (wc3_platform_install(&g_platform) != 0)
             LOGE("platform install failed");
         else

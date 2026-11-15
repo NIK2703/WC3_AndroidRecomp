@@ -535,6 +535,11 @@ typedef struct Wc3VideoApi {
     void *ctx;
     int (*play)(void *ctx, const char *host_path);
     void (*stop)(void *ctx);
+    /* Non-zero while the host player owns the screen.  The D3D9 bridge uses
+     * this to stop submitting and presenting guest frames behind the movie;
+     * the guest keeps its own render loop and still sees a successful
+     * Present, so no game code is changed. */
+    int (*active)(void *ctx);
 } Wc3VideoApi;
 
 typedef struct Wc3Platform {

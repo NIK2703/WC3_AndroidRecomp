@@ -7,6 +7,7 @@ import android.media.AudioAttributes;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.media.MediaPlayer;
+import android.os.Build;
 import android.os.Process;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
@@ -26,6 +27,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Campaign movie player.
@@ -36,6 +38,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * and plays the extracted MP3 track with MediaPlayer.  Audio and video are
  * clocked from the same start instant; MediaCodec supplies presentation
  * timestamps in display order, which already accounts for B-frames.
+ *
+ * <p>Decoded frames are handed to SurfaceFlinger with an explicit render
+ * timestamp instead of sleeping in Java and flipping immediately.  While the
+ * movie owns the screen, the D3D9 bridge skips guest presents, so DXVK does
+ * not compete with the decoder for the GPU.
  *
  * <p>The movie layer is a separate SurfaceView above GameActivity's surface.
  * There is no per-frame bridge and no copy into a Java Bitmap.
@@ -136,6 +143,7 @@ final class MoviePlayer {
         generation.incrementAndGet();
         wakeSurface();
         activity.runOnUiThread(() -> {
+            clearSurfaceFrameRate();
             layer.setVisibility(View.GONE);
             host.setOverlayVisible(true);
             releaseAudio();
@@ -149,6 +157,7 @@ final class MoviePlayer {
         wakeSurface();
 
         activity.runOnUiThread(() -> {
+            clearSurfaceFrameRate();
             layer.setVisibility(View.GONE);
             host.setOverlayVisible(true);
             releaseAudio();
@@ -171,11 +180,21 @@ final class MoviePlayer {
         activity.runOnUiThread(() -> {
             try {
                 if (gen != generation.get()) return;
+                // The movie layer is still GONE here, so its own width and
+                // height are zero.  Use its parent (the activity content
+                // view), which has the same bounds the game surface uses;
+                // DisplayMetrics includes system-bar area that the game
+                // surface does not, and using it would clip the movie on
+                // devices with a visible navigation bar.
                 DisplayMetrics dm = activity.getResources().getDisplayMetrics();
-                int containerWidth = layer.getWidth() > 0
-                        ? layer.getWidth() : dm.widthPixels;
-                int containerHeight = layer.getHeight() > 0
-                        ? layer.getHeight() : dm.heightPixels;
+                View container = layer.getParent() instanceof View
+                        ? (View) layer.getParent() : null;
+                int containerWidth = container != null
+                        && container.getWidth() > 0
+                        ? container.getWidth() : dm.widthPixels;
+                int containerHeight = container != null
+                        && container.getHeight() > 0
+                        ? container.getHeight() : dm.heightPixels;
                 if (containerWidth <= 0 || containerHeight <= 0) return;
                 double scale = Math.min(containerWidth / (double) videoWidth,
                         containerHeight / (double) videoHeight);
@@ -240,10 +259,13 @@ final class MoviePlayer {
                 finish(gen, 1);
                 return;
             }
+            setSurfaceFrameRate(surface, avi.fpsNum / (float) avi.fpsDen);
 
             MediaFormat format = MediaFormat.createVideoFormat(
                     VIDEO_MIME, avi.width, avi.height);
             format.setByteBuffer("csd-0", ByteBuffer.wrap(avi.csd));
+            format.setInteger(MediaFormat.KEY_FRAME_RATE,
+                    Math.max(1, Math.round(avi.fpsNum / (float) avi.fpsDen)));
             if (avi.maxVideoSize > 0) {
                 format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE,
                         avi.maxVideoSize);
@@ -254,10 +276,7 @@ final class MoviePlayer {
             codec.start();
 
             raf = new RandomAccessFile(movie, "r");
-            if (audioFile != null) startAudio(audioFile, gen);
-            if (!current(gen)) return;
-
-            boolean ok = decode(raf, avi, codec, gen);
+            boolean ok = decode(raf, avi, codec, gen, audioFile);
             finish(gen, ok ? 0 : 1);
         } catch (Throwable ignored) {
             finish(gen, 1);
@@ -281,8 +300,38 @@ final class MoviePlayer {
         }
     }
 
+    /**
+     * Tell SurfaceFlinger the content cadence.  On displays that can switch
+     * modes this lets it pick 24/48/120 Hz instead of repeating a 24 fps
+     * stream on a 60 Hz panel with a 3:2 cadence.  A non-positive rate clears
+     * the hint when the movie surface goes away, so the game does not inherit
+     * a 24 Hz display mode.
+     */
+    private static void setSurfaceFrameRate(Surface surface, float fps) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || surface == null)
+            return;
+        try {
+            if (!surface.isValid()) return;
+            if (fps > 0.0f) {
+                surface.setFrameRate(fps,
+                        Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+            } else {
+                surface.setFrameRate(0.0f,
+                        Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
+            }
+        } catch (Throwable ignored) {
+            // A surface that predates the hint or a device without the
+            // extension still renders; the timestamp scheduling below is the
+            // actual pacing mechanism.
+        }
+    }
+
+    private void clearSurfaceFrameRate() {
+        setSurfaceFrameRate(surfaceView.getHolder().getSurface(), 0.0f);
+    }
+
     private boolean decode(RandomAccessFile raf, AviFile avi,
-                           MediaCodec codec, int gen)
+                           MediaCodec codec, int gen, File audioFile)
             throws IOException, InterruptedException {
         int count = avi.video.size();
         if (count == 0) return false;
@@ -291,12 +340,26 @@ final class MoviePlayer {
         MediaCodec.BufferInfo outputInfo = new MediaCodec.BufferInfo();
         int queued = 0;
         int rendered = 0;
+        int outputFrames = 0;
         boolean eosQueued = false;
         boolean outputEos = false;
-        long startNs = System.nanoTime();
-        long lastOutputNs = startNs;
-        long movieNs = (long) count * 1_000_000_000L * avi.fpsDen / avi.fpsNum;
-        long deadlineNs = startNs + movieNs + EXTRA_RUN_NS;
+        boolean clockStarted = false;
+        long frameIntervalNs =
+                1_000_000_000L * avi.fpsDen / avi.fpsNum;
+        if (frameIntervalNs <= 0L) return false;
+
+        // Keep at most two frames in the compositor queue, and use the codec
+        // output timestamp as the presentation time instead of sleeping and
+        // flipping immediately.  This is the same scheduling path MediaPlayer
+        // uses: SurfaceFlinger latches the buffer on the right vsync.
+        long releaseLeadNs = frameIntervalNs * 2L;
+        long lateDropNs = frameIntervalNs * 2L;
+        long movieNs = (long) count * frameIntervalNs;
+        long startNs = 0L;
+        long startupNs = 0L;
+        long deadlineNs = 0L;
+        long startupDeadlineNs = System.nanoTime() + 15_000_000_000L;
+        long lastOutputNs = System.nanoTime();
 
         while (current(gen) && !surfaceLost) {
             for (int i = 0; i < 8 && !eosQueued; i++) {
@@ -332,6 +395,10 @@ final class MoviePlayer {
             int outIndex = codec.dequeueOutputBuffer(outputInfo, 10_000);
             if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
                 long now = System.nanoTime();
+                if (!clockStarted) {
+                    if (now > startupDeadlineNs) return false;
+                    continue;
+                }
                 if (eosQueued
                         && now - lastOutputNs > MAX_IDLE_AFTER_EOS_NS) {
                     return rendered > 0;
@@ -347,18 +414,62 @@ final class MoviePlayer {
                 outputEos = true;
             }
 
-            if (outputInfo.size > 0) {
-                long targetNs = startNs
-                        + outputInfo.presentationTimeUs * 1_000L;
-                waitUntil(targetNs, gen);
-                if (!current(gen) || surfaceLost) {
-                    codec.releaseOutputBuffer(outIndex, false);
-                    break;
-                }
-                codec.releaseOutputBuffer(outIndex, true);
-                rendered++;
-            } else {
+            // With a Surface output, BufferInfo.size is not a frame
+            // indication: many decoders report 0 for every decoded frame.
+            // The old size > 0 test therefore skipped most frames and made
+            // the movie stutter.  A zero-sized buffer is only an empty
+            // end-of-stream marker (or codec config) to be discarded.
+            boolean codecConfig =
+                    (outputInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
+            boolean emptyEos = outputEos && outputInfo.size == 0
+                    && outputInfo.presentationTimeUs == 0L;
+            if (codecConfig || emptyEos) {
                 codec.releaseOutputBuffer(outIndex, false);
+            } else {
+                if (!clockStarted) {
+                    // Start the audio clock only when the decoder has a real
+                    // frame to show.  Starting MediaPlayer earlier made the
+                    // audio lead the video by the whole decoder warm-up.
+                    long audioNs = audioFile == null
+                            ? 0L : startAudio(audioFile, gen);
+                    startNs = audioNs != 0L ? audioNs : System.nanoTime();
+                    startupNs = startNs + 500_000_000L;
+                    deadlineNs = startNs + movieNs + EXTRA_RUN_NS;
+                    lastOutputNs = System.nanoTime();
+                    clockStarted = true;
+                    if (!current(gen)) {
+                        codec.releaseOutputBuffer(outIndex, false);
+                        break;
+                    }
+                }
+                // The codec is expected to return the input presentation
+                // times in display order.  A decoder that loses them and
+                // reports zero would otherwise make every frame look like it
+                // belongs at t=0; the container is constant-rate, so the
+                // output index is an exact fallback timeline.
+                long ptsUs = outputInfo.presentationTimeUs;
+                if (ptsUs == 0L && outputFrames > 0) {
+                    ptsUs = avi.presentationTimeUs(outputFrames);
+                }
+                outputFrames++;
+                long targetNs = startNs + ptsUs * 1_000L;
+                long now = System.nanoTime();
+                if (now > startupNs && now > targetNs + lateDropNs) {
+                    // The frame already missed its slot.  Showing it now would
+                    // push every following frame further behind; drop it and
+                    // keep the audio clock authoritative.
+                    codec.releaseOutputBuffer(outIndex, false);
+                } else {
+                    waitUntil(targetNs - releaseLeadNs, gen);
+                    if (!current(gen) || surfaceLost) {
+                        codec.releaseOutputBuffer(outIndex, false);
+                        break;
+                    }
+                    long renderNs = Math.max(
+                            System.nanoTime() + 1_000_000L, targetNs);
+                    codec.releaseOutputBuffer(outIndex, renderNs);
+                    rendered++;
+                }
             }
 
             if (outputEos) break;
@@ -399,9 +510,16 @@ final class MoviePlayer {
         }
     }
 
-    private boolean startAudio(final File file, final int gen) {
+    /**
+     * Starts the native audio path and returns the System.nanoTime() at which
+     * it actually began.  Video presentation is scheduled against this clock,
+     * not against the instant the Java decode loop happens to start, so the
+     * two streams share one time base even when MediaPlayer preparation takes
+     * longer than expected.
+     */
+    private long startAudio(final File file, final int gen) {
         final CountDownLatch latch = new CountDownLatch(1);
-        final AtomicBoolean started = new AtomicBoolean(false);
+        final AtomicLong startedNs = new AtomicLong();
 
         activity.runOnUiThread(() -> {
             MediaPlayer player = null;
@@ -415,15 +533,14 @@ final class MoviePlayer {
                 player.prepare();
                 if (gen != generation.get()) {
                     player.release();
-                    latch.countDown();
                     return;
                 }
                 player.start();
+                startedNs.set(System.nanoTime());
                 synchronized (audioLock) {
                     audio = player;
                     player = null;
                 }
-                started.set(true);
             } catch (Throwable ignored) {
                 if (player != null) {
                     try {
@@ -441,7 +558,7 @@ final class MoviePlayer {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        return started.get();
+        return startedNs.get();
     }
 
     private void releaseAudio() {

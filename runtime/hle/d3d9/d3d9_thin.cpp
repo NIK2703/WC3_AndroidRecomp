@@ -40,6 +40,7 @@
 
 #include "d3d9_thin.h"
 #include "d3d9_thin_iids.h"
+#include "platform.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,6 +71,24 @@ extern "C" int wc3_vulkan_major_minor(int *major, int *minor);
 extern "C" void *wc3_android_window(void);
 /* hle_android.c: the stable non-null HWND stand-in the guest tests for null. */
 extern "C" void *hle_host_hwnd(void);
+
+/* The campaign movie is a host-owned SurfaceView.  While it is up, submitting
+ * DXVK frames behind it only competes with the hardware video decoder and the
+ * compositor.  Present still succeeds from the guest's point of view, but the
+ * frame is neither submitted nor flipped.  A short sleep keeps the guest from
+ * spinning at full speed on a frame nobody will see. */
+static int thin_video_active(void)
+{
+    const Wc3Platform *p = wc3_platform();
+    return p && p->video.active && p->video.active(p->video.ctx);
+}
+
+static void thin_video_pace(void)
+{
+    const Wc3Platform *p = wc3_platform();
+    if (p && p->thread.sleep_ns)
+        (void)p->thread.sleep_ns(p->thread.ctx, 16ull * 1000ull * 1000ull);
+}
 
 /* ------------------------------------------------------------------ */
 /* diagnostics                                                        */
@@ -1663,6 +1682,33 @@ static void thin_entry(CPU *c)
         THIN_LOG("stale guest COM object %08X (%s)", self, hle_describe(c->eip));
         c->eax = D3DERR_INVALIDCALL;
         return;
+    }
+
+    /* The host movie is a separate SurfaceView.  While it owns the screen,
+     * take the game's render calls out at the vtable boundary: no Clear or
+     * draw command is recorded into DXVK's stream, and Present neither
+     * submits nor flips.  The guest still sees success, and the short sleep
+     * keeps its frame loop at roughly display cadence instead of spinning.
+     * The gate is here, not in thin_hw_call(), because the generated
+     * marshalling path also receives some of these methods. */
+    switch (s->key) {
+    case 0x0111: /* IDirect3DDevice9::Present */
+    case 0x0303: /* IDirect3DSwapChain9::Present */
+        if (thin_video_active()) {
+            thin_video_pace();
+            c->eax = D3D_OK;
+            return;
+        }
+        break;
+    case 0x012b: /* Clear */
+    case 0x0151: case 0x0152: case 0x0153: case 0x0154: /* draws */
+        if (thin_video_active()) {
+            c->eax = D3D_OK;
+            return;
+        }
+        break;
+    default:
+        break;
     }
 
 #if WC3_DEBUG && WC3_DEBUG_GRAPHICS

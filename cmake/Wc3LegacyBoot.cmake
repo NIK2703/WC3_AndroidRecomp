@@ -419,6 +419,7 @@ target_include_directories(wc3_hle_d3d9 PRIVATE
     "${WC3_ROOT}/runtime/diag"
     "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/guest"
+    "${WC3_ROOT}/runtime/platform"
     "${WC3_ROOT}/third_party/dxvk/shim"
     "${WC3_ROOT}/third_party/dxvk/3.1.1/include/native/directx")
 target_compile_features(wc3_hle_d3d9 PRIVATE cxx_std_17)
