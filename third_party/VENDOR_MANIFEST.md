@@ -1,6 +1,6 @@
 # VENDOR_MANIFEST — wc3_android_recomp
 
-Статус: **rev 2** (2026-11-10). Инвентарь составлен по **фактически
+Статус: **rev 3** (2026-11-15). Инвентарь составлен по **фактически
 прочитанным** license-файлам; ничего не угадано. Правило R9 из
 `docs/FILE_LAYOUT.md`: vendor-код живёт только здесь, каждый компонент имеет
 запись в этом файле и свой LICENSE/COPYING рядом с исходниками.
@@ -12,6 +12,7 @@
 | Berkeley SoftFloat **Release 3e** | **да**, `third_party/softfloat/` | John R. Hauser, 2018-01-20; «Copyright 2011–2018 The Regents of the University of California» | UC Berkeley / BSD-подобная, применяется ко всему релизу и к каждому файлу | `third_party/softfloat/COPYING.txt` | state должен быть thread-local: `-DTHREAD_LOCAL=_Thread_local`; сборочные продукты (`build-host/`) gitignored |
 | DXVK **3.1.1** | **да**, `third_party/dxvk/3.1.1/` | `github.com/doitsujin/dxvk`, commit `23b07e9be441f87eb46204d78d9265e565cfbc0f`; submodules pinned в `third_party/dxvk/VENDOR_COMMIT` | **zlib/libpng** («Copyright (c) 2017 Philip Rebohle, 2019 Joshua Ashton, 2019 Robin Kertels, 2023 Jeffrey Ellison») | `third_party/dxvk/3.1.1/LICENSE` | Android/static patches уже применены; WC3 D3D9 patch делает `storageBuffer8BitAccess` и `VK_KHR_maintenance6` необязательными и включает fallback на core-команды; `dxvk-3.1.1-android-debug.patch` фиксирует retry singleton, null-guard и stderr-логи; `dxvk-3.1.1-lowmem-placed.patch` включает placed mapping host-visible памяти ниже 4 ГБ. Сборка — `tools/android/build_dxvk.ps1`, symbol isolation — `tools/lift/csrc_local/dxvk_isolate_archive_elf.c` |
 | DXVK **1.10.3** | **да**, `third_party/dxvk/1.10.3/` | тот же репозиторий, commit `e4fd5e9e8d335e8a2c0814829207cbd421f7e40e` (tag `v1.10.3`) | **zlib/libpng** | `third_party/dxvk/1.10.3/LICENSE` | второй статический бэкенд одного APK; свой namespace; сборка из того же vendor-каталога; `dxvk-1.10.3-lowmem-placed.patch` включает тот же placed mapping (Vulkan 1.3.217 headers → `shim/wc3_vulkan_lowmem.h`), kill switch `dxvk.lowMemoryPlaced` |
+| AndroidX Media3 **1.7.1** + Media3Avi **2.7.1** | **да**, `third_party/media3/` | `github.com/androidx/media` tag `1.7.1`, commit `5d42f5b5527c3e8d1a3e6ec155fc7c263bab3dd9`; `github.com/dburckh/Media3Avi` tag `2.7.1`, commit `23936fefaf7bd32976d93f42079ca915a2078f2c` | **Apache-2.0** (Media3, Guava, AndroidX) и **MIT** (Media3Avi, Copyright (c) 2022 Dustin) | `third_party/media3/LICENSE-APACHE-2.0.txt`, `third_party/media3/LICENSE-MIT-Media3Avi.txt` | только Java/Kotlin host-библиотеки, не native runtime; Media3Avi даёт AVI-демуксер и display-order PTS для MPEG-4 Part 2 B-кадров; файлы вендорены как offline local Maven `third_party/media3/repo/`, без локальных патчей; версии и SHA-256 — `third_party/media3/VENDOR_COMMIT`, состав — `third_party/media3/README.md` |
 | `winlator-input` (touch engine) | **нет** (`runtime/android/controls/vendor/winlator-input/` старого дерева) | `E:\projects\winlator-enhanced-inpu-controls-2`, commit `208371f89e2e2d218263308f26ee02bbf149a70e` | **MIT**, Copyright (c) 2023 BrunoSX | `LICENSE` в vendor-каталоге | профиль `Warcraft 3.icp` в upstream untracked; копировать по SHA-256 `349B6113…E04`, а не «похожий» профиль |
 | `dxvk_win32` shim | **да**, `third_party/dxvk/shim/` | собственный код проекта; перенесён из `runtime/android/dxvk_win32.cpp` + `runtime/android/dxvk_shim/` | проектное право | — | vendor-boundary, не guest runtime; компилируется в 1.10.3 archive и остаётся unprefixed при symbol isolation |
 | `libadrenotools` | **частично**: `third_party/libadrenotools/` (LICENSE/README), архивы `22d71e…`/`91a589…` линкуются из pinned legacy build, hooks `libmain_hook.so`/`libhook_impl.so` упакованы в `jniLibs` | `github.com/bylaws/libadrenotools`, README: Android 9+ / arm64 | **BSD-2-Clause**, Copyright (c) 2021 Billy Laws | `third_party/libadrenotools/LICENSE` | загрузка пользовательского Vulkan HAL без root; `hookLibDir` = extracted hooks, `customDriverDir` только app-private. `VENDOR_COMMIT` всё ещё открыт: до него архивы — переходный pinned build input, не source vendor |
@@ -43,7 +44,12 @@
    в исходном дереве: он грузится инструментами во время выполнения, а
    исходники Capstone в дерево не вендорятся. Продукты сборки инструментов
    лежат только в `build/lift-tools/` (R2/R3).
-8. `libadrenotools.a`, `liblinkernsbypass.a` и hooks `libmain_hook.so` /
+8. Media3/Media3Avi/Guava/AndroidX поставляются как **бинарные upstream
+   AAR/JAR** в `third_party/media3/`; это host-библиотеки, не native runtime и
+   не сгенерированный C. Локальных патчей нет, состав и SHA-256 —
+   `third_party/media3/VENDOR_COMMIT`, причина выбора и offline-layout —
+   `third_party/media3/README.md`.
+9. `libadrenotools.a`, `liblinkernsbypass.a` и hooks `libmain_hook.so` /
    `libhook_impl.so` — **переходные** Android product inputs (ADR-036). Их
    sha256 проверяет `cmake/Wc3LegacyBoot.cmake` (архивы) и фиксирует
    `third_party/libadrenotools/README.md` (все четыре файла). Это не source

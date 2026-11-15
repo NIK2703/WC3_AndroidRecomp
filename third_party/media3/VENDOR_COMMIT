@@ -1,4 +1,7 @@
 # Media3 offline vendor
+# Upstream source:
+#   AndroidX Media3 1.7.1: 5d42f5b5527c3e8d1a3e6ec155fc7c263bab3dd9
+#   Media3Avi 2.7.1:       23936fefaf7bd32976d93f42079ca915a2078f2c
 # Upstream artifacts:
 #   androidx.media3:*:1.7.1
 #   com.github.dburckh:Media3Avi:2.7.1

@@ -91,25 +91,29 @@ final class MoviePlayer {
             if (gen == generation.get()) releasePlayer();
         });
 
-        final AviFile avi;
-        try {
-            avi = AviFile.parse(new File(path));
-        } catch (Throwable ignored) {
-            finish(gen, 1);
-            return;
-        }
-
-        activity.runOnUiThread(() -> {
-            if (gen != generation.get()) return;
+        Thread worker = new Thread(() -> {
+            final AviFile avi;
             try {
-                sizeSurface(avi);
-                host.setOverlayVisible(false);
-                layer.setVisibility(View.VISIBLE);
-                startPlayer(path, gen);
+                avi = AviFile.parse(new File(path));
             } catch (Throwable ignored) {
                 finish(gen, 1);
+                return;
             }
-        });
+
+            activity.runOnUiThread(() -> {
+                if (gen != generation.get()) return;
+                try {
+                    sizeSurface(avi);
+                    host.setOverlayVisible(false);
+                    layer.setVisibility(View.VISIBLE);
+                    startPlayer(path, gen);
+                } catch (Throwable ignored) {
+                    finish(gen, 1);
+                }
+            });
+        }, "wc3-movie");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     /** Called when the guest stops the graph or the activity is destroyed. */
