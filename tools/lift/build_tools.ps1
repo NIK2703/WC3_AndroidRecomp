@@ -109,6 +109,7 @@ $targets = @(
     @{ out = 'dead_flags.exe'; src = @('dead_flags.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'xmm_local.exe'; src = @('xmm_local.c'); dir = $csrcLocal },
     @{ out = 'xmm_lane.exe'; src = @('xmm_lane.c'); dir = $csrcLocal },
+    @{ out = 'gpr_local.exe'; src = @('gpr_local.c'); dir = $csrcLocal },
     @{ out = 'leaf_call.exe'; src = @('leaf_call.c'); dir = $csrcLocal },
     @{ out = 'return_address_elide.exe'; src = @('return_address_elide.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'w3l_compat.exe'; src = @('w3l_compat.c', 'sha256.c'); dir = $csrcLocal },
@@ -383,6 +384,12 @@ void L_00401000(CPU *c)
     if ($LASTEXITCODE -ne 0 -or -not ($xlOut -match 'self-test: OK')) {
         $xlOut | ForEach-Object { Write-Host $_ }
         throw 'xmm_lane self-test failed'
+    }
+    $gl = Join-Path $bin 'gpr_local.exe'
+    $glOut = & $gl --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($glOut -match 'self-test: OK')) {
+        $glOut | ForEach-Object { Write-Host $_ }
+        throw 'gpr_local self-test failed'
     }
     $lc = Join-Path $bin 'leaf_call.exe'
     $lcOut = & $lc --self-test 2>&1

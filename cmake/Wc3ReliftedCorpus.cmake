@@ -78,6 +78,24 @@ if(NOT WC3_LEAF_CALL_EXE)
         "before configuring")
 endif()
 
+find_program(WC3_GPR_LOCAL_EXE
+    NAMES gpr_local gpr_local.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+if(NOT WC3_GPR_LOCAL_EXE)
+    message(FATAL_ERROR
+        "gpr_local.exe missing; run tools/lift/build_tools.ps1 "
+        "before configuring")
+endif()
+set(_wc3_gpr_pass_src
+    "${WC3_ROOT}/tools/lift/csrc_local/gpr_local.c")
+if(EXISTS "${_wc3_gpr_pass_src}" AND
+   "${_wc3_gpr_pass_src}" IS_NEWER_THAN "${WC3_GPR_LOCAL_EXE}")
+    message(FATAL_ERROR
+        "gpr_local.exe is older than tools/lift/csrc_local/gpr_local.c; "
+        "run tools/lift/build_tools.ps1 -Force before configuring")
+endif()
+
 find_program(WC3_ATOMICCHECK_EXE
     NAMES atomiccheck atomiccheck.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -682,7 +700,98 @@ if(_wc3_leaf_outputs)
     set_property(SOURCE ${_wc3_leaf_outputs}
         PROPERTY OBJECT_DEPENDS "${_wc3_leaf_stamp}")
 endif()
-set(WC3_RELIFTED_SOURCES "${_wc3_leaf_outputs}")
+
+# A.4: read-only GPR promotion after leaf_call.  The pass replaces only reads
+# of a guest GPR with a function-local value; every guest write stays in CPU.
+# Calls, guest dispatch, HLE and unknown helpers are barriers, so the local
+# never crosses a point that can rewrite the register behind the pass.  The
+# output directory is tagged with the final leaf profile and carries its own
+# stamp/fingerprint: a changed pass or a regenerated leaf chunk replaces the
+# source path and forces the object to be rebuilt.
+set(_wc3_gpr_tag "${_wc3_leaf_tag}")
+if(NOT _wc3_gpr_tag)
+    set(_wc3_gpr_tag "-plain")
+endif()
+set(_wc3_gpr_dir
+    "${CMAKE_CURRENT_BINARY_DIR}/gpr_local/${_wc3_gpr_tag}")
+file(MAKE_DIRECTORY "${_wc3_gpr_dir}")
+set(_wc3_gpr_stamp "${_wc3_gpr_dir}/.stamp")
+set(_wc3_gpr_fingerprint_file "${_wc3_gpr_dir}/.inputs")
+string(SHA256 _wc3_gpr_fingerprint
+    "${WC3_GPR_LOCAL_EXE}|${_wc3_leaf_outputs}|gpr-readonly-v1")
+set(_wc3_gpr_outputs)
+foreach(_wc3_src IN LISTS _wc3_leaf_outputs)
+    get_filename_component(_wc3_base "${_wc3_src}" NAME)
+    list(APPEND _wc3_gpr_outputs "${_wc3_gpr_dir}/${_wc3_base}")
+endforeach()
+list(LENGTH _wc3_gpr_outputs _wc3_gpr_count)
+list(REMOVE_DUPLICATES _wc3_gpr_outputs)
+list(LENGTH _wc3_gpr_outputs _wc3_gpr_unique)
+if(NOT _wc3_gpr_count EQUAL _wc3_gpr_unique)
+    message(FATAL_ERROR "gpr_local output basenames are not unique")
+endif()
+
+set(_wc3_gpr_need 0)
+if(NOT EXISTS "${_wc3_gpr_stamp}" OR
+   NOT EXISTS "${_wc3_gpr_fingerprint_file}" OR
+   "${WC3_GPR_LOCAL_EXE}" IS_NEWER_THAN "${_wc3_gpr_stamp}")
+    set(_wc3_gpr_need 1)
+else()
+    file(READ "${_wc3_gpr_fingerprint_file}" _wc3_gpr_fingerprint_old)
+    string(STRIP "${_wc3_gpr_fingerprint_old}" _wc3_gpr_fingerprint_old)
+    if(NOT _wc3_gpr_fingerprint_old STREQUAL _wc3_gpr_fingerprint)
+        set(_wc3_gpr_need 1)
+    endif()
+    if(NOT _wc3_gpr_need)
+        foreach(_wc3_src IN LISTS _wc3_leaf_outputs)
+            if("${_wc3_src}" IS_NEWER_THAN "${_wc3_gpr_stamp}")
+                set(_wc3_gpr_need 1)
+                break()
+            endif()
+        endforeach()
+    endif()
+endif()
+if(NOT _wc3_gpr_need)
+    foreach(_wc3_out IN LISTS _wc3_gpr_outputs)
+        if(NOT EXISTS "${_wc3_out}")
+            set(_wc3_gpr_need 1)
+            break()
+        endif()
+    endforeach()
+endif()
+
+if(_wc3_gpr_need)
+    message(STATUS "gpr_local: regenerating ${_wc3_gpr_dir}")
+    file(REMOVE_RECURSE "${_wc3_gpr_dir}")
+    file(MAKE_DIRECTORY "${_wc3_gpr_dir}")
+    foreach(_wc3_src IN LISTS _wc3_leaf_outputs)
+        get_filename_component(_wc3_base "${_wc3_src}" NAME)
+        set(_wc3_out "${_wc3_gpr_dir}/${_wc3_base}")
+        execute_process(
+            COMMAND "${WC3_GPR_LOCAL_EXE}"
+                    --lift "${_wc3_src}"
+                    --out "${_wc3_out}"
+                    --json "${_wc3_out}.json"
+                    --quiet
+            RESULT_VARIABLE _wc3_gpr_rc
+            OUTPUT_VARIABLE _wc3_gpr_stdout
+            ERROR_VARIABLE _wc3_gpr_stderr)
+        if(NOT _wc3_gpr_rc EQUAL 0)
+            message(FATAL_ERROR
+                "gpr_local failed for ${_wc3_src} (rc=${_wc3_gpr_rc}):\n"
+                "${_wc3_gpr_stdout}\n${_wc3_gpr_stderr}")
+        endif()
+    endforeach()
+    file(WRITE "${_wc3_gpr_fingerprint_file}"
+        "${_wc3_gpr_fingerprint}\n")
+    file(TOUCH "${_wc3_gpr_stamp}")
+endif()
+
+if(_wc3_gpr_outputs)
+    set_property(SOURCE ${_wc3_gpr_outputs}
+        PROPERTY OBJECT_DEPENDS "${_wc3_gpr_stamp}")
+endif()
+set(WC3_RELIFTED_SOURCES "${_wc3_gpr_outputs}")
 
 add_library(wc3_corpus_relifted STATIC ${WC3_RELIFTED_SOURCES})
 target_include_directories(wc3_corpus_relifted PRIVATE
