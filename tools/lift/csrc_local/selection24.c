@@ -26,7 +26,7 @@
 #include "sha256.h"
 
 #define PASS "selection24"
-#define PASS_REV 3
+#define PASS_REV 4
 
 typedef enum {
     K_GROUP_ALLOC = 0,
@@ -46,6 +46,9 @@ typedef enum {
     K_CAP_NET_APPLY,
     K_CAP_NET_SEND,
     K_CAP_SELECT_ALL,
+    K_ORDER_FRAME,
+    K_ORDER_SORT,
+    K_ORDER_LOOP,
     K_COUNT
 } Kind;
 
@@ -66,7 +69,10 @@ static const char *const kind_name[K_COUNT] = {
     "cap_net_recv",
     "cap_net_apply",
     "cap_net_send",
-    "cap_select_all"
+    "cap_select_all",
+    "order_frame",
+    "order_sort",
+    "order_loop"
 };
 
 /* Fixed union totals for the whole relifted game corpus. */
@@ -87,17 +93,20 @@ static const unsigned expected_total[K_COUNT] = {
     1, /* cap_net_recv  */
     5, /* cap_net_apply */
     1, /* cap_net_send  */
-    1  /* cap_select_all*/
+    1, /* cap_select_all*/
+    1, /* order_frame   */
+    4, /* order_sort    */
+    4  /* order_loop    */
 };
 
 /* Whole-file expectations.  seed.c carries the update prologue only. */
 static const unsigned expected_seed[K_COUNT] = {
-    0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0
+    0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0
 };
 
 /* closed.c carries the split fragments and the UI allocation/fill code. */
 static const unsigned expected_closed[K_COUNT] = {
-    1, 2, 1, 1, 1, 2, 1, 0, 0, 1, 5, 3, 1, 0, 5, 1, 1
+    1, 2, 1, 1, 1, 2, 1, 0, 0, 1, 5, 3, 1, 0, 5, 1, 1, 1, 4, 4
 };
 
 typedef struct {
@@ -366,6 +375,22 @@ static void sites_add(Sites *s, Kind k, uint32_t va, const char *action,
 #define VA_CAP_NET_APPLY    0x6F6BCAC9u
 #define VA_CAP_NET_SEND     0x6F6BCF1Du
 #define VA_CAP_SELECT_ALL   0x6F390293u
+
+/* Command batch (CSelectionWar3::IssueOrder path).  The original frame has a
+ * 12-entry 0x24-byte local array ending exactly at the security cookie.  The
+ * 24-unit path sorts that array with the live selection count, so the array is
+ * moved below the frame and the frame is extended by one extra 12-entry slot. */
+#define VA_ORDER_FRAME      0x6F6B7F01u
+#define VA_ORDER_SORT1      0x6F6B9E05u
+#define VA_ORDER_SORT2      0x6F6BA444u
+#define VA_ORDER_LOOP1      0x6F6B9E34u
+#define VA_ORDER_LOOP2      0x6F6BA473u
+#define ORDER_OLD_FRAME     0x5D4u
+#define ORDER_NEW_FRAME     0x940u
+#define ORDER_OLD_BASE      0xFFFFFE40u /* -0x1c0 */
+#define ORDER_NEW_BASE      0xFFFFF6C0u /* -0x940 */
+#define ORDER_NEW_LOOP1     0xFFFFF6D8u /* -0x928 */
+#define ORDER_NEW_LOOP2     0xFFFFF6DCu /* -0x924 */
 
 static const char *const INIT_GROUP_DISPATCH =
     "push32(c, 0x6F39EDA9u); dispatch(c, 0x6F3B91B0u);";
@@ -923,6 +948,39 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                  "push32(c, 0xCu);", "push32(c, 0x18u);",
                                  "push 0xc */", "push 0x18 */",
                                  K_CAP_SELECT_ALL, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_FRAME:
+                if (handle_subst(out, p, le,
+                                 "0x5D4u", "0x940u",
+                                 "sub esp, 0x5d4 */", "sub esp, 0x940 */",
+                                 K_ORDER_FRAME, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_SORT1:
+            case VA_ORDER_SORT2:
+                if (handle_subst(out, p, le,
+                                 "0xFFFFFE40u", "0xFFFFF6C0u",
+                                 "[ebp - 0x1c0] */", "[ebp - 0x940] */",
+                                 K_ORDER_SORT, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_LOOP1:
+                if (handle_subst(out, p, le,
+                                 "0xFFFFFE58u", "0xFFFFF6D8u",
+                                 "[ebp - 0x1a8] */", "[ebp - 0x928] */",
+                                 K_ORDER_LOOP, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_LOOP2:
+                if (handle_subst(out, p, le,
+                                 "0xFFFFFE5Cu", "0xFFFFF6DCu",
+                                 "[ebp - 0x1a4] */", "[ebp - 0x924] */",
+                                 K_ORDER_LOOP, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
                     return -1;
                 break;
@@ -1496,6 +1554,15 @@ static const char SELF_FIXTURE[] =
 "    c->edx = 0xCu;                                               /* 6F6BCAC9: mov edx, 0xc */\n"
 "    c->ebx = 0xCu;                                               /* 6F6BCF1D: mov ebx, 0xc */\n"
 "    c->ebx = c->ecx;                                             /* 6F3ACCA3: mov ebx, ecx */\n"
+"    c->esp = flags_sub(c, c->esp, 0x5D4u, 4);                    /* 6F6B7F01: sub esp, 0x5d4 */\n"
+"    c->ecx = (uint32_t)((c->ebp + 0xFFFFFE40u));                 /* 6F6B9E05: lea ecx, [ebp - 0x1c0] */\n"
+"    c->ecx = (uint32_t)((c->ebp + 0xFFFFFE40u));                 /* 6F6B9E05: lea ecx, [ebp - 0x1c0] */\n"
+"    c->ecx = (uint32_t)((c->ebp + 0xFFFFFE40u));                 /* 6F6BA444: lea ecx, [ebp - 0x1c0] */\n"
+"    c->ecx = (uint32_t)((c->ebp + 0xFFFFFE40u));                 /* 6F6BA444: lea ecx, [ebp - 0x1c0] */\n"
+"    c->esi = (uint32_t)((c->ebp + 0xFFFFFE58u));                 /* 6F6B9E34: lea esi, [ebp - 0x1a8] */\n"
+"    c->esi = (uint32_t)((c->ebp + 0xFFFFFE58u));                 /* 6F6B9E34: lea esi, [ebp - 0x1a8] */\n"
+"    c->esi = (uint32_t)((c->ebp + 0xFFFFFE5Cu));                 /* 6F6BA473: lea esi, [ebp - 0x1a4] */\n"
+"    c->esi = (uint32_t)((c->ebp + 0xFFFFFE5Cu));                 /* 6F6BA473: lea esi, [ebp - 0x1a4] */\n"
 "}\n";
 
 static size_t count_occurrences(const char *p, size_t n, const char *needle)
@@ -1539,6 +1606,10 @@ static int self_test(char *err, size_t errsz)
         count_occurrences(out1.p, out1.n, "0x144u") != 1 ||
         count_occurrences(out1.p, out1.n, "0x00000138u") != 1 ||
         count_occurrences(out1.p, out1.n, "0x18u") != 22 ||
+        count_occurrences(out1.p, out1.n, "0x940u") != 1 ||
+        count_occurrences(out1.p, out1.n, "0xFFFFF6C0u") != 4 ||
+        count_occurrences(out1.p, out1.n, "0xFFFFF6D8u") != 2 ||
+        count_occurrences(out1.p, out1.n, "0xFFFFF6DCu") != 2 ||
         count_occurrences(out1.p, out1.n,
                           "wc3_sel24_trace_addunit") != 1) {
         snprintf(err, errsz, "self-test first pass content mismatch");
@@ -1591,14 +1662,15 @@ static int self_test(char *err, size_t errsz)
 
     {
         const char json[] =
-            "{\"pass\":\"" PASS "\",\"pass_rev\":3,\"counts\":{"
+            "{\"pass\":\"" PASS "\",\"pass_rev\":4,\"counts\":{"
             "\"group_alloc\":1,\"init_group\":2,\"select\":2,"
             "\"cap_outer\":2,\"cap_inner\":2,\"fill_block\":2,"
             "\"fill_grid\":1,\"note_selection\":1,\"hide_all\":1,"
             "\"addunit_cap\":1,\"cap_local_list\":5,\"cap_copy_list\":3,"
             "\"cap_sync_add\":1,\"cap_net_recv\":1,\"cap_net_apply\":5,"
-            "\"cap_net_send\":1,\"cap_select_all\":1},"
-            "\"total\":32}";
+            "\"cap_net_send\":1,\"cap_select_all\":1,"
+            "\"order_frame\":1,\"order_sort\":4,\"order_loop\":4},"
+            "\"total\":41}";
         Counts c3;
 
         if (json_counts_parse(json, &c3, err2, sizeof(err2)) != 0 ||
