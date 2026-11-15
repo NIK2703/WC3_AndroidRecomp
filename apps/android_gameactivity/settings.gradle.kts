@@ -17,6 +17,17 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        // Media3 and the AVI extractor are vendored as a local Maven
+        // repository so the canonical --offline APK build does not depend on
+        // a Gradle cache descriptor or a network fetch.  Every file is pinned
+        // by SHA-256 in third_party/media3/VENDOR_COMMIT.
+        maven {
+            url = uri(file("../../third_party/media3/repo"))
+            metadataSources {
+                mavenPom()
+                artifact()
+            }
+        }
         val localMaven = providers.gradleProperty("wc3LocalMaven").orNull
         if (localMaven != null) {
             maven {

@@ -28,7 +28,9 @@ val releaseStoreFile = providers.gradleProperty("wc3ReleaseStoreFile").orNull
 
 android {
     namespace = "wc3.recomp"
-    compileSdk = 34
+    // Media3 1.7.1 is built against API 35.  targetSdk stays at 34 so the
+    // runtime behaviour of the product does not change with this dependency.
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "wc3.recomp"
@@ -104,6 +106,30 @@ dependencies {
     implementation("androidx.core:core:1.13.1")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.0.21")
+
+    // Campaign movies are RIFF/AVI with MPEG-4 Part 2 video and MP3 audio.
+    // Android has no AVI extractor in MediaExtractor/Media3, so the AVI
+    // extractor is the small Media3Avi add-on.  Media3 keeps the platform
+    // MediaCodec decoder, but owns AVI sample ordering, B-frame timestamps,
+    // audio/video sync, late-frame dropping and Surface scheduling.  The
+    // files are vendored flat in third_party/media3 for the offline build.
+    implementation("androidx.media3:media3-common:1.7.1@aar")
+    implementation("androidx.media3:media3-container:1.7.1@aar")
+    implementation("androidx.media3:media3-database:1.7.1@aar")
+    implementation("androidx.media3:media3-datasource:1.7.1@aar")
+    implementation("androidx.media3:media3-decoder:1.7.1@aar")
+    implementation("androidx.media3:media3-exoplayer:1.7.1@aar")
+    implementation("androidx.media3:media3-extractor:1.7.1@aar")
+    implementation("com.github.dburckh:Media3Avi:2.7.1@aar")
+    implementation("com.google.guava:guava:33.3.1-android@jar")
+    implementation("com.google.guava:failureaccess:1.0.2@jar")
+    implementation(
+        "com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava@jar"
+    )
+    implementation("androidx.collection:collection:1.2.0@jar")
+    implementation("androidx.exifinterface:exifinterface:1.3.6@aar")
+    implementation("androidx.annotation:annotation:1.6.0")
+    implementation("androidx.annotation:annotation-experimental:1.4.0")
 }
 
 // Kotlin 2.0's stdlib already contains the jdk7/jdk8 extension classes; the
@@ -120,14 +146,18 @@ configurations.configureEach {
     resolutionStrategy {
         force(
             "androidx.activity:activity:1.8.0",
-            "androidx.annotation:annotation:1.3.0",
+            "androidx.annotation:annotation:1.6.0",
             "androidx.annotation:annotation-experimental:1.4.0",
             "androidx.arch.core:core-common:2.2.0",
             "androidx.arch.core:core-runtime:2.2.0",
-            "androidx.collection:collection:1.1.0",
+            "androidx.collection:collection:1.2.0",
             "androidx.concurrent:concurrent-futures:1.1.0",
             "androidx.core:core:1.13.1",
             "androidx.core:core-ktx:1.13.1",
+            "androidx.exifinterface:exifinterface:1.3.6",
+            "com.google.guava:failureaccess:1.0.2",
+            "com.google.guava:guava:33.3.1-android",
+            "com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava",
             "androidx.emoji2:emoji2:1.2.0",
             "androidx.emoji2:emoji2-views-helper:1.2.0",
             "androidx.lifecycle:lifecycle-common:2.6.2",
