@@ -26,6 +26,7 @@ $ErrorActionPreference = 'Stop'
 $toolRoot = $PSScriptRoot
 $root     = (Resolve-Path (Join-Path $toolRoot '..\..')).Path
 . (Join-Path $root 'tools\ccache.ps1')
+. (Join-Path $root 'tools\build_warnings.ps1')
 $csrc      = Join-Path $toolRoot 'csrc'
 $csrcLocal = Join-Path $toolRoot 'csrc_local'
 $posixShim = Join-Path $toolRoot 'posix_shim'
@@ -48,6 +49,7 @@ if (-not $Gcc) {
 }
 if (-not (Test-Path $dll)) { throw "vendor runtime missing: $dll" }
 if (-not (Test-Path $bin)) { New-Item -ItemType Directory -Force -Path $bin | Out-Null }
+$warningState = Initialize-Wc3BuildWarningLog -Root $root -Kind 'lift-tools' -Variant 'host'
 
 # The C lifter includes this generated table; the JSON is the single source.
 $stateHooksHeader = Join-Path $bin 'state_hooks_gen.h'
@@ -58,7 +60,9 @@ if ($LASTEXITCODE -ne 0) { throw 'state hook table generation failed' }
 
 $ccache = Get-Wc3Ccache -Explicit $Ccache
 if (-not $ccache) {
-    Write-Warning 'ccache not found; lift tools will build without a compiler cache'
+    $ccacheWarning = 'WARNING: ccache not found; lift tools will build without a compiler cache'
+    Write-Warning $ccacheWarning
+    Add-Wc3BuildWarnings -Lines @($ccacheWarning) -Phase 'setup'
 }
 $compilerExe = if ($ccache) { $ccache } else { $Gcc }
 $compilerPrefix = if ($ccache) { @($Gcc.Replace('\', '/')) } else { @() }
@@ -162,9 +166,12 @@ foreach ($t in $targets) {
             @('-c', $s, '-o', $obj)
         $buildOut = & $compilerExe @compileArgs 2>&1
         $rc = $LASTEXITCODE
+        Add-Wc3BuildWarnings -Lines $buildOut `
+            -Phase ("compile {0}: {1}" -f $t.out, [IO.Path]::GetFileName($s))
         if ($rc -ne 0) {
             $ErrorActionPreference = $prev
             $buildOut | ForEach-Object { Write-Host $_ }
+            Complete-Wc3BuildWarningLog -Status failed -ExitCode $rc
             throw ("build failed: {0} ({1})" -f $t.out, $s)
         }
         $objects += $obj
@@ -175,8 +182,10 @@ foreach ($t in $targets) {
     $buildOut = & $compilerExe @linkArgs 2>&1
     $rc = $LASTEXITCODE
     $ErrorActionPreference = $prev
+    Add-Wc3BuildWarnings -Lines $buildOut -Phase ("link {0}" -f $t.out)
     if ($rc -ne 0) {
         $buildOut | ForEach-Object { Write-Host $_ }
+        Complete-Wc3BuildWarningLog -Status failed -ExitCode $rc
         throw ("build failed: " + $t.out)
     }
 }
@@ -463,6 +472,7 @@ if ($PosixCheck) {
         $out = & $compilerExe @syntaxArgs 2>&1
         $rc = $LASTEXITCODE
         $ErrorActionPreference = $prev
+        Add-Wc3BuildWarnings -Lines $out -Phase ("posix {0}" -f $f.Name)
         if ($rc -ne 0) {
             $bad++
             Write-Host ("posix: FAIL {0}" -f $f.Name)
@@ -471,7 +481,10 @@ if ($PosixCheck) {
     }
     Write-Host ("posix check: {0}/{1} files, {2} error(s), {3} warning(s)" -f `
         ($files.Count - $bad), $files.Count, $bad, $warn)
-    if ($bad -gt 0) { throw "posix syntax check failed for $bad file(s)" }
+    if ($bad -gt 0) {
+        Complete-Wc3BuildWarningLog -Status failed -ExitCode 1
+        throw "posix syntax check failed for $bad file(s)"
+    }
 }
 
 # Machine-readable build identity.  BP-6.2 wants size/hash evidence; this is
@@ -491,4 +504,5 @@ foreach ($t in $targets) {
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $reportDir 'lift_tools.json'),
     ($manifest | ConvertTo-Json -Depth 6), $utf8NoBom)
+Complete-Wc3BuildWarningLog -Status ok -ExitCode 0
 Write-Host ("built {0} tools into {1}" -f $targets.Count, $bin)

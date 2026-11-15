@@ -54,6 +54,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+. (Join-Path $root 'tools\build_warnings.ps1')
 $isDebug = $Variant -eq 'debug'
 $isOptimized = $Variant -in @('release_optimized', 'release_optimized_pgo')
 $isProfileBuild = $Variant -eq 'release_optimized_pgo'
@@ -274,6 +275,8 @@ New-Item -ItemType Directory -Force $ga | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::ExtractToDirectory($GamesActivityAar, $ga)
 
+$warningState = Initialize-Wc3BuildWarningLog -Root $root -Kind 'native' -Variant $Variant
+
 $debugValue = if ($isDebug) { 'ON' } else { 'OFF' }
 $configure = @(
     '-S', $root,
@@ -382,15 +385,19 @@ if ($isOptimized) {
 Write-Host "[app] aar   $GamesActivityAar"
 Write-Host "[app] debug $isDebug"
 $ErrorActionPreference = 'Continue'
-& $cmake @configure 2>&1 | ForEach-Object { Write-Host $_ }
+$configureOut = @(& $cmake @configure 2>&1)
+$configureOut | ForEach-Object { Write-Host $_ }
+Add-Wc3BuildWarnings -Lines $configureOut -Phase 'cmake-configure'
 $rc = $LASTEXITCODE
 if ($rc -eq 0) {
-    & $cmake --build (Join-Path $out 'cmake') --config Release 2>&1 |
-        ForEach-Object { Write-Host $_ }
+    $buildOut = @(& $cmake --build (Join-Path $out 'cmake') --config Release 2>&1)
+    $buildOut | ForEach-Object { Write-Host $_ }
+    Add-Wc3BuildWarnings -Lines $buildOut -Phase 'cmake-build'
     $rc = $LASTEXITCODE
 }
 $ErrorActionPreference = 'Stop'
 if ($rc -ne 0) {
+    Complete-Wc3BuildWarningLog -Status failed -ExitCode $rc
     Write-Host "[app] build failed ($rc)"
     exit 1
 }
@@ -484,5 +491,6 @@ if ($dynSyms -notmatch '\bpwrite\b' -or $dynSyms -notmatch '\bpread\b') {
     exit 1
 }
 Write-Host "[app] fixes save-list=$($fixes.fixes.save_list_display.sites) site(s), overlapped-save-io=present, selection24=$($selection24Value -eq 'ON')"
+Complete-Wc3BuildWarningLog -Status ok -ExitCode 0
 Write-Host '[app] built'
 exit 0

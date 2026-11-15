@@ -31,6 +31,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 . (Join-Path $root 'tools\ccache.ps1')
+. (Join-Path $root 'tools\build_warnings.ps1')
 
 # Native tools write progress to stderr.  Windows PowerShell turns that into a
 # NativeCommandError under ErrorActionPreference Stop even when the tool exits
@@ -39,12 +40,15 @@ $script:LastNativeExit = 0
 function Invoke-Native {
     param(
         [string]$FilePath,
-        [string[]]$Arguments
+        [string[]]$Arguments,
+        [string]$Phase = 'dxvk'
     )
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    & $FilePath @Arguments 2>&1 | Out-Host
+    $output = @(& $FilePath @Arguments 2>&1)
+    $output | Out-Host
     $script:LastNativeExit = $LASTEXITCODE
+    Add-Wc3BuildWarnings -Lines $output -Phase $Phase
     $ErrorActionPreference = $prev
 }
 
@@ -252,6 +256,7 @@ $outDir = Join-Path $buildRoot $Variant
 foreach ($d in @($obj1, $obj3, $outDir, (Join-Path $buildRoot 'tmp'))) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
+$warningState = Initialize-Wc3BuildWarningLog -Root $root -Kind 'dxvk' -Variant $Variant
 
 # --stale-only compares only the .cpp timestamp against its object.  The
 # low-memory patch adds fields to DxvkDeviceFeatures, so a header change must
@@ -310,7 +315,7 @@ $probeArgs = @('--dxvk', $dxvk1, '--ndk', $ndkInfo.Root,
     '--ccache', $ccache)
 if (-not $forceFull) { $probeArgs += '--stale-only' }
 Write-Host '[dxvk] compiling 1.10.3 objects'
-Invoke-Native $probe $probeArgs
+Invoke-Native $probe $probeArgs 'dxvk-1.10.3-compile'
 if ($script:LastNativeExit -ne 0) { throw "DXVK 1.10.3 object build failed: $script:LastNativeExit" }
 
 $probeArgs3 = @('--dxvk', $dxvk3, '--ndk', $ndkInfo.Root,
@@ -318,7 +323,7 @@ $probeArgs3 = @('--dxvk', $dxvk3, '--ndk', $ndkInfo.Root,
     '--ccache', $ccache)
 if (-not $forceFull) { $probeArgs3 += '--stale-only' }
 Write-Host '[dxvk] compiling 3.1.1 objects'
-Invoke-Native $probe $probeArgs3
+Invoke-Native $probe $probeArgs3 'dxvk-3.1.1-compile'
 if ($script:LastNativeExit -ne 0) { throw "DXVK 3.1.1 object build failed: $script:LastNativeExit" }
 
 $objects1 = @(Get-ChildItem $obj1 -File -Filter '*.o' | ForEach-Object { $_.FullName })
@@ -345,7 +350,8 @@ $needsShim = $forceFull -or -not (Test-Path $win32Obj) -or
     ((Get-Item $lowmemHeader).LastWriteTimeUtc -gt (Get-Item $win32Obj).LastWriteTimeUtc)
 if ($needsShim) {
     Write-Host "[dxvk] compiling dxvk_win32.cpp ($Variant)"
-    Invoke-Native $wrapper (@($ccache, $ndkInfo.ClangXX) + $commonFlags + @('-c', $win32Src, '-o', $win32Obj))
+    Invoke-Native $wrapper (@($ccache, $ndkInfo.ClangXX) + $commonFlags + @('-c', $win32Src, '-o', $win32Obj)) 'dxvk-win32'
+
     if ($script:LastNativeExit -ne 0) { throw "dxvk_win32.cpp failed: $script:LastNativeExit" }
 }
 
@@ -359,10 +365,10 @@ foreach ($a in @($archive1, $archive3, $iso1, $iso3)) {
 }
 $ar = Join-Path $ndkInfo.Bin 'llvm-ar.exe'
 Write-Host "[dxvk] archiving $($objects1.Count) 1.10.3 objects -> $archive1"
-Invoke-Native $ar (@('rcs', $archive1) + $objects1 + @($win32Obj))
+Invoke-Native $ar (@('rcs', $archive1) + $objects1 + @($win32Obj)) 'dxvk-archive-1.10.3'
 if ($script:LastNativeExit -ne 0) { throw 'llvm-ar failed for DXVK 1.10.3' }
 Write-Host "[dxvk] archiving $($objects3.Count) 3.1.1 objects -> $archive3"
-Invoke-Native $ar (@('rcs', $archive3) + $objects3)
+Invoke-Native $ar (@('rcs', $archive3) + $objects3) 'dxvk-archive-3.1.1'
 if ($script:LastNativeExit -ne 0) { throw 'llvm-ar failed for DXVK 3.1.1' }
 
 $oldTemp = $env:TEMP
@@ -378,10 +384,10 @@ try {
         throw "dxvk_isolate_archive_elf.exe missing; run tools/lift/build_tools.ps1"
     }
     Write-Host "[dxvk] isolating 1.10.3 symbols -> $iso1"
-    Invoke-Native $isolate @('wc3_dxvk1_', $iso1, $archive1)
+    Invoke-Native $isolate @('wc3_dxvk1_', $iso1, $archive1) 'dxvk-isolate-1.10.3'
     if ($script:LastNativeExit -ne 0) { throw "DXVK 1.10.3 symbol isolation failed: $script:LastNativeExit" }
     Write-Host "[dxvk] isolating 3.1.1 symbols -> $iso3"
-    Invoke-Native $isolate @('wc3_dxvk3_', $iso3, $archive3)
+    Invoke-Native $isolate @('wc3_dxvk3_', $iso3, $archive3) 'dxvk-isolate-3.1.1'
     if ($script:LastNativeExit -ne 0) { throw "DXVK 3.1.1 symbol isolation failed: $script:LastNativeExit" }
 } finally {
     $env:TEMP = $oldTemp
@@ -392,5 +398,6 @@ foreach ($a in @($iso1, $iso3)) {
     if (-not (Test-Path $a)) { throw "DXVK archive was not produced: $a" }
     Write-Host "[dxvk] $(Split-Path -Leaf $a) $((Get-Item $a).Length) bytes"
 }
+Complete-Wc3BuildWarningLog -Status ok -ExitCode 0
 Write-Host "[dxvk] built ($Variant)"
 return

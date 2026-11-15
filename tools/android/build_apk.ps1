@@ -86,6 +86,7 @@ if ($isOptimized) {
     exit 1
 }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+. (Join-Path $root 'tools\build_warnings.ps1')
 $projectDir = Join-Path $root 'apps\android_gameactivity'
 $outDir = Join-Path $root 'build\android_app'
 
@@ -411,11 +412,18 @@ $gradleArgs = @(
 Write-Host "[apk] gradle  $gradle"
 Write-Host "[apk] jdk     $jdk"
 Write-Host "[apk] variant $variant"
+$warningState = Initialize-Wc3BuildWarningLog -Root $root -Kind 'apk' -Variant $variant
 $ErrorActionPreference = 'Continue'
-& $gradle @gradleArgs 2>&1 | ForEach-Object { Write-Host $_ }
+$gradleOut = @(& $gradle @gradleArgs 2>&1)
+$gradleOut | ForEach-Object { Write-Host $_ }
+Add-Wc3BuildWarnings -Lines $gradleOut -Phase 'gradle'
 $rc = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
-if ($rc -ne 0) { Write-Host "[apk] gradle failed ($rc)"; exit 1 }
+if ($rc -ne 0) {
+    Complete-Wc3BuildWarningLog -Status failed -ExitCode $rc
+    Write-Host "[apk] gradle failed ($rc)"
+    exit 1
+}
 
 $apkDir = Join-Path $gradleApp "outputs\apk\$gradleVariant"
 $apk = Join-Path $apkDir "app-$gradleVariant.apk"
@@ -432,8 +440,14 @@ Copy-Item $apk $final -Force
 # verify the artifact rather than trusting the build configuration.
 $zipalign = Join-Path $buildTools 'zipalign.exe'
 if (-not (Test-Path $zipalign)) { Write-Host '[apk] unavailable: zipalign not found'; exit 2 }
-& $zipalign -c -P 16 4 $final 2>&1 | ForEach-Object { Write-Host $_ }
-if ($LASTEXITCODE -ne 0) { Write-Host '[apk] APK is not 16 KiB page aligned'; exit 1 }
+$zipalignOut = @(& $zipalign -c -P 16 4 $final 2>&1)
+$zipalignOut | ForEach-Object { Write-Host $_ }
+Add-Wc3BuildWarnings -Lines $zipalignOut -Phase 'zipalign'
+if ($LASTEXITCODE -ne 0) {
+    Complete-Wc3BuildWarningLog -Status failed -ExitCode 1
+    Write-Host '[apk] APK is not 16 KiB page aligned'
+    exit 1
+}
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::OpenRead($final)
@@ -509,5 +523,6 @@ if ($Install -or $Launch) {
         if ($LASTEXITCODE -ne 0) { Write-Host '[apk] launch failed'; exit 1 }
     }
 }
+Complete-Wc3BuildWarningLog -Status ok -ExitCode 0
 Write-Host '[apk] built'
 exit 0
