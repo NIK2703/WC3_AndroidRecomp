@@ -10,7 +10,9 @@
  *   - DirectSoundCreate opening the one AAudio stream without WINMM;
  *   - the Mss32 DSSCL_WRITEPRIMARY probe (primary Lock(0,0)/Unlock);
  *   - secondary buffer voice_add/Lock/Unlock/Play/GetCurrentPosition;
- *   - stream lifetime: one open, close only after the final device release.
+ *   - stream lifetime: one open, close only after the final device release;
+ *   - the product sound switch: with sound off there is no device and the
+ *     platform is never asked for a stream.
  */
 #include <stdatomic.h>
 #include <stdint.h>
@@ -738,6 +740,30 @@ static int test_argument_precedence(void)
     return 0;
 }
 
+/* The launch settings can turn sound off.  The guest must then get the same
+ * answer as on a machine without an audio driver, and the platform must not
+ * be asked for a stream: that is what keeps the audio subsystem unloaded. */
+static int test_sound_switch_off(void)
+{
+    uint32_t args[3] = { 0u, OUT_DEVICE, 0u };
+    uint32_t opens_before = g_open_calls;
+#if defined(_WIN32)
+    if (_putenv_s("WC3_SOUND", "0") != 0) return fail("set WC3_SOUND");
+#else
+    if (setenv("WC3_SOUND", "0", 1) != 0) return fail("set WC3_SOUND");
+#endif
+    if (call_row("DirectSoundCreate", args, 3u) != DSERR_NODRIVER)
+        return fail("sound off must answer DSERR_NODRIVER");
+    if (g_open_calls != opens_before)
+        return fail("sound off must not open a stream");
+#if defined(_WIN32)
+    if (_putenv_s("WC3_SOUND", "") != 0) return fail("clear WC3_SOUND");
+#else
+    unsetenv("WC3_SOUND");
+#endif
+    return 0;
+}
+
 int main(void)
 {
     if (guest_map() != 0) return fail("guest memory map failed");
@@ -766,6 +792,7 @@ int main(void)
     if (test_enumerate() != 0) return 1;
     if (test_argument_precedence() != 0) return 1;
     if (test_create_without_winmm() != 0) return 1;
+    if (test_sound_switch_off() != 0) return 1;
 
     printf("dsound runtime: PASS\n");
     return 0;

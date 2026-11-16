@@ -1,18 +1,20 @@
 # DXVK vendor boundary
 
-This directory is the source vendor for both DXVK majors linked into
+This directory is the source vendor for the DXVK archives linked into
 `libwc3gameactivity.so`.  The product never loads a DXVK DLL: the sources are
-compiled into static archives and the two copies are symbol-isolated before the
-final link.
+compiled into static archives and the three copies are symbol-isolated before
+the final link.
 
 | Path | Contents |
 |---|---|
 | `1.10.3/` | DXVK 1.10.3 source at `e4fd5e9` (tag `v1.10.3`) with the old tree's Android/static patches plus the low-memory placed and Android present patches |
 | `3.1.1/` | DXVK 3.1.1 source at `23b07e9` with the same Android/static patches, the WC3 D3D9 compatibility patch, the Android debug/pacing/present patches and the low-memory placed patch |
+| `low-latency/` | `netborg-afps/dxvk-low-latency` at `33ba69f` (tag `low-latency-framepacing-3.1.1`), DXVK 3.1.1 plus the fork's framepacer; carries the same WC3 3.1.1 patch set and `dxvk-low-latency-android.patch` |
 | `3.1.1/build-win64-ucrt/` | `compile_commands.json`, Meson-generated headers and `pnp-id-table.c`; the build recipe, not build output |
+| `low-latency/build-win64-ucrt/` | the same recipe for the low-latency fork (201 translation units) |
 | `1.10.3/build-win64-ucrt/` | the same recipe for the legacy backend |
-| `shim/` | the POSIX Win32 surface (`dxvk_shim/*.h` + `dxvk_win32.cpp`) used by both trees, the shared low-memory window, and the 1.10.3 Vulkan fallback header |
-| `patches/` | provenance snapshots of the upstream diffs, the WC3 compatibility and Android debug/pacing/present patches, and both WC3 low-memory placed mapping patches |
+| `shim/` | the POSIX Win32 surface (`dxvk_shim/*.h` + `dxvk_win32.cpp`) used by all three trees, the shared low-memory window, and the 1.10.3 Vulkan fallback header |
+| `patches/` | provenance snapshots of the upstream diffs, the WC3 compatibility and Android debug/pacing/present patches, both WC3 low-memory placed mapping patches, and the low-latency Android adaptation |
 | `VENDOR_COMMIT` | exact upstream and submodule revisions |
 
 The source trees are snapshots of the working trees used by the old build, so
@@ -29,14 +31,15 @@ powershell -File tools\android\build_dxvk.ps1 -Variant debug
 The script compiles all translation units from `compile_commands.json` with the
 NDK clang, links the Win32 shim into the 1.10.3 archive, and runs
 `tools/lift/csrc_local/dxvk_isolate_archive_elf.c` to produce
-`build/android/dxvk/<variant>/libdxvk{1,3}_iso.a`.  Every compiler invocation
-goes through ccache.  `build_app.ps1` runs this script before CMake.
+`build/android/dxvk/<variant>/libdxvk{1,3,ll}_iso.a`.  Every compiler
+invocation goes through ccache.  `build_app.ps1` runs this script before CMake.
 
 ## WC3 D3D9 compatibility patch
 
 `patches/dxvk-3.1.1-wc3-d3d9.patch` makes `storageBuffer8BitAccess` and
 extension-provided required features non-fatal for this D3D9-only archive when
-the settings host forces 3.1.1 (`WC3_DXVK_VERSION=3`).  D3D9 never creates
+the settings host forces 3.1.1 (`WC3_DXVK_VERSION=3`); the low-latency fork
+applies the same relaxation for `WC3_DXVK_VERSION=ll`.  D3D9 never creates
 8-bit storage buffers; Turnip on Adreno 7xx reports every other required
 feature but reports this one false, so stock DXVK 3.1.1 rejects the adapter
 before D3D9 can start.  Android's system Adreno 0.786 driver also reports
@@ -69,10 +72,30 @@ Do not weaken the features in a shared D3D11/D3D12 build.  If the archive is
 ever reused outside the D3D9 frontend, revisit this patch rather than keeping
 the requirements disabled by default.
 
+## Low-latency fork
+
+`low-latency/` is the `netborg-afps/dxvk-low-latency` fork at tag
+`low-latency-framepacing-3.1.1` (commit `33ba69f`).  It keeps the 3.1.1 D3D9
+frontend and adds the fork's framepacer.  The tree carries the same WC3 patch
+set as `3.1.1/`, plus `patches/dxvk-low-latency-android.patch`, which routes
+the fork's new `sync_signal.h` and `sync_atomic_signal.h` to the POSIX
+futex/std path on Android and makes the forced-compatibility option accept
+`"ll"` as well as `"3"`.  It also keeps the frame worker draining its queue
+when `VK_KHR_present_wait` is absent; otherwise the 32-entry queue fills and
+the CS thread stalls after 32 presents.
+
+The launcher writes `WC3_DXVK_VERSION=ll`.  The isolated archive is
+`libdxvkll_iso.a` with the `wc3_dxvkll_` symbol prefix and the
+`wc3_dxvkll_Direct3DCreate9` entry point.  The fork's default frame pacing is
+`LOW_LATENCY`; `DXVK_FRAME_PACE=low-latency-vrr` is available as an override.
+A forced low-latency failure does not fall back to 3.1.1 or 1.10.3: the
+selection is an explicit compatibility choice and a silent backend swap would
+hide it.
+
 ## WC3 low-memory placed mapping
 
-`patches/dxvk-3.1.1-lowmem-placed.patch` and
-`patches/dxvk-1.10.3-lowmem-placed.patch` make both DXVK trees place
+`patches/dxvk-3.1.1-lowmem-placed.patch` (used by both 3.1.1 and low-latency)
+and `patches/dxvk-1.10.3-lowmem-placed.patch` make all three trees place
 host-visible memory below 4 GB when the physical device supports
 `VK_KHR_map_memory2` and `VK_EXT_map_memory_placed`.  The thin D3D9 bridge
 then hands the native pointer straight to the 32-bit guest, so `Lock`/`Unlock`
@@ -99,6 +122,6 @@ rationale and the measurement plan are in `docs/THIN_D3D9_COPY_PLAN.md`.
 
 ## Licence
 
-DXVK is zlib/libpng.  The upstream `LICENSE` is present in both source trees;
-the APK must keep the corresponding third-party notice.  The shim is project
-code and has no separate third-party licence.
+DXVK is zlib/libpng.  The upstream `LICENSE` is present in all three source
+trees; the APK must keep the corresponding third-party notice.  The shim is
+project code and has no separate third-party licence.

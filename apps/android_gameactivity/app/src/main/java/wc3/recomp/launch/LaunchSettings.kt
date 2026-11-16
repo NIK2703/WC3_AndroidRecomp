@@ -37,7 +37,20 @@ data class LaunchSettings(
     val longPressTimeoutMs: Int = LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS,
     /* Wall-clock delay before the LMB press in the SIMPLE overlay.  The
      * native helper clamps it to 8..40 ms; 10 ms is the product default. */
-    val tapClickDelayMs: Int = LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS
+    val tapClickDelayMs: Int = LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS,
+    /* True enables the 24-unit selection profile and the 8x3 unit panel;
+     * false (the product default) keeps the original 12-unit cap and the
+     * 6x2 panel.  Applied on the next game launch, not to an already running
+     * host. */
+    val selection24: Boolean = LaunchContract.DEFAULT_SELECTION_24,
+    /* True suppresses CCursorFrame::Render in the guest.  Touch input still
+     * works; only the game-drawn cursor sprite is skipped.  Applied on the
+     * next game launch. */
+    val hideCursor: Boolean = LaunchContract.DEFAULT_HIDE_CURSOR,
+    /* Opacity of the on-screen control overlay in percent.  The settings UI
+     * exposes 10..50; the native controls layer clamps the same range and
+     * replaces the authored per-element opacity. */
+    val overlayOpacityPercent: Int = LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT
 ) {
     fun toBundle(): Bundle = Bundle().apply {
         putString(LaunchContract.KEY_GAME_DIR, gameDir)
@@ -52,5 +65,8 @@ data class LaunchSettings(
         putInt(LaunchContract.KEY_DOUBLE_TAP_TIMEOUT_MS, doubleTapTimeoutMs)
         putInt(LaunchContract.KEY_LONG_PRESS_TIMEOUT_MS, longPressTimeoutMs)
         putInt(LaunchContract.KEY_TAP_CLICK_DELAY_MS, tapClickDelayMs)
+        putBoolean(LaunchContract.KEY_SELECTION_24, selection24)
+        putBoolean(LaunchContract.KEY_HIDE_CURSOR, hideCursor)
+        putInt(LaunchContract.KEY_OVERLAY_OPACITY_PERCENT, overlayOpacityPercent)
     }
 }

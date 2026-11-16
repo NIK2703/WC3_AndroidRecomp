@@ -211,8 +211,19 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
     e = getenv("WC3_DXVK_HEIGHT");
     if (e && atoi(e) > 0)
         guest_h = (uint32_t)atoi(e);
-    if (guest_w != width || guest_h != height)
-        wc3_legacy_select_display_mode(guest_w, guest_h);
+    if (guest_w != width || guest_h != height) {
+        /* The settings screen keeps a resolution from an older device or
+         * display size.  Applying it as the guest mode is only meaningful if
+         * the current surface mode table still contains that pair. */
+        if (!display_mode_supported(guest_w, guest_h)) {
+            LOGE("launch resolution %ux%u is not in the device mode table; "
+                 "using native %ux%u", guest_w, guest_h, width, height);
+            guest_w = width;
+            guest_h = height;
+        } else {
+            wc3_legacy_select_display_mode(guest_w, guest_h);
+        }
+    }
 
     /* Keep the native buffer at the physical surface size; DXVK scales the
      * selected back buffer to it.  Publishing the window before the guest

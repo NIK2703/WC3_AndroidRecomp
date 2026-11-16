@@ -223,7 +223,7 @@ void hle_android_post_backspace(void);
 void hle_android_post_enter(void);
 
 /* Queue an arbitrary Win32 message from a host thread.  The movie completion
- * callback uses this to deliver WMU_CALL after the Java MediaCodec player has
+ * callback uses this to deliver WMU_CALL after the Java MoviePlayer has
  * reached end of stream. */
 void hle_android_post_message(uint32_t hwnd, uint32_t msg, uint32_t wp,
                               uint32_t lp);

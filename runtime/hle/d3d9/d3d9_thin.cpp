@@ -47,6 +47,10 @@
 #include <string.h>
 #include <stdint.h>
 
+#if WC3_DEBUG && WC3_DEBUG_GRAPHICS
+#include <atomic>
+#endif
+
 #ifndef D3D_OK
 #define D3D_OK 0
 #endif
@@ -63,6 +67,7 @@
 /* The two statically embedded DXVK entry points (dxvk_entry.cpp). */
 extern "C" IDirect3D9 *wc3_dxvk1_Direct3DCreate9(UINT sdk);
 extern "C" IDirect3D9 *wc3_dxvk3_Direct3DCreate9(UINT sdk);
+extern "C" IDirect3D9 *wc3_dxvkll_Direct3DCreate9(UINT sdk);
 extern "C" void wc3_dxvk_prepare(void);
 extern "C" int wc3_vulkan_major_minor(int *major, int *minor);
 /* dxvk_win32.cpp: the ANativeWindow the presenter turns into a VkSurfaceKHR.
@@ -73,14 +78,35 @@ extern "C" void *wc3_android_window(void);
 extern "C" void *hle_host_hwnd(void);
 
 /* The campaign movie is a host-owned SurfaceView.  While it is up, submitting
- * DXVK frames behind it only competes with the hardware video decoder and the
- * compositor.  Present still succeeds from the guest's point of view, but the
- * frame is neither submitted nor flipped.  A short sleep keeps the guest from
- * spinning at full speed on a frame nobody will see. */
+ * DXVK frames behind it only competes with the software FFmpeg decoder and the
+ * compositor for CPU, GPU and memory bandwidth.  Present still succeeds from
+ * the guest's point of view, but the frame is neither submitted nor flipped.
+ * A short sleep keeps the guest from spinning at full speed on a frame nobody
+ * will see. */
 static int thin_video_active(void)
 {
     const Wc3Platform *p = wc3_platform();
     return p && p->video.active && p->video.active(p->video.ctx);
+}
+
+/* One line on each transition, not one per suppressed draw.  The trace makes
+ * it visible whether the game-side DXVK stream really stopped while the
+ * movie SurfaceView was up. */
+static int thin_video_gate(void)
+{
+    int active = thin_video_active();
+#if WC3_DEBUG && WC3_DEBUG_GRAPHICS
+    static std::atomic<int> logged(0);
+    int was = logged.load(std::memory_order_relaxed);
+    if (active != was
+            && logged.compare_exchange_strong(was, active,
+                                              std::memory_order_relaxed)) {
+        THIN_LOG("movie gate %s: guest D3D9 Present/Clear/draw %s",
+                 active ? "on" : "off",
+                 active ? "suppressed" : "forwarded");
+    }
+#endif
+    return active;
 }
 
 static void thin_video_pace(void)
@@ -930,21 +956,28 @@ static void thin_build_pp(D3DPRESENT_PARAMETERS *pp, int w, int h, int windowed,
 
 static IDirect3D9 *thin_create_d3d9(void)
 {
+    /* 4 is the low-latency fork; it is a separate archive, not a 3.1.1
+     * configuration, so it keeps its own selector value. */
+    enum { DXVK_1_10_3 = 1, DXVK_3_1_1 = 3, DXVK_LOW_LATENCY = 4 };
     int forced = 0;
     const char *e = getenv("WC3_DXVK_VERSION");
     if (e && *e) {
-        if (*e == '1') forced = 1;
-        else if (*e == '3') forced = 3;
+        if (*e == '1') forced = DXVK_1_10_3;
+        else if (*e == '3') forced = DXVK_3_1_1;
+        else if (*e == 'l') forced = DXVK_LOW_LATENCY;
     }
     wc3_dxvk_prepare();
     int major = 0, minor = 0;
     int have_vk = wc3_vulkan_major_minor(&major, &minor);
     if (!forced) {
-        if (!have_vk || major < 1 || (major == 1 && minor < 3)) forced = 1;
-        else forced = 3;
+        if (!have_vk || major < 1 || (major == 1 && minor < 3)) forced = DXVK_1_10_3;
+        else forced = DXVK_3_1_1;
     }
+    const char *label = forced == DXVK_1_10_3 ? "1.10.3"
+                      : forced == DXVK_LOW_LATENCY ? "low-latency"
+                      : "3.1.1";
     THIN_LOG("Vulkan %d.%d%s, trying DXVK %s", major, minor,
-             have_vk ? "" : " (unknown)", forced == 1 ? "1.10.3" : "3.1.1");
+             have_vk ? "" : " (unknown)", label);
     THIN_LOG("android window at Direct3DCreate9: %p (hwnd=%p)",
              wc3_android_window(), hle_host_hwnd());
 
@@ -953,13 +986,17 @@ static IDirect3D9 *thin_create_d3d9(void)
      * from std::exception.  A catch-all is what lets a failed 3.1.1 attempt
      * fall back to 1.10.3 instead of terminating the process. */
     try {
-        d3d = (forced == 1) ? wc3_dxvk1_Direct3DCreate9(D3D_SDK_VERSION)
-                            : wc3_dxvk3_Direct3DCreate9(D3D_SDK_VERSION);
+        if (forced == DXVK_1_10_3)
+            d3d = wc3_dxvk1_Direct3DCreate9(D3D_SDK_VERSION);
+        else if (forced == DXVK_LOW_LATENCY)
+            d3d = wc3_dxvkll_Direct3DCreate9(D3D_SDK_VERSION);
+        else
+            d3d = wc3_dxvk3_Direct3DCreate9(D3D_SDK_VERSION);
     } catch (...) {
         THIN_LOG("Direct3DCreate9 v%d threw", forced);
         d3d = NULL;
     }
-    if (!d3d && forced == 3) {
+    if (!d3d && forced == DXVK_3_1_1) {
         THIN_LOG("3.1.1 could not create a device; falling back to 1.10.3");
         try {
             d3d = wc3_dxvk1_Direct3DCreate9(D3D_SDK_VERSION);
@@ -1694,7 +1731,7 @@ static void thin_entry(CPU *c)
     switch (s->key) {
     case 0x0111: /* IDirect3DDevice9::Present */
     case 0x0303: /* IDirect3DSwapChain9::Present */
-        if (thin_video_active()) {
+        if (thin_video_gate()) {
             thin_video_pace();
             c->eax = D3D_OK;
             return;
@@ -1702,7 +1739,7 @@ static void thin_entry(CPU *c)
         break;
     case 0x012b: /* Clear */
     case 0x0151: case 0x0152: case 0x0153: case 0x0154: /* draws */
-        if (thin_video_active()) {
+        if (thin_video_gate()) {
             c->eax = D3D_OK;
             return;
         }

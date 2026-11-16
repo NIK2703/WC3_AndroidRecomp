@@ -3,6 +3,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cpu.h"
@@ -113,6 +114,19 @@ int wc3_legacy_default_display_mode(uint32_t *width, uint32_t *height)
     return 1;
 }
 
+int wc3_legacy_current_display_mode(uint32_t *width, uint32_t *height)
+{
+    if (width) *width = 960u;
+    if (height) *height = 540u;
+    return 1;
+}
+
+int display_mode_supported(uint32_t width, uint32_t height)
+{
+    return (width == 960u && height == 540u) ||
+           (width == 1280u && height == 720u);
+}
+
 static uint32_t guest(uint32_t offset)
 {
     return GUEST_BASE + offset;
@@ -162,6 +176,26 @@ static uint32_t invoke(const char *name, const uint32_t *args, unsigned count)
     memset(&c, 0, sizeof c);
     impl(&c);
     return c.eax;
+}
+
+static uint32_t video_dword(const char *name)
+{
+    put_string(0x0600u,
+               "Software\\Blizzard Entertainment\\Warcraft III\\Video");
+    const uint32_t open_video[5] = { HKCU, guest(0x0600u), 0u, 0u,
+                                     guest(0x1008u) };
+    if (invoke("RegOpenKeyExA", open_video, 5u) != 0u) return UINT32_MAX;
+    const uint32_t video = get_u32(0x1008u);
+    if (video < 0x00150000u) return UINT32_MAX;
+
+    put_string(0x0610u, name);
+    put_u32(0x1110u, 0u);
+    put_u32(0x1114u, 4u);
+    const uint32_t query[6] = { video, guest(0x0610u), 0u, guest(0x1110u),
+                                guest(0x2400u), guest(0x1114u) };
+    if (invoke("RegQueryValueExA", query, 6u) != 0u) return UINT32_MAX;
+    if (get_u32(0x1110u) != 4u || get_u32(0x1114u) != 4u) return UINT32_MAX;
+    return get_u32(0x2400u);
 }
 
 #define CHECK(condition, message)                                         \
@@ -228,6 +262,14 @@ int main(void)
     CHECK(invoke("RegOpenKeyExA", open_root, 5u) == 0u, "open root");
     const uint32_t root = get_u32(0x1000u);
     CHECK(root >= 0x00150000u, "root handle");
+
+    /* app_boot selects the launch mode before wc3_dispatch_init(), so the
+     * Video defaults must come from the selected mode, not the native (last)
+     * table entry.  This is the guest resolution the launcher asks for. */
+    CHECK(video_dword("reswidth") == 960u,
+          "video width follows selected mode");
+    CHECK(video_dword("resheight") == 540u,
+          "video height follows selected mode");
 
 #if defined(WC3_W3L_GATEWAY_RUBATTLE)
     put_string(0x0350u, "Battle.net Gateways");
@@ -394,6 +436,23 @@ int main(void)
     const uint32_t close_sound[1] = { sound };
     CHECK(invoke("RegCloseKey", close_sound, 1u) == 0u, "close");
     CHECK(invoke("RegCloseKey", close_sound, 1u) == 6u, "close twice");
+
+    /* An explicit launch resolution is an override.  Reinstall the store with
+     * the environment pair a launch of the settings screen produces; it must
+     * replace the mode seed (and, in the real process, any restored save). */
+#if defined(_WIN32)
+    CHECK(_putenv_s("WC3_DXVK_WIDTH", "1280") == 0, "set launch width");
+    CHECK(_putenv_s("WC3_DXVK_HEIGHT", "720") == 0, "set launch height");
+#else
+    CHECK(setenv("WC3_DXVK_WIDTH", "1280", 1) == 0, "set launch width");
+    CHECK(setenv("WC3_DXVK_HEIGHT", "720", 1) == 0, "set launch height");
+#endif
+    CHECK(wc3_hle_advapi32_registry_install() == 10,
+          "reinstall with launch resolution");
+    CHECK(video_dword("reswidth") == 1280u,
+          "launch width overrides seeded mode");
+    CHECK(video_dword("resheight") == 720u,
+          "launch height overrides seeded mode");
 
     printf("registry OK (%d handlers)\n", installed);
     return 0;

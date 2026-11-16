@@ -9095,7 +9095,9 @@ static void a_reg_close_key(CPU *c) { (void)c; c->hle_last_error = 0; c->eax = 0
  * defaults.  Seed the same sane defaults a normal user has: music and effects
  * on, positional/environmental audio on, both volumes at 100%.  Do not seed
  * "nosoundwarn": the sound path is real now, so the game's own failure panel
- * must be allowed to appear if initialization ever regresses. */
+ * must be allowed to appear if initialization ever regresses.  The one
+ * exception is the product sound switch below: with sound turned off there is
+ * no device on purpose, and the panel must not park the game. */
 static void reg_seed_sound_defaults(void)
 {
     static const struct { const char *name; uint32_t value; } d[] = {
@@ -9135,13 +9137,30 @@ static void reg_seed_sound_defaults(void)
         }
     }
 #endif
+    /* The launch settings can turn sound off.  The guest then has no audio
+     * device at all, so Miles cannot open one: seed the game's own
+     * "nosoundwarn" flag, otherwise the missing device parks the game on its
+     * sound failure panel.  This is a product decision and not a diagnostic,
+     * so it is compiled into every build. */
+    const char *product_sound = getenv("WC3_SOUND");
+    if (product_sound && *product_sound && strcmp(product_sound, "0") == 0) {
+        RegVal *v = reg_slot("Software\\Blizzard Entertainment\\Warcraft III\\Sound",
+                             "nosoundwarn");
+        if (v) {
+            v->type = 4;         /* REG_DWORD */
+            v->len = 4;
+            memset(v->data, 0, sizeof v->data);
+            v->data[0] = 1;
+        }
+    }
 }
 
 /* The Android registry is in memory and starts empty.  Without a Video key
  * the launcher falls back to 800x600 before it ever asks D3D9, so seed the
- * default (100% = native surface) plus the colour/refresh fields a normal
- * Windows install has.  The game's own resolution menu overwrites these at
- * run time; only the initial value matters here.
+ * mode app_boot selected (the launcher override or the native surface) plus
+ * the colour/refresh fields a normal Windows install has.  The game's own
+ * resolution menu overwrites these at run time; only the initial value
+ * matters here.
  *
  * lockfb is a DWORD on the Windows reference install and is 0 there.  The
  * Android backend has to present the same value before the launcher reads
@@ -9150,7 +9169,10 @@ static void reg_seed_sound_defaults(void)
 static void reg_seed_resolution_defaults(void)
 {
     uint32_t w = 0, h = 0;
-    if (!hle_android_default_display_mode(&w, &h)) return;
+    /* app_boot selects an explicit launch mode before this seed runs.  Use the
+     * selected mode so the guest does not immediately change back to native. */
+    if (!hle_android_current_display_mode(&w, &h) &&
+        !hle_android_default_display_mode(&w, &h)) return;
     static const struct { const char *name; uint32_t value; } d[] = {
         { "reswidth",     0 },
         { "resheight",    0 },

@@ -15,8 +15,9 @@
  * frozen HLE thunk window, following the same pattern as the DirectSound HLE.
  * No game code is replaced: only the external COM implementation is supplied.
  *
- * The actual decoder is Wc3Platform.video (Java MediaCodec).  This module never
- * touches video frames, audio, or a Surface.  Completion is reported exactly as
+ * The actual playback is Wc3Platform.video (the Java MoviePlayer: Media3 owns
+ * AVI audio and the clock, FFmpeg decodes video).  This module never touches
+ * video frames, audio, or a Surface.  Completion is reported exactly as
  * DirectShow reports it: the registered window receives WMU_CALL (0x8001), the
  * game's WndProc calls GetEvent, and the game then posts its own WM_LBUTTONUP
  * (0x202) that leaves the cinematic.

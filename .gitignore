@@ -25,6 +25,8 @@
 *.apk
 *.dll
 !third_party/capstone/bin/capstone.dll
+# FFmpeg arm64 static archives are pinned vendor inputs, like the Media3 AARs.
+!third_party/ffmpeg/lib/arm64-v8a/*.a
 *.lib
 *.exp
 *.pdb

@@ -1,0 +1,9 @@
+FFmpeg 7.1.1 source: https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
+FFmpeg 7.1.1 source archive SHA-256: 733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1
+Build target: aarch64-linux-android26, NDK 29.0.14206865, LGPL-2.1-or-later
+SHA-256 is relative to third_party/ffmpeg/lib/arm64-v8a.
+
+c3e499916dda886ecc0e135edb34d4b6407afb70d710900913870ad6d053c59d  libavcodec.a
+a721e4e44906d3237eb71c84a576b048a0146096621dd9fe6442ba2908acb573  libavformat.a
+b4e882e0e3c4c677b2e859ffd01e0fcfad503ba0e51c91beae158430045abeaf  libavutil.a
+6952692d4fd4e91ab605f28f7c9a0684ee153eeee0d17519e8d1141558e1b7e5  libswscale.a

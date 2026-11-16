@@ -59,14 +59,17 @@ public class Wc3GameActivity extends GameActivity {
 
     /* JNI matches by name only; host_shell.c must keep the same parameter
      * order (driver id before driver root, DXVK version and config path, then
-     * the gesture flag and timers, and the SIMPLE tap delay last).  These
-     * values are strings, so a swap compiles and fails only at runtime. */
+     * the gesture flag and timers, the SIMPLE tap delay, the selection24
+     * toggle, the hideCursor toggle and the overlay opacity percent last).
+     * These values are strings, so a swap compiles and fails only at
+     * runtime. */
     private static native void nativeApplyLaunchSettings(
             String gameDir, int width, int height, boolean sound,
             String extraArgs, String driverId, String driverRoot,
             String hookDir, String dxvkVersion, String dxvkConfigPath,
             boolean doubleTapGestures, int doubleTapTimeoutMs,
-            int longPressTimeoutMs, int tapClickDelayMs);
+            int longPressTimeoutMs, int tapClickDelayMs,
+            boolean selection24, boolean hideCursor, int overlayOpacityPercent);
 
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
@@ -235,7 +238,16 @@ public class Wc3GameActivity extends GameActivity {
                         LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS),
                 settings.getInt(
                         LaunchContract.KEY_TAP_CLICK_DELAY_MS,
-                        LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS));
+                        LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS),
+                settings.getBoolean(
+                        LaunchContract.KEY_SELECTION_24,
+                        LaunchContract.DEFAULT_SELECTION_24),
+                settings.getBoolean(
+                        LaunchContract.KEY_HIDE_CURSOR,
+                        LaunchContract.DEFAULT_HIDE_CURSOR),
+                settings.getInt(
+                        LaunchContract.KEY_OVERLAY_OPACITY_PERCENT,
+                        LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT));
     }
 
     /**

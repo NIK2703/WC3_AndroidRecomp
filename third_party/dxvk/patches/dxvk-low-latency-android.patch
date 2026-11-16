@@ -1,0 +1,99 @@
+diff --git a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -26,15 +26,16 @@ namespace dxvk {
+     zeroMappedMemory      = config.getOption<bool>    ("dxvk.zeroMappedMemory",       false);
+     lowMemoryPlaced       = config.getOption<bool>    ("dxvk.lowMemoryPlaced",        true);
+ 
+-    /* WC3: an explicit 3.1.1 choice is a compatibility override.  The
+-     * settings host latches "3" into WC3_DXVK_VERSION, so the archive can
+-     * keep accepting the adapter when an optional extension is missing
+-     * instead of failing startup.  A config option is also available for
+-     * diagnostics; the forced choice always wins. */
++    /* WC3: an explicit 3.1.1 or low-latency choice is a compatibility
++     * override.  The settings host latches "3" or "ll" into
++     * WC3_DXVK_VERSION, so the archive can keep accepting the adapter when
++     * an optional extension is missing instead of failing startup.  A config
++     * option is also available for diagnostics; the forced choice always
++     * wins. */
+     std::string forcedVersion = env::getEnvVar("WC3_DXVK_VERSION");
+     ignoreMissingExtensions = config.getOption<bool>("dxvk.ignoreMissingExtensions", false)
+       || (!forcedVersion.empty() &&
+-          forcedVersion[0] == '3');
++          (forcedVersion[0] == '3' || forcedVersion[0] == 'l'));
+ 
+     /* WC3 D3D9: Adreno 0.786 reports VK_KHR_maintenance5 but the observed
+      * FF pipeline failure is consistent with the pNext shader-module path.
+diff --git a/src/util/sync/sync_atomic_signal.h b/src/util/sync/sync_atomic_signal.h
+index e387a82..727e4f1 100644
+--- a/src/util/sync/sync_atomic_signal.h
++++ b/src/util/sync/sync_atomic_signal.h
+@@ -1,6 +1,8 @@
+ #pragma once
+ 
+-#ifdef _WIN32
++/* The Android build defines _WIN32 for the DXVK shim but runs on Linux, where
++ * WaitOnAddress does not exist.  Use the futex implementation below. */
++#if defined(_WIN32) && !defined(__ANDROID__)
+ 
+ #include <synchapi.h>
+ #include <errhandlingapi.h>
+diff --git a/src/util/sync/sync_signal.h b/src/util/sync/sync_signal.h
+index e6c00f6..ce77eab 100644
+--- a/src/util/sync/sync_signal.h
++++ b/src/util/sync/sync_signal.h
+@@ -4,7 +4,9 @@
+ #include <functional>
+ #include <list>
+ 
+-#ifdef _WIN32
++/* The Android build defines _WIN32 for the DXVK shim but runs on Linux, where
++ * WaitOnAddress and SRWLOCK do not exist.  Use the POSIX futex/std path. */
++#if defined(_WIN32) && !defined(__ANDROID__)
+ #include <synchapi.h>
+ #endif
+ 
+@@ -85,7 +87,7 @@ namespace dxvk::sync {
+   };
+ 
+ 
+-#ifdef _WIN32
++#if defined(_WIN32) && !defined(__ANDROID__)
+   /**
+    * \brief Fence
+    *
+@@ -202,7 +204,7 @@ namespace dxvk::sync {
+   };
+ 
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) || defined(__ANDROID__)
+ 
+   /**
+    * \brief Fence
+diff --git a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
+--- a/src/dxvk/dxvk_presenter.cpp
++++ b/src/dxvk/dxvk_presenter.cpp
+@@ -367,17 +367,13 @@ namespace dxvk {
+     if (m_signal == nullptr || !frameId)
+       return;
+ 
+-    if (m_hasPresentWait) {
+-      std::lock_guard lock(m_frameMutex);
+-      m_lastSignaled = frameId;
+-      m_frameCond.notify_one();
+-    } else {
+-      m_fpsLimiter.delay(tracker);
+-      m_signal->signal(frameId);
+-
+-      if (tracker)
+-        tracker->notifyGpuPresentEnd(frameId);
+-    }
++    // The frame worker owns completion signalling and the fps limiter for
++    // both present-wait and non-present-wait swapchains.  Always record the
++    // submitted frame so pushFrame() can drain its queue; otherwise a device
++    // without VK_KHR_present_wait fills all 32 slots and stalls the CS thread.
++    std::lock_guard lock(m_frameMutex);
++    m_lastSignaled = frameId;
++    m_frameCond.notify_one();
+   }

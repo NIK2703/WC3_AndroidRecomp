@@ -1331,8 +1331,12 @@ static void seed_defaults_locked(void)
         seed_dword_locked(REG_SOUND, "nosoundwarn", 1u);
 #endif
 
+    /* app_boot has already selected the launch resolution when one is set.
+     * The defaults must describe that mode, not the native (last) table
+     * entry, or the game immediately changes back to the full surface size. */
     uint32_t width = 0u, height = 0u;
-    if (wc3_legacy_default_display_mode(&width, &height)) {
+    if (wc3_legacy_current_display_mode(&width, &height) ||
+        wc3_legacy_default_display_mode(&width, &height)) {
         static const struct {
             const char *name;
             uint32_t value;
@@ -1351,6 +1355,33 @@ static void seed_defaults_locked(void)
             seed_dword_locked(REG_VIDEO, video[i].name, value);
         }
     }
+}
+
+/* A launch setting is an explicit override, like choosing a mode in the game's
+ * own Video options.  Persisted values are restored first so every other saved
+ * preference survives; reswidth/resheight are then replaced with the mode
+ * app_boot selected for this launch.  An empty/auto launcher value leaves the
+ * game's saved resolution untouched. */
+static void apply_launch_resolution_locked(void)
+{
+    const char *ew = getenv("WC3_DXVK_WIDTH");
+    const char *eh = getenv("WC3_DXVK_HEIGHT");
+    char *end = NULL;
+
+    if (!ew || !*ew || !eh || !*eh) return;
+    const unsigned long width = strtoul(ew, &end, 10);
+    if (!end || *end || width == 0ul || width > UINT32_MAX) return;
+    end = NULL;
+    const unsigned long height = strtoul(eh, &end, 10);
+    if (!end || *end || height == 0ul || height > UINT32_MAX) return;
+    if (!display_mode_supported((uint32_t)width, (uint32_t)height)) return;
+
+    seed_dword_locked(REG_VIDEO, "reswidth", (uint32_t)width);
+    seed_dword_locked(REG_VIDEO, "resheight", (uint32_t)height);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    fprintf(stderr, "[registry] launch video %lux%lu overrides saved settings\n",
+            width, height);
+#endif
 }
 
 typedef struct RegOverride {
@@ -1405,6 +1436,7 @@ int wc3_hle_advapi32_registry_install(void)
 #else
     load_persisted_locked();
 #endif
+    apply_launch_resolution_locked();
 #if defined(WC3_W3L_GATEWAY_RUBATTLE)
     /* Restore the rubattle gateway list after persisted values, so a stale
      * save cannot hide the server from the Battle.net gateway picker. */

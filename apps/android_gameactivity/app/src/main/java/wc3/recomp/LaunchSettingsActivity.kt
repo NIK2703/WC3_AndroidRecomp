@@ -11,9 +11,11 @@ import android.text.Editable
 import android.text.InputFilter
 import android.text.TextWatcher
 import android.util.DisplayMetrics
+import android.view.MotionEvent
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.AutoCompleteTextView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -27,6 +29,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import wc3.recomp.launch.DxvkConfigOptions
+import wc3.recomp.launch.DxvkSuggestionAdapter
 import wc3.recomp.launch.GameFolderPicker
 import wc3.recomp.launch.GameMode
 import wc3.recomp.launch.LaunchContract
@@ -58,15 +62,19 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var longPressDelayValue: TextView
     private lateinit var tapClickDelaySlider: SeekBar
     private lateinit var tapClickDelayValue: TextView
+    private lateinit var overlayOpacitySlider: SeekBar
+    private lateinit var overlayOpacityValue: TextView
     private lateinit var argsInput: EditText
     private lateinit var driverStore: VulkanDriverStore
     private lateinit var driverSpinner: Spinner
-    private lateinit var driverStatus: TextView
     private lateinit var driverRemoveButton: Button
     private lateinit var driverImportButton: Button
     private lateinit var dxvkSpinner: Spinner
     private lateinit var dxvkConfigRows: LinearLayout
     private lateinit var dxvkConfigAddButton: Button
+    private lateinit var dxvkConfigImportButton: Button
+    private lateinit var selection24Switch: SwitchCompat
+    private lateinit var hideCursorSwitch: SwitchCompat
 
     /* DXVK's config parser accepts only these key characters and has no escape
      * for a double quote inside a value.  Filtering at input time keeps the
@@ -95,6 +103,9 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private var binding = false
     private var storageRequested = false
     private var driverBusy = false
+    private var dxvkConfigImportBusy = false
+    /* The table always ends with one empty row used to type a new variable. */
+    private var dxvkScratchRow: View? = null
 
     private val folderPicker = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -106,6 +117,12 @@ class LaunchSettingsActivity : AppCompatActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) importDriver(uri)
+    }
+
+    private val dxvkConfigPicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) importDxvkConfig(uri)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -120,7 +137,11 @@ class LaunchSettingsActivity : AppCompatActivity() {
         dxvkOptions = listOf(
             DxvkOption("", getString(R.string.launch_dxvk_auto)),
             DxvkOption(DXVK_VERSION_1_10, getString(R.string.launch_dxvk_110)),
-            DxvkOption(DXVK_VERSION_3_1_1, getString(R.string.launch_dxvk_311))
+            DxvkOption(DXVK_VERSION_3_1_1, getString(R.string.launch_dxvk_311)),
+            DxvkOption(
+                DXVK_VERSION_LOW_LATENCY,
+                getString(R.string.launch_dxvk_lowlatency)
+            )
         )
         gestureModeOptions = listOf(
             GestureModeOption(
@@ -189,14 +210,18 @@ class LaunchSettingsActivity : AppCompatActivity() {
         longPressDelayValue = findViewById(R.id.long_press_delay_value)
         tapClickDelaySlider = findViewById(R.id.tap_click_delay_slider)
         tapClickDelayValue = findViewById(R.id.tap_click_delay_value)
+        overlayOpacitySlider = findViewById(R.id.overlay_opacity_slider)
+        overlayOpacityValue = findViewById(R.id.overlay_opacity_value)
         argsInput = findViewById(R.id.args_input)
         driverSpinner = findViewById(R.id.driver_spinner)
-        driverStatus = findViewById(R.id.driver_status)
         driverRemoveButton = findViewById(R.id.driver_remove_button)
         driverImportButton = findViewById(R.id.driver_import_button)
         dxvkSpinner = findViewById(R.id.dxvk_spinner)
         dxvkConfigRows = findViewById(R.id.dxvk_config_rows)
         dxvkConfigAddButton = findViewById(R.id.dxvk_config_add)
+        dxvkConfigImportButton = findViewById(R.id.dxvk_config_import)
+        selection24Switch = findViewById(R.id.selection24_switch)
+        hideCursorSwitch = findViewById(R.id.hide_cursor_switch)
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             // libadrenotools needs Android 9; keep the system-only path and
@@ -204,8 +229,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
             for (id in intArrayOf(
                 R.id.driver_label,
                 R.id.driver_picker_frame,
-                R.id.driver_buttons,
-                R.id.driver_status
+                R.id.driver_buttons
             )) findViewById<View>(id).visibility = View.GONE
         }
 
@@ -260,6 +284,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         )
 
         soundSwitch.isChecked = settings.sound
+        selection24Switch.isChecked = settings.selection24
+        hideCursorSwitch.isChecked = settings.hideCursor
         gestureModeSpinner.setSelection(
             gestureModeOptions.indexOfFirst {
                 it.doubleTap == settings.doubleTapGestures
@@ -277,9 +303,10 @@ class LaunchSettingsActivity : AppCompatActivity() {
             settings.longPressTimeoutMs
         )
         bindTapClickDelaySlider(settings.tapClickDelayMs)
+        bindOverlayOpacitySlider(settings.overlayOpacityPercent)
         argsInput.setText(settings.extraArgs)
         rebuildDriverOptions(settings.driverId)
-        updateDriverStatus()
+        updateDriverState()
 
         val dxvkIndex = dxvkOptions.indexOfFirst { it.value == settings.dxvkVersion }
         val defaultDxvkIndex =
@@ -317,6 +344,20 @@ class LaunchSettingsActivity : AppCompatActivity() {
             }
         }
 
+        selection24Switch.setOnCheckedChangeListener { _, _ ->
+            if (!binding) {
+                refreshValidation()
+                saveIfValid()
+            }
+        }
+
+        hideCursorSwitch.setOnCheckedChangeListener { _, _ ->
+            if (!binding) {
+                refreshValidation()
+                saveIfValid()
+            }
+        }
+
         gestureModeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: AdapterView<*>?,
@@ -337,6 +378,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
         wireDelaySlider(doubleTapDelaySlider, doubleTapDelayValue)
         wireDelaySlider(longPressDelaySlider, longPressDelayValue)
         wireTapClickDelaySlider()
+        wireOverlayOpacitySlider()
 
         resolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -362,7 +404,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 id: Long
             ) {
                 if (!binding) {
-                    updateDriverStatus()
+                    updateDriverState()
                     refreshValidation()
                     saveIfValid()
                 }
@@ -387,8 +429,12 @@ class LaunchSettingsActivity : AppCompatActivity() {
         driverImportButton.setOnClickListener { pickDriverPackage() }
         driverRemoveButton.setOnClickListener { removeSelectedDriver() }
         dxvkConfigAddButton.setOnClickListener {
-            addDxvkConfigRow().requestFocus()
+            ensureScratchRow()
+            dxvkScratchRow
+                ?.findViewById<AutoCompleteTextView>(R.id.dxvk_config_key)
+                ?.requestFocus()
         }
+        dxvkConfigImportButton.setOnClickListener { pickDxvkConfig() }
 
         findViewById<Button>(R.id.choose_folder_button).setOnClickListener { pickFolder() }
         findViewById<Button>(R.id.find_folder_button).setOnClickListener { findFolder() }
@@ -491,6 +537,105 @@ class LaunchSettingsActivity : AppCompatActivity() {
         saveIfValid()
     }
 
+    private fun pickDxvkConfig() {
+        if (dxvkConfigImportBusy) return
+        try {
+            dxvkConfigPicker.launch(
+                arrayOf("text/plain", "application/octet-stream", "*/*")
+            )
+        } catch (ignored: ActivityNotFoundException) {
+            Toast.makeText(
+                this,
+                R.string.launch_dxvk_config_import_missing,
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun importDxvkConfig(uri: Uri) {
+        if (dxvkConfigImportBusy) return
+        dxvkConfigImportBusy = true
+        dxvkConfigImportButton.isEnabled = false
+        val resolver = contentResolver
+        Thread {
+            val text = try {
+                resolver.openInputStream(uri)?.use { input ->
+                    val reader = input.bufferedReader(Charsets.UTF_8)
+                    val buffer = CharArray(8192)
+                    val content = StringBuilder()
+                    var tooLarge = false
+                    while (true) {
+                        val count = reader.read(buffer)
+                        if (count < 0) break
+                        if (content.length + count > MAX_DXVK_CONFIG_FILE_CHARS) {
+                            tooLarge = true
+                            break
+                        }
+                        content.append(buffer, 0, count)
+                    }
+                    if (tooLarge) null else content.toString().removePrefix("\uFEFF")
+                }
+            } catch (ignored: Exception) {
+                null
+            }
+
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                dxvkConfigImportBusy = false
+                dxvkConfigImportButton.isEnabled = true
+                if (text == null) {
+                    Toast.makeText(
+                        this,
+                        R.string.launch_dxvk_config_import_error,
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@runOnUiThread
+                }
+
+                val entries = parseDxvkConfig(text)
+                if (entries.isEmpty()) {
+                    Toast.makeText(
+                        this,
+                        R.string.launch_dxvk_config_import_empty,
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@runOnUiThread
+                }
+
+                val importedCount = applyDxvkConfigEntries(entries)
+                refreshValidation()
+                saveIfValid()
+                Toast.makeText(
+                    this,
+                    getString(R.string.launch_dxvk_config_import_done, importedCount),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }.start()
+    }
+
+    private fun applyDxvkConfigEntries(entries: List<Pair<String, String>>): Int {
+        /* The file wins over every matching row, including duplicate rows the
+         * user may have created.  Keys that are not in the file keep their
+         * current value; new keys are appended in file order. */
+        val imported = LinkedHashMap<String, String>()
+        entries.forEach { (key, value) -> imported[key] = value }
+        val remaining = LinkedHashMap<String, String>()
+        remaining.putAll(imported)
+
+        for (index in 0 until dxvkConfigRows.childCount) {
+            val row = dxvkConfigRows.getChildAt(index)
+            val key = row.findViewById<EditText>(R.id.dxvk_config_key)
+                .text.toString().trim()
+            val value = imported[key] ?: continue
+            row.findViewById<EditText>(R.id.dxvk_config_value).setText(value)
+            remaining.remove(key)
+        }
+
+        remaining.forEach { (key, value) -> addDxvkConfigRow(key, value) }
+        return imported.size
+    }
+
     private fun pickDriverPackage() {
         if (driverBusy) return
         try {
@@ -510,7 +655,10 @@ class LaunchSettingsActivity : AppCompatActivity() {
         if (driverBusy) return
         driverBusy = true
         setDriverBusy(true)
-        driverStatus.text = getString(R.string.launch_driver_installing)
+        /* The row under the driver buttons is gone, so the progress of the
+         * install goes to a toast like the result. */
+        Toast.makeText(this, R.string.launch_driver_installing, Toast.LENGTH_LONG)
+            .show()
         Thread {
             val result = driverStore.install(uri)
             runOnUiThread {
@@ -520,7 +668,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
                     is VulkanDriverStore.InstallResult.Ok -> {
                         drivers = driverStore.list()
                         rebuildDriverOptions(result.info.id)
-                        updateDriverStatus()
+                        updateDriverState()
                         setDriverBusy(false)
                         refreshValidation()
                         saveIfValid()
@@ -534,7 +682,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
                         ).show()
                     }
                     is VulkanDriverStore.InstallResult.Error -> {
-                        updateDriverStatus()
+                        updateDriverState()
                         setDriverBusy(false)
                         refreshValidation()
                         Toast.makeText(
@@ -566,7 +714,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 if (driverStore.remove(option.id)) {
                     drivers = driverStore.list()
                     rebuildDriverOptions(if (wasSelected) "" else currentDriverId())
-                    updateDriverStatus()
+                    updateDriverState()
                     refreshValidation()
                     saveIfValid()
                     Toast.makeText(
@@ -618,24 +766,15 @@ class LaunchSettingsActivity : AppCompatActivity() {
         binding = wasBinding
     }
 
-    private fun updateDriverStatus() {
+    /*
+     * The selected driver is already visible in the spinner, so this row
+     * only tracks whether the delete button is available.
+     */
+    private fun updateDriverState() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
         val id = currentDriverId()
         val info = drivers.firstOrNull { it.id == id }
-        if (info == null) {
-            driverStatus.text = ""
-            driverRemoveButton.isEnabled = false
-            return
-        }
-        val version = info.driverVersion.ifBlank { "Vulkan" }
-        val megabytes = (info.size / (1024L * 1024L)).coerceAtLeast(0L)
-        driverStatus.text = getString(
-            R.string.launch_driver_details,
-            info.displayName,
-            version,
-            megabytes
-        )
-        driverRemoveButton.isEnabled = !driverBusy
+        driverRemoveButton.isEnabled = info != null && !driverBusy
     }
 
     private fun currentDriverId(): String =
@@ -655,46 +794,203 @@ class LaunchSettingsActivity : AppCompatActivity() {
 
     private fun setDxvkConfig(config: String) {
         dxvkConfigRows.removeAllViews()
+        dxvkScratchRow = null
         parseDxvkConfig(config).forEach { (key, value) ->
             addDxvkConfigRow(key, value)
         }
+        ensureScratchRow()
     }
 
-    private fun addDxvkConfigRow(key: String = "", value: String = ""): EditText {
+    private fun addDxvkConfigRow(
+        key: String = "",
+        value: String = ""
+    ): AutoCompleteTextView {
+        val row = createDxvkConfigRow(key, value, scratch = false)
+        insertDxvkRow(row)
+        return row.findViewById(R.id.dxvk_config_key)
+    }
+
+    /* The table keeps one empty row at the end, so a new variable can be typed
+     * without pressing a button first. */
+    private fun ensureScratchRow() {
+        val scratch = dxvkScratchRow
+        if (scratch != null && scratch.parent === dxvkConfigRows) return
+        val row = createDxvkConfigRow("", "", scratch = true)
+        dxvkScratchRow = row
+        dxvkConfigRows.addView(row)
+    }
+
+    /* New rows go in front of the empty row, so the empty one stays last. */
+    private fun insertDxvkRow(row: View) {
+        val scratch = dxvkScratchRow
+        if (scratch != null && scratch.parent === dxvkConfigRows) {
+            dxvkConfigRows.addView(row, dxvkConfigRows.indexOfChild(scratch))
+        } else {
+            dxvkConfigRows.addView(row)
+        }
+    }
+
+    private fun createDxvkConfigRow(
+        key: String,
+        value: String,
+        scratch: Boolean
+    ): View {
         val row = layoutInflater.inflate(R.layout.item_dxvk_config, dxvkConfigRows, false)
-        val keyInput = row.findViewById<EditText>(R.id.dxvk_config_key)
-        val valueInput = row.findViewById<EditText>(R.id.dxvk_config_value)
-        keyInput.filters = arrayOf(dxvkKeyFilter, InputFilter.LengthFilter(80))
-        valueInput.filters = arrayOf(dxvkValueFilter, InputFilter.LengthFilter(200))
+        val keyInput = row.findViewById<AutoCompleteTextView>(R.id.dxvk_config_key)
+        val valueInput = row.findViewById<AutoCompleteTextView>(R.id.dxvk_config_value)
+        keyInput.filters = arrayOf(
+            dxvkKeyFilter,
+            InputFilter.LengthFilter(DXVK_KEY_MAX_LENGTH)
+        )
+        valueInput.filters = arrayOf(
+            dxvkValueFilter,
+            InputFilter.LengthFilter(DXVK_VALUE_MAX_LENGTH)
+        )
+
+        /* The text is set before the adapters are attached: an attached
+         * adapter filters on every text change and would open the suggestion
+         * list while the table is filled from the saved settings. */
         keyInput.setText(key)
         valueInput.setText(value)
 
-        val saveOnBlur = View.OnFocusChangeListener { _, focused ->
-            if (!focused && !binding) saveIfValid()
+        /* The empty row is a placeholder for a new variable, not an example:
+         * the hints would read like values that are already there. */
+        if (scratch) {
+            keyInput.hint = null
+            valueInput.hint = null
+        }
+
+        val keyAdapter = DxvkSuggestionAdapter(this, DxvkConfigOptions.keys)
+        keyInput.setAdapter(keyAdapter)
+        keyInput.threshold = 0
+        val valueAdapter = DxvkSuggestionAdapter(
+            this,
+            DxvkConfigOptions.valuesFor(key.trim())
+        )
+        valueInput.setAdapter(valueAdapter)
+        valueInput.threshold = 0
+
+        val saveOnBlur = View.OnFocusChangeListener { view, focused ->
+            if (focused) {
+                /* The list of keys or of the allowed values opens on a tap and
+                 * is filtered by the beginning of the typed text. */
+                (view as AutoCompleteTextView).performCompletion()
+            } else if (!binding) {
+                saveIfValid()
+            }
         }
         keyInput.setOnFocusChangeListener(saveOnBlur)
         valueInput.setOnFocusChangeListener(saveOnBlur)
 
-        row.findViewById<Button>(R.id.dxvk_config_remove).setOnClickListener {
+        /* The suggestion list opens on a tap and is filtered by the beginning
+         * of the typed text.  Exactly one list per action: the focus path
+         * covers a field that gains the focus, the touch path covers a tap on
+         * a field that already has it.  Calling performCompletion() from both
+         * paths showed the list twice on the same tap. */
+        var focusedAtTouchDown = false
+        val showSuggestions = View.OnTouchListener { view, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN ->
+                    focusedAtTouchDown = view.hasFocus()
+                MotionEvent.ACTION_UP ->
+                    if (focusedAtTouchDown) {
+                        (view as AutoCompleteTextView).performCompletion()
+                    }
+                else -> Unit
+            }
+            false
+        }
+        keyInput.setOnTouchListener(showSuggestions)
+        valueInput.setOnTouchListener(showSuggestions)
+
+        keyInput.setOnItemClickListener { _, _, _, _ ->
+            updateDxvkValueOptions(row, keyInput.text.toString().trim())
+        }
+
+        keyInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(
+                text: CharSequence?,
+                start: Int,
+                count: Int,
+                after: Int
+            ) = Unit
+
+            override fun onTextChanged(
+                text: CharSequence?,
+                start: Int,
+                before: Int,
+                count: Int
+            ) = Unit
+
+            override fun afterTextChanged(text: Editable?) {
+                val typed = keyInput.text.toString().trim()
+                updateDxvkValueOptions(row, typed)
+                maybeAddScratchRow(row, typed, valueInput.text.toString().trim())
+            }
+        })
+
+        valueInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(
+                text: CharSequence?,
+                start: Int,
+                count: Int,
+                after: Int
+            ) = Unit
+
+            override fun onTextChanged(
+                text: CharSequence?,
+                start: Int,
+                before: Int,
+                count: Int
+            ) = Unit
+
+            override fun afterTextChanged(text: Editable?) {
+                maybeAddScratchRow(
+                    row,
+                    keyInput.text.toString().trim(),
+                    valueInput.text.toString().trim()
+                )
+            }
+        })
+
+        val removeButton = row.findViewById<Button>(R.id.dxvk_config_remove)
+        removeButton.visibility = if (scratch) View.INVISIBLE else View.VISIBLE
+        removeButton.setOnClickListener {
             dxvkConfigRows.removeView(row)
             if (!binding) saveIfValid()
         }
-        dxvkConfigRows.addView(row)
-        return keyInput
+        return row
+    }
+
+    /* The empty row at the end of the table becomes a real row once both its
+     * key and its value are set; a new empty row then takes its place. */
+    private fun maybeAddScratchRow(row: View, key: String, value: String) {
+        if (row !== dxvkScratchRow) return
+        if (key.isEmpty() || value.isEmpty()) return
+        dxvkScratchRow = null
+        ensureScratchRow()
+    }
+
+    /* Only the options with a finite set of values offer a choice; the others
+     * keep a free-form value that the user types. */
+    private fun updateDxvkValueOptions(row: View, key: String) {
+        val adapter = row.findViewById<AutoCompleteTextView>(R.id.dxvk_config_value)
+            .adapter as? DxvkSuggestionAdapter ?: return
+        adapter.setItems(DxvkConfigOptions.valuesFor(key))
     }
 
     private fun readDxvkConfig(): String {
         val lines = mutableListOf<String>()
         for (index in 0 until dxvkConfigRows.childCount) {
             val row = dxvkConfigRows.getChildAt(index)
-            val key = row.findViewById<EditText>(R.id.dxvk_config_key)
+            val key = row.findViewById<AutoCompleteTextView>(R.id.dxvk_config_key)
                 .text.toString().trim()
             if (key.isEmpty() || !key.all(::isDxvkKeyChar)) continue
 
             /* InputFilter is not applied to text set programmatically from a
              * saved preference, so sanitize once more before serialization.
              * DXVK has no escape for a quote and treats CR as whitespace. */
-            val value = row.findViewById<EditText>(R.id.dxvk_config_value)
+            val value = row.findViewById<AutoCompleteTextView>(R.id.dxvk_config_value)
                 .text.toString().trim()
                 .filter { it != '"' && it != '\n' && it != '\r' }
             val encoded = if (value.any { it.isWhitespace() }) "\"$value\"" else value
@@ -703,23 +999,49 @@ class LaunchSettingsActivity : AppCompatActivity() {
         return lines.joinToString("\n")
     }
 
+    /* Parses the flat key=value form used by the settings table.  Comments and
+     * section headers are skipped; the value ends at the first whitespace
+     * outside quotes, and quote characters are removed, matching DXVK's value
+     * syntax.  Only active (uncommented) assignments are imported: the stock
+     * dxvk.conf is a fully commented template. */
     private fun parseDxvkConfig(config: String): List<Pair<String, String>> =
         config.lineSequence().mapNotNull { raw ->
             val line = raw.trim()
-            if (line.isEmpty() || line.startsWith("#")) return@mapNotNull null
+            if (line.isEmpty() || line.startsWith("#") || line.startsWith("[")) {
+                return@mapNotNull null
+            }
 
             val equals = line.indexOf('=')
             if (equals <= 0) return@mapNotNull null
 
             val key = line.substring(0, equals).trim()
-            if (key.isEmpty() || !key.all(::isDxvkKeyChar)) return@mapNotNull null
-
-            var value = line.substring(equals + 1).trim()
-            if (value.length >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
-                value = value.substring(1, value.length - 1)
+            if (key.isEmpty() || key.length > DXVK_KEY_MAX_LENGTH ||
+                !key.all(::isDxvkKeyChar)
+            ) {
+                return@mapNotNull null
             }
-            key to value
+
+            key to parseDxvkValue(line.substring(equals + 1))
         }.toList()
+
+    private fun parseDxvkValue(raw: String): String {
+        var index = 0
+        while (index < raw.length && raw[index].isWhitespace()) index += 1
+
+        val value = StringBuilder()
+        var quoted = false
+        while (index < raw.length) {
+            val character = raw[index]
+            if (!quoted && character.isWhitespace()) break
+            if (character == '"') {
+                quoted = !quoted
+            } else {
+                value.append(character)
+            }
+            index += 1
+        }
+        return value.toString().take(DXVK_VALUE_MAX_LENGTH)
+    }
 
     private fun isDxvkKeyChar(character: Char): Boolean =
         character in 'a'..'z' ||
@@ -870,7 +1192,12 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 .getOrNull(gestureModeSpinner.selectedItemPosition)?.doubleTap ?: true,
             doubleTapTimeoutMs = progressToDelay(doubleTapDelaySlider.progress),
             longPressTimeoutMs = progressToDelay(longPressDelaySlider.progress),
-            tapClickDelayMs = tapClickDelayFromProgress(tapClickDelaySlider.progress)
+            tapClickDelayMs = tapClickDelayFromProgress(tapClickDelaySlider.progress),
+            selection24 = selection24Switch.isChecked,
+            hideCursor = hideCursorSwitch.isChecked,
+            overlayOpacityPercent = overlayOpacityFromProgress(
+                overlayOpacitySlider.progress
+            )
         )
     }
 
@@ -1000,6 +1327,61 @@ class LaunchSettingsActivity : AppCompatActivity() {
             LaunchContract.MAX_TAP_CLICK_DELAY_MS - LaunchContract.MIN_TAP_CLICK_DELAY_MS
         )
 
+    /*
+     * The opacity slider is an index into the 10..50 percent range: the
+     * layout sets max = 40 so one step is one percent.  The native controls
+     * layer clamps the same range.
+     */
+    private fun bindOverlayOpacitySlider(percent: Int) {
+        overlayOpacitySlider.max =
+            LaunchContract.MAX_OVERLAY_OPACITY_PERCENT -
+            LaunchContract.MIN_OVERLAY_OPACITY_PERCENT
+        val progress = overlayOpacityToProgress(percent)
+        overlayOpacitySlider.progress = progress
+        overlayOpacityValue.text = getString(
+            R.string.launch_overlay_opacity_value,
+            overlayOpacityFromProgress(progress)
+        )
+    }
+
+    private fun wireOverlayOpacitySlider() {
+        overlayOpacitySlider.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(
+                    seekBar: SeekBar?,
+                    progress: Int,
+                    fromUser: Boolean
+                ) {
+                    overlayOpacityValue.text = getString(
+                        R.string.launch_overlay_opacity_value,
+                        overlayOpacityFromProgress(progress)
+                    )
+                    if (fromUser && !binding) {
+                        refreshValidation()
+                        saveIfValid()
+                    }
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            }
+        )
+    }
+
+    private fun overlayOpacityToProgress(percent: Int): Int =
+        percent.coerceIn(
+            LaunchContract.MIN_OVERLAY_OPACITY_PERCENT,
+            LaunchContract.MAX_OVERLAY_OPACITY_PERCENT
+        ) - LaunchContract.MIN_OVERLAY_OPACITY_PERCENT
+
+    private fun overlayOpacityFromProgress(progress: Int): Int =
+        LaunchContract.MIN_OVERLAY_OPACITY_PERCENT + progress.coerceIn(
+            0,
+            LaunchContract.MAX_OVERLAY_OPACITY_PERCENT -
+            LaunchContract.MIN_OVERLAY_OPACITY_PERCENT
+        )
+
     /* The slider is an index, not milliseconds: max = 10 maps 100..200 ms in
      * exact 10 ms steps on every Android version. */
     private fun delayToProgress(ms: Int): Int {
@@ -1065,7 +1447,14 @@ class LaunchSettingsActivity : AppCompatActivity() {
         const val GESTURE_DELAY_STEP_MS = 10
         const val GESTURE_DELAY_STEPS =
             (MAX_GESTURE_DELAY_MS - MIN_GESTURE_DELAY_MS) / GESTURE_DELAY_STEP_MS
+        const val DXVK_KEY_MAX_LENGTH = 80
+        const val DXVK_VALUE_MAX_LENGTH = 200
+        const val MAX_DXVK_CONFIG_FILE_CHARS = 256 * 1024
         const val DXVK_VERSION_1_10 = "1"
         const val DXVK_VERSION_3_1_1 = "3"
+        /* Low-latency framepacing fork, based on DXVK 3.1.1.  The native
+         * selector parses the first character, so "ll" is distinct from both
+         * the 1.10.3 and 3.1.1 choices. */
+        const val DXVK_VERSION_LOW_LATENCY = "ll"
     }
 }

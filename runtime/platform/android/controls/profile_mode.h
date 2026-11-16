@@ -35,16 +35,28 @@ void wc3_profile_apply_gesture_timings(ProfileData *profile,
 /*
  * Build the deterministic SIMPLE variant from the authored profile.
  *
- * The authored ESC button supplies type, shape, geometry, scale, opacity and
- * icon.  All other elements are removed; the ESC element keeps KEY_ESC in
- * slot 0, while the only global gesture is single tap -> MOUSE_LEFT_BUTTON.
- * Long press, element gestures and scroll bindings are removed.
+ * SIMPLE is a copy of the authored profile with every on-screen element
+ * removed (element_count = 0) and no replacement button.  The only global
+ * gesture is single tap -> MOUSE_LEFT_BUTTON; long press, element gestures
+ * and scroll bindings are removed.
  *
- * Returns 0 on success, -1 for invalid input, -2 when the authored profile has
- * no BUTTON bound to KEY_ESC, -3 when more than one does.  On failure the
- * caller must keep FULL; this function never guesses a replacement element.
+ * Returns 0 on success, -1 for invalid input.
  */
 int wc3_profile_build_simple(const ProfileData *authored, ProfileData *simple);
+
+/*
+ * Build the cinematic SIMPLE variant from the authored profile.
+ *
+ * This is the same global gesture set as SIMPLE, but exactly one authored
+ * on-screen element is kept: the unique button that carries a KEY_ESC
+ * binding.  Its geometry and visuals are preserved; only slot 0 of that
+ * element is kept and rebound to KEY_ESC.
+ *
+ * Returns 0 on success, -1 for invalid input, -2 when no authored ESC element
+ * exists, and -3 when more than one button carries KEY_ESC.
+ */
+int wc3_profile_build_simple_esc(const ProfileData *authored,
+                                 ProfileData *simple);
 
 #ifdef __cplusplus
 }

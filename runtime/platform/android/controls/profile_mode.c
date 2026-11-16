@@ -70,6 +70,43 @@ static void clear_bind_package(ProfileBindPackage *package)
     profile_bind_package_init(package);
 }
 
+/* The global gesture set shared by both simplified variants: one tap is LMB,
+ * no long press, no double tap and no scrolling. */
+static int apply_simple_gestures(ProfileData *simple)
+{
+    ProfileGestureSettings *gestures = &simple->gesture_settings;
+    for (int i = 0; i < PROFILE_GESTURE_COUNT; i++)
+        profile_bind_package_init(&gestures->gesture_actions[i]);
+
+    ProfileBind left;
+    if (profile_bind_from_string("MOUSE_LEFT_BUTTON", &left) != 0)
+        return -1;
+    gestures->gesture_actions[PROFILE_GESTURE_SINGLE_TAP].bindings[0] = left;
+    gestures->gesture_actions[PROFILE_GESTURE_SINGLE_TAP].count = 1;
+
+    memset(gestures->scroll_bindings, 0, sizeof(gestures->scroll_bindings));
+    memset(gestures->scroll_hold_v, 0, sizeof(gestures->scroll_hold_v));
+    memset(gestures->scroll_hold_h, 0, sizeof(gestures->scroll_hold_h));
+    gestures->scroll_threshold_px = 0;
+    simple->long_press_delay_ms = 0;
+    return 0;
+}
+
+/* -1: no authored ESC; -2: more than one ESC-bearing button. */
+static int find_esc_index(const ProfileData *authored)
+{
+    int index = -1;
+    for (int i = 0; i < authored->element_count; i++) {
+        const ProfileControlElement *element = &authored->elements[i];
+        if (element->type != PROFILE_ELEM_BUTTON || !element_has_esc(element))
+            continue;
+        if (index >= 0)
+            return -2;
+        index = i;
+    }
+    return index;
+}
+
 int wc3_profile_build_simple(const ProfileData *authored, ProfileData *simple)
 {
     if (!authored || !simple || authored == simple)
@@ -78,18 +115,32 @@ int wc3_profile_build_simple(const ProfileData *authored, ProfileData *simple)
         authored->element_count > PROFILE_MAX_ELEMENTS)
         return -1;
 
-    int esc_index = -1;
-    for (int i = 0; i < authored->element_count; i++) {
-        const ProfileControlElement *element = &authored->elements[i];
-        if (element->type != PROFILE_ELEM_BUTTON || !element_has_esc(element))
-            continue;
-        if (esc_index >= 0)
-            return -3; /* ambiguous authored ESC; keep FULL */
-        esc_index = i;
-    }
-    if (esc_index < 0)
-        return -2; /* no authored ESC; keep FULL */
+    /* SIMPLE is the authored profile with every element removed.  Nothing is
+     * derived from a button: the overlay has no on-screen controls, while the
+     * global gestures below keep the menu usable. */
+    *simple = *authored;
+    simple->element_count = 0;
+    return apply_simple_gestures(simple);
+}
 
+int wc3_profile_build_simple_esc(const ProfileData *authored,
+                                 ProfileData *simple)
+{
+    if (!authored || !simple || authored == simple)
+        return -1;
+    if (authored->element_count <= 0 ||
+        authored->element_count > PROFILE_MAX_ELEMENTS)
+        return -1;
+
+    int esc_index = find_esc_index(authored);
+    if (esc_index == -1)
+        return -2;
+    if (esc_index == -2)
+        return -3;
+
+    /* Cinematic SIMPLE keeps exactly one authored element: the ESC button.
+     * Its geometry, visual properties and custom icon are preserved, while all
+     * other bindings and gestures are replaced by the deterministic set. */
     *simple = *authored;
     simple->element_count = 1;
     simple->elements[0] = authored->elements[esc_index];
@@ -104,32 +155,13 @@ int wc3_profile_build_simple(const ProfileData *authored, ProfileData *simple)
     esc->toggle_switch = false;
     esc->has_gamepad_binding = false;
 
-    /* The authored button keeps its exact ESC action.  The single tap is a
-     * global gesture for taps outside the element; it must not replace the
-     * element binding. */
     ProfileBind esc_bind;
     if (profile_bind_from_string("KEY_ESC", &esc_bind) != 0)
         return -1;
     esc->slot_packages[0].bindings[0] = esc_bind;
     esc->slot_packages[0].count = 1;
 
-    /* SIMPLE has no edge gestures and no scrolling.  The single ESC element is
-     * the only authored geometry; its visual properties are preserved above. */
-    ProfileGestureSettings *gestures = &simple->gesture_settings;
-    for (int i = 0; i < PROFILE_GESTURE_COUNT; i++)
-        clear_bind_package(&gestures->gesture_actions[i]);
-    ProfileBind left;
-    if (profile_bind_from_string("MOUSE_LEFT_BUTTON", &left) != 0)
-        return -1;
-    gestures->gesture_actions[PROFILE_GESTURE_SINGLE_TAP].bindings[0] = left;
-    gestures->gesture_actions[PROFILE_GESTURE_SINGLE_TAP].count = 1;
-    memset(gestures->scroll_bindings, 0, sizeof(gestures->scroll_bindings));
-    memset(gestures->scroll_hold_v, 0, sizeof(gestures->scroll_hold_v));
-    memset(gestures->scroll_hold_h, 0, sizeof(gestures->scroll_hold_h));
-    gestures->scroll_threshold_px = 0;
-    simple->long_press_delay_ms = 0;
-
-    return 0;
+    return apply_simple_gestures(simple);
 }
 
 void wc3_profile_apply_gesture_mode(ProfileData *profile,

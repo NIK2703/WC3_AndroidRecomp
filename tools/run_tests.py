@@ -1493,7 +1493,7 @@ def test_pass6_build_guards() -> int:
 
 
 def test_pass7_build_guards() -> int:
-    """O-70/O-74: packed relocations and P0-6 are product defaults."""
+    """O-70/O-74: packed relocations and P0-6 (global index) are defaults."""
     cmake = (ROOT / "CMakeLists.txt").read_text(
         encoding="utf-8", errors="replace")
     corpus = (ROOT / "cmake" / "Wc3ReliftedCorpus.cmake").read_text(
@@ -1523,6 +1523,10 @@ def test_pass7_build_guards() -> int:
         problems.append("relifted corpus does not gate P0-6")
     if "WC3_RETURN_ADDRESS_ELIDE_EXE" not in corpus:
         problems.append("relifted corpus does not invoke return_address_elide")
+    if ("--index-out" not in corpus or "--index " not in corpus):
+        problems.append("relifted corpus does not build/use the global P0-6 index")
+    if '"${_ra_index}" IS_NEWER_THAN "${_ra_out}"' not in corpus:
+        problems.append("relifted corpus does not refresh chunks on index change")
     if '"-DWC3_PACK_DYN_RELOCS_MODE=$packDynRelocsMode"' not in build_app:
         problems.append("build_app.ps1 does not pass the relocation mode")
     for needle in ('"-DWC3_DEVIRTUALIZE_P0_1=$liftOptValue"',
@@ -3136,6 +3140,7 @@ def test_game_state() -> int:
     rc = run([
         cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
         "-I" + str(ROOT / "runtime" / "ipc"),
+        "-I" + str(ROOT / "runtime" / "diag"),
         str(ROOT / "tests" / "game_state_test.c"),
         str(ROOT / "runtime" / "ipc" / "game_state.c"),
         "-o", str(exe),

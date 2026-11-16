@@ -58,6 +58,11 @@ find_program(WC3_XMM_LOCAL_EXE
     HINTS "${WC3_ROOT}/build/lift-tools"
     NO_DEFAULT_PATH)
 
+find_program(WC3_XMM_LANE_EXE
+    NAMES xmm_lane xmm_lane.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+
 find_program(WC3_W3L_COMPAT_EXE
     NAMES w3l_compat w3l_compat.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -141,6 +146,77 @@ if(NOT _wc3_atomic_rc EQUAL 0)
 endif()
 string(STRIP "${_wc3_atomic_out}" _wc3_atomic_out)
 message(STATUS "${_wc3_atomic_out}")
+
+if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
+    # P0-6 needs a *global* function summary: after splitcorpus a callee
+    # usually lives in another chunk, so a per-chunk index cannot prove safety
+    # and the pass degenerates to a no-op (2.5k elisions instead of ~44k on the
+    # game module).  Phase A analyzes the pre-split module sources once and
+    # writes a compact "<VA> <0|1>" map; every per-chunk run consumes it with
+    # --index.  seed.c and closed.c are disjoint halves of a module, so both
+    # are inputs.  The analysis is textual, and the raw (pre-devirtualize) form
+    # is a conservative superset of the direct-call form: a function the map
+    # marks safe cannot become a return-address reader when devirtualize only
+    # resolves call targets.
+    if(NOT WC3_RETURN_ADDRESS_ELIDE_EXE)
+        message(FATAL_ERROR
+            "return_address_elide.exe missing; run "
+            "tools/lift/build_tools.ps1 before configuring")
+    endif()
+    # Fail closed on a stale pass: the index is derived from the executable, so
+    # an older binary would silently define both the map and every chunk.
+    set(_ra_pass_src
+        "${WC3_ROOT}/tools/lift/csrc_local/return_address_elide.c")
+    if(EXISTS "${_ra_pass_src}" AND
+       "${_ra_pass_src}" IS_NEWER_THAN "${WC3_RETURN_ADDRESS_ELIDE_EXE}")
+        message(FATAL_ERROR
+            "return_address_elide.exe is older than tools/lift/csrc_local/"
+            "return_address_elide.c; run tools/lift/build_tools.ps1 -Force "
+            "before configuring")
+    endif()
+    set(_ra_index_dir "${CMAKE_CURRENT_BINARY_DIR}/return_address_elide")
+    set(_ra_index "${_ra_index_dir}/index.txt")
+    file(MAKE_DIRECTORY "${_ra_index_dir}")
+    set(_ra_index_args)
+    set(_ra_index_sources)
+    foreach(_ra_mi RANGE 0 ${_wc3_last_mod})
+        string(JSON _ra_name GET "${_wc3_manifest}" modules ${_ra_mi} name)
+        foreach(_ra_kind seed closed)
+            set(_ra_src "${WC3_RELIFTED_ROOT_ABS}/${_ra_name}/${_ra_kind}.c")
+            list(APPEND _ra_index_sources "${_ra_src}")
+            list(APPEND _ra_index_args --index-input "${_ra_src}")
+        endforeach()
+    endforeach()
+    set(_ra_index_need 0)
+    if(NOT EXISTS "${_ra_index}")
+        set(_ra_index_need 1)
+    endif()
+    if("${WC3_RETURN_ADDRESS_ELIDE_EXE}" IS_NEWER_THAN "${_ra_index}")
+        set(_ra_index_need 1)
+    endif()
+    foreach(_ra_src IN LISTS _ra_index_sources)
+        if("${_ra_src}" IS_NEWER_THAN "${_ra_index}")
+            set(_ra_index_need 1)
+        endif()
+    endforeach()
+    if(_ra_index_need)
+        execute_process(
+            COMMAND "${WC3_RETURN_ADDRESS_ELIDE_EXE}"
+                    --index-out "${_ra_index}"
+                    ${_ra_index_args}
+            RESULT_VARIABLE _ra_index_rc
+            OUTPUT_VARIABLE _ra_index_out
+            ERROR_VARIABLE _ra_index_err)
+        if(NOT _ra_index_rc EQUAL 0)
+            message(FATAL_ERROR
+                "return_address_elide index failed (rc=${_ra_index_rc}):\n"
+                "${_ra_index_out}\n${_ra_index_err}")
+        endif()
+        string(STRIP "${_ra_index_out}" _ra_index_out)
+        message(STATUS "${_ra_index_out}")
+    endif()
+endif()
+
 foreach(_mi RANGE 0 ${_wc3_last_mod})
     string(JSON _name GET "${_wc3_manifest}" modules ${_mi} name)
     set(_module_dir "${WC3_RELIFTED_ROOT_ABS}/${_name}")
@@ -296,12 +372,14 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                 if(NOT EXISTS "${_ra_out}" OR
                    NOT EXISTS "${_ra_json}" OR
                    "${_chunk}" IS_NEWER_THAN "${_ra_out}" OR
+                   "${_ra_index}" IS_NEWER_THAN "${_ra_out}" OR
                    "${WC3_RETURN_ADDRESS_ELIDE_EXE}" IS_NEWER_THAN "${_ra_out}")
                     execute_process(
                         COMMAND "${WC3_RETURN_ADDRESS_ELIDE_EXE}"
                                 --lift "${_chunk}"
                                 --out "${_ra_out}"
                                 --json "${_ra_json}"
+                                --index "${_ra_index}"
                                 --quiet
                         RESULT_VARIABLE _ra_rc
                         OUTPUT_VARIABLE _ra_stdout
@@ -407,6 +485,48 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             list(APPEND _xmm_chunks "${_xmm_out}")
         endforeach()
         set(_chunks "${_xmm_chunks}")
+        # D3c first increment: exact upper-lane zero reuse.  It must see the
+        # xmm_local text (it rewrites the local XMM[8] stores), and it runs
+        # before the profile and selection passes so they operate on the
+        # reduced form.  The transform is exact and has no option of its own;
+        # the output path carries the xmm_local profile so a different profile
+        # can never reuse a stale chunk.
+        if(NOT WC3_XMM_LANE_EXE)
+            message(FATAL_ERROR
+                "xmm_lane.exe missing; run tools/lift/build_tools.ps1 "
+                "before configuring")
+        endif()
+        set(_lane_dir
+            "${CMAKE_CURRENT_BINARY_DIR}/xmm_lane/${_xmm_profile}/${_name}/${_kind}")
+        file(MAKE_DIRECTORY "${_lane_dir}")
+        set(_lane_chunks)
+        foreach(_chunk IN LISTS _chunks)
+            get_filename_component(_chunk_name "${_chunk}" NAME)
+            set(_lane_out "${_lane_dir}/${_chunk_name}")
+            set(_lane_json "${_lane_out}.json")
+            if(NOT EXISTS "${_lane_out}" OR
+               NOT EXISTS "${_lane_json}" OR
+               "${_chunk}" IS_NEWER_THAN "${_lane_out}" OR
+               "${WC3_XMM_LANE_EXE}" IS_NEWER_THAN "${_lane_out}")
+                execute_process(
+                    COMMAND "${WC3_XMM_LANE_EXE}"
+                            --lift "${_chunk}"
+                            --out "${_lane_out}"
+                            --json "${_lane_json}"
+                            --quiet
+                    RESULT_VARIABLE _lane_rc
+                    OUTPUT_VARIABLE _lane_stdout
+                    ERROR_VARIABLE _lane_stderr)
+                if(NOT _lane_rc EQUAL 0)
+                    message(FATAL_ERROR
+                        "xmm_lane failed for ${_chunk} "
+                        "(rc=${_lane_rc}):\n"
+                        "${_lane_stdout}\n${_lane_stderr}")
+                endif()
+            endif()
+            list(APPEND _lane_chunks "${_lane_out}")
+        endforeach()
+        set(_chunks "${_lane_chunks}")
         if(WC3_W3L_COMPAT)
             # The W3L/PvPGN/rubattle profile runs after every other enabled
             # pass, so it sees the final instruction text.  The profile and
@@ -692,18 +812,30 @@ target_compile_definitions(wc3_corpus_relifted PRIVATE
     GVA_DELTA=0
     WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
     WC3_DEBUG=${WC3_DEBUG_DEFINE})
-# The relifted corpus is guest code with a frozen ABI.  Build it at -O2, not
-# -O0: the header-only runtime (cpu.h, x87.h) must inline, and generated bodies
-# run once per guest instruction.  The stack protector and _FORTIFY_SOURCE add
-# host canary/check calls that the legacy guest-memory targets already disable;
-# no speed claim follows until G-10/PM-19 measure this corpus.
+# The relifted corpus is guest code with a frozen ABI.  Build it at the
+# configured corpus level (O2 by default, O3 only in the release_optimized
+# profile), not -O0: the header-only runtime (cpu.h, x87.h) must inline, and
+# generated bodies run once per guest instruction.  The stack protector and
+# _FORTIFY_SOURCE add host canary/check calls that the legacy guest-memory
+# targets already disable; no speed claim follows until G-10/PM-19 measure
+# this corpus.
 # O-32: the NDK passes -g in CMAKE_C_FLAGS, and target options are appended
-# after it, so -g0 here (next to -O2) wins for the generated corpus only.
-# Expected effect is compile time, link peak RSS, .a size and disk I/O
-# (PM-22); no frame-time claim until G-10/PM-19, and the L_<va> set plus the
-# G-15 body check must stay unchanged.
+# after it, so -g0 here (next to the optimization level) wins for the
+# generated corpus only.  Expected effect is compile time, link peak RSS, .a
+# size and disk I/O (PM-22); no frame-time claim until G-10/PM-19, and the
+# L_<va> set plus the G-15 body check must stay unchanged.
+if(NOT DEFINED WC3_CORPUS_COMPILE_OPTIONS OR
+   "${WC3_CORPUS_COMPILE_OPTIONS}" STREQUAL "")
+    if(DEFINED WC3_CORPUS_OPT_LEVEL_EFFECTIVE AND
+       WC3_CORPUS_OPT_LEVEL_EFFECTIVE)
+        set(WC3_CORPUS_COMPILE_OPTIONS
+            "-${WC3_CORPUS_OPT_LEVEL_EFFECTIVE}")
+    else()
+        set(WC3_CORPUS_COMPILE_OPTIONS -O2)
+    endif()
+endif()
 target_compile_options(wc3_corpus_relifted PRIVATE
-    -O2
+    ${WC3_CORPUS_COMPILE_OPTIONS}
     -g0
     -fno-stack-protector
     -U_FORTIFY_SOURCE

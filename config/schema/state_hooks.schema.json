@@ -11,8 +11,8 @@
     "image_base": { "const": "0x6F000000" },
     "hooks": {
       "type": "array",
-      "minItems": 6,
-      "maxItems": 6,
+      "minItems": 11,
+      "maxItems": 11,
       "items": {
         "type": "object",
         "required": ["name", "kind", "store_va", "after_va", "bytes",
@@ -23,9 +23,12 @@
             "type": "string",
             "enum": ["cgameui_created", "cgameui_seen",
                      "cgameui_destroyed", "pause", "gameover",
-                     "gameover_cleared"]
+                     "gameover_cleared", "cinematic_enter_timed",
+                     "cinematic_enter_instant", "cinematic_leave_timed",
+                     "cinematic_leave_instant",
+                     "interface_timed_complete"]
           },
-          "kind": { "type": "integer", "minimum": 0, "maximum": 5 },
+          "kind": { "type": "integer", "minimum": 0, "maximum": 10 },
           "store_va": {
             "type": "string",
             "pattern": "^0x[0-9A-F]{8}$"

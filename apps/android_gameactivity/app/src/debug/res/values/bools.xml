@@ -2,4 +2,6 @@
 <resources>
     <!-- Debug-only T2 A/B: DebugOverlayReceiver toggles this preference. -->
     <bool name="overlay_experiment_supported">true</bool>
+    <!-- Debug-only Media3/movie trace. -->
+    <bool name="movie_diagnostics_supported">true</bool>
 </resources>

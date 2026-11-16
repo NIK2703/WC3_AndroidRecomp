@@ -2,4 +2,6 @@
 <resources>
     <!-- Release always ignores the debug overlay experiment preference. -->
     <bool name="overlay_experiment_supported">false</bool>
+    <!-- The Media3 movie trace lives only in the debug source set. -->
+    <bool name="movie_diagnostics_supported">false</bool>
 </resources>

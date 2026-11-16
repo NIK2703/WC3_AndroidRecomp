@@ -24,6 +24,11 @@ _EXPECTED_KINDS = {
     3: "pause",
     4: "gameover",
     5: "gameover_cleared",
+    6: "cinematic_enter_timed",
+    7: "cinematic_enter_instant",
+    8: "cinematic_leave_timed",
+    9: "cinematic_leave_instant",
+    10: "interface_timed_complete",
 }
 
 _EXPR = re.compile(r"^(?:c->[a-z][a-z0-9]*|0u)$")
@@ -105,7 +110,8 @@ def load_hooks(path: Path | str | None = None) -> tuple[StateHook, ...]:
             raise StateHookError(f"hooks[{index}].name missing")
         kind = raw.get("kind")
         if not isinstance(kind, int) or kind not in _EXPECTED_KINDS:
-            raise StateHookError(f"{name}.kind must be 0..5")
+            raise StateHookError(
+                f"{name}.kind must be 0..{max(_EXPECTED_KINDS)}")
         if _EXPECTED_KINDS[kind] != name:
             raise StateHookError(
                 f"{name}.kind={kind} does not match "
@@ -157,7 +163,8 @@ def load_hooks(path: Path | str | None = None) -> tuple[StateHook, ...]:
 
     hooks.sort(key=lambda h: h.kind)
     if [h.kind for h in hooks] != list(range(len(_EXPECTED_KINDS))):
-        raise StateHookError("hook kinds must cover 0..5 exactly")
+        raise StateHookError(
+            f"hook kinds must cover 0..{max(_EXPECTED_KINDS)} exactly")
     return tuple(hooks)
 
 

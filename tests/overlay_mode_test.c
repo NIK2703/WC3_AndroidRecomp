@@ -23,6 +23,27 @@ int main(void)
            WC3_OVERLAY_MODE_SIMPLE);
     assert(wc3_overlay_mode_for_state(
                WC3_GAME_STATE_CGAMEUI | WC3_GAME_STATE_CINEMATIC) ==
+           WC3_OVERLAY_MODE_SIMPLE_ESC);
+    /* A hidden interface is the cinematic mode: the ESC variant is kept. */
+    assert(wc3_overlay_mode_for_state(
+               WC3_GAME_STATE_CGAMEUI | WC3_GAME_STATE_CINEMATIC) ==
+           WC3_OVERLAY_MODE_SIMPLE_ESC);
+    assert(wc3_overlay_mode_is_simple(WC3_OVERLAY_MODE_SIMPLE));
+    assert(wc3_overlay_mode_is_simple(WC3_OVERLAY_MODE_SIMPLE_ESC));
+    assert(!wc3_overlay_mode_is_simple(WC3_OVERLAY_MODE_FULL));
+
+    /* A pause or game-over menu keeps the buttonless variant even if the
+     * cinematic bit is still latched. */
+    assert(wc3_overlay_mode_for_state(
+               WC3_GAME_STATE_CGAMEUI | WC3_GAME_STATE_PAUSE |
+                   WC3_GAME_STATE_CINEMATIC) ==
+           WC3_OVERLAY_MODE_SIMPLE);
+    assert(wc3_overlay_mode_for_state(
+               WC3_GAME_STATE_CGAMEUI | WC3_GAME_STATE_GAMEOVER |
+                   WC3_GAME_STATE_CINEMATIC) ==
+           WC3_OVERLAY_MODE_SIMPLE);
+    assert(wc3_overlay_mode_for_state(
+               WC3_GAME_STATE_CGAMEUI | WC3_GAME_STATE_PAUSE) ==
            WC3_OVERLAY_MODE_SIMPLE);
 
     /* Replay/observer remain FULL even inside a cinematic. */
@@ -32,6 +53,9 @@ int main(void)
     assert(wc3_overlay_mode_for_state(
                WC3_GAME_STATE_CGAMEUI | WC3_GAME_STATE_OBSERVER |
                    WC3_GAME_STATE_CINEMATIC) ==
+           WC3_OVERLAY_MODE_FULL);
+    assert(wc3_overlay_mode_for_state(
+               WC3_GAME_STATE_CGAMEUI | WC3_GAME_STATE_REPLAY) ==
            WC3_OVERLAY_MODE_FULL);
 
     /* Game-over cannot hide a replay/observer world. */

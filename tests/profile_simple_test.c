@@ -49,6 +49,7 @@ int main(void)
 {
     static ProfileData authored;
     static ProfileData simple;
+    static ProfileData simple_esc;
     memset(&authored, 0, sizeof(authored));
 
     ProfileControlElement *dpad = &authored.elements[0];
@@ -73,27 +74,7 @@ int main(void)
     authored.gesture_settings.scroll_hold_v[0] = true;
 
     assert(wc3_profile_build_simple(&authored, &simple) == 0);
-    assert(simple.element_count == 1);
-    const ProfileControlElement *esc = &simple.elements[0];
-    assert(esc->type == PROFILE_ELEM_BUTTON);
-    assert(esc->shape == PROFILE_SHAPE_CIRCLE);
-    assert(esc->x == authored.elements[1].x);
-    assert(esc->y == authored.elements[1].y);
-    assert(esc->w == authored.elements[1].w);
-    assert(esc->h == authored.elements[1].h);
-    assert(esc->scale == authored.elements[1].scale);
-    assert(esc->opacity == authored.elements[1].opacity);
-    assert(strcmp(esc->display_text, "ESC") == 0);
-    assert(esc->slot_packages[0].count == 1);
-    assert(strcmp(esc->slot_packages[0].bindings[0].name, "KEY_ESC") == 0);
-    assert(esc->slot_packages[1].count == 0);
-    assert(esc->slot_packages[2].count == 0);
-    assert(esc->slot_packages[3].count == 0);
-    assert(esc->binds[0].name[0] == '\0');
-    assert(esc->long_press_package.count == 0);
-    assert(esc->gesture_package.count == 0);
-    assert(esc->binding_count == 0);
-    assert(!esc->has_gamepad_binding);
+    assert(simple.element_count == 0);
     assert(simple.gesture_settings.gesture_actions[PROFILE_GESTURE_SINGLE_TAP]
                .count == 1);
     assert(strcmp(simple.gesture_settings
@@ -110,28 +91,61 @@ int main(void)
     assert(!simple.gesture_settings.scroll_hold_v[0]);
     assert(simple.long_press_delay_ms == 0);
 
+    /* The cinematic variant keeps exactly the authored ESC element and the
+     * same simplified global gestures. */
+    assert(wc3_profile_build_simple_esc(&authored, &simple_esc) == 0);
+    assert(simple_esc.element_count == 1);
+    assert(simple_esc.elements[0].type == PROFILE_ELEM_BUTTON);
+    assert(simple_esc.elements[0].x == authored.elements[1].x);
+    assert(simple_esc.elements[0].y == authored.elements[1].y);
+    assert(simple_esc.elements[0].w == authored.elements[1].w);
+    assert(simple_esc.elements[0].h == authored.elements[1].h);
+    assert(simple_esc.elements[0].scale == authored.elements[1].scale);
+    assert(strcmp(simple_esc.elements[0].display_text, "ESC") == 0);
+    assert(simple_esc.elements[0].slot_packages[0].count == 1);
+    assert(strcmp(simple_esc.elements[0].slot_packages[0].bindings[0].name,
+                  "KEY_ESC") == 0);
+    assert(simple_esc.elements[0].slot_packages[1].count == 0);
+    assert(simple_esc.elements[0].long_press_package.count == 0);
+    assert(simple_esc.elements[0].gesture_package.count == 0);
+    assert(simple_esc.elements[0].binds[0].name[0] == '\0');
+    assert(simple_esc.gesture_settings
+               .gesture_actions[PROFILE_GESTURE_SINGLE_TAP]
+               .count == 1);
+    assert(strcmp(simple_esc.gesture_settings
+                      .gesture_actions[PROFILE_GESTURE_SINGLE_TAP]
+                      .bindings[0]
+                      .name,
+                  "MOUSE_LEFT_BUTTON") == 0);
+    for (int i = 0; i < PROFILE_GESTURE_COUNT; i++) {
+        if (i == PROFILE_GESTURE_SINGLE_TAP) continue;
+        assert(simple_esc.gesture_settings.gesture_actions[i].count == 0);
+    }
+    assert(simple_esc.gesture_settings.scroll_bindings[0][0].name[0] == '\0');
+    assert(!simple_esc.gesture_settings.scroll_hold_v[0]);
+    assert(simple_esc.gesture_settings.mouse_mode ==
+           PROFILE_MOUSE_MODE_TOUCHSCREEN);
+    assert(simple_esc.long_press_delay_ms == 0);
+
     /* The authored profile is never modified. */
     assert(authored.element_count == 2);
     assert(strcmp(authored.elements[1].slot_packages[0].bindings[0].name,
                   "KEY_ESC") == 0);
     assert(authored.elements[1].long_press_package.count == 1);
 
-    /* Missing ESC keeps FULL; duplicate ESC is ambiguous and keeps FULL. */
+    /* The authored ESC is irrelevant: SIMPLE drops every element. */
     authored.elements[1].slot_packages[0].count = 0;
     authored.elements[1].binds[0].name[0] = '\0';
-    assert(wc3_profile_build_simple(&authored, &simple) == -2);
-
-    authored.elements[1].slot_packages[0].count = 1;
-    assert(profile_bind_from_string(
-               "KEY_ESC", &authored.elements[1].slot_packages[0].bindings[0])
-           == 0);
-    authored.elements[2] = authored.elements[1];
-    authored.element_count = 3;
-    assert(wc3_profile_build_simple(&authored, &simple) == -3);
+    assert(wc3_profile_build_simple(&authored, &simple) == 0);
+    assert(simple.element_count == 0);
+    assert(wc3_profile_build_simple_esc(&authored, &simple_esc) == -2);
 
     assert(wc3_profile_build_simple(NULL, &simple) == -1);
     assert(wc3_profile_build_simple(&authored, NULL) == -1);
     assert(wc3_profile_build_simple(&authored, &authored) == -1);
+    assert(wc3_profile_build_simple_esc(NULL, &simple) == -1);
+    assert(wc3_profile_build_simple_esc(&authored, NULL) == -1);
+    assert(wc3_profile_build_simple_esc(&authored, &authored) == -1);
 
     printf("profile_simple: okay\n");
     return 0;

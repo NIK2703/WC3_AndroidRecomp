@@ -63,6 +63,21 @@ typedef struct {
     size_t cap;
 } InfoVec;
 
+/* Compact serf-result map for the two-phase mode.  Phase A (--index-out)
+ * analyzes every function of the corpus once and writes "<VA> <0|1>" lines;
+ * phase B (--index) only needs this map, so a per-chunk run no longer rebuilds
+ * a local function index and loses every callee that lives in another chunk. */
+typedef struct {
+    char va[9];
+    unsigned char reads;
+} MapEntry;
+
+typedef struct {
+    MapEntry *v;
+    size_t n;
+    size_t cap;
+} FlagMap;
+
 typedef struct {
     size_t start;
     size_t end;
@@ -1612,6 +1627,208 @@ static void compute_tail_closures(InfoVec *infos)
     }
 }
 
+/* ---- global function index (two-phase mode) -------------------------- */
+
+static char *slurp_file(const char *path, size_t *out_n)
+{
+    FILE *f = fopen(path, "rb");
+    long sz;
+    char *text;
+    if (!f) {
+        fprintf(stderr, "return_address_elide: cannot read %s\n", path);
+        exit(2);
+    }
+    if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0 ||
+        fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        fprintf(stderr, "return_address_elide: cannot read %s\n", path);
+        exit(2);
+    }
+    text = (char *)xrealloc(NULL, (size_t)sz + 1);
+    if (fread(text, 1, (size_t)sz, f) != (size_t)sz) {
+        fclose(f);
+        free(text);
+        fprintf(stderr, "return_address_elide: cannot read %s\n", path);
+        exit(2);
+    }
+    fclose(f);
+    text[sz] = 0;
+    *out_n = (size_t)sz;
+    return text;
+}
+
+/* -1: unknown target, 0: safe, 1: reads the entry [esp] slot. */
+static int flagmap_lookup(const FlagMap *m, const char *va)
+{
+    size_t lo = 0, hi = m->n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = strcmp(va, m->v[mid].va);
+        if (c == 0) return m->v[mid].reads ? 1 : 0;
+        if (c < 0) hi = mid;
+        else lo = mid + 1;
+    }
+    return -1;
+}
+
+static void flagmap_push(FlagMap *m, const char *va, int reads)
+{
+    if (m->n == m->cap) {
+        m->cap = m->cap ? m->cap * 2 : 256;
+        m->v = (MapEntry *)xrealloc(m->v, m->cap * sizeof(*m->v));
+    }
+    memcpy(m->v[m->n].va, va, 9);
+    m->v[m->n].reads = reads ? 1 : 0;
+    m->n++;
+}
+
+static void flagmap_free(FlagMap *m)
+{
+    free(m->v);
+    m->v = NULL;
+    m->n = m->cap = 0;
+}
+
+static FlagMap flagmap_from_infos(InfoVec *infos)
+{
+    FlagMap m = {0};
+    size_t i;
+    for (i = 0; i < infos->n; i++)
+        flagmap_push(&m, infos->v[i].va, infos->v[i].reads_return_address);
+    return m;
+}
+
+static FlagMap load_index(const char *path)
+{
+    FlagMap m = {0};
+    size_t n = 0, pos = 0;
+    char prev[9] = {0};
+    char *text = slurp_file(path, &n);
+    while (pos < n) {
+        size_t start = pos, end;
+        int k;
+        while (pos < n && text[pos] != '\n') pos++;
+        end = pos;
+        if (pos < n) pos++;
+        if (end > start && text[end - 1] == '\r') end--;
+        if (end == start) continue;
+        if (end - start != 10 || text[start + 8] != ' ' ||
+            (text[start + 9] != '0' && text[start + 9] != '1')) {
+            fprintf(stderr,
+                    "return_address_elide: malformed index line in %s\n", path);
+            exit(2);
+        }
+        for (k = 0; k < 8; k++) {
+            if (!is_hex((unsigned char)text[start + k])) {
+                fprintf(stderr,
+                        "return_address_elide: malformed index line in %s\n",
+                        path);
+                exit(2);
+            }
+        }
+        {
+            char va[9];
+            memcpy(va, text + start, 8);
+            va[8] = 0;
+            /* write_index emits sorted unique VAs.  Refuse to binary-search
+             * anything else instead of silently mis-resolving a target. */
+            if (m.n > 0 && strcmp(prev, va) >= 0) {
+                fprintf(stderr,
+                        "return_address_elide: unsorted/duplicate index entry "
+                        "%s in %s\n", va, path);
+                exit(2);
+            }
+            memcpy(prev, va, 9);
+            flagmap_push(&m, va, text[start + 9] == '1');
+        }
+    }
+    free(text);
+    return m;
+}
+
+static int write_index(const char *path, InfoVec *infos)
+{
+    FILE *f = fopen(path, "wb");
+    size_t i;
+    if (!f) {
+        fprintf(stderr, "return_address_elide: cannot write %s\n", path);
+        return 2;
+    }
+    for (i = 0; i < infos->n; i++) {
+        if (fprintf(f, "%s %d\n", infos->v[i].va,
+                    infos->v[i].reads_return_address ? 1 : 0) < 0) {
+            fclose(f);
+            fprintf(stderr, "return_address_elide: cannot write %s\n", path);
+            return 2;
+        }
+    }
+    if (fclose(f) != 0) {
+        fprintf(stderr, "return_address_elide: cannot write %s\n", path);
+        return 2;
+    }
+    return 0;
+}
+
+/* Phase A: analyze every function of every input, run one global tail
+ * closure, and write the compact safety map.  Bodies are dropped right after
+ * analysis so a multi-hundred-MB module can be indexed in one process. */
+static int build_index(char **inputs, size_t ninputs, const char *out)
+{
+    InfoVec all = {0};
+    size_t i, unsafe = 0;
+    for (i = 0; i < ninputs; i++) {
+        size_t n = 0, k;
+        char *text = slurp_file(inputs[i], &n);
+        InfoVec part = index_functions(text, n);
+        free(text);
+        for (k = 0; k < part.n; k++) {
+            free(part.v[k].body);
+            part.v[k].body = NULL;
+            part.v[k].body_len = 0;
+        }
+        if (part.n) {
+            all.v = (FuncInfo *)xrealloc(all.v,
+                                         (all.n + part.n) * sizeof(*all.v));
+            memcpy(all.v + all.n, part.v, part.n * sizeof(*part.v));
+            all.n += part.n;
+        }
+        all.cap = all.n;
+        free(part.v);
+    }
+    if (all.n > 1) qsort(all.v, all.n, sizeof(*all.v), cmp_info);
+    /* Merge duplicate VAs conservatively: either body reading the slot or an
+     * unresolved tail makes the summary unsafe.  The corpus is expected to be
+     * unique; this keeps a malformed duplicate from weakening the proof. */
+    {
+        size_t w = 0;
+        for (i = 0; i < all.n; i++) {
+            if (w > 0 && strcmp(all.v[w - 1].va, all.v[i].va) == 0) {
+                FuncInfo *keep = &all.v[w - 1];
+                FuncInfo *dup = &all.v[i];
+                size_t k;
+                if (dup->reads_return_address) keep->reads_return_address = 1;
+                if (dup->tail_unknown) keep->tail_unknown = 1;
+                for (k = 0; k < dup->tail_targets.n; k++)
+                    strvec_push(&keep->tail_targets, dup->tail_targets.v[k]);
+                info_free(dup);
+                continue;
+            }
+            if (w != i) all.v[w] = all.v[i];
+            w++;
+        }
+        all.n = w;
+    }
+    compute_tail_closures(&all);
+    for (i = 0; i < all.n; i++)
+        if (all.v[i].reads_return_address) unsafe++;
+    i = (size_t)write_index(out, &all);
+    if (i == 0)
+        printf("return_address_elide: indexed %zu function(s), %zu unsafe\n",
+               all.n, unsafe);
+    infovec_free(&all);
+    return (int)i;
+}
+
 /* ---- code mask -------------------------------------------------------- */
 
 static size_t find_sub(const char *s, size_t n, size_t from,
@@ -1820,7 +2037,7 @@ static void change_push(Report *r, const char *va, const char *before,
 }
 
 static char *transform_text(const char *text, size_t n, InfoVec *infos,
-                            Report *report)
+                            const FlagMap *map, Report *report)
 {
     unsigned char *mask = code_mask(text, n);
     Buf out = {0};
@@ -1834,22 +2051,35 @@ static char *transform_text(const char *text, size_t n, InfoVec *infos,
         }
         {
             unsigned long tva = strtoul(site.target, NULL, 16);
-            FuncInfo *info;
             if (tva >= HLE_LO && tva < HLE_HI) {
                 report->skipped_hle++;
                 p = site.end;
                 continue;
             }
-            info = info_lookup(infos, site.target);
-            if (!info) {
-                report->skipped_unknown++;
-                p = site.end;
-                continue;
-            }
-            if (info->reads_return_address) {
-                report->skipped_reads_ra++;
-                p = site.end;
-                continue;
+            if (map) {
+                int reads = flagmap_lookup(map, site.target);
+                if (reads < 0) {
+                    report->skipped_unknown++;
+                    p = site.end;
+                    continue;
+                }
+                if (reads > 0) {
+                    report->skipped_reads_ra++;
+                    p = site.end;
+                    continue;
+                }
+            } else {
+                FuncInfo *info = info_lookup(infos, site.target);
+                if (!info) {
+                    report->skipped_unknown++;
+                    p = site.end;
+                    continue;
+                }
+                if (info->reads_return_address) {
+                    report->skipped_reads_ra++;
+                    p = site.end;
+                    continue;
+                }
             }
             if (strtoul(site.ret, NULL, 16) == 0) {
                 report->skipped_unknown++;
@@ -2181,7 +2411,8 @@ static void report_free(Report *r)
     memset(r, 0, sizeof(*r));
 }
 
-static int process_file(const char *src, const char *dst, Report *report)
+static int process_file(const char *src, const char *dst, const FlagMap *map,
+                        Report *report)
 {
     char *text;
     size_t n;
@@ -2212,15 +2443,18 @@ static int process_file(const char *src, const char *dst, Report *report)
     n = (size_t)sz;
     report->file = xstrdup(src);
 
-    infos = index_functions(text, n);
-    compute_tail_closures(&infos);
+    memset(&infos, 0, sizeof(infos));
+    if (!map) {
+        infos = index_functions(text, n);
+        compute_tail_closures(&infos);
+    }
     {
         size_t nb = 0;
         BodyEntry *b = build_bodies(text, n, &nb);
         report->functions = nb;
         free(b);
     }
-    out = transform_text(text, n, &infos, report);
+    out = transform_text(text, n, map ? NULL : &infos, map, report);
     verify_text(out, strlen(out), report);
     if (report->errors.n == 0 && dst) {
         const char *slash = strrchr(dst, '/');
@@ -2362,7 +2596,13 @@ static int self_test(void)
     report.file = xstrdup("self-test");
     infos = index_functions(SELF_TEST, n);
     compute_tail_closures(&infos);
-    out = transform_text(SELF_TEST, n, &infos, &report);
+    {
+        /* The pipeline always runs phase B with the global map; exercise that
+         * path here instead of the legacy local-index lookup. */
+        FlagMap map = flagmap_from_infos(&infos);
+        out = transform_text(SELF_TEST, n, NULL, &map, &report);
+        flagmap_free(&map);
+    }
     verify_text(out, strlen(out), &report);
     if (report.errors.n) {
         fprintf(stderr, "return_address_elide self-test: FAIL errors\n");
@@ -2439,27 +2679,57 @@ static int self_test(void)
 static void usage(void)
 {
     fputs("usage: return_address_elide --lift IN --out OUT "
-          "[--json REPORT] [--quiet]\n"
+          "[--index INDEX] [--json REPORT] [--quiet]\n"
+          "       return_address_elide --index-out FILE "
+          "--index-input IN [--index-input IN ...]\n"
           "       return_address_elide --self-test\n", stderr);
 }
 
 int main(int argc, char **argv)
 {
     const char *lift = NULL, *out = NULL, *json = NULL;
+    const char *index_in = NULL, *index_out = NULL;
+    char **index_inputs = NULL;
+    size_t nindex_inputs = 0, cap_index_inputs = 0;
     int quiet = 0, i, rc;
     Report report;
+    FlagMap map;
     if (argc == 2 && strcmp(argv[1], "--self-test") == 0)
         return self_test();
+    memset(&map, 0, sizeof(map));
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--lift") && i + 1 < argc) lift = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--json") && i + 1 < argc) json = argv[++i];
+        else if (!strcmp(argv[i], "--index") && i + 1 < argc)
+            index_in = argv[++i];
+        else if (!strcmp(argv[i], "--index-out") && i + 1 < argc)
+            index_out = argv[++i];
+        else if (!strcmp(argv[i], "--index-input") && i + 1 < argc) {
+            if (nindex_inputs == cap_index_inputs) {
+                cap_index_inputs = cap_index_inputs ? cap_index_inputs * 2 : 4;
+                index_inputs = (char **)xrealloc(
+                    index_inputs, cap_index_inputs * sizeof(*index_inputs));
+            }
+            index_inputs[nindex_inputs++] = argv[++i];
+        }
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
         else { usage(); return 2; }
     }
+    if (index_out) {
+        if (lift || out || nindex_inputs == 0) {
+            usage();
+            return 2;
+        }
+        rc = build_index(index_inputs, nindex_inputs, index_out);
+        free(index_inputs);
+        return rc;
+    }
+    free(index_inputs);
     if (!lift || !out) { usage(); return 2; }
+    if (index_in) map = load_index(index_in);
     memset(&report, 0, sizeof(report));
-    rc = process_file(lift, out, &report);
+    rc = process_file(lift, out, index_in ? &map : NULL, &report);
     if (write_report(json, &report) != 0) {
         fprintf(stderr, "return_address_elide: cannot write report %s\n", json);
         rc = 2;
@@ -2471,5 +2741,6 @@ int main(int argc, char **argv)
                report.skipped_unknown);
     }
     report_free(&report);
+    flagmap_free(&map);
     return rc;
 }

@@ -68,6 +68,32 @@ revision, the patch snapshot and the reason.
     `D3D9Light` 4.27%.
 * Build: `tools/android/build_dxvk.ps1 -Variant <release|debug>`.
 
+## DXVK low-latency
+
+* Upstream: `netborg-afps/dxvk-low-latency` commit
+  `33ba69f4985cdc56b9fe7bdce763d6bc068f2792` (tag
+  `low-latency-framepacing-3.1.1`), based on DXVK 3.1.1 and carrying the fork's
+  framepacer.  Submodule pins are in `third_party/dxvk/VENDOR_COMMIT`.
+* Applied source state: `third_party/dxvk/low-latency/`.
+* Patches: the same `dxvk-3.1.1-*` snapshots listed above, replayed on the
+  fork's tree.  The only fork-specific snapshot is
+  `third_party/dxvk/patches/dxvk-low-latency-android.patch`, a delta on the
+  already-patched low-latency tree:
+  * routes the fork's new `sync_signal.h` and `sync_atomic_signal.h` to the
+    POSIX/futex path on Android.  The DXVK shim defines `_WIN32` for the
+    Android target, so the fork's `#ifdef _WIN32` branches tried to include
+    `synchapi.h` and use `WaitOnAddress`, neither of which exists there.
+  * extends the WC3 forced-compatibility check from `"3"` to `"ll"`, so the
+    low-latency archive gets the same optional-feature relaxation as 3.1.1.
+  * records every completed present in `Presenter::signalFrame()` even when
+    `VK_KHR_present_wait` is unavailable, and lets the frame worker own
+    completion signalling and fps limiting.  Without this, the 32-entry frame
+    queue fills and the CS thread stalls after 32 presents.
+* Build: `tools/android/build_dxvk.ps1` compiles 201 translation units into
+  `libdxvkll.a` and isolates them as `libdxvkll_iso.a` with the `wc3_dxvkll_`
+  prefix.  The app selects it with `WC3_DXVK_VERSION=ll`; a forced low-latency
+  failure does not fall back to 3.1.1 or 1.10.3.
+
 ## DXVK 1.10.3
 
 * Upstream: `e4fd5e9e8d335e8a2c0814829207cbd421f7e40e` (tag `v1.10.3`).

@@ -167,16 +167,8 @@ int main(int argc, char **argv)
     assert(controls_set_overlay_mode(WC3_OVERLAY_MODE_SIMPLE) == 0);
     assert(controls_overlay_mode() == WC3_OVERLAY_MODE_SIMPLE);
     assert(controls_layout_id() == 2);
-    assert(g_state.element_count == 1);
-    assert(g_state.elements[0].type == BUTTON);
-    /* The element itself is ESC.  LMB is the global single tap, not slot 0. */
-    assert(g_state.elements[0].bindings[0].type == KEYBOARD_FIRST + 9);
-    assert(g_state.elements[0].bindings[0].keycode == 9);
-    assert(g_state.elements[0].bindings[1].type == NONE);
-    assert(g_state.elements[0].x == 91);
-    assert(g_state.elements[0].y == 111);
-    assert(g_state.g_element_long_press_count[0] == 0);
-    assert(g_state.g_element_gesture_count[0] == 0);
+    /* SIMPLE has no on-screen controls; LMB stays the global single tap. */
+    assert(g_state.element_count == 0);
     assert(g_state.cfg.touch_mode == TOUCHSCREEN);
     assert(g_state.cfg.gestures[SINGLE_TAP].count == 1);
     assert(g_state.cfg.gestures[SINGLE_TAP].arr[0].type == MOUSE_LEFT_BUTTON);
@@ -185,9 +177,9 @@ int main(int argc, char **argv)
         assert(g_state.cfg.gestures[i].count == 0);
     }
 
-    /* A tap outside ESC moves the cursor and presses LMB on finger-down; the
-     * release stays on finger-up.  The press may only follow the move, and a
-     * tap on the ESC element must send KEY_ESC instead. */
+    /* With no elements every tap is a field tap: it moves the cursor and
+     * presses LMB on finger-down; the release stays on finger-up.  The press
+     * may only follow the move. */
     controls_set_action_sink(sink, NULL);
     actions_clear();
     assert(controls_touch(WC3_TOUCH_DOWN, 0, 500.0f, 500.0f, 1000) == 0);
@@ -216,16 +208,6 @@ int main(int argc, char **argv)
     assert(!has_button(0, 1));
     assert(!has_pointer_move(500, 500));
 
-    actions_clear();
-    const float ex = g_state.elements[0].x + g_state.elements[0].w * 0.5f;
-    const float ey = g_state.elements[0].y + g_state.elements[0].h * 0.5f;
-    assert(controls_touch(WC3_TOUCH_DOWN, 0, ex, ey, 2000) == 0);
-    assert(controls_touch(WC3_TOUCH_UP, 0, ex, ey, 2050) == 0);
-    controls_tick(2200);
-    assert(has_key(9, 1));
-    assert(has_key(9, 0));
-    assert(!has_button(0, 1));
-
     /* A drag that starts after the down-click must not add another click on
      * finger-up.  Only the held press from the down event may be released. */
     actions_clear();
@@ -247,6 +229,7 @@ int main(int argc, char **argv)
     overlay_init(&snapshot, 1000, 1000, NULL);
     assert(controls_populate_overlay(&snapshot) == 0);
     assert(snapshot.layout_id == controls_layout_id());
+    assert(snapshot.element_count == 0);
     Wc3Overlay other = snapshot;
     other.layout_id++;
     assert(!overlay_visual_state_equal(&snapshot, &other));
@@ -256,20 +239,92 @@ int main(int argc, char **argv)
     set_transform(1.5f, 1.25f, 7.0f, -3.0f);
     assert(controls_resize(800, 600) == 0);
     assert(controls_overlay_mode() == WC3_OVERLAY_MODE_SIMPLE);
-    assert(g_state.element_count == 1);
-    assert(g_state.elements[0].x == 73);
-    assert(g_state.elements[0].y == 67);
+    assert(g_state.element_count == 0);
     assert_transform(1.5f, 1.25f, 7.0f, -3.0f);
     assert(controls_layout_id() == 3);
+
+    /* Cinematic variant: one authored ESC element and the same simplified
+     * global gestures.  The ESC element must send KEY_ESC, not LMB. */
+    assert(controls_set_overlay_mode(WC3_OVERLAY_MODE_SIMPLE_ESC) == 0);
+    assert(controls_overlay_mode() == WC3_OVERLAY_MODE_SIMPLE_ESC);
+    assert(controls_layout_id() == 4);
+    assert(g_state.element_count == 1);
+    assert(g_state.elements[0].type == BUTTON);
+    assert(g_state.elements[0].bindings[0].type == KEYBOARD_FIRST + 9);
+    assert(g_state.elements[0].bindings[0].keycode == 9);
+    assert(g_state.elements[0].bindings[1].type == NONE);
+    assert(g_state.g_element_long_press_count[0] == 0);
+    assert(g_state.g_element_gesture_count[0] == 0);
+    assert(g_state.cfg.touch_mode == TOUCHSCREEN);
+    assert(g_state.cfg.gestures[SINGLE_TAP].count == 1);
+    assert(g_state.cfg.gestures[SINGLE_TAP].arr[0].type == MOUSE_LEFT_BUTTON);
+    for (int i = 0; i < GESTURE_TYPE_COUNT; i++) {
+        if (i == SINGLE_TAP) continue;
+        assert(g_state.cfg.gestures[i].count == 0);
+    }
+
+    controls_set_action_sink(sink, NULL);
+    actions_clear();
+    const float ex = g_state.elements[0].x + g_state.elements[0].w * 0.5f;
+    const float ey = g_state.elements[0].y + g_state.elements[0].h * 0.5f;
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, ex, ey, 2000) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, ex, ey, 2050) == 0);
+    controls_tick(2200);
+    assert(has_key(9, 1));
+    assert(has_key(9, 0));
+    assert(!has_button(0, 1));
+    controls_cancel_all();
+    assert(controls_switch_safe() == 1);
+
+    /* Resize keeps SIMPLE_ESC and the host transform. */
+    assert(controls_resize(900, 700) == 0);
+    assert(controls_overlay_mode() == WC3_OVERLAY_MODE_SIMPLE_ESC);
+    assert(g_state.element_count == 1);
+    assert(g_state.elements[0].bindings[0].keycode == 9);
+    assert_transform(1.5f, 1.25f, 7.0f, -3.0f);
+    assert(controls_layout_id() == 5);
 
     /* Switch back using the same preserved transform. */
     assert(controls_set_overlay_mode(WC3_OVERLAY_MODE_FULL) == 0);
     assert(g_state.element_count == 12);
     assert_transform(1.5f, 1.25f, 7.0f, -3.0f);
-    assert(controls_layout_id() == 4);
+    assert(controls_layout_id() == 6);
+
+    /* The product opacity is one value for every control element and
+     * replaces the authored per-element opacity. */
+    controls_set_opacity_percent(30);
+    assert(controls_opacity_percent() == 30);
+    Wc3Overlay faded;
+    memset(&faded, 0, sizeof faded);
+    overlay_init(&faded, 1000, 1000, NULL);
+    assert(controls_populate_overlay(&faded) == 0);
+    assert(faded.element_count == 12);
+    for (int i = 0; i < faded.element_count; i++) {
+        assert(faded.elements[i].has_opacity);
+        assert(fabsf(faded.elements[i].opacity - 0.30f) < 0.001f);
+    }
+    overlay_destroy(&faded);
+
+    /* The native clamp repeats the settings-screen range. */
+    controls_set_opacity_percent(5);
+    assert(controls_opacity_percent() == 10);
+    controls_set_opacity_percent(90);
+    assert(controls_opacity_percent() == 50);
+
+    /* 0 keeps the authored profile opacity. */
+    controls_set_opacity_percent(0);
+    assert(controls_opacity_percent() == 0);
+    Wc3Overlay plain;
+    memset(&plain, 0, sizeof plain);
+    overlay_init(&plain, 1000, 1000, NULL);
+    assert(controls_populate_overlay(&plain) == 0);
+    for (int i = 0; i < plain.element_count; i++) {
+        assert(!plain.elements[i].has_opacity);
+    }
+    overlay_destroy(&plain);
 
     assert(controls_set_overlay_mode(WC3_OVERLAY_MODE_FULL) == 0);
-    assert(controls_layout_id() == 4);
+    assert(controls_layout_id() == 6);
 
     controls_cancel_all();
     free(json);

@@ -5,7 +5,8 @@
  * only the small COM surface it needs: IGraphBuilder::RenderFile,
  * IMediaEventEx (notification + event drain), IVideoWindow (owner/style/rect)
  * and IMediaControl (Run/Stop).  This module supplies those objects and hands
- * the actual file to Wc3Platform.video, which is the Android MediaCodec player.
+ * the actual file to Wc3Platform.video, the Android host MoviePlayer (Media3
+ * audio/clock, FFmpeg video).
  *
  * The completion path is deliberately the DirectShow one: the Java player
  * reports end-of-stream, this module stores EC_COMPLETE/EC_USERABORT/

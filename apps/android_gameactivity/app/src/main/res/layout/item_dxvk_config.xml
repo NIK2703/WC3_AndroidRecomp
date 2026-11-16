@@ -7,7 +7,7 @@
     android:gravity="center_vertical"
     android:orientation="horizontal">
 
-    <EditText
+    <AutoCompleteTextView
         android:id="@+id/dxvk_config_key"
         style="@style/Wc3Field"
         android:layout_width="0dp"
@@ -20,7 +20,7 @@
         android:maxLength="80"
         android:saveEnabled="false" />
 
-    <EditText
+    <AutoCompleteTextView
         android:id="@+id/dxvk_config_value"
         style="@style/Wc3Field"
         android:layout_width="0dp"

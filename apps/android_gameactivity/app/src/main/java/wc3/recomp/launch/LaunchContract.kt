@@ -22,6 +22,9 @@ object LaunchContract {
     const val KEY_DOUBLE_TAP_TIMEOUT_MS = "double_tap_timeout_ms"
     const val KEY_LONG_PRESS_TIMEOUT_MS = "long_press_timeout_ms"
     const val KEY_TAP_CLICK_DELAY_MS = "tap_click_delay_ms"
+    const val KEY_SELECTION_24 = "selection_24"
+    const val KEY_HIDE_CURSOR = "hide_cursor"
+    const val KEY_OVERLAY_OPACITY_PERCENT = "overlay_opacity_percent"
 
     /* The authored .icp profile uses 120 ms for both gesture timers.  The
      * settings screen exposes only the product range 100..200 ms, step 10. */
@@ -34,6 +37,23 @@ object LaunchContract {
     const val DEFAULT_TAP_CLICK_DELAY_MS = 10
     const val MIN_TAP_CLICK_DELAY_MS = 8
     const val MAX_TAP_CLICK_DELAY_MS = 40
+
+    /* Off is the product default: the original 12-unit cap and the 6x2
+     * panel.  The settings switch enables the 24-unit profile and the 8x3
+     * panel at run time; the corpus is not rebuilt. */
+    const val DEFAULT_SELECTION_24 = false
+
+    /* The guest draws its own CCursorFrame sprite.  Off keeps the original
+     * behavior; on skips that render without changing touch input. */
+    const val DEFAULT_HIDE_CURSOR = false
+
+    /* Opacity of the on-screen control overlay, in percent of the alpha
+     * channel.  10 is nearly invisible, 50 is half solid; the value replaces
+     * the authored per-element opacity of the .icp profile.  The native
+     * controls layer clamps the same range. */
+    const val DEFAULT_OVERLAY_OPACITY_PERCENT = 40
+    const val MIN_OVERLAY_OPACITY_PERCENT = 10
+    const val MAX_OVERLAY_OPACITY_PERCENT = 50
 
     /* The product default is DXVK 1.10.3 ("1").  An empty version is the
      * explicit "Auto" choice and keeps the driver-based compatibility gate. */

@@ -2,9 +2,10 @@
 
 This directory contains the Android media stack used by the campaign movie
 player.  The player no longer parses AVI samples or drives `MediaCodec` itself:
-Media3 owns demuxing, decode-order/display-order timestamps, audio/video
-synchronisation and Surface scheduling, and the Media3Avi extractor supplies
-the AVI container support that Android's `MediaExtractor` does not have.
+Media3 owns AVI audio demuxing, the playback clock and A/V synchronisation, and
+the Media3Avi extractor supplies the AVI container support that Android's
+`MediaExtractor` does not have.  The MPEG-4 Part 2 Advanced Simple Profile
+video stream is decoded by the vendored FFmpeg path, not by `MediaCodec`.
 
 ## Versions
 
@@ -25,10 +26,12 @@ in this tree.  The complete artifact list and SHA-256 pins are in
 The campaign movies are RIFF/AVI files with MPEG-4 Part 2 video (`XVID`) and
 MP3 audio.  Android has no AVI extractor in `MediaExtractor`, and Media3's
 built-in AVI support is intentionally limited.  Media3Avi adds the missing
-demuxer and, importantly, emits display-order timestamps for the `IPBBBP`
-picture patterns used by these movies.  The platform decoder remains
-`c2.android.mpeg4.decoder`; there is no hardware MPEG-4 decoder on the target
-device.
+demuxer and emits the display-order timestamps used by the audio/clock side.
+The video track is disabled in ExoPlayer: the target device only exposes
+`c2.android.mpeg4.decoder`, a software Simple Profile decoder, while these
+movies are Advanced Simple Profile with B-frames.  FFmpeg decodes that stream
+and presents it through `ANativeWindow`; Media3Avi is not used for video
+decode.
 
 `libVLC` was evaluated and rejected for this use: its AAR is about 87 MB before
 native extraction, it adds about 52 MB of arm64 libraries plus its own

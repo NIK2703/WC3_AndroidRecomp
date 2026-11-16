@@ -25,7 +25,10 @@ def main() -> int:
     hooks = state_hooks.load_hooks()
     if [h.name for h in hooks] != [
             "cgameui_created", "cgameui_seen", "cgameui_destroyed",
-            "pause", "gameover", "gameover_cleared"]:
+            "pause", "gameover", "gameover_cleared",
+            "cinematic_enter_timed", "cinematic_enter_instant",
+            "cinematic_leave_timed", "cinematic_leave_instant",
+            "interface_timed_complete"]:
         print("state_hooks: unexpected hook names")
         return 1
 

@@ -30,6 +30,7 @@
 #include "direct_call.h"
 #include "hle_bridge.h"
 #include "platform.h"
+#include "sound_switch.h"
 #include "wc3_debug.h"
 #include "dsound_hle.h"
 
@@ -1075,6 +1076,14 @@ static void h_dsound_create(CPU *c)
     /* NULL selects the default playback device; an explicit GUID we do not
      * implement must fail with DSERR_NODRIVER, not pretend to work. */
     if (guid) { c->eax = DSERR_NODRIVER; return; }
+
+    /* The launch settings can turn sound off.  The guest then gets the same
+     * answer as on a machine without an audio driver and no device is
+     * created, so the audio subsystem stays unloaded. */
+    if (!wc3_sound_enabled()) {
+        c->eax = DSERR_NODRIVER;
+        return;
+    }
 
     const Wc3AudioApi *a = ds_audio();
     if (!a || !a->voice_add || !a->open || !a->primary_voice) {

@@ -107,12 +107,14 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.0.21")
 
-    // Campaign movies are RIFF/AVI with MPEG-4 Part 2 video and MP3 audio.
+    // Campaign movies are RIFF/AVI with MPEG-4 Part 2 ASP video and MP3 audio.
     // Android has no AVI extractor in MediaExtractor/Media3, so the AVI
-    // extractor is the small Media3Avi add-on.  Media3 keeps the platform
-    // MediaCodec decoder, but owns AVI sample ordering, B-frame timestamps,
-    // audio/video sync, late-frame dropping and Surface scheduling.  The
-    // files are vendored flat in third_party/media3 for the offline build.
+    // extractor is the small Media3Avi add-on.  Media3/Media3Avi owns AVI
+    // audio, the playback clock and A/V sync; the ASP video track is decoded
+    // by the vendored FFmpeg path because the platform decoder on the target
+    // device is Simple Profile only and cannot reorder B-frames.  The
+    // artifacts are vendored under third_party/media3 as an offline local
+    // Maven repository.
     implementation("androidx.media3:media3-common:1.7.1@aar")
     implementation("androidx.media3:media3-container:1.7.1@aar")
     implementation("androidx.media3:media3-database:1.7.1@aar")

@@ -75,9 +75,12 @@
     __android_log_print(ANDROID_LOG_INFO, "wc3ime", __VA_ARGS__)
 #define IME_LOGE(...) \
     __android_log_print(ANDROID_LOG_ERROR, "wc3ime", __VA_ARGS__)
+#define STATE_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "wc3state", __VA_ARGS__)
 #else
 #define IME_LOG(...) ((void)0)
 #define IME_LOGE(...) ((void)0)
+#define STATE_LOG(...) ((void)0)
 #endif
 
 #if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
@@ -85,6 +88,18 @@
     __android_log_print(ANDROID_LOG_INFO, "GPU_DRIVERS", __VA_ARGS__)
 #else
 #define GPU_LOG(...) ((void)0)
+#endif
+
+/* The Java trace uses the same tag, so one logcat filter sees the native
+ * DirectShow gate and the Media3/FFmpeg player state on one timeline. */
+#if WC3_DEBUG && WC3_DEBUG_MOVIE
+#define MOVIE_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "wc3movie", __VA_ARGS__)
+#define MOVIE_LOGE(...) \
+    __android_log_print(ANDROID_LOG_ERROR, "wc3movie", __VA_ARGS__)
+#else
+#define MOVIE_LOG(...) ((void)0)
+#define MOVIE_LOGE(...) ((void)0)
 #endif
 
 static Wc3Platform g_platform;
@@ -295,6 +310,9 @@ static int g_double_tap_timeout_ms;
 static int g_long_press_timeout_ms;
 /* Zero means "use the controls-layer default" for a direct diagnostic launch. */
 static int g_tap_click_delay_ms;
+/* Product opacity of the control overlay in percent; 0 keeps the authored
+ * profile opacity for a direct diagnostic launch. */
+static int g_overlay_opacity_percent;
 
 #define SHARED_DATA_DIR_NAME "Warcraft 3"
 
@@ -1130,18 +1148,29 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     jboolean sound, jstring extra_args, jstring driver_id, jstring driver_root,
     jstring hook_dir, jstring dxvk_version, jstring dxvk_config_path,
     jboolean double_tap_gestures, jint double_tap_timeout_ms,
-    jint long_press_timeout_ms, jint tap_click_delay_ms)
+    jint long_press_timeout_ms, jint tap_click_delay_ms,
+    jboolean selection24, jboolean hide_cursor, jint overlay_opacity_percent)
 {
     /* JNI has no type checking between two jstring parameters.  Keep this
      * order identical to Wc3GameActivity.nativeApplyLaunchSettings: id before
      * root, DXVK version and config path, then the gesture flag and timers,
-     * and the SIMPLE tap delay last, or values are copied into the wrong
+     * the SIMPLE tap delay, the selection24 toggle, the hideCursor toggle and
+     * the overlay opacity percent last, or values are copied into the wrong
      * slot. */
     (void)clazz;
     g_double_tap_gestures = double_tap_gestures ? 1 : 0;
     g_double_tap_timeout_ms = (int)double_tap_timeout_ms;
     g_long_press_timeout_ms = (int)long_press_timeout_ms;
     g_tap_click_delay_ms = (int)tap_click_delay_ms;
+    g_overlay_opacity_percent = (int)overlay_opacity_percent;
+    /* The 24-unit selection module latches this before the first panel is
+     * constructed.  "1" enables the 24-unit cap and the 8x3 panel; "0" (the
+     * product default) keeps the original 12-unit cap and 6x2 panel without a
+     * second corpus. */
+    setenv("WC3_SELECTION_24", selection24 ? "1" : "0", 1);
+    /* CCursorFrame::Render checks this before drawing the guest cursor sprite.
+     * "0" explicitly overrides an inherited diagnostic value. */
+    setenv("WC3_HIDE_CURSOR", hide_cursor ? "1" : "0", 1);
 
     const char *dir = NULL;
     const char *user_args = NULL;
@@ -1176,10 +1205,11 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
             dxvk_config ? dxvk_config : "(null)");
 
     /* An explicit version is a compatibility override, not an automatic
-     * choice: the as-built thin bridge treats "1"/"3" as forced and skips its
-     * version selector.  The DXVK entry wrappers also suppress the
-     * 3.1.1 -> 1.10.3 fallback while "3" is forced. */
-    dxvk_forced = dxvk && (strcmp(dxvk, "1") == 0 || strcmp(dxvk, "3") == 0);
+     * choice: the as-built thin bridge treats "1"/"3"/"ll" as forced and skips
+     * its version selector.  The DXVK entry wrappers also suppress the
+     * 3.1.1/LL -> 1.10.3 fallback while a newer archive is forced. */
+    dxvk_forced = dxvk && (strcmp(dxvk, "1") == 0 || strcmp(dxvk, "3") == 0 ||
+                           strcmp(dxvk, "ll") == 0);
     if (dxvk_forced)
         setenv("WC3_DXVK_VERSION", dxvk, 1);
     else
@@ -1228,7 +1258,13 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     args[0] = '\0';
     if (user_args && user_args[0])
         snprintf(args, sizeof args, "%s", user_args);
-    if (!sound && !has_arg_token(args, "-nosound")) {
+    /* The guest-level switch stops the game from building a sound graph.  The
+     * host-level switch (WC3_SOUND) is what keeps the audio subsystem itself
+     * unloaded, so both are needed for a fully silent launch.  A manual
+     * "-nosound" in the extra arguments turns sound off as well. */
+    const int has_nosound = has_arg_token(args, "-nosound");
+    const int sound_off = !sound || has_nosound;
+    if (sound_off && !has_nosound) {
         static const char token[] = "-nosound";
         size_t len = strlen(args);
         const size_t token_len = sizeof token - 1u;
@@ -1239,6 +1275,11 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
         if (len + token_len < sizeof args)
             snprintf(args + len, sizeof args - len, "%s", token);
     }
+    /* The sound switch is latched before android_main installs the platform
+     * table.  "0" means the guest never gets an audio device and the platform
+     * never opens an AAudio stream, so the audio subsystem stays unloaded: no
+     * real-time callback, no mixer and no supervisor thread exist. */
+    setenv("WC3_SOUND", sound_off ? "0" : "1", 1);
     if (args[0])
         setenv("WC3_ARGS", args, 1);
     else
@@ -1344,9 +1385,7 @@ static int video_play(void *ctx, const char *host_path)
     if (!activity || !activity->javaGameActivity || !host_path ||
         !host_path[0])
         return -1;
-#if WC3_DEBUG && WC3_DEBUG_JNI
-    fprintf(stderr, "[jni] video_play path=%s\n", host_path);
-#endif
+    MOVIE_LOG("[jni] video_play path=%s", host_path);
 
     int attached = 0;
     JNIEnv *env = video_attach_env(activity, &attached);
@@ -1366,38 +1405,37 @@ static int video_play(void *ctx, const char *host_path)
                  * nativeMovieFinished() and then be overwritten here. */
                 atomic_store_explicit(&g_movie_active, 1,
                                       memory_order_release);
+                MOVIE_LOG("[jni] movie gate on (playMovie pending)");
                 jboolean started = (*env)->CallBooleanMethod(
                     env, activity->javaGameActivity, method, path);
                 if ((*env)->ExceptionCheck(env)) {
-#if WC3_DEBUG && WC3_DEBUG_JNI
-                    fprintf(stderr, "[jni] video_play: Java exception in playMovie\n");
+                    MOVIE_LOGE("[jni] video_play: Java exception in playMovie");
+#if WC3_DEBUG && WC3_DEBUG_MOVIE
                     (*env)->ExceptionDescribe(env);
 #endif
                     (*env)->ExceptionClear(env);
                     started = JNI_FALSE;
                 }
-#if WC3_DEBUG && WC3_DEBUG_JNI
                 if (!started)
-                    fprintf(stderr, "[jni] video_play: playMovie returned false\n");
-#endif
+                    MOVIE_LOGE("[jni] video_play: playMovie returned false");
                 if (started) {
                     rc = 0;
+                    MOVIE_LOG("[jni] movie play accepted");
                 } else {
                     atomic_store_explicit(&g_movie_active, 0,
                                           memory_order_release);
+                    MOVIE_LOG("[jni] movie gate off (playMovie rejected)");
                 }
                 (*env)->DeleteLocalRef(env, path);
             } else {
-#if WC3_DEBUG && WC3_DEBUG_JNI
-                fprintf(stderr, "[jni] video_play: NewStringUTF failed\n");
+                MOVIE_LOGE("[jni] video_play: NewStringUTF failed");
+#if WC3_DEBUG && WC3_DEBUG_MOVIE
                 (*env)->ExceptionDescribe(env);
 #endif
                 (*env)->ExceptionClear(env);
             }
         } else {
-#if WC3_DEBUG && WC3_DEBUG_JNI
-            fprintf(stderr, "[jni] video_play: playMovie method not found\n");
-#endif
+            MOVIE_LOGE("[jni] video_play: playMovie method not found");
             (*env)->ExceptionClear(env);
         }
         (*env)->DeleteLocalRef(env, cls);
@@ -1412,6 +1450,7 @@ static int video_play(void *ctx, const char *host_path)
 static void video_stop(void *ctx)
 {
     (void)ctx;
+    MOVIE_LOG("[jni] video_stop gate off");
     atomic_store_explicit(&g_movie_active, 0, memory_order_release);
     GameActivity *activity = host_activity();
     if (!activity || !activity->javaGameActivity) return;
@@ -1440,9 +1479,7 @@ Java_wc3_recomp_Wc3GameActivity_nativeMovieFinished(JNIEnv *env, jclass clazz,
 {
     (void)env;
     (void)clazz;
-#if WC3_DEBUG && WC3_DEBUG_JNI
-    fprintf(stderr, "[jni] movie_finished status=%d\n", (int)status);
-#endif
+    MOVIE_LOG("[jni] movie_finished status=%d gate off", (int)status);
     atomic_store_explicit(&g_movie_active, 0, memory_order_release);
     wc3_hle_ole32_video_finished((int)status);
 }
@@ -1817,8 +1854,8 @@ static void host_haptic_sink(int effect, void *user)
     if (g_haptics_ready) haptics_android_perform(effect);
 }
 
-/* A rejected transition (for example SIMPLE has no authored ESC) is retried
- * only after the published bits change, not on every touch wake. */
+/* A rejected transition is retried only after the published bits change, not
+ * on every touch wake. */
 static uint32_t g_switch_rejected_bits;
 static int g_switch_rejected;
 
@@ -1843,6 +1880,8 @@ static void input_apply_game_state_mode(void)
     if (!controls_switch_safe()) return;
 
     int rc = controls_set_overlay_mode(want);
+    STATE_LOG("apply bits=%08x want=%d current=%d rc=%d", bits, (int)want,
+              (int)controls_overlay_mode(), rc);
     if (rc == 0) {
         g_switch_rejected = 0;
         if (visual_rebuild_layout(g_input_width, g_input_height) != 0)
@@ -1949,9 +1988,9 @@ static int overlay_input_start(int width, int height)
     controls_set_action_sink(NULL, NULL);
 #endif
 
-    /* A surface resize must not throw away the current FULL/SIMPLE layout or
-     * its transform.  controls_resize() rebuilds the active profile at the new
-     * size; only the first start parses the authored profile. */
+    /* A surface resize must not throw away the current FULL/SIMPLE/SIMPLE_ESC
+     * layout or its transform.  controls_resize() rebuilds the active profile
+     * at the new size; only the first start parses the authored profile. */
     int controls_ready = 0;
     if (controls_layout_id() != 0) {
         if (controls_resize(width, height) == 0) {
@@ -1986,6 +2025,11 @@ static int overlay_input_start(int width, int height)
         }
         free(profile);
     }
+
+    /* The product opacity is a product setting, not a profile property, so it
+     * is applied to the controls layer after the profile is parsed and before
+     * the first overlay snapshot is built. */
+    controls_set_opacity_percent(g_overlay_opacity_percent);
 
     /* The first published overlay must already match the exact current guest
      * state; otherwise a menu would flash the gameplay profile. */
@@ -2538,7 +2582,7 @@ static int load_image(const char *dir, const char *name, uint32_t base)
 }
 #endif
 
-void android_main(struct android_app *app)
+JNIEXPORT void android_main(struct android_app *app)
 {
     WC3_TRACE_THREAD_NAME("wc3-ui");
     WC3_TRACE_SCOPE("wc3.android_main");

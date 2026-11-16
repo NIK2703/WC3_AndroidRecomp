@@ -158,7 +158,7 @@ void wc3_dispatch_init(void)
     WC3_INSTALL_STEP(wc3_hle_dsound_install());
     /* The campaign cinematics are DirectShow; the guest imports only the
      * three ole32 entry points, while the graph/event/control/video methods
-     * are appended here and reach the Java MediaCodec player through
+     * are appended here and reach the Java MoviePlayer through
      * Wc3Platform.video. */
     WC3_INSTALL_STEP(wc3_hle_ole32_install());
 #undef WC3_INSTALL_STEP

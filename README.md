@@ -37,12 +37,22 @@ or choose it with the system folder picker (SAF). The picker result must map to
 a real filesystem path because the native host reads the licensed files with
 POSIX calls. Resolution is chosen by height from 360 px in 180 px steps up to
 the screen height, and the width comes from the display aspect ratio. The
-native entry keeps the current surface size. The selected path reaches the
-native host through `WC3_GAME_DATA_DIR`. Resolution maps to
+native entry keeps the current surface size and leaves the game's saved Video
+resolution alone. A non-native choice overrides that saved resolution for the
+launch, as if it had been selected in the game's Video options. The selected
+path reaches the native host through `WC3_GAME_DATA_DIR`. Resolution maps to
 `WC3_DXVK_WIDTH`/`WC3_DXVK_HEIGHT`, and sound-off maps to `-nosound` in
-`WC3_ARGS`. The default process stores the values and passes them to both hosts
+`WC3_ARGS` and to `WC3_SOUND=0` for the host: with sound off the platform
+never opens an AAudio stream and the guest gets no audio device, so the audio
+subsystem (real-time callback, mixer, supervisor thread) is not loaded at all. The default process stores the values and passes them to both hosts
 through the launch intent, so the `:roc` process never reads another process's
-preferences.
+preferences. The DXVK configuration table can also load active `key = value`
+lines from a selected `dxvk.conf`: matching keys are overwritten with the file
+value, and new keys are appended. The key field suggests the option names of
+the vendored `dxvk.conf`, and the value field the documented values of the
+options that have a finite set of them; both lists open on a tap and are
+filtered by the beginning of the typed text. The table ends with an empty row
+that takes the next variable once its key and its value are set.
 
 The debug build adds `(debug)` to both labels, targets `wc3.recomp.debug` from
 its shortcuts, and installs next to the release build. The APK does not ship

@@ -21,6 +21,8 @@
     <string name="launch_resolution_option" translatable="false">%1$d × %2$d</string>
 
     <string name="launch_sound_label">Sound</string>
+    <string name="launch_selection24_label">24-unit selection</string>
+    <string name="launch_hide_cursor_label">Hide game cursor</string>
     <string name="launch_gesture_mode_label">Touchscreen control gestures</string>
     <string name="launch_gesture_mode_double">Double tap, single tap with delay</string>
     <string name="launch_gesture_mode_single">No double tap, single tap without delay</string>
@@ -35,13 +37,14 @@
     <string name="launch_long_press_delay_label">Long-press delay</string>
     <string name="launch_tap_click_delay_label">Click press delay in simplified profile</string>
     <string name="launch_gesture_delay_value">%1$d ms</string>
+    <string name="launch_overlay_opacity_label">Control overlay opacity</string>
+    <string name="launch_overlay_opacity_value">%1$d %%</string>
 
     <string name="launch_driver_label">Vulkan driver</string>
     <string name="launch_driver_system">System Vulkan driver (recommended)</string>
     <string name="launch_driver_import">Install ZIP</string>
     <string name="launch_driver_remove">Delete</string>
     <string name="launch_driver_installing">Installing driver package…</string>
-    <string name="launch_driver_details">%1$s · %2$s · %3$d MB</string>
     <string name="launch_driver_picker_missing">No system file picker is available.</string>
     <string name="launch_driver_installed">%1$s — %2$s</string>
     <string name="launch_driver_removed">Driver package deleted. The system driver will be used.</string>
@@ -60,6 +63,7 @@
     <string name="launch_dxvk_auto">Auto</string>
     <string name="launch_dxvk_110" translatable="false">DXVK 1.10.3</string>
     <string name="launch_dxvk_311" translatable="false">DXVK 3.1.1</string>
+    <string name="launch_dxvk_lowlatency" translatable="false">DXVK 3.1.1 low-latency</string>
     <string name="launch_dxvk_config_label">DXVK configuration</string>
     <string name="launch_dxvk_config_key">Key</string>
     <string name="launch_dxvk_config_value">Value</string>
@@ -68,6 +72,12 @@
     <string name="launch_dxvk_config_add">Add variable</string>
     <string name="launch_dxvk_config_remove">Remove variable</string>
     <string name="launch_dxvk_config_remove_symbol" translatable="false">×</string>
+    <string name="launch_dxvk_config_import">From file</string>
+    <string name="launch_dxvk_config_import_description">Load DXVK configuration from a file</string>
+    <string name="launch_dxvk_config_import_missing">No system file picker is available.</string>
+    <string name="launch_dxvk_config_import_error">Could not read the DXVK configuration file.</string>
+    <string name="launch_dxvk_config_import_empty">The file has no active variables. Remove “#” from the lines you want to import.</string>
+    <string name="launch_dxvk_config_import_done">Loaded variables: %1$d</string>
 
     <string name="launch_args_label">Extra arguments</string>
 

@@ -45,6 +45,7 @@ struct IDirect3D9;
 
 extern "C" void wc3_dxvk1_dxvk_set_vulkan_get_instance_proc_addr(void *fn);
 extern "C" void wc3_dxvk3_dxvk_set_vulkan_get_instance_proc_addr(void *fn);
+extern "C" void wc3_dxvkll_dxvk_set_vulkan_get_instance_proc_addr(void *fn);
 
 #if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
 static int g_shim_log_count;
@@ -109,7 +110,8 @@ extern "C" void wc3_dxvk_prepare(void)
 #endif
     wc3_dxvk1_dxvk_set_vulkan_get_instance_proc_addr(gipa);
     wc3_dxvk3_dxvk_set_vulkan_get_instance_proc_addr(gipa);
-    DX_LOG("prepare set dxvk1/dxvk3 gipa=%p", gipa);
+    wc3_dxvkll_dxvk_set_vulkan_get_instance_proc_addr(gipa);
+    DX_LOG("prepare set dxvk1/dxvk3/dxvkll gipa=%p", gipa);
 }
 
 /* The R8 package is built from Mesa 5ac41be677.  Its descriptor-prefetch
@@ -141,15 +143,34 @@ static void enable_turnip_nodescprefetch(void)
  * before android_main, so the as-built thin bridge can treat it as its forced
  * selector without a second JNI path.  Match the bridge's first-character
  * parser so the wrapper suppresses the same fallback the bridge would take;
- * the settings screen writes the canonical "1"/"3", and anything else keeps
- * automatic selection. */
+ * the settings screen writes "1"/"3"/"ll", and anything else keeps automatic
+ * selection.  The low-latency fork is a third archive, not a 3.1.1 mode, so it
+ * gets its own family id. */
+enum {
+    DXVK_AUTO        = 0,
+    DXVK_1_10_3      = 1,
+    DXVK_3_1_1       = 3,
+    DXVK_LOW_LATENCY = 4,
+};
+
 static int forced_dxvk_major()
 {
     const char *value = getenv("WC3_DXVK_VERSION");
-    if (!value) return 0;
-    if (value[0] == '1') return 1;
-    if (value[0] == '3') return 3;
-    return 0;
+    if (!value) return DXVK_AUTO;
+    if (value[0] == '1') return DXVK_1_10_3;
+    if (value[0] == '3') return DXVK_3_1_1;
+    if (value[0] == 'l') return DXVK_LOW_LATENCY;
+    return DXVK_AUTO;
+}
+
+static const char *dxvk_label(int family)
+{
+    switch (family) {
+        case DXVK_1_10_3:      return "1.10.3";
+        case DXVK_3_1_1:       return "3.1.1";
+        case DXVK_LOW_LATENCY: return "low-latency";
+        default:               return "auto";
+    }
 }
 
 /* The DXVK major selector calls this through --wrap=wc3_vulkan_major_minor.
@@ -172,7 +193,7 @@ extern "C" int wc3_vulkan_major_minor(int *major, int *minor)
     forced = forced_dxvk_major();
     if (forced)
         DX_LOG("DXVK %s forced by launch settings; compatibility gate "
-               "bypassed", forced == 1 ? "1.10.3" : "3.1.1");
+               "bypassed", dxvk_label(forced));
 
     platform = wc3_platform();
     DX_LOG("major_minor platform=%p proc=%p", (const void *)platform,
@@ -205,11 +226,11 @@ extern "C" int wc3_vulkan_major_minor(int *major, int *minor)
             platform->vulkan_driver.ctx, active, sizeof active);
     if (wc3_dxvk3_package_needs_nodescprefetch(
             active, have_caps, have_caps ? caps.driver_version : 0)) {
-        if (forced == 3) {
+        if (forced == DXVK_3_1_1 || forced == DXVK_LOW_LATENCY) {
             enable_turnip_nodescprefetch();
             DX_LOG("driver package '%s' has the ir3 descriptor-prefetch bug; "
                    "IR3_SHADER_DEBUG=nodescprefetch enabled for forced "
-                   "DXVK 3.1.1", active);
+                   "DXVK %s", active, dxvk_label(forced));
         } else {
             DX_LOG("driver package '%s' is older than Turnip 26.0.0; "
                    "selecting DXVK 1.10.3", active);
@@ -222,7 +243,7 @@ extern "C" int wc3_vulkan_major_minor(int *major, int *minor)
     if (minor) *minor = min;
     if (forced) {
         DX_LOG("Vulkan report %d.%d (DXVK %s forced; automatic would choose %s)",
-               maj, min, forced == 1 ? "1.10.3" : "3.1.1",
+               maj, min, dxvk_label(forced),
                (maj == 1 && min < 3) ? "1.10.3" : "3.1.1");
     } else {
         DX_LOG("Vulkan report %d.%d (DXVK %s)", maj, min,
@@ -232,28 +253,36 @@ extern "C" int wc3_vulkan_major_minor(int *major, int *minor)
 }
 
 /*
- * The as-built thin bridge selects a DXVK major before it calls one of these
- * entry points.  Log both calls and swallow the version's own exception so the
+ * The as-built thin bridge selects a DXVK family before it calls one of these
+ * entry points.  Log each call and swallow the version's own exception so the
  * fallback path is visible instead of being mistaken for "3.1.1 was never
  * selected".  CMake applies --wrap to the archive symbols.
  */
 extern "C" IDirect3D9 *__real_wc3_dxvk1_Direct3DCreate9(unsigned int sdk);
 extern "C" IDirect3D9 *__real_wc3_dxvk3_Direct3DCreate9(unsigned int sdk);
+extern "C" IDirect3D9 *__real_wc3_dxvkll_Direct3DCreate9(unsigned int sdk);
 
-#if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
+typedef const void *(*DxvkErrorMessageFn)(const void *);
+
 /*
  * DXVK reports setup failures by throwing dxvk::DxvkError.  That type does not
  * derive from std::exception; it is an ordinary object whose first and only
  * member is a std::string.  The isolated archive prefixes the symbol that
  * defines the type, and the NDK libc++ compares typeinfo by pointer, so a
- * normal catch (const dxvk::DxvkError&) cannot match.  The archive still
- * exports the accessor under its prefixed mangled name; call it on the current
- * exception object instead.
+ * normal catch (const dxvk::DxvkError&) cannot match.  Every archive still
+ * exports the accessor under its prefixed mangled name; call the accessor that
+ * belongs to the archive that threw.  The declarations stay outside the debug
+ * guard because the wrappers pass them to log_current_exception in every
+ * build; only the debug definition calls them.
  */
 extern "C" const void *
 wc3_dxvk3__ZNK4dxvk9DxvkError7messageEv(const void *self);
+extern "C" const void *
+wc3_dxvkll__ZNK4dxvk9DxvkError7messageEv(const void *self);
 
-static void log_current_exception(const char *where)
+#if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
+static void log_current_exception(const char *where,
+                                  DxvkErrorMessageFn messageFn)
 {
     std::type_info *type = __cxxabiv1::__cxa_current_exception_type();
     const char *name = type ? type->name() : "(unknown)";
@@ -265,9 +294,10 @@ static void log_current_exception(const char *where)
 
     DX_LOG("%s type=%s primary=%p", where, demangled ? demangled : name,
            primary);
-    if (primary && strstr(demangled ? demangled : name, "DxvkError")) {
+    if (primary && messageFn &&
+        strstr(demangled ? demangled : name, "DxvkError")) {
         const std::string *message = static_cast<const std::string *>(
-            wc3_dxvk3__ZNK4dxvk9DxvkError7messageEv(primary));
+            messageFn(primary));
         DX_LOG("%s message=%s", where,
                message ? message->c_str() : "(null)");
     }
@@ -276,18 +306,20 @@ static void log_current_exception(const char *where)
     std::free(demangled);
 }
 #else
-static void log_current_exception(const char *) {}
+static void log_current_exception(const char *, DxvkErrorMessageFn) {}
 #endif
 
 extern "C" IDirect3D9 *__wrap_wc3_dxvk1_Direct3DCreate9(unsigned int sdk)
 {
-    /* A forced 3.1.1 attempt must not silently become a 1.10.3 run when the
-     * selected backend throws or returns NULL.  The as-built bridge calls this
-     * entry for its 3.1.1 -> 1.10.3 fallback; suppressing the wrapped result
+    /* A forced 3.1.1 or low-latency attempt must not silently become a 1.10.3
+     * run when the selected backend throws or returns NULL.  The as-built
+     * bridge calls this entry for its fallback; suppressing the wrapped result
      * keeps the user's choice and turns the failure into an explicit startup
      * failure instead of a different DXVK version. */
-    if (forced_dxvk_major() == 3) {
-        DX_LOG("DXVK 1.10.3 entry suppressed: DXVK 3.1.1 is forced");
+    int family = forced_dxvk_major();
+    if (family == DXVK_3_1_1 || family == DXVK_LOW_LATENCY) {
+        DX_LOG("DXVK 1.10.3 entry suppressed: DXVK %s is forced",
+               dxvk_label(family));
         return nullptr;
     }
 #if WC3_DEBUG && WC3_DEBUG_DXVK_DEBUG
@@ -319,7 +351,30 @@ extern "C" IDirect3D9 *__wrap_wc3_dxvk3_Direct3DCreate9(unsigned int sdk)
         DX_LOG("DXVK 3.1.1 threw std::exception: %s", e.what());
         return nullptr;
     } catch (...) {
-        log_current_exception("DXVK 3.1.1 threw");
+        log_current_exception("DXVK 3.1.1 threw",
+                              wc3_dxvk3__ZNK4dxvk9DxvkError7messageEv);
+        return nullptr;
+    }
+}
+
+extern "C" IDirect3D9 *__wrap_wc3_dxvkll_Direct3DCreate9(unsigned int sdk)
+{
+#if WC3_DEBUG && WC3_DEBUG_DXVK_DEBUG
+    setenv("DXVK_DEBUG", "validation", 0);
+    wc3_dxvk_trace_set_version("low-latency");
+    wc3_dxvk_trace_mark("Direct3DCreate9 low-latency");
+#endif
+    DX_LOG("DXVK low-latency entry sdk=%u", sdk);
+    try {
+        IDirect3D9 *d3d = __real_wc3_dxvkll_Direct3DCreate9(sdk);
+        DX_LOG("DXVK low-latency result=%p", (void *)d3d);
+        return d3d;
+    } catch (const std::exception &e) {
+        DX_LOG("DXVK low-latency threw std::exception: %s", e.what());
+        return nullptr;
+    } catch (...) {
+        log_current_exception("DXVK low-latency threw",
+                              wc3_dxvkll__ZNK4dxvk9DxvkError7messageEv);
         return nullptr;
     }
 }

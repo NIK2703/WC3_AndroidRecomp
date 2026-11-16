@@ -78,16 +78,30 @@ void controls_cancel_all(void);
 int controls_switch_safe(void);
 
 /*
- * Switch between the authored FULL profile and the derived SIMPLE profile.
- * The switch is rejected (negative result, current mode unchanged) when the
- * engine is busy or SIMPLE could not be derived from the authored ESC.
- * A successful switch releases held bindings and increments layout_id.
+ * Switch between the authored FULL profile and the derived SIMPLE variants.
+ * Both SIMPLE modes share the same simplified global gestures.  SIMPLE has no
+ * on-screen elements (menus); SIMPLE_ESC has exactly the authored ESC element
+ * and is used while a cinematic scene is running.  The switch is rejected
+ * (negative result, current mode unchanged) when the engine is busy or the
+ * requested variant is unavailable.  A successful switch releases held
+ * bindings and increments layout_id.
  */
 int controls_set_overlay_mode(Wc3OverlayMode mode);
 Wc3OverlayMode controls_overlay_mode(void);
 
 /* Monotonic id of the current engine layout; 0 before the first init. */
 uint32_t controls_layout_id(void);
+
+/*
+ * Product opacity of the on-screen controls, in percent of the alpha
+ * channel.  The settings screen exposes 10..50 (10 is nearly invisible, 50
+ * is half solid); the value is applied to every control element in every
+ * overlay snapshot, so it replaces the authored per-element opacity.
+ * 0 keeps the authored profile opacity.  The host applies the setting before
+ * the first overlay snapshot is built.
+ */
+void controls_set_opacity_percent(int percent);
+int controls_opacity_percent(void);
 
 /* Rebuild the current layout at a new size.  Returns 0 on success. */
 int controls_resize(int width, int height);

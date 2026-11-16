@@ -23,6 +23,7 @@
 #include "platform_android.h"
 #include "asset_snapshot.h"
 #include "audio_mixer.h"
+#include "sound_switch.h"
 #if WC3_DEBUG && WC3_DEBUG_AUDIO
 #include "audio_tap.h"
 #endif
@@ -2460,6 +2461,13 @@ static int android_audio_open(void *ctx, uint32_t sample_rate,
     (void)ctx;
     if (!out) return -1;
     *out = 0;
+    /* The launch settings can turn sound off.  Refusing here is what keeps
+     * the audio subsystem unloaded: no AAudio stream means no real-time
+     * callback thread, no mixer and no supervisor thread exist. */
+    if (!wc3_sound_enabled()) {
+        AUDIO_LOG("sound disabled by the launch settings; no AAudio stream");
+        return -1;
+    }
     if (bits != 8u && bits != 16u) return -1;
     if (sample_rate < 8000u || sample_rate > 192000u) return -1;
     if (channels < 1u || channels > 8u) return -1;

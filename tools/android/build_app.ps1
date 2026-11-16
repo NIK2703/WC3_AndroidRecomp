@@ -11,6 +11,13 @@
 #
 # There is deliberately no -Clean switch; delete build\android_app\<variant>
 # and build\android\dxvk by hand if a true clean rebuild is required.
+#
+# All native variants automatically use the IDEAPAD distcc worker when it is
+# reachable and keep the normal local path otherwise.  Debug-info commands
+# still compile locally by construction.  The optimized variants also allow
+# PGO/LTO commands; a final release_optimized build copies its merged profile
+# to IDEAPAD before compiling.  See tools/dist/README.md.  Set WC3_DIST_AUTO=0
+# for a forced local build.
 
 [CmdletBinding()]
 param(
@@ -25,6 +32,30 @@ param(
     [string]$Pgo = 'off',
     [string]$PgoProfile = 'build/pgo/wc3.profdata',
     [string]$PgoRawDir = '/data/data/wc3.recomp/files/pgo',
+    # Instrumentation kind.  release_optimized defaults to IRPGO; 'instr' is
+    # retained only for reproducing the historical front-end profile.
+    [ValidateSet('instr', 'ir')]
+    [string]$PgoKind = 'instr',
+    # release_optimized-only code generation profile.  These parameters are
+    # rejected for release/debug so the canonical product stays unchanged.
+    [ValidateSet('O2', 'O3')]
+    [string]$OptLevel = 'O2',
+    [ValidateSet('', 'O2', 'O3')]
+    [string]$CorpusOptLevel = '',
+    [string]$Mtune = '',
+    [switch]$OmitFramePointer,
+    [switch]$SplitMachineFunctions,
+    [ValidateSet('none', 'hfsort', 'cdsort')]
+    [string]$CallGraphSort = 'none',
+    [ValidateSet('O2', 'O3')]
+    [string]$LtoOptLevel = 'O2',
+    [switch]$LtoWholeProgramVisibility,
+    [switch]$NoThinLtoCache,
+    [switch]$EmitRelocs,
+    [switch]$Polly,
+    [switch]$HiddenVisibility,
+    [switch]$NoSemanticInterposition,
+    [string]$SymbolOrderFile = '',
     # Product builds require the relifted corpus.  SoftFloat was removed, so
     # the prebuilt legacy corpus is not a linkable product input.
     [string]$CorpusRoot = 'build/corpus-full',
@@ -55,6 +86,15 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 . (Join-Path $root 'tools\build_warnings.ps1')
+# Release and debug builds automatically use the IDEAPAD distcc worker when it
+# is reachable.  A failed probe is a normal local build; see tools/dist/README.md.
+. (Join-Path $root 'tools\dist\distributed_env.ps1')
+
+function ConvertTo-CMakeBool {
+    param([bool]$Value)
+    if ($Value) { return 'ON' }
+    return 'OFF'
+}
 $isDebug = $Variant -eq 'debug'
 $isOptimized = $Variant -in @('release_optimized', 'release_optimized_pgo')
 $isProfileBuild = $Variant -eq 'release_optimized_pgo'
@@ -69,6 +109,166 @@ if ($isProfileBuild -and $Pgo -ne 'generate') {
 }
 if (-not $isProfileBuild -and $isOptimized -and $Pgo -eq 'generate') {
     throw "profile generation uses -Variant release_optimized_pgo, not release_optimized"
+}
+
+$isFinalOptimized = $Variant -eq 'release_optimized'
+$experimentalParams = @(
+    'PgoKind', 'OptLevel', 'CorpusOptLevel', 'Mtune', 'OmitFramePointer',
+    'SplitMachineFunctions', 'CallGraphSort', 'LtoOptLevel',
+    'LtoWholeProgramVisibility', 'NoThinLtoCache', 'EmitRelocs', 'Polly',
+    'HiddenVisibility', 'NoSemanticInterposition', 'SymbolOrderFile'
+)
+if (-not $isOptimized) {
+    foreach ($name in $experimentalParams) {
+        if ($PSBoundParameters.ContainsKey($name)) {
+            throw "-$name is only valid with -Variant release_optimized or " +
+                  'release_optimized_pgo; release/debug must keep their ' +
+                  'historical code generation'
+        }
+    }
+}
+if ($Mtune -and $Mtune -notmatch '^[A-Za-z0-9+_.-]+$') {
+    throw "-Mtune contains unsupported characters: '$Mtune'"
+}
+
+# Variant defaults.  release_optimized is the measured O3/IRPGO profile; the
+# training build keeps the same base code-generation and instrumentation
+# flags so its counters map to the final build, but it skips LTO and
+# machine-function splitting.
+$effectivePgoKind = if ($PSBoundParameters.ContainsKey('PgoKind')) {
+    $PgoKind
+} elseif ($isOptimized) {
+    'ir'
+} else {
+    'instr'
+}
+$effectiveOptLevel = if ($PSBoundParameters.ContainsKey('OptLevel')) {
+    $OptLevel
+} elseif ($isOptimized) {
+    'O3'
+} else {
+    'O2'
+}
+$effectiveCorpusOptLevel = if ($PSBoundParameters.ContainsKey('CorpusOptLevel')) {
+    $CorpusOptLevel
+} else {
+    $effectiveOptLevel
+}
+if (-not $effectiveCorpusOptLevel) {
+    $effectiveCorpusOptLevel = $effectiveOptLevel
+}
+$effectiveOmitFramePointer = if ($PSBoundParameters.ContainsKey('OmitFramePointer')) {
+    [bool]$OmitFramePointer
+} elseif ($isOptimized) {
+    $true
+} else {
+    $false
+}
+$effectiveSplitMachineFunctions =
+    if ($PSBoundParameters.ContainsKey('SplitMachineFunctions')) {
+        [bool]$SplitMachineFunctions
+    } elseif ($isFinalOptimized) {
+        $true
+    } else {
+        $false
+    }
+$effectiveCallGraphSort = if ($PSBoundParameters.ContainsKey('CallGraphSort')) {
+    $CallGraphSort
+} elseif ($isFinalOptimized) {
+    'cdsort'
+} else {
+    'none'
+}
+$effectiveLtoOptLevel = if ($PSBoundParameters.ContainsKey('LtoOptLevel')) {
+    $LtoOptLevel
+} elseif ($isFinalOptimized) {
+    'O3'
+} else {
+    'O2'
+}
+$effectiveLtoWholeProgramVisibility =
+    if ($PSBoundParameters.ContainsKey('LtoWholeProgramVisibility')) {
+        [bool]$LtoWholeProgramVisibility
+    } elseif ($isFinalOptimized) {
+        $true
+    } else {
+        $false
+    }
+$effectiveThinLtoCache = if ($PSBoundParameters.ContainsKey('NoThinLtoCache')) {
+    -not [bool]$NoThinLtoCache
+} elseif ($isFinalOptimized) {
+    $true
+} else {
+    $false
+}
+$effectiveEmitRelocs = if ($PSBoundParameters.ContainsKey('EmitRelocs')) {
+    [bool]$EmitRelocs
+} else {
+    $false
+}
+$effectivePolly = if ($PSBoundParameters.ContainsKey('Polly')) {
+    [bool]$Polly
+} elseif ($isOptimized) {
+    # Polly is part of the experimental release_optimized profile by default.
+    # It remains off for release/debug and can be disabled explicitly with
+    # -Polly:$false when isolating a suspected FP/codegen regression.
+    $true
+} else {
+    $false
+}
+$effectiveHiddenVisibility = if ($PSBoundParameters.ContainsKey('HiddenVisibility')) {
+    [bool]$HiddenVisibility
+} elseif ($isOptimized) {
+    $true
+} else {
+    $false
+}
+$effectiveNoSemanticInterposition =
+    if ($PSBoundParameters.ContainsKey('NoSemanticInterposition')) {
+        [bool]$NoSemanticInterposition
+    } elseif ($isOptimized) {
+        $true
+    } else {
+        $false
+    }
+$effectiveSymbolOrderFile = if ($PSBoundParameters.ContainsKey('SymbolOrderFile')) {
+    $SymbolOrderFile
+} else {
+    ''
+}
+
+if ($isProfileBuild -and $effectiveSplitMachineFunctions) {
+    throw '-SplitMachineFunctions requires profile use; the training build ' +
+          'has no profile for the split decision'
+}
+if (-not $isFinalOptimized -and $effectiveCallGraphSort -ne 'none') {
+    throw '-CallGraphSort requires -Variant release_optimized with ThinLTO'
+}
+if (-not $isFinalOptimized -and $effectiveLtoWholeProgramVisibility) {
+    throw '-LtoWholeProgramVisibility requires release_optimized ThinLTO'
+}
+if (-not $isFinalOptimized -and $effectiveThinLtoCache) {
+    throw 'ThinLTO cache requires release_optimized ThinLTO'
+}
+if ($effectiveSymbolOrderFile) {
+    $orderPath = if ([IO.Path]::IsPathRooted($effectiveSymbolOrderFile)) {
+        $effectiveSymbolOrderFile
+    } else {
+        Join-Path $root $effectiveSymbolOrderFile
+    }
+    if (-not (Test-Path -LiteralPath $orderPath)) {
+        throw "symbol ordering file not found: $orderPath"
+    }
+    $effectiveSymbolOrderFile =
+        ((Resolve-Path -LiteralPath $orderPath).Path) -replace '\\', '/'
+}
+
+# O-42 is part of the release ABI check; -KeepDynsym is the explicit triage
+# exception.  Whole-program visibility is only valid when that boundary holds.
+$hideDynsym = (-not $isDebug) -and (-not $KeepDynsym)
+if ($effectiveLtoWholeProgramVisibility -and -not $hideDynsym) {
+    throw '-LtoWholeProgramVisibility requires the default hidden dynamic ' +
+          'symbol surface; do not combine it with -KeepDynsym'
 }
 
 # BV-5.3: the debug tag list lives in config/debug_tags.txt, not in this
@@ -217,13 +417,42 @@ function Get-AndroidNdk {
     foreach ($r in ($roots | Select-Object -Unique)) {
         $clang = Join-Path $r 'toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe'
         if (Test-Path $clang) {
+            $profdata = Join-Path $r 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-profdata.exe'
             return [pscustomobject]@{
-                Root  = (Resolve-Path $r).Path
-                Clang = (Resolve-Path $clang).Path
+                Root     = (Resolve-Path $r).Path
+                Clang    = (Resolve-Path $clang).Path
+                Profdata = if (Test-Path $profdata) {
+                    (Resolve-Path $profdata).Path
+                } else {
+                    $null
+                }
             }
         }
     }
     return $null
+}
+
+function Get-PgoProfileKind {
+    param(
+        [string]$Path,
+        [string]$Profdata
+    )
+    if (-not $Profdata -or -not (Test-Path -LiteralPath $Profdata)) {
+        throw 'llvm-profdata.exe not found in the selected NDK'
+    }
+    $lines = @(& $Profdata show $Path 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "llvm-profdata show failed for $Path"
+    }
+    $text = $lines -join "`n"
+    if ($text -match 'Instrumentation level:\s*IR\b') {
+        return 'ir'
+    }
+    if ($text -match 'Instrumentation level:\s*Front-end\b') {
+        return 'instr'
+    }
+    throw "cannot determine PGO instrumentation kind for $Path; " +
+          'expected llvm-profdata to report IR or Front-end'
 }
 
 $sdk = Get-AndroidSdk
@@ -244,6 +473,27 @@ if (-not (Test-Path $cmake) -or -not (Test-Path $ninja) -or
     Write-Host '[app] unavailable: CMake 3.22.1 or NDK toolchain missing'
     exit 2
 }
+
+# One trampoline call: when IDEAPAD is reachable, the helper starts the tunnel
+# and re-runs this same script with WC3_DIST_ACTIVE=1.  The original body below
+# then executes unchanged in the child scope; no try/finally wraps it.  If the
+# peer is unavailable or WC3_DIST_AUTO=0, this returns and the body runs locally.
+# The profile is copied before the child starts so every profile-use compile
+# sees the same absolute path locally and on IDEAPAD.
+$distPgoProfile = ''
+if ($isOptimized -and $Pgo -eq 'use' -and $PgoProfile) {
+    $profileCandidate = if ([IO.Path]::IsPathRooted($PgoProfile)) {
+        $PgoProfile
+    } else {
+        Join-Path $root $PgoProfile
+    }
+    if (Test-Path -LiteralPath $profileCandidate -PathType Leaf) {
+        $distPgoProfile = (Resolve-Path -LiteralPath $profileCandidate).Path
+    }
+}
+Invoke-Wc3AutoDistributedBuild -ScriptPath $PSCommandPath `
+    -Parameters $PSBoundParameters -Root $root -Variant $Variant `
+    -PgoProfile $distPgoProfile
 
 # DXVK is a target product now: both archives are built from
 # third_party/dxvk by the target script, not consumed from the legacy tree.
@@ -323,6 +573,17 @@ if ($isOptimized) {
             throw "PGO profile not found: $profilePath (run the training build first)"
         }
         $PgoProfile = ((Resolve-Path -LiteralPath $profilePath).Path) -replace '\\', '/'
+        # clang's -fprofile-use silently consumes a profile of the wrong kind
+        # and the resulting binary has no useful profile data.  Check the
+        # actual instrumentation level instead of trusting the file extension
+        # or an earlier build's sidecar.
+        $actualPgoKind = Get-PgoProfileKind -Path $PgoProfile `
+            -Profdata $ndk.Profdata
+        if ($actualPgoKind -ne $effectivePgoKind) {
+            throw "PGO profile kind '$actualPgoKind' does not match requested " +
+                  "'$effectivePgoKind' ($PgoProfile). Rebuild the training "
+                  "profile with -PgoKind $effectivePgoKind."
+        }
         $configure += '-DWC3_PGO_MODE=use'
         $configure += "-DWC3_PGO_PROFILE=$PgoProfile"
     } else {
@@ -335,6 +596,25 @@ if ($isOptimized) {
 } else {
     $configure += '-DWC3_PGO_MODE=off'
 }
+$configure += "-DWC3_PGO_KIND=$effectivePgoKind"
+# The release/debug profile is explicit and conservative; only
+# release_optimized changes the code-generation knobs.  Passing every value
+# also prevents a stale CMake cache from a previous optimized configure from
+# leaking into a canonical build.
+$configure += "-DWC3_OPT_LEVEL=$effectiveOptLevel"
+$configure += "-DWC3_CORPUS_OPT_LEVEL=$effectiveCorpusOptLevel"
+$configure += "-DWC3_MTUNE=$Mtune"
+$configure += "-DWC3_OMIT_FRAME_POINTER=$(ConvertTo-CMakeBool $effectiveOmitFramePointer)"
+$configure += "-DWC3_SPLIT_MACHINE_FUNCTIONS=$(ConvertTo-CMakeBool $effectiveSplitMachineFunctions)"
+$configure += "-DWC3_CALL_GRAPH_SORT=$effectiveCallGraphSort"
+$configure += "-DWC3_LTO_OPT_LEVEL=$effectiveLtoOptLevel"
+$configure += "-DWC3_LTO_WHOLE_PROGRAM_VISIBILITY=$(ConvertTo-CMakeBool $effectiveLtoWholeProgramVisibility)"
+$configure += "-DWC3_THINLTO_CACHE=$(ConvertTo-CMakeBool $effectiveThinLtoCache)"
+$configure += "-DWC3_EMIT_RELOCS=$(ConvertTo-CMakeBool $effectiveEmitRelocs)"
+$configure += "-DWC3_POLLY=$(ConvertTo-CMakeBool $effectivePolly)"
+$configure += "-DWC3_HIDDEN_VISIBILITY=$(ConvertTo-CMakeBool $effectiveHiddenVisibility)"
+$configure += "-DWC3_NO_SEMANTIC_INTERPOSITION=$(ConvertTo-CMakeBool $effectiveNoSemanticInterposition)"
+$configure += "-DWC3_SYMBOL_ORDER_FILE=$effectiveSymbolOrderFile"
 # Optimization policy: the generated-corpus transformations (P0-1/P0-2/P0-6,
 # D1, D2, D3b, D4) are unconditional in CMake/liftcore.  There are no
 # per-optimization command-line switches to pass here.  -fno-plt is not passed
@@ -356,8 +636,8 @@ $configure += "-DWC3_ICF_MODE=safe"
 $configure += "-DWC3_ICF_PRINT_SECTIONS=ON"
 # O-42: release ships only the JNI surface.  Debug keeps all dynamic symbols so
 # on-device crash logs retain L_<va> names; -KeepDynsym is the explicit escape
-# hatch for a release triage build.
-$hideDynsym = (-not $isDebug) -and (-not $KeepDynsym)
+# hatch for a release triage build.  $hideDynsym is resolved before the
+# optimize flags so whole-program visibility can reject -KeepDynsym early.
 if ($hideDynsym) {
     $configure += '-DWC3_HIDE_DYNSYM=ON'
 } else {
@@ -374,7 +654,14 @@ Write-Host "[app] selection24 $selection24Value"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
 Write-Host "[app] hide_dynsym $hideDynsym"
 Write-Host "[app] lto   $ltoValue"
-Write-Host "[app] pgo   $Pgo"
+Write-Host "[app] pgo   $Pgo kind $effectivePgoKind"
+Write-Host "[app] opt   $effectiveOptLevel corpus $effectiveCorpusOptLevel mtune '$Mtune'"
+Write-Host "[app] frame_pointer $(-not $effectiveOmitFramePointer) split_mf $effectiveSplitMachineFunctions"
+Write-Host "[app] layout cg_sort $effectiveCallGraphSort lto_opt $effectiveLtoOptLevel wpv $effectiveLtoWholeProgramVisibility thinlto_cache $effectiveThinLtoCache"
+Write-Host "[app] codegen hidden_visibility $effectiveHiddenVisibility no_semantic_interposition $effectiveNoSemanticInterposition polly $effectivePolly emit_relocs $effectiveEmitRelocs"
+if ($effectiveSymbolOrderFile) {
+    Write-Host "[app] symbol_order $effectiveSymbolOrderFile"
+}
 if ($isOptimized) {
     if ($Pgo -eq 'use') {
         Write-Host "[app] pgo_profile $PgoProfile"
@@ -443,7 +730,8 @@ if ($selection24Value -eq 'ON') {
         'wc3_sel24_note_selection',
         'wc3_sel24_select',
         'wc3_sel24_hide_buttons',
-        'wc3_sel24_fill')) {
+        'wc3_sel24_fill',
+        'wc3_sel24_cap')) {
         if ($corpusSyms -notmatch ('\b' + [regex]::Escape($sym) + '\b')) {
             Write-Host "[app] selection24 call site is absent from the corpus archive: $sym"
             exit 1
@@ -486,11 +774,25 @@ if ($selection24Value -eq 'ON' -and
     Write-Host '[app] selection24 marker is absent from the product .so'
     exit 1
 }
+# The cursor switch is a runtime launch setting, but it can only work when the
+# product link kept the --wrap member and resolved the generated corpus call
+# through it.  Check the marker and the wrapper symbol in the actual .so.
+if ($soStrings -notmatch 'WC3_HIDE_CURSOR') {
+    Write-Host '[app] cursor-hide build marker is absent from the product .so'
+    exit 1
+}
+$nm = Join-Path $ndk.Root 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-nm.exe'
+$soSymbols = (& $nm $so 2>&1) -join "`n"
+if ($soSymbols -notmatch '\b__wrap_L_6F1A47B0\b' -or
+    $soSymbols -notmatch '\b__wrap_L_6F342220\b') {
+    Write-Host '[app] cursor-hide wrapper is absent from the product .so'
+    exit 1
+}
 if ($dynSyms -notmatch '\bpwrite\b' -or $dynSyms -notmatch '\bpread\b') {
     Write-Host '[app] overlapped save I/O is absent from the product .so'
     exit 1
 }
-Write-Host "[app] fixes save-list=$($fixes.fixes.save_list_display.sites) site(s), overlapped-save-io=present, selection24=$($selection24Value -eq 'ON')"
+Write-Host "[app] fixes save-list=$($fixes.fixes.save_list_display.sites) site(s), overlapped-save-io=present, selection24=$($selection24Value -eq 'ON'), cursor-hide=present"
 Complete-Wc3BuildWarningLog -Status ok -ExitCode 0
 Write-Host '[app] built'
 exit 0

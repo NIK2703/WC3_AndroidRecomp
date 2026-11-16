@@ -209,20 +209,64 @@ endif()
 
 # Experimental release_optimized native profile.  It is the same Android
 # release product as WC3_VARIANT=release (same app id, Gradle release build
-# type, corpus, HLE, graphics and hardening) with two compiler-profile changes:
-# ThinLTO across the product link graph and a two-stage PGO profile.  The
-# profile-generation build is intentionally not LTO: it collects counts, while
-# the final build applies both -fprofile-instr-use and -flto=thin.
+# type, corpus, HLE, graphics and hardening) with a compiler-profile delta:
+# O3 code generation, ThinLTO across the product link graph, PGO, corpus Polly
+# and optional profile-guided layout.  The profile-generation build is intentionally not
+# LTO: it collects counters, while the final build applies profile-use and
+# -flto=thin.  Every new switch is dormant in release/debug: the build scripts
+# pass release values only for release_optimized and its training variant.
 set(WC3_LTO "OFF" CACHE STRING
     "Interprocedural optimization: OFF or THIN (ThinLTO)")
 set_property(CACHE WC3_LTO PROPERTY STRINGS OFF THIN)
 set(WC3_PGO_MODE "off" CACHE STRING
     "Profile-guided optimization: off, generate, or use")
 set_property(CACHE WC3_PGO_MODE PROPERTY STRINGS off generate use)
+set(WC3_PGO_KIND "instr" CACHE STRING
+    "PGO instrumentation kind: instr (front-end) or ir (IRPGO)")
+set_property(CACHE WC3_PGO_KIND PROPERTY STRINGS instr ir)
 set(WC3_PGO_PROFILE "" CACHE FILEPATH
     "Path to the merged .profdata for WC3_PGO_MODE=use")
 set(WC3_PGO_RAW_DIR "" CACHE STRING
     "On-device directory for .profraw files when WC3_PGO_MODE=generate")
+set(WC3_PGO_INTERVAL_SEC "30" CACHE STRING
+    "Profile snapshot interval in seconds for the training writer")
+set(WC3_OPT_LEVEL "O2" CACHE STRING
+    "Optimization level for product code: O2 or O3")
+set_property(CACHE WC3_OPT_LEVEL PROPERTY STRINGS O2 O3)
+set(WC3_CORPUS_OPT_LEVEL "" CACHE STRING
+    "Optimization level for generated corpus: O2 or O3 (empty follows WC3_OPT_LEVEL)")
+set(WC3_MTUNE "" CACHE STRING
+    "Optional AArch64 -mtune value (for example cortex-a76); empty keeps generic")
+option(WC3_OMIT_FRAME_POINTER
+    "Omit the AArch64 frame pointer in product/corpus code" OFF)
+option(WC3_SPLIT_MACHINE_FUNCTIONS
+    "Use -fsplit-machine-functions with profile-use (release_optimized only)" OFF)
+set(WC3_CALL_GRAPH_SORT "none" CACHE STRING
+    "LLD call-graph layout: none, hfsort, or cdsort")
+set_property(CACHE WC3_CALL_GRAPH_SORT PROPERTY STRINGS none hfsort cdsort)
+set(WC3_LTO_OPT_LEVEL "O2" CACHE STRING
+    "Optimization level for the ThinLTO backend: O2 or O3")
+set_property(CACHE WC3_LTO_OPT_LEVEL PROPERTY STRINGS O2 O3)
+option(WC3_LTO_WHOLE_PROGRAM_VISIBILITY
+    "Assume whole-program visibility in ThinLTO (requires -Bsymbolic)" OFF)
+option(WC3_THINLTO_CACHE
+    "Reuse a ThinLTO backend cache across links" OFF)
+set(WC3_THINLTO_CACHE_DIR "" CACHE PATH
+    "ThinLTO cache directory (empty uses <build>/thinlto-cache)")
+option(WC3_EMIT_RELOCS
+    "Keep relocations in the product .so for a future post-link optimizer" OFF)
+# The CMake default stays OFF so a direct release configure cannot inherit the
+# experiment.  build_app.ps1 passes ON by default for release_optimized and
+# explicitly passes OFF for release/debug; -Polly:$false disables it for an A/B.
+option(WC3_POLLY
+    "Enable Polly for the generated corpus (exactness-sensitive experiment)" OFF)
+option(WC3_HIDDEN_VISIBILITY
+    "Compile product code with hidden visibility (JNI surface stays default)" OFF)
+option(WC3_NO_SEMANTIC_INTERPOSITION
+    "Assume local definitions cannot be interposed (requires -Bsymbolic)" OFF)
+set(WC3_SYMBOL_ORDER_FILE "" CACHE FILEPATH
+    "Optional LLD symbol ordering file for profile-guided layout")
+
 string(TOUPPER "${WC3_LTO}" _wc3_lto_upper)
 if(_wc3_lto_upper STREQUAL "THIN")
     message(STATUS "release_optimized: ThinLTO enabled")
@@ -231,21 +275,209 @@ if(_wc3_lto_upper STREQUAL "THIN")
 elseif(NOT _wc3_lto_upper STREQUAL "OFF")
     message(FATAL_ERROR "WC3_LTO must be OFF or THIN, got '${WC3_LTO}'")
 endif()
+
+string(TOUPPER "${WC3_OPT_LEVEL}" _wc3_opt_upper)
+if(NOT _wc3_opt_upper MATCHES "^O[23]$")
+    message(FATAL_ERROR
+        "WC3_OPT_LEVEL must be O2 or O3, got '${WC3_OPT_LEVEL}'")
+endif()
+if(WC3_CORPUS_OPT_LEVEL)
+    string(TOUPPER "${WC3_CORPUS_OPT_LEVEL}" _wc3_corpus_opt_upper)
+else()
+    set(_wc3_corpus_opt_upper "${_wc3_opt_upper}")
+endif()
+if(NOT _wc3_corpus_opt_upper MATCHES "^O[23]$")
+    message(FATAL_ERROR
+        "WC3_CORPUS_OPT_LEVEL must be empty, O2, or O3, got "
+        "'${WC3_CORPUS_OPT_LEVEL}'")
+endif()
+set(WC3_CORPUS_OPT_LEVEL_EFFECTIVE "${_wc3_corpus_opt_upper}")
+if(WC3_MTUNE AND NOT WC3_MTUNE MATCHES "^[A-Za-z0-9+_.-]+$")
+    message(FATAL_ERROR
+        "WC3_MTUNE contains unsupported characters: '${WC3_MTUNE}'")
+endif()
+if(NOT WC3_PGO_INTERVAL_SEC MATCHES "^[0-9]+$")
+    message(FATAL_ERROR
+        "WC3_PGO_INTERVAL_SEC must be an integer >= 5, got "
+        "'${WC3_PGO_INTERVAL_SEC}'")
+endif()
+if(WC3_PGO_INTERVAL_SEC LESS 5)
+    message(FATAL_ERROR
+        "WC3_PGO_INTERVAL_SEC must be an integer >= 5, got "
+        "'${WC3_PGO_INTERVAL_SEC}'")
+endif()
+string(TOLOWER "${WC3_PGO_KIND}" _wc3_pgo_kind_lower)
+if(NOT _wc3_pgo_kind_lower MATCHES "^(instr|ir)$")
+    message(FATAL_ERROR
+        "WC3_PGO_KIND must be instr or ir, got '${WC3_PGO_KIND}'")
+endif()
+string(TOLOWER "${WC3_CALL_GRAPH_SORT}" _wc3_cg_sort_lower)
+if(NOT _wc3_cg_sort_lower MATCHES "^(none|hfsort|cdsort)$")
+    message(FATAL_ERROR
+        "WC3_CALL_GRAPH_SORT must be none, hfsort, or cdsort, got "
+        "'${WC3_CALL_GRAPH_SORT}'")
+endif()
+string(TOUPPER "${WC3_LTO_OPT_LEVEL}" _wc3_lto_opt_upper)
+if(NOT _wc3_lto_opt_upper MATCHES "^O[23]$")
+    message(FATAL_ERROR
+        "WC3_LTO_OPT_LEVEL must be O2 or O3, got '${WC3_LTO_OPT_LEVEL}'")
+endif()
+if(NOT _wc3_cg_sort_lower STREQUAL "none" AND
+   NOT _wc3_lto_upper STREQUAL "THIN")
+    message(FATAL_ERROR
+        "WC3_CALL_GRAPH_SORT=${WC3_CALL_GRAPH_SORT} requires WC3_LTO=THIN")
+endif()
+if(WC3_LTO_WHOLE_PROGRAM_VISIBILITY)
+    if(NOT _wc3_lto_upper STREQUAL "THIN")
+        message(FATAL_ERROR
+            "WC3_LTO_WHOLE_PROGRAM_VISIBILITY requires WC3_LTO=THIN")
+    endif()
+    if(NOT WC3_HIDE_DYNSYM)
+        message(FATAL_ERROR
+            "WC3_LTO_WHOLE_PROGRAM_VISIBILITY requires WC3_HIDE_DYNSYM=ON "
+            "so the JNI surface is the only interposable boundary")
+    endif()
+endif()
+if(WC3_THINLTO_CACHE AND NOT _wc3_lto_upper STREQUAL "THIN")
+    message(FATAL_ERROR "WC3_THINLTO_CACHE requires WC3_LTO=THIN")
+endif()
+if(WC3_SYMBOL_ORDER_FILE AND NOT EXISTS "${WC3_SYMBOL_ORDER_FILE}")
+    message(FATAL_ERROR
+        "WC3_SYMBOL_ORDER_FILE does not exist: ${WC3_SYMBOL_ORDER_FILE}")
+endif()
+
+# Product compile options are target-local so vendor archives and the DXVK
+# shim keep their own policy.  Release/debug leave every new option at its
+# historical default; only release_optimized enables this list.  -O2 is not
+# repeated: the release build type already provides it, and repeating it in a
+# debug configure would silently override the debug optimization level.
+set(WC3_PRODUCT_COMPILE_OPTIONS)
+if(NOT _wc3_opt_upper STREQUAL "O2")
+    list(APPEND WC3_PRODUCT_COMPILE_OPTIONS "-${_wc3_opt_upper}")
+endif()
+if(WC3_MTUNE)
+    list(APPEND WC3_PRODUCT_COMPILE_OPTIONS "-mtune=${WC3_MTUNE}")
+endif()
+if(WC3_OMIT_FRAME_POINTER)
+    list(APPEND WC3_PRODUCT_COMPILE_OPTIONS -fomit-frame-pointer)
+endif()
+if(WC3_NO_SEMANTIC_INTERPOSITION)
+    list(APPEND WC3_PRODUCT_COMPILE_OPTIONS -fno-semantic-interposition)
+endif()
+if(WC3_HIDDEN_VISIBILITY)
+    list(APPEND WC3_PRODUCT_COMPILE_OPTIONS -fvisibility=hidden)
+endif()
+if(WC3_SPLIT_MACHINE_FUNCTIONS)
+    list(APPEND WC3_PRODUCT_COMPILE_OPTIONS -fsplit-machine-functions)
+endif()
+if(WC3_SYMBOL_ORDER_FILE)
+    list(APPEND WC3_PRODUCT_COMPILE_OPTIONS -ffunction-sections -fdata-sections)
+endif()
+
+string(SUBSTRING "${_wc3_lto_opt_upper}" 1 -1 _wc3_lto_opt_digit)
+set(WC3_PRODUCT_LINK_OPTIONS)
+if(_wc3_lto_upper STREQUAL "THIN")
+    list(APPEND WC3_PRODUCT_LINK_OPTIONS
+        "-Wl,--lto-O${_wc3_lto_opt_digit}")
+    if(NOT _wc3_cg_sort_lower STREQUAL "none")
+        list(APPEND WC3_PRODUCT_LINK_OPTIONS
+            "-Wl,--call-graph-profile-sort=${_wc3_cg_sort_lower}")
+    endif()
+    if(WC3_LTO_WHOLE_PROGRAM_VISIBILITY)
+        list(APPEND WC3_PRODUCT_LINK_OPTIONS
+            -Wl,--lto-whole-program-visibility)
+    endif()
+    if(WC3_THINLTO_CACHE)
+        if(NOT WC3_THINLTO_CACHE_DIR)
+            set(WC3_THINLTO_CACHE_DIR
+                "${CMAKE_CURRENT_BINARY_DIR}/thinlto-cache")
+        endif()
+        file(MAKE_DIRECTORY "${WC3_THINLTO_CACHE_DIR}")
+        file(TO_CMAKE_PATH "${WC3_THINLTO_CACHE_DIR}" _wc3_thinlto_cache_cmake)
+        list(APPEND WC3_PRODUCT_LINK_OPTIONS
+            "-Wl,--thinlto-cache-dir=${_wc3_thinlto_cache_cmake}")
+    endif()
+endif()
+if(WC3_EMIT_RELOCS)
+    list(APPEND WC3_PRODUCT_LINK_OPTIONS -Wl,--emit-relocs)
+endif()
+if(WC3_SYMBOL_ORDER_FILE)
+    file(TO_CMAKE_PATH "${WC3_SYMBOL_ORDER_FILE}" _wc3_order_cmake)
+    list(APPEND WC3_PRODUCT_LINK_OPTIONS
+        "-Wl,--symbol-ordering-file=${_wc3_order_cmake}")
+endif()
+if(WC3_PRODUCT_COMPILE_OPTIONS)
+    message(STATUS
+        "release_optimized: product flags ${WC3_PRODUCT_COMPILE_OPTIONS}")
+endif()
+if(WC3_PRODUCT_LINK_OPTIONS)
+    message(STATUS
+        "release_optimized: link flags ${WC3_PRODUCT_LINK_OPTIONS}")
+endif()
+
+# Corpus options mirror the product profile but keep the exactness constraints
+# that already live in Wc3ReliftedCorpus.cmake.  Polly and machine-function
+# splitting are experiments: release/debug scripts pass OFF, release_optimized
+# enables Polly by default (split-MF remains profile/warning-gated).
+set(WC3_CORPUS_COMPILE_OPTIONS "-${WC3_CORPUS_OPT_LEVEL_EFFECTIVE}")
+if(WC3_MTUNE)
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS "-mtune=${WC3_MTUNE}")
+endif()
+if(WC3_OMIT_FRAME_POINTER)
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -fomit-frame-pointer)
+endif()
+if(WC3_NO_SEMANTIC_INTERPOSITION)
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -fno-semantic-interposition)
+endif()
+if(WC3_HIDDEN_VISIBILITY)
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -fvisibility=hidden)
+endif()
+if(WC3_SPLIT_MACHINE_FUNCTIONS)
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -fsplit-machine-functions)
+endif()
+if(WC3_SYMBOL_ORDER_FILE)
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -ffunction-sections -fdata-sections)
+endif()
+if(WC3_POLLY)
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -mllvm -polly)
+endif()
+if(NOT _wc3_corpus_opt_upper STREQUAL "O2" OR
+   WC3_MTUNE OR WC3_OMIT_FRAME_POINTER OR
+   WC3_NO_SEMANTIC_INTERPOSITION OR WC3_HIDDEN_VISIBILITY OR
+   WC3_SPLIT_MACHINE_FUNCTIONS OR WC3_SYMBOL_ORDER_FILE OR WC3_POLLY)
+    message(STATUS
+        "release_optimized: corpus flags ${WC3_CORPUS_COMPILE_OPTIONS}")
+endif()
+
 string(TOLOWER "${WC3_PGO_MODE}" _wc3_pgo_lower)
 if(_wc3_pgo_lower STREQUAL "generate")
     if(NOT WC3_PGO_RAW_DIR)
         message(FATAL_ERROR
             "WC3_PGO_MODE=generate requires WC3_PGO_RAW_DIR")
     endif()
-    # %p is expanded by the LLVM profile runtime, so concurrent app processes
-    # and reruns do not overwrite one another's counters.
-    set(_wc3_profraw_file "${WC3_PGO_RAW_DIR}/wc3-%p.profraw")
-    message(STATUS
-        "release_optimized: PGO generate -> ${_wc3_profraw_file}")
-    add_compile_options(
-        "-fprofile-instr-generate=${_wc3_profraw_file}")
-    add_link_options(
-        "-fprofile-instr-generate=${_wc3_profraw_file}")
+    if(_wc3_pgo_kind_lower STREQUAL "instr")
+        # %p is expanded by the LLVM profile runtime, so concurrent app
+        # processes and reruns do not overwrite one another's counters.
+        set(_wc3_profraw_file "${WC3_PGO_RAW_DIR}/wc3-%p.profraw")
+        message(STATUS
+            "release_optimized: front-end PGO generate -> ${_wc3_profraw_file}")
+        add_compile_options(
+            "-fprofile-instr-generate=${_wc3_profraw_file}")
+        add_link_options(
+            "-fprofile-instr-generate=${_wc3_profraw_file}")
+    else()
+        # -fprofile-generate treats its argument as a directory and appends
+        # default_%m.profraw.  pgo_profile.c overrides the filename with the
+        # device path before every snapshot, so this is only the runtime
+        # default and never the file that the training flow consumes.
+        message(STATUS
+            "release_optimized: IRPGO generate -> ${WC3_PGO_RAW_DIR}")
+        add_compile_options("-fprofile-generate=${WC3_PGO_RAW_DIR}")
+        add_link_options("-fprofile-generate=${WC3_PGO_RAW_DIR}")
+    endif()
+    # Atomic counters reduce lost updates from guest threads.  This is a
+    # training-only cost; the final profile-use build does not carry it.
+    add_compile_options(-fprofile-update=atomic)
 elseif(_wc3_pgo_lower STREQUAL "use")
     if(NOT WC3_PGO_PROFILE OR NOT EXISTS "${WC3_PGO_PROFILE}")
         message(FATAL_ERROR
@@ -253,12 +485,28 @@ elseif(_wc3_pgo_lower STREQUAL "use")
             "(got '${WC3_PGO_PROFILE}')")
     endif()
     message(STATUS
-        "release_optimized: PGO use <- ${WC3_PGO_PROFILE}")
+        "release_optimized: ${WC3_PGO_KIND} PGO use <- ${WC3_PGO_PROFILE}")
+    if(_wc3_pgo_kind_lower STREQUAL "instr")
+        add_compile_options(
+            "-fprofile-instr-use=${WC3_PGO_PROFILE}")
+    else()
+        add_compile_options(
+            "-fprofile-use=${WC3_PGO_PROFILE}")
+    endif()
+    # A partial training run is expected on a device.  Suppress the flood of
+    # unprofiled-function warnings, but keep profile-read errors fatal.
     add_compile_options(
-        "-fprofile-instr-use=${WC3_PGO_PROFILE}")
+        -Wno-profile-instr-unprofiled
+        -Wno-profile-instr-out-of-date)
 elseif(NOT _wc3_pgo_lower STREQUAL "off")
     message(FATAL_ERROR
         "WC3_PGO_MODE must be off, generate, or use, got '${WC3_PGO_MODE}'")
+endif()
+if(WC3_SPLIT_MACHINE_FUNCTIONS AND
+   NOT _wc3_pgo_lower STREQUAL "use")
+    message(FATAL_ERROR
+        "WC3_SPLIT_MACHINE_FUNCTIONS requires WC3_PGO_MODE=use: the split "
+        "decision needs a profile")
 endif()
 
 # BV-5.3: WC3_DEBUG_TAGS is the single source of subsystem tags.  A tag is a
@@ -405,9 +653,13 @@ add_library(wc3_platform STATIC
     "${WC3_ROOT}/runtime/ipc/game_state.c")
 target_include_directories(wc3_platform PUBLIC
     "${WC3_ROOT}/runtime/ipc"
+    "${WC3_ROOT}/runtime/diag"
     "${WC3_ROOT}/runtime/platform"
     "${WC3_ROOT}/runtime/platform/android")
 target_compile_definitions(wc3_platform PUBLIC WC3_DEBUG=${WC3_DEBUG_DEFINE})
+if(WC3_PRODUCT_COMPILE_OPTIONS)
+    target_compile_options(wc3_platform PRIVATE ${WC3_PRODUCT_COMPILE_OPTIONS})
+endif()
 
 add_library(wc3_guest STATIC
     "${WC3_ROOT}/runtime/guest/guest_memory.c"
@@ -415,6 +667,9 @@ add_library(wc3_guest STATIC
     "${WC3_ROOT}/runtime/guest/pe.c")
 target_include_directories(wc3_guest PUBLIC ${WC3_INCLUDES})
 target_link_libraries(wc3_guest PUBLIC wc3_platform)
+if(WC3_PRODUCT_COMPILE_OPTIONS)
+    target_compile_options(wc3_guest PRIVATE ${WC3_PRODUCT_COMPILE_OPTIONS})
+endif()
 
 if(WC3_BUILD_PLATFORM_TEST)
     add_executable(wc3_platform_test
@@ -443,6 +698,27 @@ if(WC3_BUILD_APP)
         IMPORTED_LOCATION "${GA_ARCHIVE}")
     target_include_directories(game_activity_static INTERFACE "${GA_INCLUDE}")
 
+    # FFmpeg 7.1.1 is the ASP video decoder for campaign movies; the platform
+    # MPEG-4 decoder on the target device is Simple Profile only and cannot
+    # reorder the B-frames in these AVI files.  Only the arm64-v8a product has
+    # a matching vendor build.
+    if(NOT ANDROID OR NOT ANDROID_ABI STREQUAL "arm64-v8a")
+        message(FATAL_ERROR
+            "campaign movie FFmpeg path requires the Android arm64-v8a target")
+    endif()
+    set(WC3_FFMPEG_ROOT "${WC3_ROOT}/third_party/ffmpeg")
+    foreach(_wc3_ffmpeg_lib avformat avcodec swscale avutil)
+        set(_wc3_ffmpeg_archive
+            "${WC3_FFMPEG_ROOT}/lib/arm64-v8a/lib${_wc3_ffmpeg_lib}.a")
+        if(NOT EXISTS "${_wc3_ffmpeg_archive}")
+            message(FATAL_ERROR
+                "FFmpeg vendor archive missing: ${_wc3_ffmpeg_archive}; "
+                "restore third_party/ffmpeg before configuring")
+        endif()
+        add_library(wc3_ffmpeg_${_wc3_ffmpeg_lib} STATIC IMPORTED)
+        set_target_properties(wc3_ffmpeg_${_wc3_ffmpeg_lib} PROPERTIES
+            IMPORTED_LOCATION "${_wc3_ffmpeg_archive}")
+    endforeach()
     # Winlator C touch engine, vendored under third_party.  It is a pinned
     # third-party input library, not imported build logic: the overlay adapter
     # in runtime/platform/android/controls is the only consumer.  Vendor code
@@ -481,36 +757,63 @@ if(WC3_BUILD_APP)
         jnigraphics m)
     target_compile_definitions(wc3_overlay PUBLIC
         WC3_DEBUG=${WC3_DEBUG_DEFINE})
-    target_compile_options(wc3_overlay PRIVATE -Wall -Wextra -O2)
+    # Keep the historical -O2 for release/debug; an experimental -O3 is
+    # appended after it and therefore wins only when explicitly requested.
+    target_compile_options(wc3_overlay PRIVATE
+        -Wall -Wextra -O2 ${WC3_PRODUCT_COMPILE_OPTIONS})
     set_target_properties(wc3_overlay PROPERTIES
         C_EXTENSIONS ON
         POSITION_INDEPENDENT_CODE ON)
 
     add_library(wc3gameactivity SHARED
-        "${WC3_ROOT}/apps/android_gameactivity/src/main/cpp/host_shell.c")
+        "${WC3_ROOT}/apps/android_gameactivity/src/main/cpp/host_shell.c"
+        "${WC3_ROOT}/apps/android_gameactivity/src/main/cpp/movie_ffmpeg.c")
     if(_wc3_pgo_lower STREQUAL "generate")
         # The Android process has no reliable atexit on a force-stop.  This
         # training-only writer snapshots the counters after startup so the
         # final profile-use build can be produced from a real device run.
+        # Generate the device path in a header instead of a compile definition:
+        # MSYS2 rewrites an absolute /data/... command-line argument to a
+        # C:/msys64/... path and strips the C-string quoting, which made the
+        # macro expand as an identifier rather than a string literal.
+        string(REPLACE "\\" "/" _wc3_pgo_dir_for_c "${WC3_PGO_RAW_DIR}")
+        string(REPLACE "\"" "\\\"" _wc3_pgo_dir_for_c
+            "${_wc3_pgo_dir_for_c}")
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/wc3_pgo_config.h"
+            "/* Generated by CMake for the release_optimized training writer. */\n"
+            "#pragma once\n"
+            "#define WC3_PGO_DIR \"${_wc3_pgo_dir_for_c}\"\n"
+            "#define WC3_PGO_INTERVAL_SEC ${WC3_PGO_INTERVAL_SEC}\n")
         target_sources(wc3gameactivity PRIVATE
             "${WC3_ROOT}/apps/android_gameactivity/src/main/cpp/pgo_profile.c")
     endif()
     target_include_directories(wc3gameactivity PRIVATE
         ${WC3_INCLUDES}
-        "${WC3_ROOT}/runtime/app")
+        "${CMAKE_CURRENT_BINARY_DIR}"
+        "${WC3_ROOT}/runtime/app"
+        "${WC3_FFMPEG_ROOT}/include")
+    # Link every FFmpeg archive the movie module uses directly: static link
+    # order is avformat -> avcodec -> swscale -> avutil, and an archive that
+    # only arrives transitively is easy to miss.
     target_link_libraries(wc3gameactivity PRIVATE
         wc3_platform
         wc3_overlay
+        wc3_ffmpeg_avformat
+        wc3_ffmpeg_avcodec
+        wc3_ffmpeg_swscale
+        wc3_ffmpeg_avutil
         -Wl,--whole-archive game_activity_static -Wl,--no-whole-archive
         android log aaudio m)
     if(NOT WC3_WITH_ASBUILT_HLE)
         target_link_libraries(wc3gameactivity PRIVATE wc3_guest)
     endif()
-    target_compile_options(wc3gameactivity PRIVATE -fPIC -O2 -Wall -Wextra)
+    target_compile_options(wc3gameactivity PRIVATE
+        -fPIC -O2 -Wall -Wextra ${WC3_PRODUCT_COMPILE_OPTIONS})
     target_link_options(wc3gameactivity PRIVATE
         -Wl,-z,max-page-size=16384
         -Wl,-Bsymbolic
-        -Wl,-u,JNI_OnLoad)
+        -Wl,-u,JNI_OnLoad
+        ${WC3_PRODUCT_LINK_OPTIONS})
     if(WC3_PACK_DYN_RELOCS)
         if(NOT ANDROID)
             message(FATAL_ERROR "WC3_PACK_DYN_RELOCS requires the Android toolchain")

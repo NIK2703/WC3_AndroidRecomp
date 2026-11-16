@@ -1,9 +1,9 @@
-# Build both vendored DXVK trees for Android arm64.
+# Build the vendored DXVK trees for Android arm64.
 #
-# The source is in third_party/dxvk/{1.10.3,3.1.1}; the only Win32 surface DXVK
-# sees is third_party/dxvk/shim.  This is a target build, not the old tree's
-# probe: it writes the two static archives that Wc3LegacyBoot.cmake links into
-# libwc3gameactivity.so.  Every compiler call goes through ccache (BP-12).
+# The source is in third_party/dxvk/{1.10.3,3.1.1,low-latency}; the only Win32
+# surface DXVK sees is third_party/dxvk/shim.  This is a target build, not the
+# old tree's probe: it writes the static archives that Wc3LegacyBoot.cmake links
+# into libwc3gameactivity.so.  Every compiler call goes through ccache (BP-12).
 #
 # Exit codes: 0 built, 1 failure, 2 unavailable (SDK/NDK/ccache missing).
 #
@@ -115,10 +115,12 @@ if (-not $ccache) {
 $dxvkRoot = Join-Path $root 'third_party\dxvk'
 $dxvk1 = Join-Path $dxvkRoot '1.10.3'
 $dxvk3 = Join-Path $dxvkRoot '3.1.1'
+$dxvkLL = Join-Path $dxvkRoot 'low-latency'
 $shim = Join-Path $dxvkRoot 'shim'
 $directx = Join-Path $dxvk3 'include\native\directx'
-foreach ($p in @($dxvk1, $dxvk3, $shim, (Join-Path $dxvk1 'build-win64-ucrt\compile_commands.json'),
-        (Join-Path $dxvk3 'build-win64-ucrt\compile_commands.json'))) {
+foreach ($p in @($dxvk1, $dxvk3, $dxvkLL, $shim, (Join-Path $dxvk1 'build-win64-ucrt\compile_commands.json'),
+        (Join-Path $dxvk3 'build-win64-ucrt\compile_commands.json'),
+        (Join-Path $dxvkLL 'build-win64-ucrt\compile_commands.json'))) {
     if (-not (Test-Path $p)) { throw "vendored DXVK input missing: $p" }
 }
 $patch = Join-Path $dxvkRoot 'patches\dxvk-3.1.1-wc3-d3d9.patch'
@@ -249,11 +251,93 @@ if (-not (Select-String -LiteralPath $swapchain1 -SimpleMatch -Pattern 'if (stat
     throw "DXVK 1.10.3 source does not contain the Android suboptimal-present fix"
 }
 
+# The low-latency fork is DXVK 3.1.1 plus upstream's framepacer.  It carries the
+# same WC3 patch set, replayed by hand across the fork's changed files, so the
+# same markers must survive a fork refresh.  The lock-free Vulkan loader setter
+# is required here too: this archive does not link the 1.10.3 Win32 shim.
+# The fork's new sync headers must keep the Android futex/std path, and the
+# forced-compatibility option must recognize "ll" as well as "3".
+$llFeatureSource = Join-Path $dxvkLL 'src\dxvk\dxvk_device_info.cpp'
+$llCmdlistSource = Join-Path $dxvkLL 'src\dxvk\dxvk_cmdlist.h'
+$llOptionsSource = Join-Path $dxvkLL 'src\dxvk\dxvk_options.cpp'
+$llOptionsHeader = Join-Path $dxvkLL 'src\dxvk\dxvk_options.h'
+$llDeviceHeader = Join-Path $dxvkLL 'src\dxvk\dxvk_device_info.h'
+$llGraphicsSource = Join-Path $dxvkLL 'src\dxvk\dxvk_graphics.cpp'
+$llContextSource = Join-Path $dxvkLL 'src\dxvk\dxvk_context.cpp'
+$llShaderSource = Join-Path $dxvkLL 'src\dxvk\dxvk_shader.cpp'
+$llShaderHeader = Join-Path $dxvkLL 'src\dxvk\dxvk_shader.h'
+$llMemorySource = Join-Path $dxvkLL 'src\dxvk\dxvk_memory.cpp'
+$llSleepSource = Join-Path $dxvkLL 'src\util\util_sleep.cpp'
+$llPresenterSource = Join-Path $dxvkLL 'src\dxvk\dxvk_presenter.cpp'
+$llSwapchainSource = Join-Path $dxvkLL 'src\d3d9\d3d9_swapchain.cpp'
+$llFixedFunctionSource = Join-Path $dxvkLL 'src\d3d9\d3d9_fixed_function.cpp'
+$llDeviceSource = Join-Path $dxvkLL 'src\d3d9\d3d9_device.cpp'
+$llDeviceHeaderD3d9 = Join-Path $dxvkLL 'src\d3d9\d3d9_device.h'
+$llLoaderSource = Join-Path $dxvkLL 'src\vulkan\vulkan_loader.cpp'
+$llSyncSignalSource = Join-Path $dxvkLL 'src\util\sync\sync_signal.h'
+$llSyncAtomicSource = Join-Path $dxvkLL 'src\util\sync\sync_atomic_signal.h'
+if (-not (Select-String -LiteralPath $llFeatureSource -SimpleMatch -Pattern 'storageBuffer8BitAccess, false' -Quiet) -or
+    -not (Select-String -LiteralPath $llFeatureSource -SimpleMatch -Pattern 'khrMaintenance6, maintenance6, false' -Quiet) -or
+    -not (Select-String -LiteralPath $llFeatureSource -SimpleMatch -Pattern 'm_ignoreMissingExtensions' -Quiet) -or
+    -not (Select-String -LiteralPath $llFeatureSource -SimpleMatch -Pattern 'extMapMemoryPlaced' -Quiet) -or
+    -not (Select-String -LiteralPath $llCmdlistSource -SimpleMatch -Pattern 'vkCmdBindDescriptorSets2KHR != nullptr' -Quiet) -or
+    -not (Select-String -LiteralPath $llCmdlistSource -SimpleMatch -Pattern 'vkCmdPushConstants2KHR != nullptr' -Quiet) -or
+    -not (Select-String -LiteralPath $llCmdlistSource -SimpleMatch -Pattern 'vkCmdBindIndexBuffer2KHR != nullptr' -Quiet) -or
+    -not (Select-String -LiteralPath $llCmdlistSource -SimpleMatch -Pattern 'vkCmdSetDepthClipEnableEXT != nullptr' -Quiet) -or
+    -not (Select-String -LiteralPath $llOptionsSource -SimpleMatch -Pattern 'lowMemoryPlaced' -Quiet) -or
+    -not (Select-String -LiteralPath $llOptionsSource -SimpleMatch -Pattern 'ignoreMissingExtensions' -Quiet) -or
+    -not (Select-String -LiteralPath $llOptionsHeader -SimpleMatch -Pattern 'ignoreMissingExtensions' -Quiet) -or
+    -not (Select-String -LiteralPath $llDeviceHeader -SimpleMatch -Pattern 'm_ignoreMissingExtensions' -Quiet) -or
+    -not (Select-String -LiteralPath $llOptionsSource -SimpleMatch -Pattern "forcedVersion[0] == 'l'" -Quiet) -or
+    -not (Select-String -LiteralPath $llOptionsSource -SimpleMatch -Pattern 'useShaderModules' -Quiet) -or
+    -not (Select-String -LiteralPath $llOptionsHeader -SimpleMatch -Pattern 'useShaderModules' -Quiet) -or
+    -not (Select-String -LiteralPath $llShaderSource -SimpleMatch -Pattern 'useShaderModules' -Quiet) -or
+    -not (Select-String -LiteralPath $llShaderSource -SimpleMatch -Pattern 'vkCreateShaderModule' -Quiet) -or
+    -not (Select-String -LiteralPath $llShaderHeader -SimpleMatch -Pattern 'm_modules' -Quiet) -or
+    -not (Select-String -LiteralPath $llGraphicsSource -SimpleMatch -Pattern 'extDepthClipEnable.depthClipEnable' -Quiet) -or
+    -not (Select-String -LiteralPath $llContextSource -SimpleMatch -Pattern 'khrLoadStoreOpNone' -Quiet) -or
+    -not (Select-String -LiteralPath $llDeviceSource -SimpleMatch -Pattern 'm_ffViewValid' -Quiet) -or
+    -not (Select-String -LiteralPath $llDeviceHeaderD3d9 -SimpleMatch -Pattern 'm_ffCachedLights' -Quiet) -or
+    -not (Select-String -LiteralPath $llMemorySource -SimpleMatch -Pattern 'wc3_lowmem.h' -Quiet) -or
+    -not (Select-String -LiteralPath $llSleepSource -SimpleMatch -Pattern 'clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME' -Quiet) -or
+    -not (Select-String -LiteralPath $llPresenterSource -SimpleMatch -Pattern 'keeping swapchain' -Quiet) -or
+    -not (Select-String -LiteralPath $llPresenterSource -SimpleMatch -Pattern 'm_lastSignaled = frameId' -Quiet) -or
+    (Select-String -LiteralPath $llPresenterSource -SimpleMatch -Pattern 'if (m_hasPresentWait) {' -Quiet) -or
+    -not (Select-String -LiteralPath $llFixedFunctionSource -SimpleMatch -Pattern 'must be SPIR-V 1.3' -Quiet) -or
+    -not (Select-String -LiteralPath $llLoaderSource -SimpleMatch -Pattern 'dxvk_set_vulkan_get_instance_proc_addr' -Quiet) -or
+    -not (Select-String -LiteralPath $llSyncSignalSource -SimpleMatch -Pattern 'defined(_WIN32) && !defined(__ANDROID__)' -Quiet) -or
+    -not (Select-String -LiteralPath $llSyncAtomicSource -SimpleMatch -Pattern 'defined(_WIN32) && !defined(__ANDROID__)' -Quiet) -or
+    (Select-String -LiteralPath $llSwapchainSource -SimpleMatch -Pattern 'SynchronizePresent' -Quiet) -or
+    (Select-String -LiteralPath $llSwapchainSource -SimpleMatch -Pattern 'm_presentStatus' -Quiet)) {
+    throw "DXVK low-latency source does not contain the WC3 3.1.1 patch set or the frame-queue drain fix"
+}
+$llFixedFunctionHeaderDir = Join-Path $dxvkLL 'build-win64-ucrt\src\d3d9\libd3d9.a.p'
+foreach ($fixedFunctionName in @('vert', 'frag', 'frag_sample')) {
+    $fixedFunctionHeader = Join-Path $llFixedFunctionHeaderDir "d3d9_fixed_function_$fixedFunctionName.h"
+    if (-not (Test-Path $fixedFunctionHeader)) {
+        throw "DXVK low-latency fixed-function shader header missing: $fixedFunctionHeader"
+    }
+    $fixedFunctionHeaderText = Get-Content -LiteralPath $fixedFunctionHeader -Raw
+    if ($fixedFunctionHeaderText -notmatch '0x07230203,\s*0x00010300' -or
+        $fixedFunctionHeaderText -notmatch 'SPIRV_VERSION 0x00010300u') {
+        throw "DXVK low-latency fixed-function shader $fixedFunctionName is not SPIR-V 1.3"
+    }
+}
+$llCompileCommands = Join-Path $dxvkLL 'build-win64-ucrt\compile_commands.json'
+foreach ($llUnit in @('dxvk_hud_item_latency.cpp', 'dxvk_framepacer.cpp',
+        'dxvk_framepacer_mode_low_latency.cpp', 'dxvk_calibrated_device_timestamps.cpp',
+        'dxvk_calibrated_swapchain_timestamps.cpp')) {
+    if (-not (Select-String -LiteralPath $llCompileCommands -SimpleMatch -Pattern $llUnit -Quiet)) {
+        throw "DXVK low-latency build recipe is missing $llUnit"
+    }
+}
+
 $buildRoot = Join-Path $root 'build\android\dxvk'
 $obj1 = Join-Path $buildRoot 'obj\1.10.3'
 $obj3 = Join-Path $buildRoot 'obj\3.1.1'
+$objLL = Join-Path $buildRoot 'obj\low-latency'
 $outDir = Join-Path $buildRoot $Variant
-foreach ($d in @($obj1, $obj3, $outDir, (Join-Path $buildRoot 'tmp'))) {
+foreach ($d in @($obj1, $obj3, $objLL, $outDir, (Join-Path $buildRoot 'tmp'))) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
 $warningState = Initialize-Wc3BuildWarningLog -Root $root -Kind 'dxvk' -Variant $Variant
@@ -276,7 +360,8 @@ $forceFull = [bool]$Full
 if (-not $forceFull) {
     $stale1 = Test-DxvkSourcesNewerThanObjects -SourceRoots @((Join-Path $dxvk1 'src'), $shim) -ObjDir $obj1
     $stale3 = Test-DxvkSourcesNewerThanObjects -SourceRoots @((Join-Path $dxvk3 'src'), $shim) -ObjDir $obj3
-    if ($stale1 -or $stale3) {
+    $staleLL = Test-DxvkSourcesNewerThanObjects -SourceRoots @((Join-Path $dxvkLL 'src'), $shim) -ObjDir $objLL
+    if ($stale1 -or $stale3 -or $staleLL) {
         Write-Host '[dxvk] source or header newer than cached objects; forcing full rebuild'
         $forceFull = $true
     }
@@ -326,10 +411,20 @@ Write-Host '[dxvk] compiling 3.1.1 objects'
 Invoke-Native $probe $probeArgs3 'dxvk-3.1.1-compile'
 if ($script:LastNativeExit -ne 0) { throw "DXVK 3.1.1 object build failed: $script:LastNativeExit" }
 
+$probeArgsLL = @('--dxvk', $dxvkLL, '--ndk', $ndkInfo.Root,
+    '--api', $Api, '--objdir', $objLL, '--codegen', '--jobs', $Jobs,
+    '--ccache', $ccache)
+if (-not $forceFull) { $probeArgsLL += '--stale-only' }
+Write-Host '[dxvk] compiling low-latency objects'
+Invoke-Native $probe $probeArgsLL 'dxvk-low-latency-compile'
+if ($script:LastNativeExit -ne 0) { throw "DXVK low-latency object build failed: $script:LastNativeExit" }
+
 $objects1 = @(Get-ChildItem $obj1 -File -Filter '*.o' | ForEach-Object { $_.FullName })
 $objects3 = @(Get-ChildItem $obj3 -File -Filter '*.o' | ForEach-Object { $_.FullName })
+$objectsLL = @(Get-ChildItem $objLL -File -Filter '*.o' | ForEach-Object { $_.FullName })
 if ($objects1.Count -lt 100) { throw "only $($objects1.Count) DXVK 1.10.3 objects; run with -Full" }
 if ($objects3.Count -lt 190) { throw "only $($objects3.Count) DXVK 3.1.1 objects; run with -Full" }
+if ($objectsLL.Count -lt 201) { throw "only $($objectsLL.Count) DXVK low-latency objects; run with -Full" }
 
 # ---- Win32 surface -------------------------------------------------------
 $win32Src = Join-Path $shim 'dxvk_win32.cpp'
@@ -358,9 +453,11 @@ if ($needsShim) {
 # ---- static archives and symbol isolation --------------------------------
 $archive1 = Join-Path $outDir 'libdxvk1.a'
 $archive3 = Join-Path $outDir 'libdxvk3.a'
+$archiveLL = Join-Path $outDir 'libdxvkll.a'
 $iso1 = Join-Path $outDir 'libdxvk1_iso.a'
 $iso3 = Join-Path $outDir 'libdxvk3_iso.a'
-foreach ($a in @($archive1, $archive3, $iso1, $iso3)) {
+$isoLL = Join-Path $outDir 'libdxvkll_iso.a'
+foreach ($a in @($archive1, $archive3, $archiveLL, $iso1, $iso3, $isoLL)) {
     if (Test-Path $a) { Remove-Item $a -Force }
 }
 $ar = Join-Path $ndkInfo.Bin 'llvm-ar.exe'
@@ -370,6 +467,9 @@ if ($script:LastNativeExit -ne 0) { throw 'llvm-ar failed for DXVK 1.10.3' }
 Write-Host "[dxvk] archiving $($objects3.Count) 3.1.1 objects -> $archive3"
 Invoke-Native $ar (@('rcs', $archive3) + $objects3) 'dxvk-archive-3.1.1'
 if ($script:LastNativeExit -ne 0) { throw 'llvm-ar failed for DXVK 3.1.1' }
+Write-Host "[dxvk] archiving $($objectsLL.Count) low-latency objects -> $archiveLL"
+Invoke-Native $ar (@('rcs', $archiveLL) + $objectsLL) 'dxvk-archive-low-latency'
+if ($script:LastNativeExit -ne 0) { throw 'llvm-ar failed for DXVK low-latency' }
 
 $oldTemp = $env:TEMP
 $oldTmp = $env:TMP
@@ -389,12 +489,15 @@ try {
     Write-Host "[dxvk] isolating 3.1.1 symbols -> $iso3"
     Invoke-Native $isolate @('wc3_dxvk3_', $iso3, $archive3) 'dxvk-isolate-3.1.1'
     if ($script:LastNativeExit -ne 0) { throw "DXVK 3.1.1 symbol isolation failed: $script:LastNativeExit" }
+    Write-Host "[dxvk] isolating low-latency symbols -> $isoLL"
+    Invoke-Native $isolate @('wc3_dxvkll_', $isoLL, $archiveLL) 'dxvk-isolate-low-latency'
+    if ($script:LastNativeExit -ne 0) { throw "DXVK low-latency symbol isolation failed: $script:LastNativeExit" }
 } finally {
     $env:TEMP = $oldTemp
     $env:TMP = $oldTmp
 }
 
-foreach ($a in @($iso1, $iso3)) {
+foreach ($a in @($iso1, $iso3, $isoLL)) {
     if (-not (Test-Path $a)) { throw "DXVK archive was not produced: $a" }
     Write-Host "[dxvk] $(Split-Path -Leaf $a) $((Get-Item $a).Length) bytes"
 }

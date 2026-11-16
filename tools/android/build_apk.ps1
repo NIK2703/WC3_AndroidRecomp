@@ -24,6 +24,28 @@ param(
     [string]$Pgo = 'off',
     [string]$PgoProfile = 'build/pgo/wc3.profdata',
     [string]$PgoRawDir = '/data/data/wc3.recomp/files/pgo',
+    [ValidateSet('instr', 'ir')]
+    [string]$PgoKind = 'instr',
+    # release_optimized-only code generation profile; rejected for release and
+    # debug by the same validation as build_app.ps1.
+    [ValidateSet('O2', 'O3')]
+    [string]$OptLevel = 'O2',
+    [ValidateSet('', 'O2', 'O3')]
+    [string]$CorpusOptLevel = '',
+    [string]$Mtune = '',
+    [switch]$OmitFramePointer,
+    [switch]$SplitMachineFunctions,
+    [ValidateSet('none', 'hfsort', 'cdsort')]
+    [string]$CallGraphSort = 'none',
+    [ValidateSet('O2', 'O3')]
+    [string]$LtoOptLevel = 'O2',
+    [switch]$LtoWholeProgramVisibility,
+    [switch]$NoThinLtoCache,
+    [switch]$EmitRelocs,
+    [switch]$Polly,
+    [switch]$HiddenVisibility,
+    [switch]$NoSemanticInterposition,
+    [string]$SymbolOrderFile = '',
     # O-52: initial-exec is rejected by bionic for a dlopen'ed app library.
     # Only global-dynamic is accepted.
     [ValidateSet('global-dynamic')]
@@ -84,6 +106,20 @@ if ($isOptimized) {
 } elseif ($Pgo -ne 'off') {
     Write-Host '[apk] -Pgo is only valid for release_optimized variants'
     exit 1
+}
+$experimentalParams = @(
+    'PgoKind', 'OptLevel', 'CorpusOptLevel', 'Mtune', 'OmitFramePointer',
+    'SplitMachineFunctions', 'CallGraphSort', 'LtoOptLevel',
+    'LtoWholeProgramVisibility', 'NoThinLtoCache', 'EmitRelocs', 'Polly',
+    'HiddenVisibility', 'NoSemanticInterposition', 'SymbolOrderFile'
+)
+if (-not $isOptimized) {
+    foreach ($name in $experimentalParams) {
+        if ($PSBoundParameters.ContainsKey($name)) {
+            Write-Host "[apk] -$name is only valid for release_optimized variants"
+            exit 1
+        }
+    }
 }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 . (Join-Path $root 'tools\build_warnings.ps1')
@@ -192,6 +228,56 @@ if ($isOptimized) {
     $nativeParams['Pgo'] = $Pgo
     $nativeParams['PgoProfile'] = $PgoProfile
     $nativeParams['PgoRawDir'] = $PgoRawDir
+    # Forward only explicitly supplied knobs; build_app.ps1 owns the
+    # variant-specific defaults (O3/IRPGO/cdsort/Polly for release_optimized
+    # and O2/none/Polly for the training build).
+    if ($PSBoundParameters.ContainsKey('PgoKind')) {
+        $nativeParams['PgoKind'] = $PgoKind
+    }
+    if ($PSBoundParameters.ContainsKey('OptLevel')) {
+        $nativeParams['OptLevel'] = $OptLevel
+    }
+    if ($PSBoundParameters.ContainsKey('CorpusOptLevel')) {
+        $nativeParams['CorpusOptLevel'] = $CorpusOptLevel
+    }
+    if ($PSBoundParameters.ContainsKey('Mtune')) {
+        $nativeParams['Mtune'] = $Mtune
+    }
+    if ($PSBoundParameters.ContainsKey('OmitFramePointer')) {
+        $nativeParams['OmitFramePointer'] = [bool]$OmitFramePointer
+    }
+    if ($PSBoundParameters.ContainsKey('SplitMachineFunctions')) {
+        $nativeParams['SplitMachineFunctions'] = [bool]$SplitMachineFunctions
+    }
+    if ($PSBoundParameters.ContainsKey('CallGraphSort')) {
+        $nativeParams['CallGraphSort'] = $CallGraphSort
+    }
+    if ($PSBoundParameters.ContainsKey('LtoOptLevel')) {
+        $nativeParams['LtoOptLevel'] = $LtoOptLevel
+    }
+    if ($PSBoundParameters.ContainsKey('LtoWholeProgramVisibility')) {
+        $nativeParams['LtoWholeProgramVisibility'] =
+            [bool]$LtoWholeProgramVisibility
+    }
+    if ($PSBoundParameters.ContainsKey('NoThinLtoCache')) {
+        $nativeParams['NoThinLtoCache'] = [bool]$NoThinLtoCache
+    }
+    if ($PSBoundParameters.ContainsKey('EmitRelocs')) {
+        $nativeParams['EmitRelocs'] = [bool]$EmitRelocs
+    }
+    if ($PSBoundParameters.ContainsKey('Polly')) {
+        $nativeParams['Polly'] = [bool]$Polly
+    }
+    if ($PSBoundParameters.ContainsKey('HiddenVisibility')) {
+        $nativeParams['HiddenVisibility'] = [bool]$HiddenVisibility
+    }
+    if ($PSBoundParameters.ContainsKey('NoSemanticInterposition')) {
+        $nativeParams['NoSemanticInterposition'] =
+            [bool]$NoSemanticInterposition
+    }
+    if ($PSBoundParameters.ContainsKey('SymbolOrderFile')) {
+        $nativeParams['SymbolOrderFile'] = $SymbolOrderFile
+    }
 }
 $ErrorActionPreference = 'Continue'
 & $nativeScript @nativeParams 2>&1 | ForEach-Object { Write-Host $_ }

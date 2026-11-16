@@ -49,6 +49,28 @@ class LaunchSettingsStore(context: Context) {
             } else {
                 LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS
             }
+        },
+        /* An absent preference keeps the original 12-unit cap; the 24-unit
+         * profile is opt-in. */
+        selection24 = prefs.getBoolean(
+            KEY_SELECTION_24, LaunchContract.DEFAULT_SELECTION_24
+        ),
+        hideCursor = prefs.getBoolean(
+            KEY_HIDE_CURSOR, LaunchContract.DEFAULT_HIDE_CURSOR
+        ),
+        /* An absent or out-of-range preference falls back to the product
+         * default; the slider range is 10..50 percent. */
+        overlayOpacityPercent = prefs.getInt(
+            KEY_OVERLAY_OPACITY_PERCENT,
+            LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT
+        ).let {
+            if (it >= LaunchContract.MIN_OVERLAY_OPACITY_PERCENT &&
+                it <= LaunchContract.MAX_OVERLAY_OPACITY_PERCENT
+            ) {
+                it
+            } else {
+                LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT
+            }
         }
     )
 
@@ -72,6 +94,15 @@ class LaunchSettingsStore(context: Context) {
                     LaunchContract.MAX_TAP_CLICK_DELAY_MS
                 )
             )
+            .putBoolean(KEY_SELECTION_24, settings.selection24)
+            .putBoolean(KEY_HIDE_CURSOR, settings.hideCursor)
+            .putInt(
+                KEY_OVERLAY_OPACITY_PERCENT,
+                settings.overlayOpacityPercent.coerceIn(
+                    LaunchContract.MIN_OVERLAY_OPACITY_PERCENT,
+                    LaunchContract.MAX_OVERLAY_OPACITY_PERCENT
+                )
+            )
             .commit()
 
     private companion object {
@@ -88,5 +119,8 @@ class LaunchSettingsStore(context: Context) {
         const val KEY_DOUBLE_TAP_TIMEOUT_MS = "double_tap_timeout_ms"
         const val KEY_LONG_PRESS_TIMEOUT_MS = "long_press_timeout_ms"
         const val KEY_TAP_CLICK_DELAY_MS = "tap_click_delay_ms"
+        const val KEY_SELECTION_24 = "selection_24"
+        const val KEY_HIDE_CURSOR = "hide_cursor"
+        const val KEY_OVERLAY_OPACITY_PERCENT = "overlay_opacity_percent"
     }
 }

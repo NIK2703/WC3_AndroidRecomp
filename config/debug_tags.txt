@@ -6,7 +6,9 @@ BOOT
 ASSETS
 INPUT
 GRAPHICS
-JNI
+# Campaign movie path: DirectShow gate, Media3 AVI audio/clock and the
+# FFmpeg ASP decode/render trace.  Debug only; release tags are empty (BV-5).
+MOVIE
 # DirectShow/ole32 HLE diagnostics for campaign movies (RenderFile, Run,
 # GetEvent, finish).  Debug only; release tags are empty (BV-5).
 HLE

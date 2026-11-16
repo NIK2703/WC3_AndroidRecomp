@@ -372,6 +372,7 @@ add_library(wc3_hle_android STATIC
     "${WC3_ROOT}/runtime/hle/android/hle_android.c"
     "${WC3_ROOT}/runtime/hle/android/pe32.c"
     "${WC3_ROOT}/runtime/hle/android/guest_mem.c"
+    "${WC3_ROOT}/runtime/hle/android/hle_cursor127.c"
     "${WC3_ROOT}/runtime/hle/android/hle_widescreen127.c")
 target_include_directories(wc3_hle_android PRIVATE
     "${WC3_ROOT}/runtime/hle/android"
@@ -468,6 +469,28 @@ target_compile_options(wc3_dxvk_entry PRIVATE
     -D_FORTIFY_SOURCE=0)
 set_target_properties(wc3_dxvk_entry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Apply the release_optimized code-generation profile to every first-party
+# product target, not only to the final DSO.  The exactness flags above
+# (-fno-strict-aliasing, -fwrapv, -ffp-contract=off) stay in effect; the
+# profile only appends optimization/visibility options.  Vendor archives and
+# prebuilt inputs are deliberately excluded.
+if(WC3_PRODUCT_COMPILE_OPTIONS)
+    foreach(_wc3_opt_target IN ITEMS
+            wc3_boot
+            wc3_hle_bridge
+            wc3_compat
+            wc3_selection24
+            wc3_hle_modules
+            wc3_hle_android
+            wc3_hle_d3d9
+            wc3_dxvk_entry)
+        if(TARGET ${_wc3_opt_target})
+            target_compile_options(${_wc3_opt_target} PRIVATE
+                ${WC3_PRODUCT_COMPILE_OPTIONS})
+        endif()
+    endforeach()
+endif()
+
 # --- libadrenotools / liblinkernsbypass ------------------------------------
 # Pinned legacy build inputs for ADR-036.  They are BSD-2-Clause vendor
 # binaries, not build scripts; third_party/VENDOR_MANIFEST.md records the
@@ -532,7 +555,7 @@ foreach(_need
     endif()
 endforeach()
 
-# Both DXVK archives are built from the vendored sources in third_party/dxvk
+# The DXVK archives are built from the vendored sources in third_party/dxvk
 # by tools/android/build_dxvk.ps1.  The old tree supplies no DXVK binary: these
 # archives are target build products, not pinned inputs.  The debug variant
 # differs because the Win32 shim carries WC3_DEBUG_GRAPHICS.
@@ -546,7 +569,8 @@ set(WC3_DXVK_DIR
     CACHE PATH "Directory containing the source-built isolated DXVK archives")
 set(WC3_DXVK_ARCHIVES
     "${WC3_DXVK_DIR}/libdxvk1_iso.a"
-    "${WC3_DXVK_DIR}/libdxvk3_iso.a")
+    "${WC3_DXVK_DIR}/libdxvk3_iso.a"
+    "${WC3_DXVK_DIR}/libdxvkll_iso.a")
 
 foreach(_required
         ${WC3_CORPUS_OBJECTS} ${WC3_D3D9_GEN_OBJECT} ${WC3_DXVK_ARCHIVES})
@@ -604,14 +628,21 @@ if(WC3_SELECTION_24)
         -Wl,--undefined=wc3_selection24_build_marker)
 endif()
 
-# The widescreen wrapper is linked with --wrap so neither the generated
-# dispatcher nor the generated corpus is edited for the two RenderEdge hooks.
+# The widescreen and cursor wrappers are linked with --wrap so neither the
+# generated dispatcher nor the generated corpus is edited for these hooks.
 target_link_options(wc3gameactivity PRIVATE
     -Wl,--wrap=L_6F126E30
     -Wl,--wrap=L_6F654E20
+    # The sprite submit function and the named image lookup: the product
+    # launch setting can suppress the guest's own cursor draw (every UI
+    # draws the same cursor image) without a second corpus.
+    -Wl,--wrap=L_6F1A47B0
+    -Wl,--wrap=L_6F342220
+    -Wl,--undefined=wc3_cursor127_build_marker
     -Wl,--wrap=wc3_vulkan_major_minor
     -Wl,--wrap=wc3_dxvk1_Direct3DCreate9
     -Wl,--wrap=wc3_dxvk3_Direct3DCreate9
+    -Wl,--wrap=wc3_dxvkll_Direct3DCreate9
     # DXVK 1.10.3 references this symbol directly.  The target-owned hidden
     # shim replaces -lvulkan; force the archive member in regardless of link
     # order so the product has no DT_NEEDED libvulkan.so.

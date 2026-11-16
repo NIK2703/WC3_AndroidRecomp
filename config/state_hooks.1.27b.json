@@ -69,6 +69,61 @@
       "value": "0u",
       "guard": null,
       "cache_source": "CGameUI teardown clears CGameUI+0x22C with a constant zero"
+    },
+    {
+      "name": "cinematic_enter_timed",
+      "kind": 6,
+      "store_va": "0x6F373F43",
+      "after_va": "0x6F373F4D",
+      "bytes": "c7868001000001000000",
+      "width": 4,
+      "value": "0u",
+      "guard": null,
+      "cache_source": "ShowInterface(false, duration > 0) writes CGameUI+0x180 = 1 and shows CCinematicPanel"
+    },
+    {
+      "name": "cinematic_enter_instant",
+      "kind": 7,
+      "store_va": "0x6F37400A",
+      "after_va": "0x6F374014",
+      "bytes": "c7868001000003000000",
+      "width": 4,
+      "value": "0u",
+      "guard": null,
+      "cache_source": "ShowInterface(false, duration <= 0) writes CGameUI+0x180 = 3 and shows CCinematicPanel"
+    },
+    {
+      "name": "cinematic_leave_timed",
+      "kind": 8,
+      "store_va": "0x6F373CA3",
+      "after_va": "0x6F373CAD",
+      "bytes": "c7868001000002000000",
+      "width": 4,
+      "value": "0u",
+      "guard": null,
+      "cache_source": "ShowInterface(true, duration > 0) writes CGameUI+0x180 = 2 and restores the interface"
+    },
+    {
+      "name": "cinematic_leave_instant",
+      "kind": 9,
+      "store_va": "0x6F373D6D",
+      "after_va": "0x6F373D77",
+      "bytes": "c7868001000004000000",
+      "width": 4,
+      "value": "0u",
+      "guard": null,
+      "cache_source": "ShowInterface(true, duration <= 0) writes CGameUI+0x180 = 4 and restores the interface"
+    },
+    {
+      "name": "interface_timed_complete",
+      "kind": 10,
+      "store_va": "0x6F36F11C",
+      "after_va": "0x6F36F122",
+      "bytes": "898180010000",
+      "width": 4,
+      "value": "c->eax",
+      "guard": null,
+      "cache_source": "Timer 0x1E callback completes a timed ShowInterface: writes CGameUI+0x180 = 4 when a timed show completes (interface visible again, so the cinematic bit is cleared) or 3 when a timed hide completes (interface stays hidden, which is the cinematic mode, so the cinematic bit is kept); the published value selects the meaning"
     }
   ]
 }

@@ -156,6 +156,13 @@ target_compile_options(wc3_legacy_fix_save_list PRIVATE
     -Wno-unused-parameter
     -Wno-sign-compare
     -Wno-parentheses-equality)
+# This replacement TU is part of the generated corpus.  The corpus profile
+# (O2 by default, O3 in release_optimized) is appended after the historical
+# flags, so the exactness switches above stay in force.
+if(WC3_CORPUS_COMPILE_OPTIONS)
+    target_compile_options(wc3_legacy_fix_save_list PRIVATE
+        ${WC3_CORPUS_COMPILE_OPTIONS})
+endif()
 set_target_properties(wc3_legacy_fix_save_list PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
 

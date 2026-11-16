@@ -42,6 +42,40 @@ int main(void)
     wc3_game_state_hook(WC3_GAME_STATE_HOOK_GAMEOVER_CLEARED, 0u);
     assert((wc3_game_state_get() & WC3_GAME_STATE_GAMEOVER) == 0u);
 
+    /* Both ShowInterface hidden branches set CINEMATIC; both restore branches
+     * clear it. */
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_CINEMATIC_ENTER_TIMED, 0u);
+    assert((wc3_game_state_get() & WC3_GAME_STATE_CINEMATIC) != 0u);
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_CINEMATIC_LEAVE_TIMED, 0u);
+    assert((wc3_game_state_get() & WC3_GAME_STATE_CINEMATIC) == 0u);
+
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_CINEMATIC_ENTER_INSTANT, 0u);
+    assert((wc3_game_state_get() & WC3_GAME_STATE_CINEMATIC) != 0u);
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_CINEMATIC_LEAVE_INSTANT, 0u);
+    assert((wc3_game_state_get() & WC3_GAME_STATE_CINEMATIC) == 0u);
+
+    /* The timed transition completion publishes the interface mode it settles
+     * on.  A completed timed show (mode 4) leaves the interface visible, so
+     * the authored controls must come back; a completed timed hide (mode 3)
+     * leaves the interface hidden, which is the cinematic mode, so the
+     * cinematic bit must survive it. */
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_CINEMATIC_ENTER_TIMED, 0u);
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_INTERFACE_TIMED_COMPLETE,
+                        WC3_INTERFACE_MODE_SHOWN);
+    assert((wc3_game_state_get() & WC3_GAME_STATE_CINEMATIC) == 0u);
+
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_CINEMATIC_ENTER_TIMED, 0u);
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_INTERFACE_TIMED_COMPLETE,
+                        WC3_INTERFACE_MODE_HIDDEN);
+    assert((wc3_game_state_get() & WC3_GAME_STATE_CINEMATIC) != 0u);
+
+    /* The intro hides the interface through the instant branch, which arms no
+     * timer, so the cinematic bit stays until the interface is restored. */
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_CINEMATIC_ENTER_INSTANT, 0u);
+    assert((wc3_game_state_get() & WC3_GAME_STATE_CINEMATIC) != 0u);
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_CINEMATIC_LEAVE_INSTANT, 0u);
+    assert((wc3_game_state_get() & WC3_GAME_STATE_CINEMATIC) == 0u);
+
     /* A replay/observer bit, when published by a later proven anchor, must not
      * be lost by a pause transition.  The hook path itself is tested here. */
     wc3_game_state_set(WC3_GAME_STATE_REPLAY, 0u);
@@ -56,7 +90,10 @@ int main(void)
     wc3_game_state_hook(WC3_GAME_STATE_HOOK_CGAMEUI_SEEN, 0u);
     assert(wc3_game_state_get() == 0u);
 
+    wc3_game_state_hook(WC3_GAME_STATE_HOOK_CINEMATIC_ENTER_INSTANT, 0u);
+    assert((wc3_game_state_get() & WC3_GAME_STATE_CINEMATIC) != 0u);
     wc3_game_state_hook(WC3_GAME_STATE_HOOK_CGAMEUI_CREATED, 1u);
+    assert((wc3_game_state_get() & WC3_GAME_STATE_CINEMATIC) == 0u);
     wc3_game_state_hook(WC3_GAME_STATE_HOOK_GAMEOVER, 1u);
     wc3_game_state_hook(WC3_GAME_STATE_HOOK_CGAMEUI_DESTROYED, 0u);
     assert(wc3_game_state_get() == 0u);
