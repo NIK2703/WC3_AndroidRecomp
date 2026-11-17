@@ -75,6 +75,14 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var dxvkConfigImportButton: Button
     private lateinit var selection24Switch: SwitchCompat
     private lateinit var hideCursorSwitch: SwitchCompat
+    private lateinit var parallelExecutionSwitch: SwitchCompat
+    private lateinit var gridLabel: TextView
+    private lateinit var gridSwitch: SwitchCompat
+    private lateinit var gridOptionsGroup: LinearLayout
+    private lateinit var gridDarkenSlider: SeekBar
+    private lateinit var gridDarkenValue: TextView
+    private lateinit var gridCycleSlider: SeekBar
+    private lateinit var gridCycleValue: TextView
 
     /* DXVK's config parser accepts only these key characters and has no escape
      * for a double quote inside a value.  Filtering at input time keeps the
@@ -98,7 +106,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private var resolutionOptions: List<ResolutionOption> = emptyList()
     private var gestureModeOptions: List<GestureModeOption> = emptyList()
     private var driverOptions: List<DriverOption> = emptyList()
-    private var dxvkOptions: List<DxvkOption> = emptyList()
+    private var dxvkOptions: List<ValueOption> = emptyList()
     private var drivers: List<VulkanDriverStore.DriverInfo> = emptyList()
     private var binding = false
     private var storageRequested = false
@@ -135,10 +143,10 @@ class LaunchSettingsActivity : AppCompatActivity() {
         driverStore = VulkanDriverStore(this)
         drivers = driverStore.list()
         dxvkOptions = listOf(
-            DxvkOption("", getString(R.string.launch_dxvk_auto)),
-            DxvkOption(DXVK_VERSION_1_10, getString(R.string.launch_dxvk_110)),
-            DxvkOption(DXVK_VERSION_3_1_1, getString(R.string.launch_dxvk_311)),
-            DxvkOption(
+            ValueOption("", getString(R.string.launch_dxvk_auto)),
+            ValueOption(DXVK_VERSION_1_10, getString(R.string.launch_dxvk_110)),
+            ValueOption(DXVK_VERSION_3_1_1, getString(R.string.launch_dxvk_311)),
+            ValueOption(
                 DXVK_VERSION_LOW_LATENCY,
                 getString(R.string.launch_dxvk_lowlatency)
             )
@@ -222,6 +230,24 @@ class LaunchSettingsActivity : AppCompatActivity() {
         dxvkConfigImportButton = findViewById(R.id.dxvk_config_import)
         selection24Switch = findViewById(R.id.selection24_switch)
         hideCursorSwitch = findViewById(R.id.hide_cursor_switch)
+        parallelExecutionSwitch = findViewById(R.id.parallel_execution_switch)
+        gridLabel = findViewById(R.id.grid_label)
+        gridSwitch = findViewById(R.id.grid_switch)
+        gridOptionsGroup = findViewById(R.id.grid_options_group)
+        gridDarkenSlider = findViewById(R.id.grid_darken_slider)
+        gridDarkenValue = findViewById(R.id.grid_darken_value)
+        gridCycleSlider = findViewById(R.id.grid_cycle_slider)
+        gridCycleValue = findViewById(R.id.grid_cycle_value)
+
+        if (!resources.getBoolean(R.bool.experimental_gameplay_options_supported)) {
+            findViewById<View>(R.id.selection24_row).visibility = View.GONE
+            findViewById<View>(R.id.parallel_execution_row).visibility = View.GONE
+        }
+        if (resources.getBoolean(R.bool.userdebug_build)) {
+            findViewById<View>(R.id.selection24_row).visibility = View.GONE
+            findViewById<View>(R.id.grid_row).visibility = View.GONE
+            findViewById<View>(R.id.grid_options_group).visibility = View.GONE
+        }
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             // libadrenotools needs Android 9; keep the system-only path and
@@ -269,6 +295,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
         ).apply {
             setDropDownViewResource(R.layout.item_resolution_dropdown)
         }
+
     }
 
     private fun bindSettings(settings: LaunchSettings) {
@@ -286,6 +313,12 @@ class LaunchSettingsActivity : AppCompatActivity() {
         soundSwitch.isChecked = settings.sound
         selection24Switch.isChecked = settings.selection24
         hideCursorSwitch.isChecked = settings.hideCursor
+        parallelExecutionSwitch.isChecked = settings.parallelExecution
+        gridSwitch.isChecked = settings.gridEnabled
+        bindGridDarkenSlider(settings.gridDarkenPercent)
+        bindGridCycleSlider(settings.gridCycleSeconds)
+        updateGridOptions()
+        updateGridLabel()
         gestureModeSpinner.setSelection(
             gestureModeOptions.indexOfFirst {
                 it.doubleTap == settings.doubleTapGestures
@@ -358,6 +391,21 @@ class LaunchSettingsActivity : AppCompatActivity() {
             }
         }
 
+        parallelExecutionSwitch.setOnCheckedChangeListener { _, _ ->
+            if (!binding) {
+                refreshValidation()
+                saveIfValid()
+            }
+        }
+
+        gridSwitch.setOnCheckedChangeListener { _, _ ->
+            updateGridOptions()
+            if (!binding) {
+                refreshValidation()
+                saveIfValid()
+            }
+        }
+
         gestureModeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: AdapterView<*>?,
@@ -379,6 +427,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         wireDelaySlider(longPressDelaySlider, longPressDelayValue)
         wireTapClickDelaySlider()
         wireOverlayOpacitySlider()
+        wireGridDarkenSlider()
+        wireGridCycleSlider()
 
         resolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -387,6 +437,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
+                updateGridLabel()
                 if (!binding) {
                     refreshValidation()
                     saveIfValid()
@@ -1197,7 +1248,23 @@ class LaunchSettingsActivity : AppCompatActivity() {
             hideCursor = hideCursorSwitch.isChecked,
             overlayOpacityPercent = overlayOpacityFromProgress(
                 overlayOpacitySlider.progress
-            )
+            ),
+            parallelExecution = parallelExecutionSwitch.isChecked,
+            gridEnabled = gridSwitch.isChecked,
+            gridDarkenPercent =
+                LaunchContract.MIN_GRID_DARKEN_PERCENT +
+                gridDarkenSlider.progress.coerceIn(
+                    0,
+                    LaunchContract.MAX_GRID_DARKEN_PERCENT -
+                    LaunchContract.MIN_GRID_DARKEN_PERCENT
+                ),
+            gridCycleSeconds =
+                LaunchContract.MIN_GRID_CYCLE_SECONDS +
+                gridCycleSlider.progress.coerceIn(
+                    0,
+                    LaunchContract.MAX_GRID_CYCLE_SECONDS -
+                    LaunchContract.MIN_GRID_CYCLE_SECONDS
+                )
         )
     }
 
@@ -1382,6 +1449,137 @@ class LaunchSettingsActivity : AppCompatActivity() {
             LaunchContract.MIN_OVERLAY_OPACITY_PERCENT
         )
 
+    /*
+     * The grid darken slider is the source 0..100 percent value; the native
+     * layer truncates `percent * 255 / 100`, so 50 percent maps to alpha 127.
+     */
+    private fun bindGridDarkenSlider(percent: Int) {
+        gridDarkenSlider.max = LaunchContract.MAX_GRID_DARKEN_PERCENT -
+            LaunchContract.MIN_GRID_DARKEN_PERCENT
+        val value = percent.coerceIn(
+            LaunchContract.MIN_GRID_DARKEN_PERCENT,
+            LaunchContract.MAX_GRID_DARKEN_PERCENT
+        )
+        gridDarkenSlider.progress =
+            value - LaunchContract.MIN_GRID_DARKEN_PERCENT
+        gridDarkenValue.text = getString(R.string.launch_grid_darken_value, value)
+    }
+
+    private fun wireGridDarkenSlider() {
+        gridDarkenSlider.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(
+                    seekBar: SeekBar?,
+                    progress: Int,
+                    fromUser: Boolean
+                ) {
+                    val value = progress.coerceIn(
+                        0,
+                        LaunchContract.MAX_GRID_DARKEN_PERCENT -
+                            LaunchContract.MIN_GRID_DARKEN_PERCENT
+                    ) + LaunchContract.MIN_GRID_DARKEN_PERCENT
+                    gridDarkenValue.text = getString(
+                        R.string.launch_grid_darken_value,
+                        value
+                    )
+                    if (fromUser && !binding) {
+                        refreshValidation()
+                        saveIfValid()
+                    }
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            }
+        )
+    }
+
+    private fun bindGridCycleSlider(seconds: Int) {
+        gridCycleSlider.max = LaunchContract.MAX_GRID_CYCLE_SECONDS -
+            LaunchContract.MIN_GRID_CYCLE_SECONDS
+        val value = seconds.coerceIn(
+            LaunchContract.MIN_GRID_CYCLE_SECONDS,
+            LaunchContract.MAX_GRID_CYCLE_SECONDS
+        )
+        gridCycleSlider.progress =
+            value - LaunchContract.MIN_GRID_CYCLE_SECONDS
+        gridCycleValue.text = gridCycleText(value)
+    }
+
+    private fun wireGridCycleSlider() {
+        gridCycleSlider.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(
+                    seekBar: SeekBar?,
+                    progress: Int,
+                    fromUser: Boolean
+                ) {
+                    val value = progress.coerceIn(
+                        0,
+                        LaunchContract.MAX_GRID_CYCLE_SECONDS -
+                            LaunchContract.MIN_GRID_CYCLE_SECONDS
+                    ) + LaunchContract.MIN_GRID_CYCLE_SECONDS
+                    gridCycleValue.text = gridCycleText(value)
+                    if (fromUser && !binding) {
+                        refreshValidation()
+                        saveIfValid()
+                    }
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            }
+        )
+    }
+
+    private fun gridCycleText(seconds: Int): String =
+        if (seconds <= 0) {
+            getString(R.string.launch_grid_cycle_off)
+        } else {
+            getString(R.string.launch_grid_cycle_value, seconds)
+        }
+
+    private fun updateGridOptions() {
+        val grid = gridSwitch.isChecked
+        gridOptionsGroup.visibility = if (grid) View.VISIBLE else View.GONE
+        /* Scaling is not a user choice.  The grid is a mask over the exact 2x
+         * source, so it implies the half-surface nearest path; without the
+         * grid the compositor gets the guest mode.  The launch resolution is
+         * fixed by the grid as well and stays visible but disabled. */
+        resolutionSpinner.isEnabled = !grid
+    }
+
+    /*
+     * Source preview label: the native half mode is exactly half of the
+     * physical surface on both axes, rounded down for an odd surface.  It is
+     * the extent the present pass upscales 2x with nearest sampling, not a
+     * separate game-aspect window.
+     */
+    private fun updateGridLabel() {
+        val preview = gridPreview()
+        val label = if (preview == null) {
+            getString(R.string.launch_grid_label)
+        } else {
+            getString(
+                R.string.launch_grid_label_resolution,
+                preview.first,
+                preview.second
+            )
+        }
+        gridLabel.text = label
+        /* The source CheckBox carries the resolution preview in its own text;
+         * keep the switch's accessibility label in sync with the visible row. */
+        gridSwitch.contentDescription = label
+    }
+
+    private fun gridPreview(): Pair<Int, Int>? {
+        val (screenWidth, screenHeight) = nativeScreenSize()
+        if (screenWidth < 2 || screenHeight < 2) return null
+        return (screenWidth / 2) to (screenHeight / 2)
+    }
+
     /* The slider is an index, not milliseconds: max = 10 maps 100..200 ms in
      * exact 10 ms steps on every Android version. */
     private fun delayToProgress(ms: Int): Int {
@@ -1431,7 +1629,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
         val label: String
     )
 
-    private data class DxvkOption(
+    private data class ValueOption(
         val value: String,
         val label: String
     )

@@ -6,6 +6,10 @@
  * `#if WC3_DEBUG && WC3_DEBUG_<TARGET>`; this scanner accepts both that form
  * and a bare `#if WC3_DEBUG`, and reports code outside either.
  *
+ * Files are scanned by a pool of worker threads.  Each file produces its own
+ * report buffer; the buffers are printed in sorted path order after the pool
+ * joins, so parallel output is identical to sequential output.
+ *
  * This is a static source scanner, not a compiler.  It understands enough C
  * preprocessing to know whether a line is inside a WC3_DEBUG region, then
  * reports four kinds of problems:
@@ -30,11 +34,12 @@
  * Build (MSYS2/UCRT64 gcc, through ccache per BP-12):
  *   ccache gcc -std=c11 -O2 -Wall -Wextra -c tools/scan_wc3debug.c -o build/tmp/scan_wc3debug.o
  *   ccache gcc build/tmp/scan_wc3debug.o -o build/tmp/scan_wc3debug.exe
+ * POSIX builds add -pthread to both commands.
  *
  * Usage (from the repository root):
  *   build/tmp/scan_wc3debug.exe runtime apps
  *   build/tmp/scan_wc3debug.exe --no-symbols runtime apps
- *   build/tmp/scan_wc3debug.exe --exclude headless runtime apps
+ *   build/tmp/scan_wc3debug.exe -j 8 --exclude headless runtime apps
  *
  * runtime/platform/headless is the verification target, not the APK product;
  * exclude it when enforcing release hygiene for the shipped library.  The
@@ -55,6 +60,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,7 +69,9 @@
 #include <windows.h>
 #else
 #include <dirent.h>
+#include <pthread.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #define SCAN_PATH_MAX 4096
@@ -122,6 +130,18 @@ static void buf_puts(Buf *b, const char *s)
     memcpy(b->s + b->len, s, n);
     b->len += n;
     b->s[b->len] = '\0';
+}
+static void buf_vprintf(Buf *b, const char *fmt, va_list ap)
+{
+    va_list copy;
+    va_copy(copy, ap);
+    int n = vsnprintf(NULL, 0, fmt, copy);
+    va_end(copy);
+    if (n < 0)
+        return;
+    buf_reserve(b, b->len + (size_t)n);
+    vsnprintf(b->s + b->len, b->cap - b->len, fmt, ap);
+    b->len += (size_t)n;
 }
 static void buf_free(Buf *b)
 {
@@ -252,6 +272,7 @@ typedef struct {
     int symbols;
     int all;
     int max_size_mb;
+    int jobs;
     char **excludes;
     int n_excludes;
 } Options;
@@ -919,6 +940,7 @@ static void collect_declaration(const char *clean, const char *tokens,
 
 typedef struct {
     const char *path;
+    Buf *out;
     int *line_flags; /* bit 0: output, bit 1: env, bit 2: marker,
                         bit 3: diagnostic hook/state */
     int nlines;
@@ -927,16 +949,23 @@ typedef struct {
     int review;
     int verbose;
 } FileState;
-static void print_line_excerpt(const char *line)
+static void fs_printf(FileState *fs, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    buf_vprintf(fs->out, fmt, ap);
+    va_end(ap);
+}
+static void print_line_excerpt(Buf *out, const char *line)
 {
     const char *p = skip_ws(line);
     int n = 0;
     while (*p && *p != '\n' && n < SCAN_MAX_LINE_PRINT) {
-        putchar(*p++);
+        buf_putc(out, *p++);
         n++;
     }
     if (*p && n == SCAN_MAX_LINE_PRINT)
-        printf("...");
+        buf_puts(out, "...");
 }
 static void report_finding(FileState *fs, int line, const char *category,
                            const char *detail, const char *source_line)
@@ -945,11 +974,11 @@ static void report_finding(FileState *fs, int line, const char *category,
         fs->review++;
     else
         fs->findings++;
-    printf("%s:%d: %s: %s\n", fs->path, line, category, detail);
+    fs_printf(fs, "%s:%d: %s: %s\n", fs->path, line, category, detail);
     if (source_line) {
-        printf("    ");
-        print_line_excerpt(source_line);
-        printf("\n");
+        buf_puts(fs->out, "    ");
+        print_line_excerpt(fs->out, source_line);
+        buf_putc(fs->out, '\n');
     }
     if (fs->line_flags && line > 0 && line <= fs->nlines)
         fs->line_flags[line - 1] |= 1;
@@ -1231,10 +1260,10 @@ static void scan_outputs(FileState *fs, LineInfo *li, int *debug_line,
             if (cls == CLASS_ERROR || cls == CLASS_STATUS) {
                 fs->kept++;
                 if (fs->verbose) {
-                    printf("%s:%d: kept-%s: ", fs->path, i + 1,
-                           cls == CLASS_ERROR ? "error" : "status");
-                    print_line_excerpt(lines[i]);
-                    printf("\n");
+                    fs_printf(fs, "%s:%d: kept-%s: ", fs->path, i + 1,
+                              cls == CLASS_ERROR ? "error" : "status");
+                    print_line_excerpt(fs->out, lines[i]);
+                    buf_putc(fs->out, '\n');
                 }
             } else {
                 char detail[512];
@@ -1331,8 +1360,8 @@ static void scan_envs(FileState *fs, LineInfo *li, int *debug_line,
             continue;
         if (is_crash_report_env(name)) {
             if (fs->verbose)
-                printf("%s:%d: kept-crash-env: %s is a crash-report detail "
-                       "control\\n", fs->path, i + 1, name);
+                fs_printf(fs, "%s:%d: kept-crash-env: %s is a crash-report "
+                          "detail control\\n", fs->path, i + 1, name);
             continue;
         }
         if (is_debug_env(name)) {
@@ -1502,8 +1531,8 @@ static void scan_debug_refs(FileState *fs, LineInfo *li, int *debug_line,
         if (is_generated_dispatch_abi(name)) {
             fs->kept++;
             if (fs->verbose) {
-                printf("%s:%d: kept-generated-abi: %s %s\n", fs->path, i + 1,
-                       kind, name);
+                fs_printf(fs, "%s:%d: kept-generated-abi: %s %s\n", fs->path,
+                          i + 1, kind, name);
             }
             continue;
         }
@@ -1592,15 +1621,15 @@ static const char *symbol_kind(const Symbol *s)
         return "macro";
     return "variable";
 }
-static void print_use_lines(const char *path, const char *const *lines,
+static void print_use_lines(FileState *fs, const char *const *lines,
                             const int *v, int n)
 {
     for (int i = 0; i < n; i++) {
         int line = v[i];
-        printf("    use at %s:%d: ", path, line);
+        fs_printf(fs, "    use at %s:%d: ", fs->path, line);
         if (line > 0)
-            print_line_excerpt(lines[line - 1]);
-        printf("\n");
+            print_line_excerpt(fs->out, lines[line - 1]);
+        buf_putc(fs->out, '\n');
     }
 }
 static void report_symbols(FileState *fs, SymTab *tab,
@@ -1638,7 +1667,7 @@ static void report_symbols(FileState *fs, SymTab *tab,
                      s->uses_debug == 1 ? "" : "s");
             report_finding(fs, s->decl_lines[0], "associated-debug-only",
                            detail, lines[s->decl_lines[0] - 1]);
-            print_use_lines(fs->path, lines, s->use_debug_lines,
+            print_use_lines(fs, lines, s->use_debug_lines,
                             s->n_use_debug_lines);
             continue;
         }
@@ -1652,7 +1681,7 @@ static void report_symbols(FileState *fs, SymTab *tab,
                      s->uses_outside == 1 ? "" : "s");
             report_finding(fs, s->decl_lines[0], "debug-decl-used-outside",
                            detail, lines[s->decl_lines[0] - 1]);
-            print_use_lines(fs->path, lines, s->use_lines, s->n_use_lines);
+            print_use_lines(fs, lines, s->use_lines, s->n_use_lines);
             continue;
         }
         if (!s->decl_debug && s->uses_outside > 0 && debug_name) {
@@ -1666,15 +1695,15 @@ static void report_symbols(FileState *fs, SymTab *tab,
                      s->uses_debug == 1 ? "" : "s");
             report_finding(fs, s->decl_lines[0], "debug-symbol-outside",
                            detail, lines[s->decl_lines[0] - 1]);
-            print_use_lines(fs->path, lines, s->use_lines, s->n_use_lines);
+            print_use_lines(fs, lines, s->use_lines, s->n_use_lines);
             continue;
         }
         if (fs->verbose && !s->decl_debug && s->uses_debug > 0 &&
             s->uses_outside > 0) {
-            printf("%s:%d: shared-debug-symbol: %s %s %s is used both inside "
-                   "and outside WC3_DEBUG; not purely debug-only\n",
-                   fs->path, s->decl_lines[0], symbol_kind(s), s->name,
-                   s->is_static ? "(static)" : "(file-local)");
+            fs_printf(fs, "%s:%d: shared-debug-symbol: %s %s %s is used both "
+                      "inside and outside WC3_DEBUG; not purely debug-only\n",
+                      fs->path, s->decl_lines[0], symbol_kind(s), s->name,
+                      s->is_static ? "(static)" : "(file-local)");
         }
     }
 }
@@ -1742,10 +1771,16 @@ static char **split_lines(char *data, size_t len, int *out_n)
     *out_n = k;
     return lines;
 }
-static void scan_file(const char *path, const Options *opt, int *files_done,
-                      int *total_findings, int *total_kept,
-                      int *total_review)
+typedef struct {
+    Buf out;
+    int done;
+    int findings;
+    int kept;
+    int review;
+} ScanResult;
+static void scan_file(const char *path, const Options *opt, ScanResult *res)
 {
+    buf_init(&res->out);
     size_t len = 0;
     char *data = read_file(path, &len, opt->max_size_mb);
     if (!data)
@@ -1826,6 +1861,7 @@ static void scan_file(const char *path, const Options *opt, int *files_done,
     FileState fs;
     memset(&fs, 0, sizeof(fs));
     fs.path = path;
+    fs.out = &res->out;
     fs.line_flags = line_flags;
     fs.nlines = nlines;
     fs.verbose = opt->verbose;
@@ -1866,12 +1902,12 @@ static void scan_file(const char *path, const Options *opt, int *files_done,
         symtab_free(&tab);
     }
     if (opt->verbose && fs.findings == 0)
-        printf("%s: no high-confidence findings (%d kept, %d review)\n",
-               path, fs.kept, fs.review);
-    *total_findings += fs.findings;
-    *total_kept += fs.kept;
-    *total_review += fs.review;
-    (*files_done)++;
+        fs_printf(&fs, "%s: no high-confidence findings (%d kept, %d review)\n",
+                  path, fs.kept, fs.review);
+    res->findings = fs.findings;
+    res->kept = fs.kept;
+    res->review = fs.review;
+    res->done = 1;
     for (int i = 0; i < nlines; i++) {
         buf_free(&li[i].clean);
         buf_free(&li[i].tokens);
@@ -1882,6 +1918,104 @@ static void scan_file(const char *path, const Options *opt, int *files_done,
     free(line_flags);
     free(lines);
     free(data);
+}
+
+typedef struct {
+    const StrList *files;
+    const Options *opt;
+    ScanResult *results;
+    int worker;
+    int workers;
+} ScanWorker;
+static void scan_worker_run(ScanWorker *w)
+{
+    for (int i = w->worker; i < w->files->n; i += w->workers)
+        scan_file(w->files->v[i], w->opt, &w->results[i]);
+}
+static int default_jobs(void)
+{
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+#endif
+}
+#ifdef _WIN32
+static DWORD WINAPI scan_worker_thread(LPVOID arg)
+{
+    scan_worker_run((ScanWorker *)arg);
+    return 0;
+}
+#else
+static void *scan_worker_thread(void *arg)
+{
+    scan_worker_run((ScanWorker *)arg);
+    return NULL;
+}
+#endif
+static int scan_files_parallel(const StrList *files, const Options *opt,
+                               ScanResult *results, int jobs)
+{
+    if (jobs <= 1)
+        return 0;
+    ScanWorker *workers = (ScanWorker *)calloc((size_t)jobs, sizeof(*workers));
+    if (!workers)
+        return 0;
+    for (int i = 0; i < jobs; i++) {
+        workers[i].files = files;
+        workers[i].opt = opt;
+        workers[i].results = results;
+        workers[i].worker = i;
+        workers[i].workers = jobs;
+    }
+#ifdef _WIN32
+    HANDLE *threads = (HANDLE *)calloc((size_t)jobs, sizeof(*threads));
+    unsigned char *started = (unsigned char *)calloc((size_t)jobs, 1);
+    if (!threads || !started) {
+        free(threads);
+        free(started);
+        free(workers);
+        return 0;
+    }
+    for (int i = 0; i < jobs; i++) {
+        threads[i] = CreateThread(NULL, 0, scan_worker_thread, &workers[i], 0,
+                                  NULL);
+        started[i] = threads[i] != NULL;
+    }
+    for (int i = 0; i < jobs; i++) {
+        if (started[i]) {
+            WaitForSingleObject(threads[i], INFINITE);
+            CloseHandle(threads[i]);
+        } else {
+            scan_worker_run(&workers[i]);
+        }
+    }
+#else
+    pthread_t *threads = (pthread_t *)calloc((size_t)jobs, sizeof(*threads));
+    unsigned char *started = (unsigned char *)calloc((size_t)jobs, 1);
+    if (!threads || !started) {
+        free(threads);
+        free(started);
+        free(workers);
+        return 0;
+    }
+    for (int i = 0; i < jobs; i++)
+        started[i] = pthread_create(&threads[i], NULL, scan_worker_thread,
+                                    &workers[i]) == 0;
+    for (int i = 0; i < jobs; i++) {
+        if (started[i])
+            pthread_join(threads[i], NULL);
+        else
+            scan_worker_run(&workers[i]);
+    }
+#endif
+    free(threads);
+    free(started);
+    free(workers);
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1902,10 +2036,11 @@ static void usage(const char *argv0)
     printf("  --all               do not skip build/, third_party/, refs/\n");
     printf("  --exclude TEXT      skip paths containing TEXT (repeatable)\n");
     printf("  --max-size MB       skip files larger than MB (default 32, 0=no limit)\n");
+    printf("  -j, --jobs N        scan with N worker threads (default: CPU count)\n");
     printf("  -h, --help          this help\n");
     printf("\nexamples:\n");
     printf("  scan_wc3debug runtime apps\n");
-    printf("  scan_wc3debug --exclude headless runtime apps\n");
+    printf("  scan_wc3debug -j 8 --exclude headless runtime apps\n");
     printf("\nexit status: 0 = clean or review-only, 1 = high-confidence finding,\n");
     printf("             2 = usage/IO error\n");
 }
@@ -1947,6 +2082,14 @@ int main(int argc, char **argv)
             opt.max_size_mb = atoi(argv[++i]);
             if (opt.max_size_mb < 0)
                 opt.max_size_mb = 0;
+        } else if (!strcmp(argv[i], "-j") || !strcmp(argv[i], "--jobs")) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "scan_wc3debug: --jobs needs a value\n");
+                return 2;
+            }
+            opt.jobs = atoi(argv[++i]);
+            if (opt.jobs < 0)
+                opt.jobs = 0;
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "scan_wc3debug: unknown option %s\n", argv[i]);
             return 2;
@@ -1971,15 +2114,38 @@ int main(int argc, char **argv)
     }
     qsort(files.v, (size_t)files.n, sizeof(char *), strlist_cmp);
 
+    ScanResult *results =
+        (ScanResult *)calloc((size_t)files.n, sizeof(*results));
+    if (!results) {
+        fprintf(stderr, "scan_wc3debug: out of memory\n");
+        return 2;
+    }
+    int jobs = opt.jobs > 0 ? opt.jobs : default_jobs();
+    if (jobs < 1)
+        jobs = 1;
+    if (jobs > files.n)
+        jobs = files.n;
+    if (!scan_files_parallel(&files, &opt, results, jobs)) {
+        for (int i = 0; i < files.n; i++)
+            scan_file(files.v[i], &opt, &results[i]);
+    }
+
     int files_done = 0;
     int total_findings = 0;
     int total_kept = 0;
     int total_review = 0;
-
     for (int i = 0; i < files.n; i++) {
-        scan_file(files.v[i], &opt, &files_done, &total_findings,
-                  &total_kept, &total_review);
+        ScanResult *res = &results[i];
+        if (res->out.len)
+            fwrite(res->out.s, 1, res->out.len, stdout);
+        files_done += res->done;
+        total_findings += res->findings;
+        total_kept += res->kept;
+        total_review += res->review;
+        buf_free(&res->out);
     }
+    free(results);
+
     printf("\nScanned %d source file(s).\n", files_done);
     printf("Findings: %d (review sites: %d)\n", total_findings,
            total_review);

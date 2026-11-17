@@ -161,6 +161,21 @@ int hle_android_select_display_mode(uint32_t width, uint32_t height)
     return 1;
 }
 
+int hle_android_half_resolution(void)
+{
+    return 0;
+}
+
+int hle_android_request_display_mode(uint32_t width, uint32_t height)
+{
+    return hle_android_select_display_mode(width, height);
+}
+
+void hle_android_set_grid_disabled_callback(hle_android_grid_disabled_fn cb)
+{
+    (void)cb;
+}
+
 int hle_android_display_mode(uint32_t index, uint32_t *width, uint32_t *height)
 {
     static const uint32_t widths[] = { 640, 800, 1024 };

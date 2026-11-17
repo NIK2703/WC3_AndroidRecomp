@@ -241,7 +241,9 @@ static int probe_with_gipa(PFN_vkGetInstanceProcAddr gipa,
     PFN_vkEnumeratePhysicalDevices enumerate_phys;
     PFN_vkGetPhysicalDeviceProperties get_props;
     PFN_vkEnumerateDeviceExtensionProperties enum_ext;
+#if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
     PFN_vkGetPhysicalDeviceFeatures2 get_features2;
+#endif
     VkApplicationInfo app;
     VkInstanceCreateInfo create_info;
     VkInstance instance = VK_NULL_HANDLE;
@@ -295,9 +297,11 @@ static int probe_with_gipa(PFN_vkGetInstanceProcAddr gipa,
         instance, "vkGetPhysicalDeviceProperties");
     enum_ext = (PFN_vkEnumerateDeviceExtensionProperties)gipa(
         instance, "vkEnumerateDeviceExtensionProperties");
+#if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
     get_features2 = (PFN_vkGetPhysicalDeviceFeatures2)gipa(
         instance, "vkGetPhysicalDeviceFeatures2");
     DRV_LOG("probe features2=%p", (void *)get_features2);
+#endif
 
     if (!destroy_instance || !enumerate_phys || !get_props)
         goto cleanup;

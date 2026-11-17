@@ -365,7 +365,7 @@ static void guest_set_iface(ThinObj *r, int iface)
 {
     if (iface < 0 || iface >= D3D9_IFACE_COUNT) return;
     r->iface = (uint16_t)iface;
-    ThinGuestObj *o = (ThinGuestObj *)(uintptr_t)r->guest;
+    ThinGuestObj *o = (ThinGuestObj *)guest_host_ptr(r->guest);
     o->iface = (uint32_t)iface;
     o->vtbl = g_vt[iface];
 }
@@ -432,7 +432,7 @@ uint32_t thin_wrap(void *host, int iface, int take_ref)
     uint32_t g = g_alloc0(sizeof(ThinGuestObj));
     if (!g) { rec_free(r); if (take_ref) unk->Release(); return 0; }
 
-    ThinGuestObj *o = (ThinGuestObj *)(uintptr_t)g;
+    ThinGuestObj *o = (ThinGuestObj *)guest_host_ptr(g);
     o->vtbl = g_vt[kind];
     o->id = (uint32_t)rec_index(r);
     o->iface = (uint32_t)kind;
@@ -459,7 +459,7 @@ void *thin_unwrap(uint32_t g)
         THIN_LOG("unmapped guest COM object %08X", g);
         return NULL;
     }
-    ThinGuestObj *o = (ThinGuestObj *)(uintptr_t)g;
+    ThinGuestObj *o = (ThinGuestObj *)guest_host_ptr(g);
     if (o->magic != THIN_MAGIC || o->id >= THIN_MAX_REC) {
         THIN_LOG("bad guest COM object %08X (magic=%08X)", g, o->magic);
         return NULL;
@@ -475,7 +475,7 @@ void *thin_unwrap(uint32_t g)
 static uint32_t thin_obj_addref(uint32_t g)
 {
     if (!g || !hle_android_guest_ok(g, sizeof(ThinGuestObj))) return 0;
-    ThinGuestObj *o = (ThinGuestObj *)(uintptr_t)g;
+    ThinGuestObj *o = (ThinGuestObj *)guest_host_ptr(g);
     if (o->magic != THIN_MAGIC || o->id >= THIN_MAX_REC) return 0;
     ThinObj *r = &g_rec[o->id];
     if (!(r->flags & THIN_F_USED) || r->guest != g) return 0;
@@ -488,7 +488,7 @@ static uint32_t thin_obj_addref(uint32_t g)
 static uint32_t thin_obj_release(uint32_t g)
 {
     if (!g || !hle_android_guest_ok(g, sizeof(ThinGuestObj))) return 0;
-    ThinGuestObj *o = (ThinGuestObj *)(uintptr_t)g;
+    ThinGuestObj *o = (ThinGuestObj *)guest_host_ptr(g);
     if (o->magic != THIN_MAGIC || o->id >= THIN_MAX_REC) return 0;
     ThinObj *r = &g_rec[o->id];
     if (!(r->flags & THIN_F_USED) || r->guest != g) return 0;
@@ -618,7 +618,7 @@ uintptr_t thin_gptr(CPU *c, unsigned n, size_t size)
         THIN_LOG("bad guest pointer %08X size %u (arg %u)", a, want, n);
         return 0;
     }
-    return (uintptr_t)a;
+    return (uintptr_t)guest_host_ptr(a);
 }
 
 /* ------------------------------------------------------------------ */
@@ -633,6 +633,27 @@ static void thin_desktop_mode(int *w, int *h, int *refresh)
     *w = (int)aw;
     *h = (int)ah;
     *refresh = (int)hle_android_display_refresh_rate();
+}
+
+/* The half-resolution grid is a product contract at startup, not a permanent
+ * lock.  Before the first presented frame, snap the requested back buffer to
+ * the exact half extent so a stale registry value or a hardcoded fallback
+ * cannot create a native buffer that DXVK would then rescale linearly.  After
+ * the first frame, a different size is the user's Video-options change:
+ * request_display_mode() turns the grid off and applies the new mode, so this
+ * helper must not silently clamp it back. */
+static void thin_force_half_mode(int *w, int *h)
+{
+    if (!w || !h || !hle_android_half_resolution() ||
+        hle_android_guest_presented())
+        return;
+    uint32_t hw = 0, hh = 0;
+    if (!hle_android_default_display_mode(&hw, &hh)) return;
+    if (*w != (int)hw || *h != (int)hh) {
+        THIN_LOG("half mode: requested %dx%d, using %ux%u", *w, *h, hw, hh);
+        *w = (int)hw;
+        *h = (int)hh;
+    }
 }
 
 #define THIN_MODE_MAX 512
@@ -890,9 +911,9 @@ static void thin_log_real_caps(void)
 
 void thin_pp_from_guest(uint32_t g, D3DPRESENT_PARAMETERS *pp)
 {
-    const PP32 *p = (const PP32 *)(uintptr_t)g;
     memset(pp, 0, sizeof *pp);
-    if (!p) return;
+    if (!g) return;
+    const PP32 *p = (const PP32 *)guest_host_ptr(g);
     pp->BackBufferWidth = p->BackBufferWidth;
     pp->BackBufferHeight = p->BackBufferHeight;
     pp->BackBufferFormat = (D3DFORMAT)p->BackBufferFormat;
@@ -911,8 +932,8 @@ void thin_pp_from_guest(uint32_t g, D3DPRESENT_PARAMETERS *pp)
 
 void thin_pp_to_guest(uint32_t g, const D3DPRESENT_PARAMETERS *pp)
 {
-    PP32 *p = (PP32 *)(uintptr_t)g;
-    if (!p || !pp) return;
+    if (!g || !pp) return;
+    PP32 *p = (PP32 *)guest_host_ptr(g);
     p->BackBufferWidth = pp->BackBufferWidth;
     p->BackBufferHeight = pp->BackBufferHeight;
     p->BackBufferFormat = (uint32_t)pp->BackBufferFormat;
@@ -1116,7 +1137,7 @@ static void thin_query_interface(CPU *c, ThinObj *o)
         c->eax = D3DERR_INVALIDCALL;
         return;
     }
-    const uint8_t *want = (const uint8_t *)(uintptr_t)iidp;
+    const uint8_t *want = (const uint8_t *)guest_host_ptr(iidp);
     const ThinIid *hit = NULL;
     for (unsigned i = 0; i < k_thin_iid_count; i++) {
         if (memcmp(want, k_thin_iids[i].bytes, 16) == 0) {
@@ -1186,7 +1207,7 @@ static void thin_get_container(CPU *c, ThinObj *o)
         c->eax = D3DERR_INVALIDCALL;
         return;
     }
-    const uint8_t *want = (const uint8_t *)(uintptr_t)iidp;
+    const uint8_t *want = (const uint8_t *)guest_host_ptr(iidp);
     int kind = -1;
     for (unsigned i = 0; i < k_thin_iid_count; i++) {
         if (memcmp(want, k_thin_iids[i].bytes, 16) == 0) {
@@ -1259,7 +1280,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        AdapterId32 *id = (AdapterId32 *)(uintptr_t)out;
+        AdapterId32 *id = (AdapterId32 *)guest_host_ptr(out);
         memset(id, 0, sizeof *id);
         strncpy(id->Driver, "wc3recomp-thin", sizeof id->Driver - 1);
         strncpy(id->Description, "Warcraft III static recompiler (thin D3D9)",
@@ -1282,7 +1303,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        *(D3DDISPLAYMODE *)(uintptr_t)out = *m;
+        *(D3DDISPLAYMODE *)guest_host_ptr(out) = *m;
         c->eax = D3D_OK;
         return;
     }
@@ -1292,7 +1313,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        thin_fill_display((D3DDISPLAYMODE *)(uintptr_t)out);
+        thin_fill_display((D3DDISPLAYMODE *)guest_host_ptr(out));
         c->eax = D3D_OK;
         return;
     }
@@ -1308,7 +1329,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        thin_fill_caps((Caps9 *)(uintptr_t)out, thin_arg(c, 1),
+        thin_fill_caps((Caps9 *)guest_host_ptr(out), thin_arg(c, 1),
                        (D3DDEVTYPE)thin_arg(c, 2));
         thin_count(THIN_STAT_CAPS);
         c->eax = D3D_OK;
@@ -1325,11 +1346,12 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        const PP32 *p = (const PP32 *)(uintptr_t)ppg;
+        const PP32 *p = (const PP32 *)guest_host_ptr(ppg);
         g_pp = *p;
         int w = (int)p->BackBufferWidth;
         int h = (int)p->BackBufferHeight;
         if (!w || !h) thin_desktop_mode(&w, &h, NULL);
+        thin_force_half_mode(&w, &h);
         int windowed = p->Windowed ? 1 : 0;
         if (getenv("WC3_HIDDEN")) windowed = 1;
         int vsync = p->FullScreen_PresentationInterval !=
@@ -1340,11 +1362,12 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
                                  ? p->AutoDepthStencilFormat
                                  : (uint32_t)D3DFMT_UNKNOWN;
 
-        hle_android_select_display_mode((uint32_t)w, (uint32_t)h);
+        hle_android_request_display_mode((uint32_t)w, (uint32_t)h);
         thin_count(THIN_STAT_CREATE_DEVICE);
         THIN_LOG("CreateDevice %dx%d windowed=%d fmt=%u depth=%u reuse=%d "
-                 "retired=%d", w, h, windowed, bb_fmt, depth_fmt,
-                 g_dev != NULL, g_device_retired);
+                 "retired=%d half=%d presented=%d", w, h, windowed, bb_fmt,
+                 depth_fmt, g_dev != NULL, g_device_retired,
+                 hle_android_half_resolution(), hle_android_guest_presented());
 
         if (g_dev) {
             D3DPRESENT_PARAMETERS pp;
@@ -1429,7 +1452,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        thin_fill_caps((Caps9 *)(uintptr_t)out, 0, D3DDEVTYPE_HAL);
+        thin_fill_caps((Caps9 *)guest_host_ptr(out), 0, D3DDEVTYPE_HAL);
         thin_count(THIN_STAT_CAPS);
         c->eax = D3D_OK;
         return;
@@ -1440,7 +1463,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        thin_fill_display((D3DDISPLAYMODE *)(uintptr_t)out);
+        thin_fill_display((D3DDISPLAYMODE *)guest_host_ptr(out));
         c->eax = D3D_OK;
         return;
     }
@@ -1450,7 +1473,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        Creation32 *p = (Creation32 *)(uintptr_t)out;
+        Creation32 *p = (Creation32 *)guest_host_ptr(out);
         p->AdapterOrdinal = 0;
         p->DeviceType = D3DDEVTYPE_HAL;
         p->hFocusWindow = (uint32_t)(uintptr_t)hle_host_hwnd();
@@ -1487,11 +1510,12 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        const PP32 *p = (const PP32 *)(uintptr_t)ppg;
+        const PP32 *p = (const PP32 *)guest_host_ptr(ppg);
         g_pp = *p;
         int w = (int)p->BackBufferWidth;
         int h = (int)p->BackBufferHeight;
         if (!w || !h) thin_desktop_mode(&w, &h, NULL);
+        thin_force_half_mode(&w, &h);
         int windowed = p->Windowed ? 1 : 0;
         if (getenv("WC3_HIDDEN")) windowed = 1;
         int vsync = p->FullScreen_PresentationInterval !=
@@ -1500,7 +1524,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
                                             : (uint32_t)D3DFMT_X8R8G8B8;
         uint32_t dfmt = p->EnableAutoDepthStencil ? p->AutoDepthStencilFormat
                                                   : (uint32_t)D3DFMT_UNKNOWN;
-        hle_android_select_display_mode((uint32_t)w, (uint32_t)h);
+        hle_android_request_display_mode((uint32_t)w, (uint32_t)h);
         D3DPRESENT_PARAMETERS pp;
         thin_build_pp(&pp, w, h, windowed, vsync, bfmt, dfmt);
         thin_detach_all();
@@ -1528,6 +1552,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
         if ((g_presents & 511u) == 0) thin_dump_stats();
 #endif
         thin_count(THIN_STAT_PRESENT);
+        if (hr == D3D_OK) hle_android_note_present();
         thin_after_present();
         c->eax = (uint32_t)hr;
         return;
@@ -1538,7 +1563,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        D3DRASTER_STATUS *r = (D3DRASTER_STATUS *)(uintptr_t)out;
+        D3DRASTER_STATUS *r = (D3DRASTER_STATUS *)guest_host_ptr(out);
         r->InVBlank = TRUE;
         r->ScanLine = 0;
         c->eax = D3D_OK;
@@ -1547,13 +1572,14 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
 
     /* ---- IDirect3DSwapChain9 -------------------------------------- */
     case 0x0303: { /* Present */
+        const RECT *src = (const RECT *)thin_gptr(c, 1, sizeof(RECT));
+        const RECT *dst = (const RECT *)thin_gptr(c, 2, sizeof(RECT));
+        const RGNDATA *dirty =
+            (const RGNDATA *)thin_gptr(c, 4, sizeof(RGNDATA));
         HRESULT hr;
         try {
             hr = ((IDirect3DSwapChain9 *)o->host)->Present(
-                (const RECT *)(uintptr_t)thin_arg(c, 1),
-                (const RECT *)(uintptr_t)thin_arg(c, 2), NULL,
-                (const RGNDATA *)(uintptr_t)thin_arg(c, 4),
-                (DWORD)thin_arg(c, 5));
+                src, dst, NULL, dirty, (DWORD)thin_arg(c, 5));
         } catch (...) {
             hr = E_FAIL;
         }
@@ -1562,6 +1588,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
         if ((g_presents & 511u) == 0) thin_dump_stats();
 #endif
         thin_count(THIN_STAT_PRESENT);
+        if (hr == D3D_OK) hle_android_note_present();
         thin_after_present();
         c->eax = (uint32_t)hr;
         return;
@@ -1572,7 +1599,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        D3DRASTER_STATUS *r = (D3DRASTER_STATUS *)(uintptr_t)out;
+        D3DRASTER_STATUS *r = (D3DRASTER_STATUS *)guest_host_ptr(out);
         r->InVBlank = TRUE;
         r->ScanLine = 0;
         c->eax = D3D_OK;
@@ -1584,7 +1611,7 @@ void thin_hw_call(CPU *c, const ThinSlot *s, ThinObj *o)
             c->eax = D3DERR_INVALIDCALL;
             return;
         }
-        thin_fill_display((D3DDISPLAYMODE *)(uintptr_t)out);
+        thin_fill_display((D3DDISPLAYMODE *)guest_host_ptr(out));
         c->eax = D3D_OK;
         return;
     }
@@ -1708,7 +1735,7 @@ static void thin_entry(CPU *c)
         c->eax = D3DERR_INVALIDCALL;
         return;
     }
-    ThinGuestObj *go = (ThinGuestObj *)(uintptr_t)self;
+    ThinGuestObj *go = (ThinGuestObj *)guest_host_ptr(self);
     if (go->magic != THIN_MAGIC || go->id >= THIN_MAX_REC) {
         THIN_LOG("bad guest COM object %08X (%s)", self, hle_describe(c->eip));
         c->eax = D3DERR_INVALIDCALL;

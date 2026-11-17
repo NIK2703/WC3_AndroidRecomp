@@ -194,13 +194,13 @@ int wc3_lock_trace_enter(const CPU *c, uint32_t target,
 
     uint32_t guest_id = 0;
     if (c->fs_base)
-        guest_id = *(volatile uint32_t *)(uintptr_t)(c->fs_base + 0x24u);
+        guest_id = *(volatile uint32_t *)guest_host_ptr(c->fs_base + 0x24u);
     uint32_t host_id = lt_host_tid();
 
     uint32_t ret = 0, call_ret = 0;
     if (c->esp) {
         const volatile uint32_t *sp =
-            (const volatile uint32_t *)(uintptr_t)c->esp;
+            (const volatile uint32_t *)guest_host_ptr(c->esp);
         ret = sp[0];
         call_ret = sp[2];   /* [ret][arg][caller_ret] */
     }

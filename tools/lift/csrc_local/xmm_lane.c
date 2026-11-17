@@ -164,6 +164,7 @@ static int has_word(const char *s, size_t n, const char *w)
     size_t i;
     if (wl == 0 || wl > n) return 0;
     for (i = 0; i + wl <= n; i++) {
+        if (s[i] != w[0]) continue;
         if (memcmp(s + i, w, wl) != 0) continue;
         if (i > 0 && word_char(s[i - 1])) continue;
         if (i + wl < n && word_char(s[i + wl])) continue;
@@ -283,10 +284,15 @@ static size_t matching_paren(const char *s, size_t n, size_t open)
 static size_t find_bytes(const char *s, size_t n, size_t from, const char *needle)
 {
     size_t nl = strlen(needle);
-    size_t i;
+    size_t i = from;
     if (nl == 0 || nl > n) return (size_t)-1;
-    for (i = from; i + nl <= n; i++) {
+    while (i + nl <= n) {
+        const char *hit = (const char *)memchr(s + i, needle[0],
+                                               n - i - (nl - 1));
+        if (!hit) return (size_t)-1;
+        i = (size_t)(hit - s);
         if (memcmp(s + i, needle, nl) == 0) return i;
+        i++;
     }
     return (size_t)-1;
 }

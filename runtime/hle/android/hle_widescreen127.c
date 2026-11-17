@@ -108,7 +108,7 @@ void __wrap_L_6F126E30(CPU *c)
     if (factor == 1.0f)
         return;
 
-    float *m = (float *)(uintptr_t)out;
+    float *m = (float *)guest_host_ptr(out);
     m[0] /= factor;
 }
 
@@ -143,7 +143,7 @@ void __wrap_L_6F654E20(CPU *c)
     if (factor == 1.0f)
         return;
 
-    float *value = (float *)(uintptr_t)(frame + 0x58);
+    float *value = (float *)guest_host_ptr(frame + 0x58);
     *value /= factor;
 }
 

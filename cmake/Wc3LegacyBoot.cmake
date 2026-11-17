@@ -168,12 +168,17 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/hle/win32/ole32"
     "${WC3_ROOT}/runtime/hle/win32/ws2_32"
     "${WC3_ROOT}/runtime/cpu"
-    "${WC3_ROOT}/runtime/guest")
+    "${WC3_ROOT}/runtime/guest"
+    "${WC3_ROOT}/runtime/platform"
+    "${WC3_ROOT}/runtime/platform/android")
 target_compile_definitions(wc3_boot PRIVATE
     GVA_DELTA=0
     WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE})
 if(WC3_DEBUG)
     target_compile_definitions(wc3_boot PRIVATE WC3_DEBUG=1)
+endif()
+if(WC3_LOG_TO_DOWNLOADS)
+    target_compile_definitions(wc3_boot PRIVATE WC3_LOG_TO_DOWNLOADS=1)
 endif()
 target_compile_options(wc3_boot PRIVATE
     -fno-strict-aliasing
@@ -373,11 +378,15 @@ add_library(wc3_hle_android STATIC
     "${WC3_ROOT}/runtime/hle/android/pe32.c"
     "${WC3_ROOT}/runtime/hle/android/guest_mem.c"
     "${WC3_ROOT}/runtime/hle/android/hle_cursor127.c"
-    "${WC3_ROOT}/runtime/hle/android/hle_widescreen127.c")
+    "${WC3_ROOT}/runtime/hle/android/hle_widescreen127.c"
+    "${WC3_ROOT}/runtime/hle/android/parallel_raycast.c")
 target_include_directories(wc3_hle_android PRIVATE
     "${WC3_ROOT}/runtime/hle/android"
     "${WC3_ROOT}/runtime/diag"
-    "${WC3_ROOT}/runtime/cpu")
+    "${WC3_ROOT}/runtime/cpu"
+    "${WC3_ROOT}/runtime/guest"
+    "${WC3_ROOT}/runtime/platform")
+target_link_libraries(wc3_hle_android PUBLIC wc3_platform)
 target_compile_definitions(wc3_hle_android PRIVATE
     GVA_DELTA=0
     WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
@@ -400,20 +409,20 @@ target_compile_options(wc3_hle_android PRIVATE
 set_target_properties(wc3_hle_android PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # --- thin D3D9 bridge: source-built guest COM surface ----------------------
-# Phase 1b, step 1: the guest COM surface and the lock layer are compiled from
-# target-owned sources.  The previous tree's hle_d3d9_thin.o is gone; the
-# generated dispatcher (thin_gen_call/thin_method_hw) is still the pinned
-# hle_d3d9_thin_gen.o because it is pure marshalling with no wrapper state and
-# its generator/spec are not vendored yet.  It calls the source-built
+# The guest COM surface, the lock layer and the generated dispatcher are all
+# compiled from target-owned sources.  The dispatcher used to be the pinned
+# hle_d3d9_thin_gen.o; that object contains its own copy of thin_arg() with a
+# raw guest-stack dereference, which cannot work once guest memory lives in the
+# host window.  d3d9_thin_gen.cpp is the upstream generated source, rebuilt
+# here against this tree's thin_arg() (rd32g).  It calls the source-built
 # thin_after_out()/thin_hw_call() below, so the leak and OOM fixes apply to
 # every generated method.  ThinGuestObj, ThinObj, ThinSlot and the mangled
 # thin_lock_* signatures stay compatible with the frozen guest ABI; this is a
 # source port, not a new ABI.
-set(WC3_D3D9_GEN_OBJECT
-    "${WC3_LEGACY_ROOT}/build/android/boot_probe/hle_d3d9_thin_gen.o")
 add_library(wc3_hle_d3d9 OBJECT
     "${WC3_ROOT}/runtime/hle/d3d9/d3d9_thin.cpp"
-    "${WC3_ROOT}/runtime/hle/d3d9/d3d9_thin_lock.cpp")
+    "${WC3_ROOT}/runtime/hle/d3d9/d3d9_thin_lock.cpp"
+    "${WC3_ROOT}/runtime/hle/d3d9/d3d9_thin_gen.cpp")
 target_include_directories(wc3_hle_d3d9 PRIVATE
     "${WC3_ROOT}/runtime/hle/d3d9"
     "${WC3_ROOT}/runtime/hle/android"
@@ -455,7 +464,8 @@ set_target_properties(wc3_hle_d3d9 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # only its vkGetInstanceProcAddr is handed to the two DXVK copies.
 add_library(wc3_dxvk_entry STATIC
     "${WC3_ROOT}/runtime/gfx/android/dxvk_entry.cpp"
-    "${WC3_ROOT}/runtime/gfx/android/dxvk_trace.cpp")
+    "${WC3_ROOT}/runtime/gfx/android/dxvk_trace.cpp"
+    "${WC3_ROOT}/runtime/gfx/android/present_pass.cpp")
 target_include_directories(wc3_dxvk_entry PRIVATE
     "${WC3_ROOT}/runtime/platform"
     "${WC3_ROOT}/runtime/platform/android"
@@ -467,6 +477,11 @@ target_compile_options(wc3_dxvk_entry PRIVATE
     -fno-strict-aliasing
     -U_FORTIFY_SOURCE
     -D_FORTIFY_SOURCE=0)
+# The present pass creates surfaces on ANativeWindow objects, so only this
+# translation unit needs Vulkan's Android platform declarations.  Keeping the
+# define local stops the Win32 shim and trace units from seeing them.
+set_source_files_properties("${WC3_ROOT}/runtime/gfx/android/present_pass.cpp"
+    PROPERTIES COMPILE_DEFINITIONS "VK_USE_PLATFORM_ANDROID_KHR=1")
 set_target_properties(wc3_dxvk_entry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Apply the release_optimized code-generation profile to every first-party
@@ -573,7 +588,7 @@ set(WC3_DXVK_ARCHIVES
     "${WC3_DXVK_DIR}/libdxvkll_iso.a")
 
 foreach(_required
-        ${WC3_CORPUS_OBJECTS} ${WC3_D3D9_GEN_OBJECT} ${WC3_DXVK_ARCHIVES})
+        ${WC3_CORPUS_OBJECTS} ${WC3_DXVK_ARCHIVES})
     if(NOT EXISTS "${_required}")
         message(FATAL_ERROR
             "target input missing: ${_required}\n"
@@ -589,7 +604,6 @@ target_sources(wc3gameactivity PRIVATE
     "${WC3_ROOT}/runtime/platform/android/vulkan_driver_package.c"
     "${WC3_ROOT}/runtime/platform/android/vulkan_driver_android.c"
     ${WC3_CORPUS_OBJECTS}
-    ${WC3_D3D9_GEN_OBJECT}
     $<TARGET_OBJECTS:wc3_hle_d3d9>)
 target_include_directories(wc3gameactivity PRIVATE
     "${WC3_ROOT}/runtime/diag")

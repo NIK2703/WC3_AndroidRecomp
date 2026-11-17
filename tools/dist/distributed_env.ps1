@@ -1,4 +1,4 @@
-# Auto-enable the IDEAPAD distcc worker for a normal native build.
+# Auto-enable the distributed distcc workers for a normal native build.
 #
 # Dot-source this file (it has no side effects).  The normal entry point is the
 # one-call trampoline used by build_app.ps1:
@@ -7,24 +7,32 @@
 #   Invoke-Wc3AutoDistributedBuild -ScriptPath $PSCommandPath `
 #       -Parameters $PSBoundParameters -Root $root -Variant $Variant
 #
-# If IDEAPAD is reachable, that function starts the tunnel and re-runs the
-# calling script with WC3_DIST_ACTIVE=1; the original body runs unchanged in the
-# child scope and the tunnel is stopped in finally when the child exits.  If
-# distribution is unavailable, the function returns and the same script body
-# runs locally.  Enable-Wc3DistributedBuild/Disable-Wc3DistributedBuild remain
-# available for an explicit try/finally caller.
+# If at least one worker is reachable, that function starts the tunnels and
+# re-runs the calling script with WC3_DIST_ACTIVE=1; the original body runs
+# unchanged in the child scope and the tunnels are stopped in finally when the
+# child exits.  If distribution is unavailable, the function returns and the
+# same script body runs locally.  Enable-Wc3DistributedBuild/
+# Disable-Wc3DistributedBuild remain available for an explicit try/finally
+# caller.
 #
 # Enable returns $null when distribution is disabled, when a caller already
-# configured a transport, or when IDEAPAD cannot be reached.  A null result is
-# a normal local build, not an error.  All four native variants are eligible:
-# release/debug distribute ordinary corpus compiles, while the optimized
-# variants additionally allow ThinLTO and PGO commands.  A final
-# release_optimized build passes its merged profile to the tunnel, which copies
-# it to the same absolute path on IDEAPAD before the first profile-use compile.
+# configured a transport, or when no worker is available.  A null result is a
+# normal local build, not an error.  IDEAPAD and the hotspot phone are
+# independent: either can be used alone, or both together.  If the phone's sshd
+# is down, phone_tunnel.ps1 tries to start it through wireless adb and root su
+# before declaring the phone unavailable.  release, debug and
+# userdebug distribute ordinary corpus compiles to every available worker.  The
+# optimized variants use IDEAPAD by default and exclude the phone because it
+# has no merged PGO profile and only the Windows NDK has proven LTO/PGO
+# output; set WC3_DIST_PHONE_OPTIMIZED=1 to include the phone there.
 #
 # Environment toggles:
 #   WC3_DIST_AUTO=0      force a local build
 #   WC3_DIST_JOBS=N      override Ninja's total job count
+#   WC3_DIST_IDEAPAD=0   use the phone only
+#   WC3_DIST_PHONE=0     use IDEAPAD only
+#   WC3_DIST_PHONE_OPTIMIZED=1  include the phone in optimized variants
+#   WC3_DIST_PHONE_SLOTS=N      cap the phone slot count
 #   WC3_DIST=1           caller already owns the transport (build_dist.ps1)
 
 function Get-Wc3DistPython {
@@ -89,7 +97,13 @@ function Enable-Wc3DistributedBuild {
         # Merged PGO profile for the final release_optimized build.  The
         # tunnel copies it to the same absolute path on IDEAPAD; an empty value
         # leaves profile-use compiles on the local-only path.
-        [string]$PgoProfile = ''
+        [string]$PgoProfile = '',
+        # Either worker can be disabled independently; the other one is still
+        # used if it is available.
+        [switch]$NoIdeapad,
+        [switch]$NoPhone,
+        [int]$PhoneSlots = 0,
+        [int]$PhoneLocalPort = 0
     )
 
     if ($env:WC3_DIST_ACTIVE -eq '1' -or $env:WC3_DIST -eq '1') {
@@ -98,12 +112,20 @@ function Enable-Wc3DistributedBuild {
     if ($env:WC3_DIST_AUTO -eq '0') {
         return $null
     }
-    if ($Variant -notin @('release', 'debug',
+    if ($Variant -notin @('release', 'debug', 'userdebug',
             'release_optimized', 'release_optimized_pgo')) {
         return $null
     }
     $allowPgo = $Variant -in @('release_optimized', 'release_optimized_pgo')
     $allowLto = $Variant -eq 'release_optimized'
+    $useIdeapad = -not $NoIdeapad
+    if ($env:WC3_DIST_IDEAPAD -eq '0') { $useIdeapad = $false }
+    $usePhone = -not $NoPhone
+    if ($env:WC3_DIST_PHONE -eq '0') { $usePhone = $false }
+    if ($Variant -in @('release_optimized', 'release_optimized_pgo') -and
+        $env:WC3_DIST_PHONE_OPTIMIZED -ne '1') {
+        $usePhone = $false
+    }
     if ($env:CCACHE_PREFIX -and
         $env:CCACHE_PREFIX -notmatch 'wc3_dist_cc\.py') {
         Write-Warning '[dist] CCACHE_PREFIX is already set; building locally (set WC3_DIST=1 to own the transport)'
@@ -149,23 +171,34 @@ function Enable-Wc3DistributedBuild {
     try {
         $tunnelJson = & $tunnelScript -Action start `
             -LocalSlots $LocalSlots -RemoteSlots $RemoteSlots `
-            -RemotePort $RemotePort -PgoProfile $PgoProfile
+            -RemotePort $RemotePort -PgoProfile $PgoProfile `
+            -NoIdeapad:(-not $useIdeapad) -NoPhone:(-not $usePhone) `
+            -PhoneSlots $PhoneSlots -PhoneLocalPort $PhoneLocalPort
         $tunnel = $tunnelJson | ConvertFrom-Json
-        if (-not $tunnel -or [int]$tunnel.RemoteSlots -le 0) {
-            throw 'tunnel returned no remote slots'
-        }
+        if (-not $tunnel) { throw 'tunnel returned no state' }
         $remote = [int]$tunnel.RemoteSlots
+        $phoneSlots = 0
+        $phonePort = 0
+        $phoneTarget = ''
+        if ($tunnel.PhoneSlots) { $phoneSlots = [int]$tunnel.PhoneSlots }
+        if ($tunnel.PhonePort) { $phonePort = [int]$tunnel.PhonePort }
+        if ($tunnel.PhoneTarget) { $phoneTarget = [string]$tunnel.PhoneTarget }
+        if ($remote + $phoneSlots -le 0) {
+            Write-Warning '[dist] no workers available; building locally'
+            return $null
+        }
         $pgoReady = $false
         $pgoProperty = $tunnel.PSObject.Properties['PgoProfileSynced']
         if ($pgoProperty) { $pgoReady = [bool]$pgoProperty.Value }
         # Both variants have distributable work.  In debug the corpus commands
-        # end in -g0 and go to IDEAPAD; the -g commands stay on the local-only
-        # distcc path and are capped by LocalSlots, so a total of local+remote
-        # Ninja jobs fills the remote slots without lifting the local cap.
+        # end in -g0 and go to the remotes; the -g commands stay on the
+        # local-only distcc path and are capped by LocalSlots, so local plus
+        # every available worker fills the remote slots without lifting the
+        # local cap.
         $jobs = if ($requestedJobs -gt 0) {
             $requestedJobs
         } else {
-            $LocalSlots + $remote
+            $LocalSlots + $remote + $phoneSlots
         }
 
         $distccState = Join-Path $env:LOCALAPPDATA (
@@ -183,15 +216,25 @@ function Enable-Wc3DistributedBuild {
         Set-Wc3DistEnv -Previous $previous -Name 'WC3_DISTCC_EXE' -Value 'C:/msys64/usr/bin/distcc.exe'
         Set-Wc3DistEnv -Previous $previous -Name 'CCACHE_PREFIX' -Value (
             '{0} {1}' -f ($python -replace '\\', '/'), ($wrapper -replace '\\', '/'))
-        Set-Wc3DistEnv -Previous $previous -Name 'DISTCC_HOSTS' -Value (
-            '127.0.0.1:{0}/{1} localhost/{2} --localslots={2} --localslots_cpp={2}' -f
-            $tunnel.Port, $remote, $LocalSlots)
+        $hosts = @()
+        if ($remote -gt 0) {
+            $hosts += '127.0.0.1:{0}/{1}' -f $tunnel.Port, $remote
+        }
+        if ($phoneSlots -gt 0) {
+            $hosts += '127.0.0.1:{0}/{1}' -f $phonePort, $phoneSlots
+        }
+        $hosts += 'localhost/{0} --localslots={0} --localslots_cpp={0}' -f $LocalSlots
+        Set-Wc3DistEnv -Previous $previous -Name 'DISTCC_HOSTS' -Value ($hosts -join ' ')
         Set-Wc3DistEnv -Previous $previous -Name 'DISTCC_DIR' -Value $distccState
         Set-Wc3DistEnv -Previous $previous -Name 'TMPDIR' -Value $env:TEMP
         Set-Wc3DistEnv -Previous $previous -Name 'CMAKE_BUILD_PARALLEL_LEVEL' -Value "$jobs"
 
-        Write-Host ("[dist] auto enabled ({0}): target={1} local={2} remote={3} jobs={4} pgo={5} lto={6}" -f
-            $Variant, $tunnel.Target, $LocalSlots, $remote, $jobs,
+        $phoneText = if ($phoneSlots -gt 0) {
+            '{0}/{1}' -f $phoneTarget, $phoneSlots
+        } else { 'off' }
+        $ideapadText = if ($remote -gt 0) { $tunnel.Target } else { 'off' }
+        Write-Host ("[dist] auto enabled ({0}): ideapad={1} local={2} remote={3} phone={4} jobs={5} pgo={6} lto={7}" -f
+            $Variant, $ideapadText, $LocalSlots, $remote, $phoneText, $jobs,
             $(if ($allowPgo) { 'on' } else { 'off' }),
             $(if ($allowLto) { 'on' } else { 'off' }))
         return [pscustomobject]@{
@@ -200,6 +243,9 @@ function Enable-Wc3DistributedBuild {
             DistccState = $distccState
             LocalSlots = $LocalSlots
             RemoteSlots = $remote
+            PhoneSlots = $phoneSlots
+            PhonePort = $phonePort
+            PhoneTarget = $phoneTarget
             Jobs = $jobs
             PgoProfileReady = $pgoReady
             PreviousEnv = $previous
@@ -224,7 +270,7 @@ function Enable-Wc3DistributedBuild {
         if ($env:WC3_DIST_DEBUG -eq '1') {
             Write-Warning "[dist] distributed build unavailable: $message"
         } else {
-            Write-Warning '[dist] IDEAPAD unavailable; building locally (set WC3_DIST_DEBUG=1 for details)'
+            Write-Warning '[dist] no distributed worker available; building locally (set WC3_DIST_DEBUG=1 for details)'
         }
         return $null
     }

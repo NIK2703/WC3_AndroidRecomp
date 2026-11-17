@@ -1,0 +1,14 @@
+# Diagnostic tags for -Variant userdebug.
+# One tag per line; '#' starts a comment. Semicolons, commas and spaces also
+# separate tags. Read by tools/android/build_app.ps1 at build start.
+#
+# userdebug is the diagnostic build of the debug package (wc3.recomp.debug):
+# it keeps WC3_DEBUG=1 but compiles only the boot path and the crash/breadcrumb
+# reports.  Subsystem traces from config/debug_tags.txt stay off so a black
+# screen can be triaged without the noise of GRAPHICS/DXVK_DEBUG/SELECT24.
+# The boot log goes to /storage/emulated/0/Download/wc3_log.txt.
+BOOT
+CRASH
+# Counter-only pool profiling for parallel dispatch tuning.  No verbose HLE
+# or graphics traces; the counters print periodically from parallel_raycast.c.
+PERF

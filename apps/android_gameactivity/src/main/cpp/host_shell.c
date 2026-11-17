@@ -31,6 +31,7 @@
 #include "app_boot.h"
 #include "controls.h"
 #include "game_state.h"
+#include "grid_android.h"
 #include "guest_layout.h"
 #include "vulkan_driver_android.h"
 #include "guest_memory.h"
@@ -75,12 +76,9 @@
     __android_log_print(ANDROID_LOG_INFO, "wc3ime", __VA_ARGS__)
 #define IME_LOGE(...) \
     __android_log_print(ANDROID_LOG_ERROR, "wc3ime", __VA_ARGS__)
-#define STATE_LOG(...) \
-    __android_log_print(ANDROID_LOG_INFO, "wc3state", __VA_ARGS__)
 #else
 #define IME_LOG(...) ((void)0)
 #define IME_LOGE(...) ((void)0)
-#define STATE_LOG(...) ((void)0)
 #endif
 
 #if WC3_DEBUG && WC3_DEBUG_GPU_DRIVERS
@@ -88,6 +86,16 @@
     __android_log_print(ANDROID_LOG_INFO, "GPU_DRIVERS", __VA_ARGS__)
 #else
 #define GPU_LOG(...) ((void)0)
+#endif
+
+/* Present-scaling trace: what the launch bundle asked for and what reached the
+ * environment.  This is the first half of the "grid enabled but the game is
+ * still scaled smoothly" question; app_boot prints the second half. */
+#if WC3_DEBUG && WC3_DEBUG_GRAPHICS
+#define SCALE_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "wc3present", __VA_ARGS__)
+#else
+#define SCALE_LOG(...) ((void)0)
 #endif
 
 /* The Java trace uses the same tag, so one logcat filter sees the native
@@ -809,11 +817,15 @@ static void publish_visual(void)
         }
     }
     int changed = 0;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
     int sync_failed = 0;
+#endif
     if (next >= 0) {
         int rc = controls_sync_visuals(&g_visual[next]);
         if (rc < 0) {
+#if WC3_DEBUG && WC3_DEBUG_INPUT
             sync_failed = 1;
+#endif
         } else if (active < 0 || active >= OVERLAY_SNAPSHOTS ||
                    !overlay_visual_state_equal(&g_visual[active],
                                                &g_visual[next])) {
@@ -1094,6 +1106,44 @@ Java_wc3_recomp_Wc3GameActivity_nativeClearOverlaySurface(
     native_clear_overlay_surface(env, thiz, surface);
 }
 
+/*
+ * Grid SurfaceView bridge.  grid_android_set_surface() takes ownership of the
+ * ANativeWindow reference on both paths, so this wrapper never releases it.
+ */
+JNIEXPORT void JNICALL
+Java_wc3_recomp_Wc3GameActivity_nativeSetGridSurface(
+    JNIEnv *env, jobject thiz, jobject surface, jint width, jint height)
+{
+    (void)thiz;
+    if (!surface) return;
+    ANativeWindow *window = ANativeWindow_fromSurface(env, surface);
+    if (!window) return;
+    grid_android_set_surface(window, (int)width, (int)height);
+}
+
+JNIEXPORT void JNICALL
+Java_wc3_recomp_Wc3GameActivity_nativeClearGridSurface(
+    JNIEnv *env, jobject thiz, jobject surface)
+{
+    (void)env;
+    (void)thiz;
+    (void)surface;
+    grid_android_clear_surface();
+}
+
+/*
+ * Activity visibility bridge.  onStart/onStop are the only callers; the grid
+ * worker must not retain buffers while the window is not consumed.
+ */
+JNIEXPORT void JNICALL
+Java_wc3_recomp_Wc3GameActivity_nativeSetGridActive(
+    JNIEnv *env, jobject thiz, jboolean active)
+{
+    (void)env;
+    (void)thiz;
+    grid_android_set_active(active ? 1 : 0);
+}
+
 JNIEXPORT jfloat JNICALL
 Java_wc3_recomp_Wc3GameActivity_nativeImePan(JNIEnv *env, jobject thiz)
 {
@@ -1137,6 +1187,49 @@ static int has_arg_token(const char *args, const char *token)
 }
 
 /*
+ * The guest changed resolution in its own Video options while the half grid was
+ * active.  The HLE has already retired the half present target and switched to
+ * the normal compositor path; this marshals the Java-side work (hide the mask,
+ * persist the option off) to the activity's UI thread.  The HLE calls it on the
+ * guest thread, so the JNI environment may need attaching first.
+ */
+static void on_grid_runtime_disabled(uint32_t width, uint32_t height)
+{
+    struct android_app *app = g_app;
+    if (!app || !app->activity || !app->activity->vm ||
+        !app->activity->javaGameActivity)
+        return;
+
+    JavaVM *vm = app->activity->vm;
+    JNIEnv *env = NULL;
+    int attached = 0;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) {
+            LOGE("grid disable: cannot attach thread");
+            return;
+        }
+        attached = 1;
+    }
+
+    jclass cls = (*env)->GetObjectClass(env, app->activity->javaGameActivity);
+    jmethodID method = cls
+        ? (*env)->GetMethodID(env, cls, "onGridRuntimeDisabled", "(II)V")
+        : NULL;
+    if (method) {
+        (*env)->CallVoidMethod(env, app->activity->javaGameActivity, method,
+                              (jint)width, (jint)height);
+    } else {
+        LOGE("grid disable: onGridRuntimeDisabled missing");
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    if (attached) (*vm)->DetachCurrentThread(vm);
+}
+
+/*
  * Called before GameActivity.onCreate starts android_main.  Only the variables
  * owned by the settings screen are written; a host launch without the launch
  * bundle never reaches this function, so ADB/diagnostic launches keep their
@@ -1149,15 +1242,21 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     jstring hook_dir, jstring dxvk_version, jstring dxvk_config_path,
     jboolean double_tap_gestures, jint double_tap_timeout_ms,
     jint long_press_timeout_ms, jint tap_click_delay_ms,
-    jboolean selection24, jboolean hide_cursor, jint overlay_opacity_percent)
+    jboolean selection24, jboolean hide_cursor, jboolean parallel_execution,
+    jint overlay_opacity_percent, jboolean grid_enabled,
+    jint grid_darken_percent, jint grid_cycle_seconds, jstring present_scale)
 {
     /* JNI has no type checking between two jstring parameters.  Keep this
      * order identical to Wc3GameActivity.nativeApplyLaunchSettings: id before
      * root, DXVK version and config path, then the gesture flag and timers,
-     * the SIMPLE tap delay, the selection24 toggle, the hideCursor toggle and
-     * the overlay opacity percent last, or values are copied into the wrong
-     * slot. */
+     * the SIMPLE tap delay, the selection24 toggle, the hideCursor toggle,
+     * the parallelExecution toggle, the overlay opacity percent, then the
+     * grid toggle, darken percent and cycle seconds, and the presentation
+     * scale string last, or values are copied into the wrong slot. */
     (void)clazz;
+    wc3_legacy_set_grid_disabled_callback(on_grid_runtime_disabled);
+    grid_android_configure(grid_enabled ? 1 : 0, (int)grid_darken_percent,
+                           (int)grid_cycle_seconds);
     g_double_tap_gestures = double_tap_gestures ? 1 : 0;
     g_double_tap_timeout_ms = (int)double_tap_timeout_ms;
     g_long_press_timeout_ms = (int)long_press_timeout_ms;
@@ -1171,6 +1270,11 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     /* CCursorFrame::Render checks this before drawing the guest cursor sprite.
      * "0" explicitly overrides an inherited diagnostic value. */
     setenv("WC3_HIDE_CURSOR", hide_cursor ? "1" : "0", 1);
+    /* Read once by the raycast/vertex/triangle pool startup.  "0" makes every
+     * wrapper call the original sequential guest function; "1" lets the
+     * existing WC3_PARALLEL_RAYCAST / WC3_VERTEX / WC3_TRIANGLE diagnostics
+     * run. */
+    setenv("WC3_PARALLEL_GAMEPLAY", parallel_execution ? "1" : "0", 1);
 
     const char *dir = NULL;
     const char *user_args = NULL;
@@ -1179,6 +1283,7 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     const char *vulkan_hooks = NULL;
     const char *dxvk = NULL;
     const char *dxvk_config = NULL;
+    const char *present = NULL;
     int dxvk_forced = 0;
 
     if (game_dir)
@@ -1195,6 +1300,8 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
         dxvk = (*env)->GetStringUTFChars(env, dxvk_version, NULL);
     if (dxvk_config_path)
         dxvk_config = (*env)->GetStringUTFChars(env, dxvk_config_path, NULL);
+    if (present_scale)
+        present = (*env)->GetStringUTFChars(env, present_scale, NULL);
 
     GPU_LOG("apply launch driver id='%s' root='%s' hooks='%s' dxvk='%s' "
             "config='%s'",
@@ -1285,6 +1392,24 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     else
         unsetenv("WC3_ARGS");
 
+    /* Presentation scaling policy: "half" renders the guest at half the surface
+     * and upscales 2x with nearest sampling (the grid path); anything else,
+     * including the empty default, leaves the guest at native and lets the
+     * compositor scale a lower mode.  The grid layer is meaningless without the
+     * exact 2x source it masks, so enabling it forces the half path even when a
+     * shortcut or an older settings file still says "system". */
+    if (grid_enabled)
+        setenv("WC3_PRESENT_SCALE", "half", 1);
+    else if (present && present[0])
+        setenv("WC3_PRESENT_SCALE", present, 1);
+    else
+        unsetenv("WC3_PRESENT_SCALE");
+    SCALE_LOG("launch: grid=%d present_scale='%s' env='%s' saved=%dx%d",
+              grid_enabled ? 1 : 0, present ? present : "(null)",
+              getenv("WC3_PRESENT_SCALE") ? getenv("WC3_PRESENT_SCALE")
+                                          : "(unset)",
+              (int)width, (int)height);
+
     if (wc3_android_vulkan_driver_configure(g_vulkan_driver_root,
                                             g_vulkan_driver_id,
                                             g_vulkan_driver_hook_dir) != 0)
@@ -1307,6 +1432,8 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
         (*env)->ReleaseStringUTFChars(env, dxvk_version, dxvk);
     if (dxvk_config)
         (*env)->ReleaseStringUTFChars(env, dxvk_config_path, dxvk_config);
+    if (present)
+        (*env)->ReleaseStringUTFChars(env, present_scale, present);
 }
 
 static void canvas_attach_provider(struct android_app *app)
@@ -1626,6 +1753,7 @@ static void ime_window_insets(GameActivity *activity)
  * newly tapped field. */
 static void ime_show(uint32_t field_id, const Wc3LegacyKeyboardRect *rect)
 {
+    (void)field_id;
     GameActivity *activity = host_activity();
     if (!activity) return;
 
@@ -1671,6 +1799,7 @@ static void ime_hide(void)
     g_ime_active = 0;
     g_ime_rect_valid = 0;
     const int length = g_ime_text_len;
+    (void)length;
     ime_clear_locked();
     pthread_mutex_unlock(&g_ime_lock);
 
@@ -1880,8 +2009,6 @@ static void input_apply_game_state_mode(void)
     if (!controls_switch_safe()) return;
 
     int rc = controls_set_overlay_mode(want);
-    STATE_LOG("apply bits=%08x want=%d current=%d rc=%d", bits, (int)want,
-              (int)controls_overlay_mode(), rc);
     if (rc == 0) {
         g_switch_rejected = 0;
         if (visual_rebuild_layout(g_input_width, g_input_height) != 0)
@@ -2758,6 +2885,7 @@ JNIEXPORT void android_main(struct android_app *app)
     cache_stop();
     canvas_detach_provider(app);
     ime_shutdown(app);
+    (void)g_guest_ready;
     LOGI("android_main exit platform=%d guest=%d", g_platform_ready,
          g_guest_ready);
 }

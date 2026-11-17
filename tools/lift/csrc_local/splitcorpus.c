@@ -45,9 +45,6 @@
 #endif
 #endif
 
-#define LINE_CAP (1u << 20)
-#define COPY_CAP (1u << 16)
-
 typedef struct {
     uint32_t va;
     long off;
@@ -126,16 +123,24 @@ static int grow_edges(RawEdge **edges, size_t *cap, size_t need)
 static void scan_dispatch(const char *line, uint32_t from,
                           RawEdge **edges, size_t *n, size_t *cap)
 {
+    static const char call_prefix[] = "dispatch(c, 0x";
+    static const char tail_prefix[] = "dispatch_jmp(c, 0x";
     const char *p = line;
     for (;;) {
-        const char *a = strstr(p, "dispatch(c, 0x");
-        const char *b = strstr(p, "dispatch_jmp(c, 0x");
-        const char *q = a && b ? (a < b ? a : b) : (a ? a : b);
-        if (!q) return;
-        const char *hex = strstr(q, "0x");
+        const char *q = strstr(p, "dispatch");
+        const char *hex;
         char *end = NULL;
-        unsigned long v = strtoul(hex + 2, &end, 16);
-        if (end && end > hex + 2 && (v & ~0xFFFFFFFFul) == 0) {
+        unsigned long v;
+        if (!q) return;
+        if (strncmp(q, call_prefix, sizeof(call_prefix) - 1u) != 0 &&
+            strncmp(q, tail_prefix, sizeof(tail_prefix) - 1u) != 0) {
+            p = q + 1;
+            continue;
+        }
+        hex = q + (q[8] == '_' ? sizeof(tail_prefix) - 1u
+                               : sizeof(call_prefix) - 1u);
+        v = strtoul(hex, &end, 16);
+        if (end && end > hex && (v & ~0xFFFFFFFFul) == 0) {
             if (grow_edges(edges, cap, *n + 1) != 0) return;
             (*edges)[*n].from = from;
             (*edges)[*n].to_va = (uint32_t)v;
@@ -145,21 +150,6 @@ static void scan_dispatch(const char *line, uint32_t from,
     }
 }
 
-/* Copy one function block exactly as it appeared in the source.  Rewinding
- * the input before every block keeps the first pass streaming and bounded. */
-static int copy_block(FILE *in, FILE *out, long off, long len, char *buf)
-{
-    if (fseek(in, off, SEEK_SET) != 0) return -1;
-    while (len > 0) {
-        size_t want = len < COPY_CAP ? (size_t)len : COPY_CAP;
-        size_t got = fread(buf, 1, want, in);
-        if (got != want) return -1;
-        if (fwrite(buf, 1, got, out) != got) return -1;
-        len -= (long)got;
-    }
-    return 0;
-}
-
 int main(int argc, char **argv)
 {
     const char *src, *outdir, *prefix;
@@ -167,8 +157,8 @@ int main(int argc, char **argv)
     char header[DIR_MAX_PATH + 128];
     char outpath[DIR_MAX_PATH];
     FILE *in, *out = NULL;
-    char *line, *copy;
-    size_t header_len, written = 0;
+    char *data = NULL;
+    size_t data_n = 0, header_len, written = 0;
     long count = 0, chunk = 0;
     int at_line_start = 1;
     long current_off = -1, pos;
@@ -209,52 +199,77 @@ int main(int argc, char **argv)
         fprintf(stderr, "splitcorpus: cannot open %s\n", src);
         return 1;
     }
-    line = (char *)malloc(LINE_CAP);
-    copy = (char *)malloc(COPY_CAP);
-    if (!line || !copy) {
-        fprintf(stderr, "splitcorpus: out of memory\n");
-        goto done;
-    }
-
-    /* Pass 1: function boundaries and dispatch edges. */
-    while ((pos = ftell(in)) >= 0 && fgets(line, (int)LINE_CAP, in)) {
-        size_t len = strlen(line);
-        int is_func = at_line_start && !strncmp(line, "void L_", 7);
-        if (is_func) {
-            char *end = NULL;
-            unsigned long va = strtoul(line + 7, &end, 16);
-            if (end && end > line + 7 && *end == '(' &&
-                (va & ~0xFFFFFFFFul) == 0) {
-                if (nfunc == capfunc) {
-                    size_t next = capfunc ? capfunc * 2 : 4096;
-                    Func *p = (Func *)realloc(funcs, next * sizeof *p);
-                    if (!p) {
-                        fprintf(stderr, "splitcorpus: out of memory\n");
-                        goto done;
-                    }
-                    funcs = p;
-                    capfunc = next;
-                }
-                if (nfunc) funcs[nfunc - 1].len = pos - funcs[nfunc - 1].off;
-                funcs[nfunc].va = (uint32_t)va;
-                funcs[nfunc].off = pos;
-                funcs[nfunc].len = 0;
-                nfunc++;
-                current_off = pos;
-            }
-        }
-        if (nfunc) {
-            scan_dispatch(line, (uint32_t)(nfunc - 1), &edges, &nedges, &capedge);
-        }
-        at_line_start = len > 0 && line[len - 1] == '\n';
-    }
-    if (ferror(in)) {
-        fprintf(stderr, "splitcorpus: read failed: %s\n", src);
+    if (fseek(in, 0, SEEK_END) != 0) {
+        fprintf(stderr, "splitcorpus: cannot seek %s\n", src);
         goto done;
     }
     pos = ftell(in);
-    if (nfunc && current_off >= 0 && pos >= current_off)
-        funcs[nfunc - 1].len = pos - current_off;
+    if (pos < 0 || fseek(in, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "splitcorpus: cannot seek %s\n", src);
+        goto done;
+    }
+    data_n = (size_t)pos;
+    data = (char *)malloc(data_n + 1u);
+    if (!data) {
+        fprintf(stderr, "splitcorpus: out of memory\n");
+        goto done;
+    }
+    if (data_n && fread(data, 1, data_n, in) != data_n) {
+        fprintf(stderr, "splitcorpus: read failed: %s\n", src);
+        goto done;
+    }
+    data[data_n] = 0;
+    fclose(in);
+    in = NULL;
+
+    /* Pass 1: function boundaries and dispatch edges.  The whole source is
+     * already resident, so this pass avoids a per-line stdio call and the
+     * writer below can copy blocks by offset without rewinding the file. */
+    {
+        size_t off = 0;
+        while (off < data_n) {
+            char *line = data + off;
+            char *nl = (char *)memchr(line, '\n', data_n - off);
+            size_t len = nl ? (size_t)(nl - line) + 1u : data_n - off;
+            char saved = line[len];
+            int is_func;
+            line[len] = 0;
+            is_func = at_line_start && !strncmp(line, "void L_", 7);
+            if (is_func) {
+                char *end = NULL;
+                unsigned long va = strtoul(line + 7, &end, 16);
+                if (end && end > line + 7 && *end == '(' &&
+                    (va & ~0xFFFFFFFFul) == 0) {
+                    if (nfunc == capfunc) {
+                        size_t next = capfunc ? capfunc * 2 : 4096;
+                        Func *p = (Func *)realloc(funcs, next * sizeof *p);
+                        if (!p) {
+                            fprintf(stderr, "splitcorpus: out of memory\n");
+                            goto done;
+                        }
+                        funcs = p;
+                        capfunc = next;
+                    }
+                    if (nfunc) funcs[nfunc - 1].len =
+                        (long)off - funcs[nfunc - 1].off;
+                    funcs[nfunc].va = (uint32_t)va;
+                    funcs[nfunc].off = (long)off;
+                    funcs[nfunc].len = 0;
+                    nfunc++;
+                    current_off = (long)off;
+                }
+            }
+            if (nfunc) {
+                scan_dispatch(line, (uint32_t)(nfunc - 1), &edges, &nedges,
+                              &capedge);
+            }
+            at_line_start = len > 0 && line[len - 1] == '\n';
+            line[len] = saved;
+            off += len;
+        }
+    }
+    if (nfunc && current_off >= 0 && (long)data_n >= current_off)
+        funcs[nfunc - 1].len = (long)data_n - current_off;
     if (nfunc == 0) {
         fprintf(stderr, "splitcorpus: no L_ functions in %s\n", src);
         goto done;
@@ -379,8 +394,10 @@ int main(int argc, char **argv)
                 written = header_len;
                 count = 0;
             }
-            if (copy_block(in, out, f->off, len, copy) != 0) {
-                fprintf(stderr, "splitcorpus: read/write failed: %s\n", outpath);
+            if (len < 0 || (size_t)len > data_n ||
+                (size_t)f->off > data_n - (size_t)len ||
+                fwrite(data + f->off, 1, (size_t)len, out) != (size_t)len) {
+                fprintf(stderr, "splitcorpus: write failed: %s\n", outpath);
                 goto done;
             }
             written += (size_t)len;
@@ -396,9 +413,8 @@ int main(int argc, char **argv)
 
 done:
     if (out) fclose(out);
-    fclose(in);
-    free(line);
-    free(copy);
+    if (in) fclose(in);
+    free(data);
     free(funcs);
     free(edges);
     free(vamap);

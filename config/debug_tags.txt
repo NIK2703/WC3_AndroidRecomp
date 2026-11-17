@@ -1,28 +1,4 @@
-# Debug-only diagnostic tags for -Variant debug.
-# One tag per line; '#' starts a comment. Semicolons, commas and spaces also
-# separate tags. Read by tools/android/build_app.ps1 at build start.
-# Edit this file to change the set. Release builds ignore it.
+# Final debug package: boot log and crash breadcrumbs only.
+# Read by tools/android/build_app.ps1 at build start.
 BOOT
-ASSETS
-INPUT
-GRAPHICS
-# Campaign movie path: DirectShow gate, Media3 AVI audio/clock and the
-# FFmpeg ASP decode/render trace.  Debug only; release tags are empty (BV-5).
-MOVIE
-# DirectShow/ole32 HLE diagnostics for campaign movies (RenderFile, Run,
-# GetEvent, finish).  Debug only; release tags are empty (BV-5).
-HLE
-MEMORY
 CRASH
-BATTLE_NET
-GPU_DRIVERS
-# DXVK 3.1.1 black-screen trace: Vulkan instance/device/swapchain/present,
-# render passes, clears and the Android window shim.  Also turns on DXVK's own
-# debug log and validation/debug-utils messenger.  Prefix in run.txt/logcat:
-# [DXVK_DEBUG].
-DXVK_DEBUG
-# ATrace slices for simpleperf/Perfetto captures (runtime/diag/wc3_trace.h).
-PERF
-# 24-unit selection: init/note/select/hide/fill and the AddUnit cap trace.
-# Noisy on every selection update; debug only, release tags are empty (BV-5).
-SELECT24

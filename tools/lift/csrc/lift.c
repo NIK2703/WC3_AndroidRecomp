@@ -450,7 +450,7 @@ static int cmd_dispatch(int argc, char **argv) {
           "        }\n"
           "#endif\n"
           "        {\n"
-          "            uint32_t *sp = (uint32_t *)(uintptr_t)c->esp;\n"
+          "            uint32_t *sp = (uint32_t *)(uintptr_t)guest_host_ptr(c->esp);\n"
           "            fprintf(stderr, \"[dispatch] %s unknown guest target %08X (eip=%08X esp=%08X ra=%08X %s)\\n\",\n"
           "                    (tail || chained) ? \"jmp\" : \"call\", target, c->eip, c->esp,\n"
           "                    (unsigned)(uintptr_t)sp ? sp[0] : 0, hle_describe(c->eip));\n"

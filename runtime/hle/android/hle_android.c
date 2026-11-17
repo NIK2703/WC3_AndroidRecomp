@@ -67,6 +67,17 @@
 #define RES_LOG(...) do { } while (0)
 #endif
 
+/* Half-resolution / compositor scaling trace.  GRAPHICS is enabled in the
+ * debug APK, so this answers "did the mode layer actually force half, and did
+ * the target see it?" without turning on the much noisier RESOLUTION tag. */
+#if WC3_DEBUG && WC3_DEBUG_GRAPHICS
+#include <android/log.h>
+#define SCALE_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "wc3present", __VA_ARGS__)
+#else
+#define SCALE_LOG(...) do { } while (0)
+#endif
+
 /* The APK front end (native_activity.c) installs the real soft-keyboard
  * bridge here.  The standalone shell links this file without that front end,
  * so the pointers stay NULL and the guest runs exactly as before.  A function
@@ -510,12 +521,12 @@ uint32_t guest_clamp(uint32_t a, uint32_t n)
  * four plus arg32 are the ABI between the two translation units.  They stay
  * `static inline`-sized wrappers over a volatile load on purpose - a fault
  * here has to be attributable to the caller's address, not to a library. */
-uint32_t rd32g(uint32_t a) { return *(volatile uint32_t *)(uintptr_t)a; }
-void wr32g(uint32_t a, uint32_t v) { *(volatile uint32_t *)(uintptr_t)a = v; }
-static uint16_t rd16g(uint32_t a) { return *(volatile uint16_t *)(uintptr_t)a; }
-static void wr16g(uint32_t a, uint16_t v) { *(volatile uint16_t *)(uintptr_t)a = v; }
-static uint8_t rd8g(uint32_t a) { return *(volatile uint8_t *)(uintptr_t)a; }
-static void wr8g(uint32_t a, uint8_t v) { *(volatile uint8_t *)(uintptr_t)a = v; }
+uint32_t rd32g(uint32_t a) { return *(volatile uint32_t *)(uintptr_t)guest_host_ptr(a); }
+void wr32g(uint32_t a, uint32_t v) { *(volatile uint32_t *)(uintptr_t)guest_host_ptr(a) = v; }
+static uint16_t rd16g(uint32_t a) { return *(volatile uint16_t *)(uintptr_t)guest_host_ptr(a); }
+static void wr16g(uint32_t a, uint16_t v) { *(volatile uint16_t *)(uintptr_t)guest_host_ptr(a) = v; }
+static uint8_t rd8g(uint32_t a) { return *(volatile uint8_t *)(uintptr_t)guest_host_ptr(a); }
+static void wr8g(uint32_t a, uint8_t v) { *(volatile uint8_t *)(uintptr_t)guest_host_ptr(a) = v; }
 
 uint32_t arg32(CPU *c, unsigned n) { return rd32g(c->esp + 4 + n * 4); }
 
@@ -524,7 +535,7 @@ uint32_t arg32(CPU *c, unsigned n) { return rd32g(c->esp + 4 + n * 4); }
 static const char *gstr(uint32_t a)
 {
     if (!a || !guest_ok(a, 1)) return "";
-    return (const char *)(uintptr_t)a;
+    return (const char *)(uintptr_t)guest_host_ptr(a);
 }
 
 /* ------------------------------------------------------------------ */
@@ -554,7 +565,7 @@ static void heap_init(void)
         fprintf(stderr, "[hle] cannot map the HLE heap\n");
         abort();
     }
-    GBlk *b = (GBlk *)(uintptr_t)HLE_HEAP_BASE;
+    GBlk *b = (GBlk *)(uintptr_t)guest_host_ptr(HLE_HEAP_BASE);
     b->size = HLE_HEAP_SIZE - sizeof(GBlk);
     b->next = 0;
     g_heap_free = HLE_HEAP_BASE;
@@ -569,19 +580,19 @@ uint32_t hle_guest_alloc(uint32_t size)
     pthread_mutex_lock(&g_heap_lock);
     uint32_t prev = 0;
     for (uint32_t cur = g_heap_free; cur; ) {
-        GBlk *b = (GBlk *)(uintptr_t)cur;
+        GBlk *b = (GBlk *)(uintptr_t)guest_host_ptr(cur);
         if (b->size >= size) {
             uint32_t rest = b->size - size;
             if (rest >= sizeof(GBlk) + 32u) {
                 /* split */
-                GBlk *nb = (GBlk *)(uintptr_t)(cur + sizeof(GBlk) + size);
+                GBlk *nb = (GBlk *)(uintptr_t)guest_host_ptr(cur + sizeof(GBlk) + size);
                 nb->size = rest - sizeof(GBlk);
                 nb->next = b->next;
                 b->size = size;
-                if (prev) ((GBlk *)(uintptr_t)prev)->next = cur + sizeof(GBlk) + size;
+                if (prev) ((GBlk *)(uintptr_t)guest_host_ptr(prev))->next = cur + sizeof(GBlk) + size;
                 else g_heap_free = cur + sizeof(GBlk) + size;
             } else {
-                if (prev) ((GBlk *)(uintptr_t)prev)->next = b->next;
+                if (prev) ((GBlk *)(uintptr_t)guest_host_ptr(prev))->next = b->next;
                 else g_heap_free = b->next;
             }
             g_heap_used += b->size;
@@ -603,22 +614,22 @@ void hle_guest_free(uint32_t addr)
     pthread_mutex_lock(&g_heap_lock);
     uint32_t hdr = addr - sizeof(GBlk);
     if (!guest_ok(hdr, sizeof(GBlk))) { pthread_mutex_unlock(&g_heap_lock); return; }
-    GBlk *b = (GBlk *)(uintptr_t)hdr;
+    GBlk *b = (GBlk *)(uintptr_t)guest_host_ptr(hdr);
     if (b->size > HLE_HEAP_SIZE) { pthread_mutex_unlock(&g_heap_lock); return; }
     g_heap_used -= b->size;
     /* insert sorted and coalesce with both neighbours */
     uint32_t prev = 0, cur = g_heap_free;
-    while (cur && cur < hdr) { prev = cur; cur = ((GBlk *)(uintptr_t)cur)->next; }
+    while (cur && cur < hdr) { prev = cur; cur = ((GBlk *)(uintptr_t)guest_host_ptr(cur))->next; }
     b->next = cur;
-    if (prev) ((GBlk *)(uintptr_t)prev)->next = hdr;
+    if (prev) ((GBlk *)(uintptr_t)guest_host_ptr(prev))->next = hdr;
     else g_heap_free = hdr;
     if (cur && hdr + sizeof(GBlk) + b->size == cur) {
-        GBlk *nb = (GBlk *)(uintptr_t)cur;
+        GBlk *nb = (GBlk *)(uintptr_t)guest_host_ptr(cur);
         b->size += sizeof(GBlk) + nb->size;
         b->next = nb->next;
     }
     if (prev) {
-        GBlk *pb = (GBlk *)(uintptr_t)prev;
+        GBlk *pb = (GBlk *)(uintptr_t)guest_host_ptr(prev);
         if (prev + sizeof(GBlk) + pb->size == hdr) {
             pb->size += sizeof(GBlk) + b->size;
             pb->next = b->next;
@@ -630,7 +641,7 @@ void hle_guest_free(uint32_t addr)
 static uint32_t hle_alloc0(uint32_t n)
 {
     uint32_t p = hle_guest_alloc(n);
-    if (p) memset((void *)(uintptr_t)p, 0, n);
+    if (p) memset((void *)(uintptr_t)guest_host_ptr(p), 0, n);
     return p;
 }
 
@@ -639,7 +650,7 @@ uint32_t hle_guest_strdup(const char *s)
     if (!s) s = "";
     size_t n = strlen(s) + 1;
     uint32_t p = hle_guest_alloc((uint32_t)n);
-    if (p) memcpy((void *)(uintptr_t)p, s, n);
+    if (p) memcpy((void *)(uintptr_t)guest_host_ptr(p), s, n);
     return p;
 }
 
@@ -649,7 +660,7 @@ uint32_t hle_guest_strdup_w(const uint16_t *s)
     size_t n = 0;
     while (s[n]) n++;
     uint32_t p = hle_guest_alloc((uint32_t)((n + 1) * 2));
-    if (p) memcpy((void *)(uintptr_t)p, s, (n + 1) * 2);
+    if (p) memcpy((void *)(uintptr_t)guest_host_ptr(p), s, (n + 1) * 2);
     return p;
 }
 
@@ -1121,7 +1132,7 @@ static void pin_war3_exe_time(uint32_t dst, const char *name)
 
 static void fill_find_data(uint32_t dst, const char *name, const struct stat *st)
 {
-    memset((void *)(uintptr_t)dst, 0, 318);
+    memset((void *)(uintptr_t)guest_host_ptr(dst), 0, 318);
     wr32g(dst + 0, st ? st_attrs(st) : 0x80u);
     uint64_t ft = st ? filetime_from_time_t(st->st_mtime) : 0;
     wr_filetime(dst + 4, ft);
@@ -1132,7 +1143,7 @@ static void fill_find_data(uint32_t dst, const char *name, const struct stat *st
     wr32g(dst + 32, (uint32_t)size);
     size_t n = strlen(name);
     if (n > 259) n = 259;
-    memcpy((void *)(uintptr_t)(dst + 44), name, n);
+    memcpy((void *)(uintptr_t)guest_host_ptr(dst + 44), name, n);
     /* 8.3 alias: first six chars + '~' + extension, as the shell reports. */
     char alt[14]; memset(alt, 0, sizeof alt);
     size_t k = 0;
@@ -1143,7 +1154,7 @@ static void fill_find_data(uint32_t dst, const char *name, const struct stat *st
         alt[k++] = '.';
         for (size_t i = 1; dot[i] && k < 13; i++) alt[k++] = dot[i];
     }
-    memcpy((void *)(uintptr_t)(dst + 304), alt, 13);
+    memcpy((void *)(uintptr_t)guest_host_ptr(dst + 304), alt, 13);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1217,7 +1228,7 @@ static void h_get_version_ex(CPU *c)
     if (!p || !guest_ok(p, 4)) { c->eax = 0; return; }
     uint32_t size = rd32g(p);
     if (size < 0x94u || size > 0x11Cu || !guest_ok(p, size)) { c->eax = 0; return; }
-    memset((void *)(uintptr_t)p, 0, size);
+    memset((void *)(uintptr_t)guest_host_ptr(p), 0, size);
     wr32g(p + 0, size);
     wr32g(p + 4, 5);             /* dwMajorVersion: XP   */
     wr32g(p + 8, 1);             /* dwMinorVersion       */
@@ -1237,7 +1248,7 @@ static void h_get_system_info(CPU *c)
 {
     uint32_t p = arg32(c, 0);
     if (p && guest_ok(p, 36)) {
-        memset((void *)(uintptr_t)p, 0, 36);
+        memset((void *)(uintptr_t)guest_host_ptr(p), 0, 36);
         wr16g(p + 0, 0);                 /* wProcessorArchitecture = x86 */
         wr32g(p + 4, 0x1000);            /* dwPageSize */
         wr32g(p + 8, 0x00400000);        /* lpMinimumApplicationAddress */
@@ -1256,7 +1267,7 @@ static void h_global_memory_status(CPU *c)
 {
     uint32_t p = arg32(c, 0);
     if (p && guest_ok(p, 32)) {
-        memset((void *)(uintptr_t)p, 0, 32);
+        memset((void *)(uintptr_t)guest_host_ptr(p), 0, 32);
         wr32g(p + 0, 2048);          /* dwLength */
         wr32g(p + 4, 55);            /* dwMemoryLoad */
         wr32g(p + 8, 0x7FFFFFFF);    /* total phys */
@@ -1272,7 +1283,7 @@ static void h_global_memory_status(CPU *c)
 static void h_get_startup_info(CPU *c)
 {
     uint32_t p = arg32(c, 0);
-    if (p && guest_ok(p, 68)) memset((void *)(uintptr_t)p, 0, 68);
+    if (p && guest_ok(p, 68)) memset((void *)(uintptr_t)guest_host_ptr(p), 0, 68);
     c->eax = 0;
 }
 
@@ -1302,8 +1313,8 @@ static void h_get_module_file_name(CPU *c)
     if (!buf || !n || !guest_ok(buf, n)) { c->eax = 0; return; }
     size_t len = strlen(path);
     if (len >= n) len = n - 1;
-    memcpy((void *)(uintptr_t)buf, path, len);
-    ((char *)(uintptr_t)buf)[len] = 0;
+    memcpy((void *)(uintptr_t)guest_host_ptr(buf), path, len);
+    ((char *)(uintptr_t)guest_host_ptr(buf))[len] = 0;
     c->eax = (uint32_t)len;
 }
 
@@ -1314,7 +1325,7 @@ static void h_get_windows_directory(CPU *c)
     size_t len = strlen(d);
     if (!buf || !n || !guest_ok(buf, n)) { c->eax = 0; return; }
     if (len >= n) len = n - 1;
-    memcpy((void *)(uintptr_t)buf, d, len + 1);
+    memcpy((void *)(uintptr_t)guest_host_ptr(buf), d, len + 1);
     c->eax = (uint32_t)len;
 }
 
@@ -1325,8 +1336,8 @@ static void h_get_system_directory(CPU *c)
     size_t len = strlen(d);
     if (!buf || !n || !guest_ok(buf, n)) { c->eax = 0; return; }
     if (len >= n) len = n - 1;
-    memcpy((void *)(uintptr_t)buf, d, len);
-    ((char *)(uintptr_t)buf)[len] = 0;
+    memcpy((void *)(uintptr_t)guest_host_ptr(buf), d, len);
+    ((char *)(uintptr_t)guest_host_ptr(buf))[len] = 0;
     c->eax = (uint32_t)len;
 }
 
@@ -1343,7 +1354,7 @@ static void h_get_current_directory(CPU *c)
     size_t len = strlen(win);
     if (!buf || !n || !guest_ok(buf, n)) { c->eax = (uint32_t)len + 1; return; }
     if (len >= n) { c->eax = (uint32_t)len + 1; return; }
-    memcpy((void *)(uintptr_t)buf, win, len + 1);
+    memcpy((void *)(uintptr_t)guest_host_ptr(buf), win, len + 1);
     c->eax = (uint32_t)len;
 }
 
@@ -1414,7 +1425,7 @@ static void h_get_temp_path_a(CPU *c)
         c->eax = need;
         return;
     }
-    memcpy((void *)(uintptr_t)buf, win, (size_t)len + 1);
+    memcpy((void *)(uintptr_t)guest_host_ptr(buf), win, (size_t)len + 1);
     c->eax = (uint32_t)len;
 }
 
@@ -1451,8 +1462,8 @@ static void h_get_full_path_name(CPU *c)
     if (last && guest_ok(last, 4)) wr32g(last, out + (uint32_t)len);
     if (!out || !n || !guest_ok(out, n)) { c->eax = (uint32_t)len; return; }
     size_t copy = len < n - 1 ? len : n - 1;
-    memcpy((void *)(uintptr_t)out, win, copy);
-    ((char *)(uintptr_t)out)[copy] = 0;
+    memcpy((void *)(uintptr_t)guest_host_ptr(out), win, copy);
+    ((char *)(uintptr_t)guest_host_ptr(out))[copy] = 0;
     c->eax = (uint32_t)copy;
 }
 
@@ -1766,7 +1777,7 @@ static void h_get_file_version_info_a(CPU *c)
     int ok = 0;
     if (ver_load_resource(name, &d, &off, &size) == 0 && buf && len >= size &&
         guest_ok(buf, len)) {
-        memcpy((void *)(uintptr_t)buf, d + off, size);
+        memcpy((void *)(uintptr_t)guest_host_ptr(buf), d + off, size);
         ok = 1;
     }
     free(d);
@@ -1787,7 +1798,7 @@ static void h_ver_query_value_a(CPU *c)
     uint32_t value = 0, vlen = 0, rc = 0;
 
     if (block && guest_ok(block, 6)) {
-        const uint8_t *b = (const uint8_t *)(uintptr_t)block;
+        const uint8_t *b = (const uint8_t *)(uintptr_t)guest_host_ptr(block);
         uint32_t wlen = ver16(b);
         uint32_t vlen_root = ver16(b + 2);
         if (wlen >= 6 && wlen <= 0x100000u && guest_ok(block, wlen) &&
@@ -1961,9 +1972,9 @@ static void h_read_file(CPU *c)
     off_t off = -1;
     ssize_t r;
     if (g->overlapped && h_ov_offset(ov, &off))
-        r = pread(g->fd, (void *)(uintptr_t)buf, n, off);
+        r = pread(g->fd, (void *)(uintptr_t)guest_host_ptr(buf), n, off);
     else
-        r = read(g->fd, (void *)(uintptr_t)buf, n);
+        r = read(g->fd, (void *)(uintptr_t)guest_host_ptr(buf), n);
 #if WC3_DEBUG && WC3_DEBUG_HLE
     static unsigned save_reads;
     if (g->save_trace && save_reads++ < 400)
@@ -1992,9 +2003,9 @@ static void h_write_file(CPU *c)
     off_t off = -1;
     ssize_t r;
     if (g->overlapped && h_ov_offset(ov, &off))
-        r = pwrite(g->fd, (void *)(uintptr_t)buf, n, off);
+        r = pwrite(g->fd, (void *)(uintptr_t)guest_host_ptr(buf), n, off);
     else
-        r = write(g->fd, (void *)(uintptr_t)buf, n);
+        r = write(g->fd, (void *)(uintptr_t)guest_host_ptr(buf), n);
 #if WC3_DEBUG && WC3_DEBUG_HLE
     static unsigned save_writes;
     if (g->save_trace && save_writes++ < 400)
@@ -2335,8 +2346,8 @@ static void h_get_logical_drive_strings(CPU *c)
     const char *s = "C:\\";
     size_t len = strlen(s) + 2;
     if (buf && n >= len && guest_ok(buf, (uint32_t)len)) {
-        memcpy((void *)(uintptr_t)buf, s, strlen(s) + 1);
-        ((char *)(uintptr_t)buf)[strlen(s) + 1] = 0;
+        memcpy((void *)(uintptr_t)guest_host_ptr(buf), s, strlen(s) + 1);
+        ((char *)(uintptr_t)guest_host_ptr(buf))[strlen(s) + 1] = 0;
     }
     c->eax = (uint32_t)len;
 }
@@ -2356,15 +2367,15 @@ static void h_get_volume_information(CPU *c)
         const char *label = "WARCRAFT3";
         size_t n = strlen(label) + 1;
         if (n > name_len) n = name_len;
-        memcpy((void *)(uintptr_t)name_buf, label, n);
-        ((char *)(uintptr_t)name_buf)[n - 1] = 0;
+        memcpy((void *)(uintptr_t)guest_host_ptr(name_buf), label, n);
+        ((char *)(uintptr_t)guest_host_ptr(name_buf))[n - 1] = 0;
     }
     if (fs_buf && fs_len > 1 && guest_ok(fs_buf, fs_len)) {
         const char *fs = "FAT32";
         size_t n = strlen(fs) + 1;
         if (n > fs_len) n = fs_len;
-        memcpy((void *)(uintptr_t)fs_buf, fs, n);
-        ((char *)(uintptr_t)fs_buf)[n - 1] = 0;
+        memcpy((void *)(uintptr_t)guest_host_ptr(fs_buf), fs, n);
+        ((char *)(uintptr_t)guest_host_ptr(fs_buf))[n - 1] = 0;
     }
     if (serial && guest_ok(serial, 4)) wr32g(serial, 0x1A2B3C4Du);
     if (maxcomp && guest_ok(maxcomp, 4)) wr32g(maxcomp, 255);
@@ -2446,9 +2457,168 @@ static void va_log_callers(CPU *c)
  * treating every unknown VA as executable memory. */
 static void dyn_register_exec(uint32_t base, uint32_t size, uint32_t prot)
 {
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    /* Log every request that can matter for dynamic code.  A request without
+     * an execute bit is still interesting: Warden's loader allocates the
+     * module PAGE_READWRITE and only some of its copies are protected later.
+     * If a second copy is executed while still RW, this line says so. */
+    if (base && size &&
+        ((prot & 0x00F0u) ||
+         (base >= GUEST_VA2_BASE &&
+          (uint64_t)base < (uint64_t)GUEST_VA2_BASE + GUEST_VA2_SIZE))) {
+        fprintf(stderr, "[dyn] register-request base=%08X size=%08X prot=%08X exec=%d\n",
+                base, size, prot, (prot & 0x00F0u) != 0);
+    }
+#endif
     if (base && size && (prot & 0x00F0u))
         wc3_dyn_x86_register(base, size);
 }
+
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+/* guest_ok() also accepts the reserved-but-not-committed part of a VA arena,
+ * because the host window maps the whole 32-bit range.  Reading such a page
+ * faults inside the trace and hides the crash it was meant to explain.  Only
+ * read pages that a VirtualAlloc block actually covers. */
+static int va_trace_readable(uint32_t addr, unsigned n)
+{
+    return va_live_covers(addr, n) || va_fixed_mapped(addr, n);
+}
+
+static void va_trace_bytes(const char *tag, uint32_t addr, unsigned n)
+{
+    if (!va_trace_readable(addr, n)) {
+        fprintf(stderr, "[va-trace] %s %08X not committed\n", tag, addr);
+        return;
+    }
+    fprintf(stderr, "[va-trace] %s %08X:", tag, addr);
+    for (unsigned i = 0; i < n; i++)
+        fprintf(stderr, " %02X", rd8g(addr + i));
+    fputc('\n', stderr);
+}
+
+/* The packed module is the only artifact that explains an unpacked export
+ * entry pointing outside the image.  Keep one copy next to the private log so
+ * it can be unpacked and inspected without another live session. */
+static void warden_dump_source(uint32_t src, uint32_t size)
+{
+    if (!src || !size || !va_trace_readable(src, 1)) return;
+    uint32_t avail = 0;
+    for (unsigned i = 0; i < g_va_live_n; i++) {
+        uint32_t a = g_va_live[i].addr, s = g_va_live[i].size;
+        if (!a || !s || src < a || (uint64_t)src >= (uint64_t)a + s) continue;
+        avail = (uint32_t)((uint64_t)a + s - src);
+        break;
+    }
+    if (!avail) avail = size;
+    if (size > avail) size = avail;
+    FILE *f = fopen("/data/user/0/wc3.recomp.debug/files/warden_src.bin", "wb");
+    if (!f) f = fopen("/storage/emulated/0/Download/wc3_warden_src.bin", "wb");
+    if (!f) {
+        fprintf(stderr, "[va-trace] warden source dump: open failed\n");
+        return;
+    }
+    uint8_t buf[0x1000];
+    uint32_t written = 0;
+    while (written < size) {
+        uint32_t n = size - written;
+        if (n > sizeof(buf)) n = sizeof(buf);
+        if (!va_trace_readable(src + written, n)) break;
+        for (uint32_t i = 0; i < n; i++) buf[i] = rd8g(src + written + i);
+        if (fwrite(buf, 1, n, f) != n) break;
+        written += n;
+    }
+    fclose(f);
+    fprintf(stderr, "[va-trace] warden source dump %u bytes\n", written);
+}
+
+static void va_trace_slot(uint32_t obj, uint32_t off, const char *name)
+{
+    if (!va_trace_readable(obj + off, 4))
+        return;
+    uint32_t p = rd32g(obj + off);
+    fprintf(stderr,
+            "[va-trace] obj+%02X %-8s = %08X mapped=%d live=%d dyn=%d\n",
+            off, name, p, p ? guest_ok(p, 1) : 0,
+            p ? va_live_covers(p, 1) : 0,
+            p ? wc3_dyn_x86_contains(p) : 0);
+    if (!p || !va_trace_readable(p, 0x20)) return;
+    /* The Warden slot object is a small base/count/value table.  Printing its
+     * header separates a real map from a pointer that landed in code. */
+    fprintf(stderr,
+            "[va-trace]   hdr arr=%08X cnt=%08X first=%08X p+0x1C=%08X\n",
+            rd32g(p + 0x10), rd32g(p + 0x14), rd32g(p + 0x18),
+            rd32g(p + 0x1C));
+    va_trace_bytes("slot", p, 0x20);
+}
+
+void wc3_va_trace_target(uint32_t target, uint32_t obj)
+{
+    int mapped = target ? guest_ok(target, 1) : 0;
+    int in_va2 = target >= GUEST_VA2_BASE &&
+                 (uint64_t)target < (uint64_t)GUEST_VA2_BASE + GUEST_VA2_SIZE;
+    fprintf(stderr,
+            "[va-trace] target=%08X mapped=%d va2=%d dyn=%d live=%d arena=%d\n",
+            target, mapped, in_va2,
+            target ? wc3_dyn_x86_contains(target) : 0,
+            target ? va_live_covers(target, 1) : 0,
+            target ? va_arena_range(target, 1) : 0);
+
+    int inside = 0;
+    fprintf(stderr, "[va-trace] live=%u next2=%08X\n", g_va_live_n, g_va2_next);
+    for (unsigned i = 0; i < g_va_live_n; i++) {
+        uint32_t a = g_va_live[i].addr, s = g_va_live[i].size;
+        if (!a || !s) continue;
+        uint64_t e = (uint64_t)a + s;
+        int hit = target >= a && (uint64_t)target < e;
+        /* Near is one 1 MB step on either side; enough to show the allocation
+         * that owns the page before/after the bogus target. */
+        int near = !hit &&
+                   a <= (uint64_t)target + 0x00100000u &&
+                   e + 0x00100000u >= target;
+        if (hit || near) {
+            fprintf(stderr, "[va-trace]   live[%u] %08X+%X%s\n",
+                    i, a, s, hit ? " <== TARGET" : "");
+            if (hit) inside = 1;
+        }
+    }
+    if (!inside)
+        fprintf(stderr, "[va-trace]   no live block covers target\n");
+
+    if (mapped) {
+        uint32_t page = target & ~0x00000FFFu;
+        va_trace_bytes("target-page", page, 0x40);
+        va_trace_bytes("target", target, 0x20);
+        if (target >= 0x10)
+            va_trace_bytes("target-16", target - 0x10, 0x30);
+    }
+
+    if (obj && va_trace_readable(obj, 0x80)) {
+        fprintf(stderr, "[va-trace] ecx obj %08X:\n", obj);
+        for (unsigned i = 0; i < 0x20; i += 8) {
+            fprintf(stderr, "[va-trace]  +%02X:", i * 4);
+            for (unsigned j = 0; j < 8; j++)
+                fprintf(stderr, " %08X", rd32g(obj + (i + j) * 4));
+            fputc('\n', stderr);
+        }
+        /* L_6F9AE990 selects one of two inline slots with [obj+0x20], then
+         * L_6F9AEFD0 reads the pointer stored in that slot.  Dump both slots
+         * and the selected pointer.  This is the exact value that became the
+         * unknown call target. */
+        uint32_t sel = va_trace_readable(obj + 0x20, 4) ? rd32g(obj + 0x20) : 0;
+        uint32_t slot = obj + (sel * 3u + 2u) * 4u;
+        uint32_t selp = va_trace_readable(slot, 4) ? rd32g(slot) : 0;
+        fprintf(stderr,
+                "[va-trace] selector=%08X slot=%08X ptr=%08X mapped=%d "
+                "live=%d dyn=%d\n",
+                sel, slot, selp, selp ? guest_ok(selp, 1) : 0,
+                selp ? va_live_covers(selp, 1) : 0,
+                selp ? wc3_dyn_x86_contains(selp) : 0);
+        va_trace_slot(obj, 0x08, "slot0");
+        va_trace_slot(obj, 0x14, "slot1");
+    }
+    fflush(stderr);
+}
+#endif
 
 #if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
 /* The Warden loader copies a PE image into a PAGE_READWRITE VirtualAlloc and
@@ -2477,7 +2647,7 @@ static void warden_dump_exec(uint32_t base, uint32_t size)
 }
 #endif
 
-static void h_virtual_alloc(CPU *c)
+static void h_virtual_alloc_impl(CPU *c)
 {
     uint32_t addr = arg32(c, 0), size = arg32(c, 1), type = arg32(c, 2), prot = arg32(c, 3);
 #if WC3_DEBUG
@@ -2609,9 +2779,73 @@ static void h_virtual_alloc(CPU *c)
     }
 }
 
+static void h_virtual_alloc(CPU *c)
+{
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    uint32_t ra = guest_ok(c->esp, 4) ? rd32g(c->esp) : 0;
+    uint32_t req_addr = arg32(c, 0), req_size = arg32(c, 1);
+    uint32_t req_type = arg32(c, 2), req_prot = arg32(c, 3);
+#endif
+    h_virtual_alloc_impl(c);
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    uint32_t got = c->eax;
+    int in_va2 = got >= GUEST_VA2_BASE &&
+                 (uint64_t)got < (uint64_t)GUEST_VA2_BASE + GUEST_VA2_SIZE;
+    if (req_addr || (req_prot & 0x00F0u) || in_va2 || ra == 0x6F9AF05Eu) {
+        fprintf(stderr,
+                "[va-trace] VirtualAlloc ra=%08X addr=%08X size=%08X "
+                "type=%08X prot=%08X -> %08X mapped=%d live=%d arena=%d dyn=%d\n",
+                ra, req_addr, req_size, req_type, req_prot, got,
+                got ? guest_ok(got, 1) : 0,
+                got ? va_live_covers(got, 1) : 0,
+                got ? va_arena_range(got, 1) : 0,
+                got ? wc3_dyn_x86_contains(got) : 0);
+    }
+    if (ra == 0x6F9AF05Eu) {
+        /* L_6F9AF000's destination is the inline slot at EDX/EDI; the source
+         * module blob is still in ESI.  Print both: the export map inside the
+         * copy is what produced the unknown target, so the raw source header
+         * and the export entry have to be compared with it. */
+        uint32_t src = c->esi, dst = c->edi;
+        fprintf(stderr,
+                "[va-trace] warden src=%08X slot=%08X src[0]=%08X "
+                "slot_base=%08X slot_size=%08X\n",
+                src, dst,
+                src && va_trace_readable(src, 4) ? rd32g(src) : 0,
+                dst && va_trace_readable(dst, 4) ? rd32g(dst) : 0,
+                dst && va_trace_readable(dst + 4, 4) ? rd32g(dst + 4) : 0);
+        if (src) warden_dump_source(src, 0x20000);
+        if (src && va_trace_readable(src, 0x50)) {
+            va_trace_bytes("warden-src", src, 0x50);
+            uint32_t sections = rd32g(src + 0x24);
+            if (sections > 8) sections = 8;
+            for (uint32_t i = 0; i < sections; i++) {
+                uint32_t e = src + 0x28 + i * 12;
+                if (!va_trace_readable(e, 12)) break;
+                fprintf(stderr,
+                        "[va-trace] warden section[%u] %08X %08X %08X\n",
+                        i, rd32g(e), rd32g(e + 4), rd32g(e + 8));
+            }
+            va_trace_bytes("warden-stream", src + 0x4C, 0x20);
+        }
+        if (got && va_trace_readable(got, 0x28))
+            va_trace_bytes("warden-dst", got, 0x28);
+        if (got && va_trace_readable(got + 0x3078, 0x10))
+            va_trace_bytes("warden-dst+3078", got + 0x3078, 0x10);
+    }
+#endif
+}
+
 static void h_virtual_free(CPU *c)
 {
     uint32_t addr = arg32(c, 0), size = arg32(c, 1), type = arg32(c, 2);
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    if (addr >= GUEST_VA2_BASE &&
+        (uint64_t)addr < (uint64_t)GUEST_VA2_BASE + GUEST_VA2_SIZE)
+        fprintf(stderr,
+                "[va-trace] VirtualFree ra=%08X addr=%08X size=%08X type=%08X\n",
+                guest_ok(c->esp, 4) ? rd32g(c->esp) : 0, addr, size, type);
+#endif
     /* A released/decommitted range must stop being a dispatch fallback even if
      * the guest later reuses the same base for ordinary data. */
     wc3_dyn_x86_unregister(addr);
@@ -2645,6 +2879,21 @@ static void h_virtual_protect(CPU *c)
 {
     uint32_t addr = arg32(c, 0), size = arg32(c, 1);
     uint32_t prot = arg32(c, 2), oldp = arg32(c, 3);
+
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    if ((addr >= GUEST_VA2_BASE &&
+         (uint64_t)addr < (uint64_t)GUEST_VA2_BASE + GUEST_VA2_SIZE) ||
+        (prot & 0x00F0u)) {
+        fprintf(stderr,
+                "[va-trace] VirtualProtect ra=%08X addr=%08X size=%08X "
+                "prot=%08X oldp=%08X live=%d arena=%d mapped=%d\n",
+                guest_ok(c->esp, 4) ? rd32g(c->esp) : 0, addr, size, prot,
+                oldp,
+                addr ? va_live_covers(addr, size) : 0,
+                addr ? va_arena_range(addr, size) : 0,
+                addr ? guest_ok(addr, size) : 0);
+    }
+#endif
 
     if (addr && size && (prot & 0x00F0u) && va_live_covers(addr, size)) {
         wc3_dyn_x86_register(addr, size);
@@ -2685,7 +2934,7 @@ static void h_virtual_query(CPU *c)
     }
     if (!guest_ok(addr, 1) && region == VA_PAGE) { c->eax = 0; return; }
 
-    memset((void *)(uintptr_t)out, 0, 28);
+    memset((void *)(uintptr_t)guest_host_ptr(out), 0, 28);
     wr32g(out + 0, base);              /* BaseAddress */
     wr32g(out + 4, base);              /* AllocationBase */
     wr32g(out + 8, 0x04);              /* PAGE_READWRITE */
@@ -2737,7 +2986,7 @@ static void h_heap_realloc(CPU *c)
     uint32_t old = rd32g(p - 8);
     uint32_t q = hle_guest_alloc(size ? size : 1);
     if (!q) { c->eax = 0; return; }
-    memcpy((void *)(uintptr_t)q, (void *)(uintptr_t)p, old < size ? old : size);
+    memcpy((void *)(uintptr_t)guest_host_ptr(q), (void *)(uintptr_t)guest_host_ptr(p), old < size ? old : size);
     hle_guest_free(p);
     c->eax = q;
 }
@@ -3667,16 +3916,16 @@ static void h_interlocked_xchg(CPU *c)
 {
     uint32_t p = arg32(c, 0), v = arg32(c, 1);
     if (p && guest_ok(p, 4))
-        c->eax = __atomic_exchange_n((uint32_t *)(uintptr_t)p, v, __ATOMIC_SEQ_CST);
+        c->eax = __atomic_exchange_n((uint32_t *)(uintptr_t)guest_host_ptr(p), v, __ATOMIC_SEQ_CST);
     else c->eax = 0;
 }
 static void h_interlocked_cmp(CPU *c)
 {
     uint32_t p = arg32(c, 0), x = arg32(c, 1), cmp = arg32(c, 2);
     if (p && guest_ok(p, 4)) {
-        uint32_t old = __atomic_load_n((uint32_t *)(uintptr_t)p, __ATOMIC_SEQ_CST);
+        uint32_t old = __atomic_load_n((uint32_t *)(uintptr_t)guest_host_ptr(p), __ATOMIC_SEQ_CST);
         while (old == cmp) {
-            if (__atomic_compare_exchange_n((uint32_t *)(uintptr_t)p, &old, x, 0,
+            if (__atomic_compare_exchange_n((uint32_t *)(uintptr_t)guest_host_ptr(p), &old, x, 0,
                                             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
                 break;
         }
@@ -3687,14 +3936,14 @@ static void h_interlocked_inc(CPU *c)
 {
     uint32_t p = arg32(c, 0);
     if (p && guest_ok(p, 4))
-        c->eax = __atomic_add_fetch((uint32_t *)(uintptr_t)p, 1, __ATOMIC_SEQ_CST);
+        c->eax = __atomic_add_fetch((uint32_t *)(uintptr_t)guest_host_ptr(p), 1, __ATOMIC_SEQ_CST);
     else c->eax = 0;
 }
 static void h_interlocked_dec(CPU *c)
 {
     uint32_t p = arg32(c, 0);
     if (p && guest_ok(p, 4))
-        c->eax = __atomic_sub_fetch((uint32_t *)(uintptr_t)p, 1, __ATOMIC_SEQ_CST);
+        c->eax = __atomic_sub_fetch((uint32_t *)(uintptr_t)guest_host_ptr(p), 1, __ATOMIC_SEQ_CST);
     else c->eax = 0;
 }
 
@@ -3802,7 +4051,7 @@ static void h_get_local_time(CPU *c)
 static void h_get_time_zone_information(CPU *c)
 {
     uint32_t p = arg32(c, 0);
-    if (p && guest_ok(p, 172)) memset((void *)(uintptr_t)p, 0, 172);
+    if (p && guest_ok(p, 172)) memset((void *)(uintptr_t)guest_host_ptr(p), 0, 172);
     c->eax = 0;
 }
 static void h_filetime_to_system_time(CPU *c)
@@ -3855,7 +4104,7 @@ static void h_get_date_format(CPU *c)
     if (buf && n && guest_ok(buf, n)) {
         size_t len = strlen(s);
         if (len >= n) len = n - 1;
-        memcpy((void *)(uintptr_t)buf, s, len + 1);
+        memcpy((void *)(uintptr_t)guest_host_ptr(buf), s, len + 1);
         c->eax = (uint32_t)len;
     } else c->eax = 0;
 }
@@ -3866,7 +4115,7 @@ static void h_get_time_format(CPU *c)
     if (buf && n && guest_ok(buf, n)) {
         size_t len = strlen(s);
         if (len >= n) len = n - 1;
-        memcpy((void *)(uintptr_t)buf, s, len + 1);
+        memcpy((void *)(uintptr_t)guest_host_ptr(buf), s, len + 1);
         c->eax = (uint32_t)len;
     } else c->eax = 0;
 }
@@ -4340,7 +4589,7 @@ static void h_multibyte_to_widechar(CPU *c)
     uint32_t cp = arg32(c, 0), flags = arg32(c, 1), src = arg32(c, 2),
              n = arg32(c, 3), dst = arg32(c, 4), cap = arg32(c, 5);
     if (!src || !guest_ok(src, 1)) { c->eax = 0; return; }
-    const uint8_t *s = (const uint8_t *)(uintptr_t)src;
+    const uint8_t *s = (const uint8_t *)(uintptr_t)guest_host_ptr(src);
     size_t scan = 0;
     if (n == 0xFFFFFFFFu) {
         while (scan < 0x7FFFFFFFu && guest_ok(src + (uint32_t)scan, 1) &&
@@ -4549,8 +4798,8 @@ static void h_get_locale_info(CPU *c)
     size_t len = strlen(s) + 1;
     if (buf && n && guest_ok(buf, n)) {
         size_t copy = len < n ? len : n;
-        memcpy((void *)(uintptr_t)buf, s, copy);
-        if (copy) ((char *)(uintptr_t)buf)[copy - 1] = 0;
+        memcpy((void *)(uintptr_t)guest_host_ptr(buf), s, copy);
+        if (copy) ((char *)(uintptr_t)guest_host_ptr(buf))[copy - 1] = 0;
     }
     c->eax = (uint32_t)len;
 }
@@ -4562,8 +4811,8 @@ static void h_get_computer_name(CPU *c)
     size_t len = strlen(s);
     if (buf && n && guest_ok(buf, n)) {
         size_t copy = len < n - 1 ? len : n - 1;
-        memcpy((void *)(uintptr_t)buf, s, copy);
-        ((char *)(uintptr_t)buf)[copy] = 0;
+        memcpy((void *)(uintptr_t)guest_host_ptr(buf), s, copy);
+        ((char *)(uintptr_t)guest_host_ptr(buf))[copy] = 0;
         if (n >= 4) wr32g(n, (uint32_t)copy);
     }
     c->eax = 1;
@@ -4577,7 +4826,7 @@ static void h_format_message(CPU *c)
     if (buf && n && guest_ok(buf, n)) {
         size_t len = strlen(msg);
         if (len >= n) len = n - 1;
-        memcpy((void *)(uintptr_t)buf, msg, len + 1);
+        memcpy((void *)(uintptr_t)guest_host_ptr(buf), msg, len + 1);
         c->eax = (uint32_t)len;
     } else c->eax = 0;
 }
@@ -4660,7 +4909,7 @@ static void h_map_view_of_file(CPU *c)
     }
     uint32_t base = va_alloc(want);
     if (!base) { c->eax = 0; return; }
-    ssize_t r = pread(m->fd, (void *)(uintptr_t)base, want, (off_t)off_lo);
+    ssize_t r = pread(m->fd, (void *)(uintptr_t)guest_host_ptr(base), want, (off_t)off_lo);
     if (r < 0) {
         uint32_t n = va_live_take(base);
         if (!n) n = va_round(want);
@@ -4670,7 +4919,7 @@ static void h_map_view_of_file(CPU *c)
         return;
     }
     if ((uint32_t)r < want)
-        memset((void *)(uintptr_t)(base + (uint32_t)r), 0, want - (uint32_t)r);
+        memset((void *)(uintptr_t)guest_host_ptr(base + (uint32_t)r), 0, want - (uint32_t)r);
     m->file_map_base = base;
     m->file_map_size = want;
 #if WC3_DEBUG
@@ -5110,7 +5359,7 @@ static void cr_fwrite(CPU *c)
     uint64_t total = (uint64_t)size * nmemb;
     size_t r = 0;
     if (f && size && nmemb && total <= 0x7FFFFFFFu && guest_ok(buf, (uint32_t)total))
-        r = fwrite((const void *)(uintptr_t)buf, size, nmemb, f);
+        r = fwrite((const void *)(uintptr_t)guest_host_ptr(buf), size, nmemb, f);
 #if WC3_DEBUG
     fprintf(stderr, "[crt] fwrite(buf=%08X size=%u n=%u rec=%08X) -> %u\n",
             buf, size, nmemb, arg32(c, 3), (unsigned)r);
@@ -5125,7 +5374,7 @@ static void cr_fread(CPU *c)
     uint64_t total = (uint64_t)size * nmemb;
     size_t r = 0;
     if (f && size && nmemb && total <= 0x7FFFFFFFu && guest_ok(buf, (uint32_t)total))
-        r = fread((void *)(uintptr_t)buf, size, nmemb, f);
+        r = fread((void *)(uintptr_t)guest_host_ptr(buf), size, nmemb, f);
     c->eax = (uint32_t)r;
 }
 
@@ -5194,7 +5443,7 @@ static void cr_strupr(CPU *c)
     uint32_t a = arg32(c, 0);
     uint32_t n = a ? guest_clamp(a, 0x100000u) : 0;
     for (uint32_t i = 0; i < n; i++) {
-        char *p = (char *)(uintptr_t)(a + i);
+        char *p = (char *)(uintptr_t)guest_host_ptr(a + i);
         if (!*p) break;
         *p = (char)toupper((unsigned char)*p);
     }
@@ -5206,7 +5455,7 @@ static void cr_strlwr(CPU *c)
     uint32_t a = arg32(c, 0);
     uint32_t n = a ? guest_clamp(a, 0x100000u) : 0;
     for (uint32_t i = 0; i < n; i++) {
-        char *p = (char *)(uintptr_t)(a + i);
+        char *p = (char *)(uintptr_t)guest_host_ptr(a + i);
         if (!*p) break;
         *p = (char)tolower((unsigned char)*p);
     }
@@ -5221,7 +5470,7 @@ static void cr_strnlen(CPU *c)
     uint32_t a = arg32(c, 0), max = arg32(c, 1), n = 0;
     uint32_t lim = a ? guest_clamp(a, max) : 0;
     for (; n < lim; n++) {
-        const char *p = (const char *)(uintptr_t)(a + n);
+        const char *p = (const char *)(uintptr_t)guest_host_ptr(a + n);
         if (!*p) break;
     }
     c->eax = n;
@@ -5274,7 +5523,7 @@ static void cr_strtol(CPU *c)
     int base = (int)arg32(c, 2);
     char *end = NULL;
     long v = strtol(s, &end, base ? base : 10);
-    if (endp && guest_ok(endp, 4)) wr32g(endp, (uint32_t)(uintptr_t)end);
+    if (endp && guest_ok(endp, 4)) wr32g(endp, guest_host_va(end));
     c->eax = (uint32_t)(int32_t)v;
 }
 
@@ -5446,8 +5695,8 @@ static void cr_sprintf(CPU *c)
     size_t n = guest_format(out, sizeof out, fmt, c->esp + 12);
     uint32_t room = guest_clamp(dst, (uint32_t)n + 1);
     if (room) {
-        memcpy((void *)(uintptr_t)dst, out, room - 1);
-        ((char *)(uintptr_t)dst)[room - 1] = 0;
+        memcpy((void *)(uintptr_t)guest_host_ptr(dst), out, room - 1);
+        ((char *)(uintptr_t)guest_host_ptr(dst))[room - 1] = 0;
     }
     c->eax = (uint32_t)n;
 }
@@ -5457,7 +5706,7 @@ static void cr_strrchr(CPU *c)
     const char *s = gstr(arg32(c, 0));
     int ch = (int)arg32(c, 1);
     const char *p = strrchr(s, ch);
-    c->eax = p ? (uint32_t)(uintptr_t)p : 0;
+    c->eax = p ? guest_host_va(p) : 0;
 }
 
 static void cr_strstr(CPU *c)
@@ -5465,7 +5714,7 @@ static void cr_strstr(CPU *c)
     const char *hay = gstr(arg32(c, 0)), *needle = gstr(arg32(c, 1));
     if (!hay[0]) { c->eax = 0; return; }
     const char *p = strstr(hay, needle);
-    c->eax = p ? (uint32_t)(uintptr_t)p : 0;
+    c->eax = p ? guest_host_va(p) : 0;
 }
 
 /* strpbrk(s, accept).  Storm uses it to split a path on "\\/:" while it
@@ -5478,7 +5727,7 @@ static void cr_strpbrk(CPU *c)
     const char *s = gstr(arg32(c, 0)), *accept = gstr(arg32(c, 1));
     if (!s[0] || !accept[0]) { c->eax = 0; return; }
     const char *p = strpbrk(s, accept);
-    c->eax = p ? (uint32_t)(uintptr_t)p : 0;
+    c->eax = p ? guest_host_va(p) : 0;
 }
 
 static void cr_strspn(CPU *c)
@@ -5522,7 +5771,7 @@ static void cr_fullpath(CPU *c)
         c->eax = 0;
         return;
     }
-    memcpy((void *)(uintptr_t)buf, full, len + 1);
+    memcpy((void *)(uintptr_t)guest_host_ptr(buf), full, len + 1);
     c->eax = buf;
 }
 
@@ -5532,7 +5781,7 @@ static void cr_strcpy_s(CPU *c)
     const char *s = gstr(src);
     size_t len = strlen(s);
     if (!dst || cap <= len || !guest_ok(dst, (uint32_t)len + 1)) { c->eax = 22; return; }
-    memcpy((void *)(uintptr_t)dst, s, len + 1);
+    memcpy((void *)(uintptr_t)guest_host_ptr(dst), s, len + 1);
     c->eax = 0;
 }
 
@@ -5554,7 +5803,7 @@ static void cr_memmove(CPU *c)
 {
     uint32_t dst = arg32(c, 0), src = arg32(c, 1), n = arg32(c, 2);
     if (dst && src && n && guest_ok(dst, n) && guest_ok(src, n))
-        memmove((void *)(uintptr_t)dst, (void *)(uintptr_t)src, n);
+        memmove((void *)(uintptr_t)guest_host_ptr(dst), (void *)(uintptr_t)guest_host_ptr(src), n);
     else if (n)
         cr_refuse(c, "memmove", dst, src, n);
     c->eax = dst;
@@ -5564,7 +5813,7 @@ static void cr_memcpy(CPU *c)
 {
     uint32_t dst = arg32(c, 0), src = arg32(c, 1), n = arg32(c, 2);
     if (dst && src && n && guest_ok(dst, n) && guest_ok(src, n))
-        memcpy((void *)(uintptr_t)dst, (void *)(uintptr_t)src, n);
+        memcpy((void *)(uintptr_t)guest_host_ptr(dst), (void *)(uintptr_t)guest_host_ptr(src), n);
     else if (n)
         cr_refuse(c, "memcpy", dst, src, n);
     c->eax = dst;
@@ -5573,7 +5822,7 @@ static void cr_memcpy(CPU *c)
 static void cr_memset(CPU *c)
 {
     uint32_t dst = arg32(c, 0), v = arg32(c, 1), n = arg32(c, 2);
-    if (dst && n && guest_ok(dst, n)) memset((void *)(uintptr_t)dst, (int)v, n);
+    if (dst && n && guest_ok(dst, n)) memset((void *)(uintptr_t)guest_host_ptr(dst), (int)v, n);
     else if (n)
         cr_refuse(c, "memset", dst, 0, n);
     c->eax = dst;
@@ -5594,8 +5843,8 @@ static void cr_qsort(CPU *c)
         if (!tmp_guest) { c->eax = 0; return; }
         c->hle_tmp_guest = tmp_guest;
     }
-    uint8_t *a = (uint8_t *)(uintptr_t)base;
-    uint8_t *tmp = (uint8_t *)(uintptr_t)tmp_guest;
+    uint8_t *a = (uint8_t *)(uintptr_t)guest_host_ptr(base);
+    uint8_t *tmp = (uint8_t *)(uintptr_t)guest_host_ptr(tmp_guest);
     for (uint32_t i = 1; i < n; i++) {
         memcpy(tmp, a + i * width, width);
         uint32_t j = i;
@@ -5604,7 +5853,7 @@ static void cr_qsort(CPU *c)
             /* cdecl order: the last argument first, the return address last.
              * Pushing the filler first instead handed the comparator
              * (arg2, filler) and it dereferenced 0x7EFFFFF1 as a pointer. */
-            push32(c, (uint32_t)(uintptr_t)(a + (j - 1) * width));
+            push32(c, guest_host_va(a + (j - 1) * width));
             push32(c, tmp_guest);
             push32(c, 0x7EFFFFF1u);      /* return slot; never jumped to */
             dispatch(c, cmp);
@@ -5626,7 +5875,7 @@ static void cr_strtoul(CPU *c)
     uint32_t endp = arg32(c, 1);
     char *end = NULL;
     unsigned long v = strtoul(s, &end, (int)arg32(c, 2));
-    if (endp && guest_ok(endp, 4)) wr32g(endp, (uint32_t)(uintptr_t)end);
+    if (endp && guest_ok(endp, 4)) wr32g(endp, guest_host_va(end));
     c->eax = (uint32_t)v;
 }
 static void cr_atoi(CPU *c) { c->eax = (uint32_t)atoi(gstr(arg32(c, 0))); }
@@ -5652,7 +5901,7 @@ static void cr_itoa(CPU *c)
     if (v < 0) *--p = '-';
     size_t n = strlen(p) + 1;
     if (!guest_ok(buf, (uint32_t)n)) { c->eax = 0; return; }
-    memcpy((void *)(uintptr_t)buf, p, n);
+    memcpy((void *)(uintptr_t)guest_host_ptr(buf), p, n);
     c->eax = buf;
 }
 
@@ -5672,8 +5921,8 @@ static void cr_vsnprintf(CPU *c)
     uint32_t room = guest_clamp(dst, cap);
     if (room) {
         size_t w = (n < (size_t)room) ? n : (size_t)room - 1;
-        memcpy((void *)(uintptr_t)dst, out, w);
-        ((char *)(uintptr_t)dst)[w] = 0;
+        memcpy((void *)(uintptr_t)guest_host_ptr(dst), out, w);
+        ((char *)(uintptr_t)guest_host_ptr(dst))[w] = 0;
     }
     /* _vsnprintf returns the length the string *needs*, and Storm's caller
      * branches on `ret < size` to decide whether it was truncated. */
@@ -5841,7 +6090,7 @@ static int guest_thread_wait(struct GThread *t, int32_t ms)
 static void teb_init_local(CPU *c, uint32_t teb, uint32_t stack_base,
                            uint32_t stack_size, uint32_t tid)
 {
-    memset((void *)(uintptr_t)teb, 0, 0x1000);
+    memset((void *)(uintptr_t)guest_host_ptr(teb), 0, 0x1000);
     wr32g(teb + 0x00, 0xFFFFFFFFu);              /* SEH chain end */
     wr32g(teb + 0x04, stack_base + stack_size);  /* StackBase */
     wr32g(teb + 0x08, stack_base);               /* StackLimit */
@@ -6041,11 +6290,11 @@ static void *guest_thread_proc(void *p)
 
     CPU c;
     memset(&c, 0, sizeof c);
-    /* Lifted functions take `CPU *restrict c`.  Guest memory is
-     * identity-mapped below 4 GiB, so the host CPU object must live above
-     * that range; otherwise a guest write could alias it and the restrict
-     * promise would be false.  This is a startup invariant, not a hint. */
-    if ((uintptr_t)&c < 0x100000000ull) abort();
+    /* Lifted functions take `CPU *restrict c`.  Guest memory occupies one
+     * host window; the host CPU object must stay outside it, otherwise a guest
+     * write could alias the CPU state and the restrict promise would be false.
+     * This is a startup invariant, not a hint. */
+    if (guest_host_contains(&c)) abort();
     cpu_x87_init_thread(&c);
     c.esp = t->stack_base + t->stack_size - 0x100;
     teb_init_local(&c, t->teb, t->stack_base, t->stack_size, t->guest_id);
@@ -6382,7 +6631,7 @@ static void cr_realloc(CPU *c)
     uint32_t oldsz = guest_ok(old - 8, 8) ? rd32g(old - 8) : 0;
     if (oldsz > HLE_HEAP_SIZE) oldsz = 0;
     uint32_t p = hle_guest_alloc(n);
-    if (p) memcpy((void *)(uintptr_t)p, (void *)(uintptr_t)old,
+    if (p) memcpy((void *)(uintptr_t)guest_host_ptr(p), (void *)(uintptr_t)guest_host_ptr(old),
                   oldsz < n ? oldsz : n);
     hle_guest_free(old);
     c->eax = p;
@@ -6480,8 +6729,8 @@ static void cr_vsprintf(CPU *c)
     size_t n = guest_format(out, sizeof out, f, va);
     uint32_t room = guest_clamp(dst, (uint32_t)n + 1);
     if (room) {
-        memcpy((void *)(uintptr_t)dst, out, room - 1);
-        ((char *)(uintptr_t)dst)[room - 1] = 0;
+        memcpy((void *)(uintptr_t)guest_host_ptr(dst), out, room - 1);
+        ((char *)(uintptr_t)guest_host_ptr(dst))[room - 1] = 0;
     }
     c->eax = (uint32_t)n;
 }
@@ -6500,8 +6749,8 @@ static void snprintf_common(CPU *c, unsigned argbase, uint32_t dst, uint32_t cap
     uint32_t room = guest_clamp(dst, cap);
     if (room) {
         size_t w = (n < (size_t)room) ? n : (size_t)room - 1;
-        memcpy((void *)(uintptr_t)dst, out, w);
-        ((char *)(uintptr_t)dst)[w] = 0;
+        memcpy((void *)(uintptr_t)guest_host_ptr(dst), out, w);
+        ((char *)(uintptr_t)guest_host_ptr(dst))[w] = 0;
     }
     c->eax = (uint32_t)n;
 }
@@ -6546,7 +6795,7 @@ static void cr_strerror(CPU *c)
     static uint32_t msg;
     if (!msg) {
         msg = hle_alloc0(32);
-        if (msg) strcpy((char *)(uintptr_t)msg, "error");
+        if (msg) strcpy((char *)(uintptr_t)guest_host_ptr(msg), "error");
     }
     c->eax = msg;
 }
@@ -6763,7 +7012,7 @@ static void cr_strdup(CPU *c)
     const char *s = gstr(arg32(c, 0));
     size_t n = strlen(s) + 1;
     uint32_t p = hle_guest_alloc((uint32_t)n);
-    if (p) memcpy((void *)(uintptr_t)p, s, n);
+    if (p) memcpy((void *)(uintptr_t)guest_host_ptr(p), s, n);
     c->eax = p;
 }
 
@@ -6782,7 +7031,7 @@ static void h_get_window_info(CPU *c)
 {
     uint32_t p = arg32(c, 1);
     if (p && guest_ok(p, 60)) {
-        memset((void *)(uintptr_t)p, 0, 60);
+        memset((void *)(uintptr_t)guest_host_ptr(p), 0, 60);
         wr32g(p + 0, 60);        /* cbSize */
         wr32g(p + 36, 0x04CF0000u); /* dwStyle: WS_OVERLAPPEDWINDOW-ish */
         wr32g(p + 40, 0x00000100u); /* dwExStyle: WS_EX_WINDOWEDGE */
@@ -6806,7 +7055,7 @@ static void cr_strchr(CPU *c)
 {
     const char *s = gstr(arg32(c, 0));
     const char *p = strchr(s, (int)(arg32(c, 1) & 0xFFu));
-    c->eax = p ? (uint32_t)(uintptr_t)p : 0;
+    c->eax = p ? guest_host_va(p) : 0;
 }
 
 /* sscanf.  The game parses config and data text with it, so "return 0 and write
@@ -6852,7 +7101,7 @@ static void cr_sscanf(CPU *c)
             }
             unsigned k = n < sizeof tmp - 1 ? n : sizeof tmp - 1;
             tmp[k] = 0;
-            if (!suppress && guest_ok(p, k + 1)) memcpy((void *)(uintptr_t)p, tmp, k + 1);
+            if (!suppress && guest_ok(p, k + 1)) memcpy((void *)(uintptr_t)guest_host_ptr(p), tmp, k + 1);
         } else if (conv == 'c') {
             if (!suppress && guest_ok(p, 1)) wr8g(p, (uint8_t)*s);
             s++;
@@ -6873,11 +7122,11 @@ static void cr_sscanf(CPU *c)
             if (!suppress) {
                 if (lng) {
                     if (guest_ok(p, 8)) {
-                        memcpy((void *)(uintptr_t)p, &d, 8);
+                        memcpy((void *)(uintptr_t)guest_host_ptr(p), &d, 8);
                     }
                 } else {
                     float fv = (float)d;
-                    if (guest_ok(p, 4)) memcpy((void *)(uintptr_t)p, &fv, 4);
+                    if (guest_ok(p, 4)) memcpy((void *)(uintptr_t)guest_host_ptr(p), &fv, 4);
                 }
             }
         } else {
@@ -6912,7 +7161,7 @@ static void h_wsa_startup(CPU *c)
 {
     uint32_t p = arg32(c, 1);
     if (p && guest_ok(p, 0x190)) {
-        memset((void *)(uintptr_t)p, 0, 0x190);
+        memset((void *)(uintptr_t)guest_host_ptr(p), 0, 0x190);
         wr16g(p + 0, 0x0202);      /* wVersion     */
         wr16g(p + 2, 0x0202);      /* wHighVersion */
     }
@@ -6996,8 +7245,8 @@ static void u_load_string(CPU *c)
 
     if (buf && n > 0 && guest_ok(buf, n)) {
         size_t k = (size_t)len < (size_t)n - 1 ? (size_t)len : (size_t)n - 1;
-        if (k) memcpy((void *)(uintptr_t)buf, tmp, k);
-        ((char *)(uintptr_t)buf)[k] = 0;
+        if (k) memcpy((void *)(uintptr_t)guest_host_ptr(buf), tmp, k);
+        ((char *)(uintptr_t)guest_host_ptr(buf))[k] = 0;
     }
 #if WC3_DEBUG
     fprintf(stderr, "[ui] LoadStringA(%08X, %u) -> %d \"%s\"\n",
@@ -7022,8 +7271,8 @@ static void u_wsprintf(CPU *c)
     size_t n = guest_format(out, sizeof out, f, c->esp + 12);
     uint32_t room = guest_clamp(dst, (uint32_t)n + 1);
     if (room) {
-        memcpy((void *)(uintptr_t)dst, out, room - 1);
-        ((char *)(uintptr_t)dst)[room - 1] = 0;
+        memcpy((void *)(uintptr_t)guest_host_ptr(dst), out, room - 1);
+        ((char *)(uintptr_t)guest_host_ptr(dst))[room - 1] = 0;
     }
     c->eax = (uint32_t)n;
 }
@@ -7312,7 +7561,7 @@ static void u_create_window(CPU *c)
             c->eax = 0;
             return;
         }
-        memset((void *)(uintptr_t)cs, 0, 48);
+        memset((void *)(uintptr_t)guest_host_ptr(cs), 0, 48);
         wr32g(cs + 0, param);            /* lpCreateParams */
         wr32g(cs + 4, arg32(c, 10));     /* hInstance */
         wr32g(cs + 8, arg32(c, 9));      /* hMenu */
@@ -8660,7 +8909,7 @@ static void u_set_class_long(CPU *c) { (void)c; c->eax = 0; }
 static void u_get_window_text(CPU *c)
 {
     uint32_t buf = arg32(c, 1), n = arg32(c, 2);
-    if (buf && n && guest_ok(buf, n)) ((char *)(uintptr_t)buf)[0] = 0;
+    if (buf && n && guest_ok(buf, n)) ((char *)(uintptr_t)guest_host_ptr(buf))[0] = 0;
     c->eax = 0;
 }
 static void u_get_window_text_length(CPU *c) { (void)c; c->eax = 0; }
@@ -8691,6 +8940,15 @@ static uint32_t g_display_generation = 1;
 static uint32_t g_display_w = 800, g_display_h = 600;
 static int      g_display_known;
 static int      g_guest_started;
+/* Half-resolution grid rendering (present_scale = half).  The mode table keeps
+ * the full device list plus the exact half extent, because a runtime choice of
+ * any other mode is the documented way to leave the grid.  The half flag only
+ * changes the default mode and which present path runs. */
+static int      g_half_resolution;
+/* Set after the guest's first successful Present.  Before that, startup mode
+ * requests keep the forced half; after it, a different mode is a user choice. */
+static int      g_guest_presented;
+static hle_android_grid_disabled_fn g_grid_disabled_cb;
 
 /* 1.27-only fixup, implemented by the widescreen wrapper object.  The weak
  * reference stays zero on the 1.26 image, so that build is untouched. */
@@ -8726,7 +8984,11 @@ static uint32_t display_mode_count_for_screen(void)
     return count;
 }
 
-static int display_mode_for_index(uint32_t index, uint32_t *w, uint32_t *h)
+/* The full device mode table.  Kept separate from the public enumerator so a
+ * half-resolution run can append the exact half extent when the step table
+ * does not already contain it, without losing the table it was derived from. */
+static int display_mode_full_for_index(uint32_t index, uint32_t *w,
+                                       uint32_t *h)
 {
     ensure_screen_known();
     uint32_t count = display_mode_count_for_screen();
@@ -8743,6 +9005,51 @@ static int display_mode_for_index(uint32_t index, uint32_t *w, uint32_t *h)
     return 1;
 }
 
+static int display_mode_full_has(uint32_t width, uint32_t height)
+{
+    uint32_t count = display_mode_count_for_screen();
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t w, h;
+        if (display_mode_full_for_index(i, &w, &h) && w == width &&
+            h == height)
+            return 1;
+    }
+    return 0;
+}
+
+/* The half-resolution grid mode.  Nearest 2x is exact only when the guest
+ * extent is exactly half the surface on both axes, so an even surface halves
+ * directly: 2400x1080 -> 1200x540, 1600x900 -> 800x450.  That is better than
+ * the 180-pixel table step, which would pick 640x360 for a 900-line screen and
+ * leave a 2.5x compositor scale.  An odd surface has no exact half; the largest
+ * table entry at or below half is used and the present plan sends it to the
+ * compositor. */
+static int half_display_mode(uint32_t *w, uint32_t *h)
+{
+    ensure_screen_known();
+    if ((g_screen_w % 2u) == 0u && (g_screen_h % 2u) == 0u) {
+        uint32_t hw = g_screen_w / 2u;
+        uint32_t hh = g_screen_h / 2u;
+        if (hh >= DISPLAY_MODE_MIN_HEIGHT) {
+            if (w) *w = hw;
+            if (h) *h = hh;
+            return 1;
+        }
+    }
+
+    uint32_t count = display_mode_count_for_screen();
+    uint32_t target_h = g_screen_h / 2u;
+    for (uint32_t i = count; i-- > 0u;) {
+        uint32_t mw, mh;
+        if (display_mode_full_for_index(i, &mw, &mh) && mh <= target_h) {
+            if (w) *w = mw;
+            if (h) *h = mh;
+            return 1;
+        }
+    }
+    return display_mode_full_for_index(count - 1u, w, h);
+}
+
 void hle_android_set_screen_size(uint32_t width, uint32_t height)
 {
     if (!width || !height) return;
@@ -8756,27 +9063,92 @@ void hle_android_set_screen_size(uint32_t width, uint32_t height)
         hle_android_default_display_mode(&dw, &dh);
         hle_android_select_display_mode(dw, dh);
     }
+    SCALE_LOG("hle: screen=%ux%u gen=%u current=%ux%u half=%d changed=%d",
+              g_screen_w, g_screen_h, g_display_generation, g_display_w,
+              g_display_h, g_half_resolution, changed);
     RES_LOG("screen %ux%u gen=%u current=%ux%u", g_screen_w, g_screen_h,
             g_display_generation, g_display_w, g_display_h);
 }
 
 uint32_t hle_android_display_generation(void) { return g_display_generation; }
+
 uint32_t hle_android_display_mode_count(void)
 {
     ensure_screen_known();
-    return display_mode_count_for_screen();
+    uint32_t full = display_mode_count_for_screen();
+    if (!g_half_resolution) return full;
+    uint32_t hw = 0, hh = 0;
+    if (!half_display_mode(&hw, &hh)) return full;
+    if (display_mode_full_has(hw, hh)) return full;
+    return full < HLE_ANDROID_DISPLAY_MODE_MAX ? full + 1u : full;
 }
+
 uint32_t hle_android_display_refresh_rate(void) { return 60u; }
+
+void hle_android_set_half_resolution(int enabled)
+{
+    SCALE_LOG("hle: half_resolution=%d screen=%ux%u known=%d presented=%d",
+              enabled ? 1 : 0, g_screen_w, g_screen_h, g_screen_known,
+              g_guest_presented);
+    g_half_resolution = enabled ? 1 : 0;
+    /* A new half-resolution launch starts a fresh contract.  Leaving the
+     * previous session's "a frame was presented" bit set would let a stale
+     * native restart mode win over the forced half before the first frame. */
+    if (enabled) g_guest_presented = 0;
+}
+
+int hle_android_half_resolution(void) { return g_half_resolution; }
+
+void hle_android_note_present(void) { g_guest_presented = 1; }
+int hle_android_guest_presented(void) { return g_guest_presented; }
+
+void hle_android_set_grid_disabled_callback(hle_android_grid_disabled_fn fn)
+{
+    g_grid_disabled_cb = fn;
+}
+
+/* User-visible escape hatch: the game's Video options won a resolution change.
+ * Turn the half contract off before the new mode is applied; otherwise the
+ * present pass would keep nearest-scaling the old half extent into the new
+ * one.  retire() only unpublishes -- DXVK may still own a swap chain on the
+ * retired reader -- and DXVK rebuilds its presenter on the real window at the
+ * next Present.  The host hides the grid layer and persists the option off. */
+static void hle_android_disable_half_resolution(uint32_t width, uint32_t height)
+{
+    if (!g_half_resolution) return;
+    g_half_resolution = 0;
+    wc3_present_target_set_half_grid(0);
+    wc3_present_target_retire();
+    SCALE_LOG("hle: half grid disabled at %ux%u; target retired", width, height);
+    RES_LOG("half grid disabled at runtime; returning to system scaling");
+    if (g_grid_disabled_cb) g_grid_disabled_cb(width, height);
+}
 
 int hle_android_display_mode(uint32_t index, uint32_t *width, uint32_t *height)
 {
-    return display_mode_for_index(index, width, height);
+    ensure_screen_known();
+    uint32_t full = display_mode_count_for_screen();
+    if (!g_half_resolution)
+        return display_mode_full_for_index(index, width, height);
+
+    uint32_t hw = 0, hh = 0;
+    if (!half_display_mode(&hw, &hh))
+        return display_mode_full_for_index(index, width, height);
+    if (display_mode_full_has(hw, hh))
+        return display_mode_full_for_index(index, width, height);
+    if (index == full && full < HLE_ANDROID_DISPLAY_MODE_MAX) {
+        if (width) *width = hw;
+        if (height) *height = hh;
+        return 1;
+    }
+    return display_mode_full_for_index(index, width, height);
 }
 
 int hle_android_default_display_mode(uint32_t *width, uint32_t *height)
 {
-    uint32_t count = hle_android_display_mode_count();
-    return hle_android_display_mode(count - 1u, width, height);
+    if (g_half_resolution) return half_display_mode(width, height);
+    uint32_t count = display_mode_count_for_screen();
+    return display_mode_full_for_index(count - 1u, width, height);
 }
 
 int hle_android_current_display_mode(uint32_t *width, uint32_t *height)
@@ -8813,16 +9185,25 @@ int hle_android_select_display_mode(uint32_t width, uint32_t height)
     }
     int changed = !g_display_known || g_display_w != width ||
                   g_display_h != height || g_win_w != width || g_win_h != height;
+    if (changed) g_display_generation++;
     g_display_w = width;
     g_display_h = height;
     g_display_known = 1;
     /* The guest-visible client rectangle follows the selected mode even when
      * the game never calls SetWindowPos (the Android window has no real frame).
-     * This is only the guest/back-buffer size; the Android surface and DXVK's
-     * present extent stay at the native size so the image is scaled to fill
-     * the display and touch remains in one fixed surface space. */
+     * With the present pass active this is also the extent DXVK's producer
+     * surface follows, so DXVK's swap chain follows the mode and its blitter
+     * copies the back buffer 1:1 instead of rescaling it.  Boot owns the first
+     * target (app_boot resolves the launch override before DXVK starts), so
+     * only runtime changes are applied here. */
     g_win_w = width;
     g_win_h = height;
+    SCALE_LOG("hle: select %ux%u -> %ux%u index=%d changed=%d started=%d "
+              "half=%d screen=%ux%u",
+              width, height, g_display_w, g_display_h, index, changed,
+              g_guest_started, g_half_resolution, g_screen_w, g_screen_h);
+    if (g_guest_started)
+        wc3_present_target_ensure(width, height, g_screen_w, g_screen_h);
     if (changed && g_guest_started && g_game_module_mapped) {
 #if defined(__GNUC__)
         if (hle_widescreen127_client_size_changed)
@@ -8836,6 +9217,45 @@ int hle_android_select_display_mode(uint32_t width, uint32_t height)
     }
     RES_LOG("select %ux%u -> not in device mode table", width, height);
     return 0;
+}
+
+int hle_android_request_display_mode(uint32_t width, uint32_t height)
+{
+    SCALE_LOG("hle: request %ux%u half=%d presented=%d current=%ux%u",
+              width, height, g_half_resolution, g_guest_presented, g_display_w,
+              g_display_h);
+    if (!hle_android_display_mode_supported(width, height)) {
+        RES_LOG("request %ux%u -> not in device mode table", width, height);
+        SCALE_LOG("hle: request %ux%u rejected by mode table", width, height);
+        return 0;
+    }
+
+    if (g_half_resolution) {
+        uint32_t hw = 0, hh = 0;
+        if (half_display_mode(&hw, &hh) &&
+            (width != hw || height != hh)) {
+            if (!g_guest_presented) {
+                /* The game has not shown a frame yet: a saved native mode or a
+                 * hardcoded fallback must not steal the launch from the grid.
+                 * Keep half and report success so the caller does not enter a
+                 * fallback loop. */
+                RES_LOG("startup mode %ux%u -> keep half %ux%u", width, height,
+                        hw, hh);
+                SCALE_LOG("hle: startup request %ux%u -> keep half %ux%u",
+                          width, height, hw, hh);
+                return hle_android_select_display_mode(hw, hh);
+            }
+            /* In-game Video options won: the grid and the exact 2x path turn
+             * off, and the selected mode is then presented through the normal
+             * compositor scale (smoothing included). */
+            RES_LOG("runtime mode %ux%u -> disable half grid", width, height);
+            SCALE_LOG("hle: runtime request %ux%u -> disable half", width,
+                      height);
+            hle_android_disable_half_resolution(width, height);
+        }
+    }
+
+    return hle_android_select_display_mode(width, height);
 }
 
 static void u_get_system_metrics(CPU *c)
@@ -8884,7 +9304,7 @@ static void u_enum_display_settings(CPU *c)
         RES_LOG("EnumDisplaySettingsA(%u) -> none", num);
         return;
     }
-    memset((void *)(uintptr_t)dm, 0, 156);
+    memset((void *)(uintptr_t)guest_host_ptr(dm), 0, 156);
     wr16g(dm + 36, 156);
     wr32g(dm + 40, DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY);
     wr32g(dm + 104, 32);
@@ -8899,8 +9319,8 @@ static void u_enum_display_devices(CPU *c)
 {
     uint32_t num = arg32(c, 1), dev = arg32(c, 2);
     if (num != 0 || !dev || !guest_ok(dev, 32)) { c->eax = 0; return; }
-    memset((void *)(uintptr_t)dev, 0, 32);
-    memcpy((void *)(uintptr_t)dev, "\\\\.\\DISPLAY1", 13);
+    memset((void *)(uintptr_t)guest_host_ptr(dev), 0, 32);
+    memcpy((void *)(uintptr_t)guest_host_ptr(dev), "\\\\.\\DISPLAY1", 13);
     c->eax = 1;
 }
 
@@ -8928,8 +9348,14 @@ static void u_change_display_settings(CPU *c)
         RES_LOG("ChangeDisplaySettings(%ux%u, flags=%u) -> BADMODE", w, h, flags);
         return;
     }
-    if (!(flags & 0x00000002u)) /* CDS_TEST */
-        hle_android_select_display_mode(w, h);
+    if (!(flags & 0x00000002u)) { /* CDS_TEST */
+        if (!hle_android_request_display_mode(w, h)) {
+            c->eax = DISP_CHANGE_BADMODE;
+            RES_LOG("ChangeDisplaySettings(%ux%u, flags=%u) -> apply failed",
+                    w, h, flags);
+            return;
+        }
+    }
     c->eax = 0;
     RES_LOG("ChangeDisplaySettings(%ux%u, flags=%u) -> ok%s", w, h, flags,
             (flags & 0x00000002u) ? " (test)" : "");
@@ -9051,7 +9477,7 @@ static void a_reg_query_value(CPU *c)
     if (!buf || !plen || !guest_ok(plen, 4)) { c->eax = 0; return; }
     uint32_t cap = rd32g(plen);
     uint32_t n = v->len < cap ? v->len : cap;
-    if (guest_ok(buf, n)) memcpy((void *)(uintptr_t)buf, v->data, n);
+    if (guest_ok(buf, n)) memcpy((void *)(uintptr_t)guest_host_ptr(buf), v->data, n);
     wr32g(plen, v->len);
     c->hle_last_error = 0;
     c->eax = 0;
@@ -9065,7 +9491,7 @@ static void a_reg_set_value(CPU *c)
     if (!v) { c->hle_last_error = 8; c->eax = 8; return; }
     v->type = type;
     v->len = len > sizeof v->data ? (uint32_t)sizeof v->data : len;
-    if (data && guest_ok(data, v->len)) memcpy(v->data, (void *)(uintptr_t)data, v->len);
+    if (data && guest_ok(data, v->len)) memcpy(v->data, guest_host_ptr(data), v->len);
 #if WC3_DEBUG
     fprintf(stderr, "[reg] RegSetValueExA(\"%s\") len=%u\n", name, len);
 #endif
@@ -9203,7 +9629,7 @@ static void a_get_user_name(CPU *c)
     if (buf && n && guest_ok(buf, n)) {
         size_t len = strlen(s);
         if (len >= n) len = n - 1;
-        memcpy((void *)(uintptr_t)buf, s, len + 1);
+        memcpy((void *)(uintptr_t)guest_host_ptr(buf), s, len + 1);
         if (n >= 4) wr32g(n, (uint32_t)len + 1);
     }
     c->eax = 1;
@@ -9337,7 +9763,7 @@ static const struct { const char *m; uint8_t iface; uint8_t out; } g_d3d9_outs[]
 static void d3d9_fill_caps(uint32_t p)
 {
     if (!p || !guest_ok(p, CAPS_SIZE)) return;
-    memset((void *)(uintptr_t)p, 0, CAPS_SIZE);
+    memset((void *)(uintptr_t)guest_host_ptr(p), 0, CAPS_SIZE);
     wr32g(p + 8,  0x00020000u);        /* Caps: D3DCAPS_READ_SCANLINE-ish  */
     wr32g(p + 28, 0x00000020u);        /* DevCaps: D3DDEVCAPS_HWTRANSFORMANDLIGHT */
     wr32g(p + CAPS_MAXTEXW,    2048);
@@ -9383,10 +9809,10 @@ static const struct { uint16_t w, h; } g_d3d9_modes[] = {
 static void d3d9_fill_ident(uint32_t p)
 {
     if (!p || !guest_ok(p, 1100)) return;
-    memset((void *)(uintptr_t)p, 0, 1100);
-    strcpy((char *)(uintptr_t)p, "wc3-recomp");
-    strcpy((char *)(uintptr_t)(p + 512), "Android null adapter");
-    strcpy((char *)(uintptr_t)(p + 1024), "\\\\.\\DISPLAY1");
+    memset((void *)(uintptr_t)guest_host_ptr(p), 0, 1100);
+    strcpy((char *)(uintptr_t)guest_host_ptr(p), "wc3-recomp");
+    strcpy((char *)(uintptr_t)guest_host_ptr(p + 512), "Android null adapter");
+    strcpy((char *)(uintptr_t)guest_host_ptr(p + 1024), "\\\\.\\DISPLAY1");
     wr32g(p + 1064, 0x1414);   /* VendorId */
     wr32g(p + 1068, 0x0001);   /* DeviceId */
 }
@@ -9697,8 +10123,8 @@ static uint32_t copy_profile_default(CPU *c)
     if (!out || !n || !guest_ok(out, n)) return 0;
     size_t len = def ? strlen(def) : 0;
     if (len >= n) len = n - 1;
-    if (len) memcpy((void *)(uintptr_t)out, def, len);
-    ((char *)(uintptr_t)out)[len] = 0;
+    if (len) memcpy((void *)(uintptr_t)guest_host_ptr(out), def, len);
+    ((char *)(uintptr_t)guest_host_ptr(out))[len] = 0;
     return (uint32_t)len;
 }
 static void h_get_profile_string_a(CPU *c) { c->eax = copy_profile_default(c); }
@@ -9738,7 +10164,7 @@ static void h_get_cp_info(CPU *c)
 {
     uint32_t cp = arg32(c, 0), out = arg32(c, 1);
     if (!out || !guest_ok(out, 20)) { c->eax = 0; return; }
-    memset((void *)(uintptr_t)out, 0, 20);
+    memset((void *)(uintptr_t)guest_host_ptr(out), 0, 20);
     uint32_t maxch = (cp == 65001u) ? 4u : (cp == 1200u || cp == 1201u) ? 2u : 1u;
     wr32g(out, maxch);
     wr8g(out + 4, '?');                 /* DefaultChar[0] */
@@ -11079,8 +11505,8 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
     /* A fault inside one of the VirtualAlloc arenas is either the guest
      * touching a block it already released, or us handing out a range we
      * never mapped.  The tables say which. */
-    if (si && (uintptr_t)si->si_addr < 0x100000000ull) {
-        uint32_t a = (uint32_t)(uintptr_t)si->si_addr;
+    if (si && guest_host_contains(si->si_addr)) {
+        uint32_t a = guest_host_va(si->si_addr);
         if (a >= GUEST_VA_BASE) {
             char d[64];
             va_describe(a, d, sizeof d);

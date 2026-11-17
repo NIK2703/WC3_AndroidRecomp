@@ -130,6 +130,9 @@ typedef LONG      LSTATUS;
 
 typedef void     *HANDLE;
 typedef void     *HWND;
+#ifndef __stdcall
+#define __stdcall
+#endif
 /* Message plumbing.  DXVK's swapchain subclasses the window, so the window
  * procedure type and the message argument types have to exist even though
  * nothing here ever dispatches a message. */

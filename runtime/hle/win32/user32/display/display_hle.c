@@ -139,8 +139,12 @@ static void apply_mode(CPU *c, uint32_t dm, uint32_t flags)
         return;
     }
 
-    if (!(flags & CDS_TEST))
-        wc3_legacy_select_display_mode(width, height);
+    if (!(flags & CDS_TEST)) {
+        if (!wc3_legacy_request_display_mode(width, height)) {
+            c->eax = DISP_CHANGE_BADMODE;
+            return;
+        }
+    }
     c->eax = DISP_CHANGE_SUCCESSFUL;
 }
 

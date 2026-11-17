@@ -85,7 +85,7 @@ static int pe_range_ok(const Wc3PeImage *image, uint32_t rva, uint64_t size)
 static int pe_cstring_ok(const Wc3PeImage *image, uint32_t rva)
 {
     if (!image || !image->base || rva >= image->span) return 0;
-    const char *text = (const char *)(uintptr_t)(image->base + rva);
+    const char *text = (const char *)(uintptr_t)guest_host_ptr(image->base + rva);
     return memchr(text, '\0', image->span - rva) != NULL;
 }
 
@@ -221,7 +221,7 @@ int wc3_pe_load(const Wc3Platform *platform, const char *path,
     }
     mapped = 1;
 
-    memcpy((void *)(uintptr_t)base, file, headers);
+    memcpy((void *)(uintptr_t)guest_host_ptr(base), file, headers);
 
     const pe_section_header *section = (const pe_section_header *)sections;
     for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; i++) {
@@ -238,7 +238,7 @@ int wc3_pe_load(const Wc3Platform *platform, const char *path,
         uint32_t copy = section[i].SizeOfRawData;
         if (copy > section[i].VirtualSize) copy = section[i].VirtualSize;
         if (copy == 0u) continue;
-        memcpy((void *)(uintptr_t)(base + section[i].VirtualAddress),
+        memcpy((void *)(uintptr_t)guest_host_ptr(base + section[i].VirtualAddress),
                file + section[i].PointerToRawData, copy);
     }
 
@@ -266,7 +266,7 @@ int wc3_pe_load(const Wc3Platform *platform, const char *path,
             if (block_rva64 > span || span - block_rva64 < sizeof(pe_base_reloc))
                 goto malformed;
             const uint8_t *block =
-                (const uint8_t *)(uintptr_t)(base + (uint32_t)block_rva64);
+                (const uint8_t *)(uintptr_t)guest_host_ptr(base + (uint32_t)block_rva64);
             uint32_t block_va = load_u32(block);
             uint32_t block_size = load_u32(block + 4);
             if (block_size < sizeof(pe_base_reloc) ||
@@ -287,7 +287,7 @@ int wc3_pe_load(const Wc3Platform *platform, const char *path,
                 uint64_t width = type == PE_REL_HIGHLOW ? 4u : 2u;
                 if (target > span || width > (uint64_t)span - target)
                     goto malformed;
-                void *p = (void *)(uintptr_t)(base + (uint32_t)target);
+                void *p = (void *)(uintptr_t)guest_host_ptr(base + (uint32_t)target);
                 switch (type) {
                 case PE_REL_HIGH:
                     store_u16(p, (uint16_t)(load_u16(p) +
@@ -354,7 +354,7 @@ static int export_cstring_ok(const Wc3PeImage *image, uint32_t rva)
 {
     if (!export_range_ok(image, rva, 1u)) return 0;
     uint64_t end = (uint64_t)image->export_rva + image->export_size;
-    const char *text = (const char *)(uintptr_t)(image->base + rva);
+    const char *text = (const char *)(uintptr_t)guest_host_ptr(image->base + rva);
     return memchr(text, '\0', (size_t)(end - rva)) != NULL;
 }
 
@@ -363,7 +363,7 @@ static const pe_export_dir *export_dir(const Wc3PeImage *image)
     if (!export_range_ok(image, image->export_rva,
                          sizeof(pe_export_dir)))
         return NULL;
-    return (const pe_export_dir *)(uintptr_t)(image->base + image->export_rva);
+    return (const pe_export_dir *)(uintptr_t)guest_host_ptr(image->base + image->export_rva);
 }
 
 static uint32_t export_function_rva(const Wc3PeImage *image,
@@ -373,7 +373,7 @@ static uint32_t export_function_rva(const Wc3PeImage *image,
     if (!dir || function_index >= dir->NumberOfFunctions) return 0;
     uint64_t bytes = (uint64_t)dir->NumberOfFunctions * sizeof(uint32_t);
     if (!export_range_ok(image, dir->AddressOfFunctions, bytes)) return 0;
-    return load_u32((const void *)(uintptr_t)(image->base +
+    return load_u32((const void *)(uintptr_t)guest_host_ptr(image->base +
                                               dir->AddressOfFunctions +
                                               function_index * 4u));
 }
@@ -394,15 +394,15 @@ uint32_t wc3_pe_export(const Wc3PeImage *image, const char *name)
 
     for (uint32_t i = 0; i < dir->NumberOfNames; i++) {
         uint32_t name_rva = load_u32(
-            (const void *)(uintptr_t)(image->base + dir->AddressOfNames +
+            (const void *)(uintptr_t)guest_host_ptr(image->base + dir->AddressOfNames +
                                       i * 4u));
         if (!export_cstring_ok(image, name_rva)) return 0;
         const char *candidate =
-            (const char *)(uintptr_t)(image->base + name_rva);
+            (const char *)(uintptr_t)guest_host_ptr(image->base + name_rva);
         if (strcmp(candidate, name) != 0) continue;
 
         uint16_t ordinal = load_u16(
-            (const void *)(uintptr_t)(image->base +
+            (const void *)(uintptr_t)guest_host_ptr(image->base +
                                       dir->AddressOfNameOrdinals + i * 2u));
         uint32_t rva = export_function_rva(image, dir, ordinal);
         if (rva == 0u) return 0;
@@ -470,7 +470,7 @@ static int res_view(const Wc3PeImage *image, uint32_t offset,
         return 0;
 
     const uint8_t *root =
-        (const uint8_t *)(uintptr_t)(image->base + image->resource_rva);
+        (const uint8_t *)(uintptr_t)guest_host_ptr(image->base + image->resource_rva);
     memcpy(out_dir, root + offset, sizeof *out_dir);
     uint64_t count = (uint64_t)out_dir->NumberOfNamedEntries +
                      out_dir->NumberOfIdEntries;
@@ -537,7 +537,7 @@ static const res_data_entry *res_find(const Wc3PeImage *image, unsigned type,
     if (data_rva > UINT32_MAX ||
         !pe_range_ok(image, (uint32_t)data_rva, sizeof(res_data_entry)))
         return NULL;
-    return (const res_data_entry *)(uintptr_t)(image->base + data_rva);
+    return (const res_data_entry *)(uintptr_t)guest_host_ptr(image->base + data_rva);
 }
 
 int wc3_pe_string_resource(const Wc3PeImage *image, unsigned id, char *out,
@@ -552,7 +552,7 @@ int wc3_pe_string_resource(const Wc3PeImage *image, unsigned id, char *out,
     memcpy(&resource, data, sizeof resource);
     if (!pe_range_ok(image, resource.OffsetToData, resource.Size)) return 0;
     const uint8_t *block =
-        (const uint8_t *)(uintptr_t)(image->base + resource.OffsetToData);
+        (const uint8_t *)(uintptr_t)guest_host_ptr(image->base + resource.OffsetToData);
     uint32_t size = resource.Size;
     unsigned want = id & 15u;
     uint32_t off = 0;
@@ -599,7 +599,7 @@ int wc3_pe_bind_imports(
             import_rva + i * (uint32_t)sizeof(pe_import_descriptor);
         pe_import_descriptor descriptor;
         memcpy(&descriptor,
-               (const void *)(uintptr_t)(image->base + descriptor_rva),
+               (const void *)(uintptr_t)guest_host_ptr(image->base + descriptor_rva),
                sizeof descriptor);
         if (descriptor.Name == 0u && descriptor.FirstThunk == 0u &&
             descriptor.OriginalFirstThunk == 0u) {
@@ -609,7 +609,7 @@ int wc3_pe_bind_imports(
         if (descriptor.Name == 0u || descriptor.FirstThunk == 0u) return -1;
         if (!pe_cstring_ok(image, descriptor.Name)) return -1;
         const char *dll =
-            (const char *)(uintptr_t)(image->base + descriptor.Name);
+            (const char *)(uintptr_t)guest_host_ptr(image->base + descriptor.Name);
 
         uint32_t lookup_rva = descriptor.OriginalFirstThunk
                                   ? descriptor.OriginalFirstThunk
@@ -628,10 +628,10 @@ int wc3_pe_bind_imports(
                 return -1;
 
             uint32_t lookup =
-                load_u32((const void *)(uintptr_t)(image->base +
+                load_u32((const void *)(uintptr_t)guest_host_ptr(image->base +
                                                    (uint32_t)thunk_rva));
             if (lookup == 0u) {
-                store_u32((void *)(uintptr_t)(image->base +
+                store_u32((void *)(uintptr_t)guest_host_ptr(image->base +
                                               (uint32_t)iat_rva),
                           0u);
                 break;
@@ -646,14 +646,14 @@ int wc3_pe_bind_imports(
                     !pe_cstring_ok(image, (uint32_t)name_rva))
                     return -1;
                 va = resolve(
-                    dll, (const char *)(uintptr_t)(image->base + name_rva),
+                    dll, (const char *)(uintptr_t)guest_host_ptr(image->base + name_rva),
                     0u, user);
             }
             if (va)
                 bound++;
             else
                 missing++;
-            store_u32((void *)(uintptr_t)(image->base + (uint32_t)iat_rva),
+            store_u32((void *)(uintptr_t)guest_host_ptr(image->base + (uint32_t)iat_rva),
                       va);
 
             if (thunk_rva > UINT32_MAX - 4u || iat_rva > UINT32_MAX - 4u)

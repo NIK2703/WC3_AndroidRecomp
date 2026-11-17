@@ -28,6 +28,7 @@
 
 #include "cpu.h"
 #include "direct_call.h"
+#include "guest_host.h"
 #include "hle_bridge.h"
 #include "platform.h"
 #include "sound_switch.h"
@@ -461,7 +462,7 @@ static void h_get_module_file_name_a(CPU *c)
         c->eax = 0u;
         return;
     }
-    if (copy) memcpy((void *)(uintptr_t)buffer, name, copy);
+    if (copy) memcpy(guest_host_ptr(buffer), name, copy);
     wc3_legacy_wr8g(buffer + copy, 0u);
     c->eax = copy;
 }
@@ -617,7 +618,7 @@ static void ds_create_sound_buffer(CPU *c, DsObject *o)
         return;
     }
     if (b->bits == 8u)
-        memset((void *)(uintptr_t)b->guest_samples, 0x80, b->bytes);
+        memset(guest_host_ptr(b->guest_samples), 0x80, b->bytes);
     b->parent_self = o->self;
     b->stream = o->stream;
     o->children++;
@@ -897,9 +898,13 @@ static void ds_unlock(CPU *c, DsObject *o)
     uint64_t base2 = base1 + first / o->bpf;
     uint32_t accepted = 0u;
     uint32_t total = first + second;
+    /* p1/p2 are guest VAs.  The mixer copies them on a host thread, so hand
+     * it host pointers instead of dereferencing the guest window directly. */
+    const void *src1 = first ? guest_host_ptr(p1) : NULL;
+    const void *src2 = second ? guest_host_ptr(p2) : NULL;
     if (a->voice_publish2(a->ctx, o->voice, base1,
-                          (const void *)(uintptr_t)p1, first,
-                          base2, second ? (const void *)(uintptr_t)p2 : NULL,
+                          src1, first,
+                          base2, src2,
                           second, &accepted) != 0 ||
         accepted != total) {
         c->eax = DSERR_GENERIC;

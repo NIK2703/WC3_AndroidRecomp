@@ -72,7 +72,7 @@ static void movie_log_setup(void)
 #endif
 }
 
-static pthread_once_t movie_log_once = PTHREAD_ONCE_INIT;
+static pthread_once_t movie_once = PTHREAD_ONCE_INIT;
 
 typedef struct {
     JavaVM *vm;
@@ -618,7 +618,7 @@ Java_wc3_recomp_MoviePlayer_nativeStartVideo(
     (void)thiz;
     if (!env || !path || !surface || !clock)
         return 0;
-    (void)pthread_once(&movie_log_once, movie_log_setup);
+    (void)pthread_once(&movie_once, movie_log_setup);
 
     const char *path_chars = (*env)->GetStringUTFChars(env, path, NULL);
     if (!path_chars) {

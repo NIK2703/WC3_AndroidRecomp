@@ -497,10 +497,6 @@ static int controls_apply_profile(const ProfileData *profile, int width,
     g_layout_id++;
     g_overlay_mode = mode;
     g_initialized = true;
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-    WC3_CTRL_LOG("apply mode=%d elements=%d layout=%u", (int)mode, count,
-                 g_layout_id);
-#endif
     clear_error();
     rc = 0;
 

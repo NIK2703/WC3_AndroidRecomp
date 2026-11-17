@@ -1443,7 +1443,7 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
                      * Keep the scalar loop below it, and for overlapping
                      * movs where forward byte semantics are required. */
                     lf_push(&e, lf_afmt("if (c->ecx) { if (c->ecx >= 16) { "
-                                        "memset((void *)(uintptr_t)c->edi, "
+                                        "memset((void *)(uintptr_t)guest_host_ptr(c->edi), "
                                         "(int)(uint8_t)(%s), (size_t)c->ecx); "
                                         "c->edi += c->ecx; } "
                                         "else while (c->ecx) { wr8(c->edi, %s); "
@@ -1468,7 +1468,8 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
                 if (rep) {
                     lf_push(&e, lf_afmt("if (c->ecx) { uint64_t _n = (uint64_t)c->ecx * %dull; "
                                         "if (_n >= 16 && (c->esi + _n <= c->edi || c->edi + _n <= c->esi)) { "
-                                        "memcpy((void *)(uintptr_t)c->edi, (void *)(uintptr_t)c->esi, (size_t)_n); "
+                                        "memcpy((void *)(uintptr_t)guest_host_ptr(c->edi), "
+                                        "(void *)(uintptr_t)guest_host_ptr(c->esi), (size_t)_n); "
                                         "c->esi += (uint32_t)_n; c->edi += (uint32_t)_n; } "
                                         "else while (c->ecx) { %s c->ecx--; } "
                                         "c->ecx = 0; }",

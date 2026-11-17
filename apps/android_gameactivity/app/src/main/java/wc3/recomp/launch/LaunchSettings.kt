@@ -50,7 +50,20 @@ data class LaunchSettings(
     /* Opacity of the on-screen control overlay in percent.  The settings UI
      * exposes 10..50; the native controls layer clamps the same range and
      * replaces the authored per-element opacity. */
-    val overlayOpacityPercent: Int = LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT
+    val overlayOpacityPercent: Int = LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT,
+    /* True keeps the deterministic chunked raycast and vertex loops.  False
+     * makes both wrappers call the original sequential guest functions;
+     * applied on the next game launch. */
+    val parallelExecution: Boolean = LaunchContract.DEFAULT_PARALLEL_EXECUTION,
+    /* Half-resolution grid presentation.  Off creates no extra SurfaceView
+     * and no native renderer.  The darken percent follows the source slider
+     * (0..100); the cycle moves the transparent pixel of every 2x2 cell and
+     * is resolved from -1 "auto" to a concrete interval before launch. */
+    val gridEnabled: Boolean = LaunchContract.DEFAULT_GRID_ENABLED,
+    val gridDarkenPercent: Int = LaunchContract.DEFAULT_GRID_DARKEN_PERCENT,
+    val gridCycleSeconds: Int = LaunchContract.DEFAULT_GRID_CYCLE_SECONDS,
+    /* Presentation scaling is not a setting.  The grid needs the exact-2x
+     * half-surface path; every other case stays on the compositor. */
 ) {
     fun toBundle(): Bundle = Bundle().apply {
         putString(LaunchContract.KEY_GAME_DIR, gameDir)
@@ -68,5 +81,17 @@ data class LaunchSettings(
         putBoolean(LaunchContract.KEY_SELECTION_24, selection24)
         putBoolean(LaunchContract.KEY_HIDE_CURSOR, hideCursor)
         putInt(LaunchContract.KEY_OVERLAY_OPACITY_PERCENT, overlayOpacityPercent)
+        putBoolean(LaunchContract.KEY_PARALLEL_EXECUTION, parallelExecution)
+        putBoolean(LaunchContract.KEY_GRID_ENABLED, gridEnabled)
+        putInt(LaunchContract.KEY_GRID_DARKEN_PERCENT, gridDarkenPercent)
+        putInt(LaunchContract.KEY_GRID_CYCLE_SECONDS, gridCycleSeconds)
+        putString(
+            LaunchContract.KEY_PRESENT_SCALE,
+            if (gridEnabled) {
+                LaunchContract.PRESENT_SCALE_HALF
+            } else {
+                LaunchContract.PRESENT_SCALE_SYSTEM
+            }
+        )
     }
 }

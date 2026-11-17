@@ -25,6 +25,7 @@ typedef struct CPU {
     int log[64];
     int n;
     long hops;
+    uint32_t esp;
 } CPU;
 
 #include "direct_call.h"
@@ -108,6 +109,30 @@ static void depth_nested(CPU *c) {
     note(c, 12);
 }
 
+/* D4c: a tail to a proven leaf is a direct host call.  It must not publish a
+ * pending target and must not disturb the caller's transition state. */
+static void tail_leaf_target(CPU *c) {
+    note(c, 14);
+}
+
+static void tail_leaf_caller(CPU *c) {
+    note(c, 13);
+    WC3_DIRECT_TAIL_LEAF(tail_leaf_target, c);
+    return;
+}
+
+/* A real lifted leaf ends with `ret`, modelled here as esp += 4.  The direct
+ * tail must leave that pop to the leaf: the current frame only returns. */
+static void leaf_ret_target(CPU *c) {
+    c->esp += 4u;
+    note(c, 15);
+}
+
+static void leaf_ret_caller(CPU *c) {
+    WC3_DIRECT_TAIL_LEAF(leaf_ret_target, c);
+    return;
+}
+
 int main(void)
 {
     CPU c = { .n = 0, .hops = 0 };
@@ -180,7 +205,26 @@ int main(void)
     CHECK(wc3_guest_depth_get(&c) == 0u);
     CHECK(c.disp_pending_valid == 0u);
 
-    /* 10. clean frame: drain a tailful callee, restore the caller's draining */
+    /* 10. leaf tail: direct host call, no pending write, depth restored */
+    c.n = 0;
+    c.disp_draining = 0u;
+    WC3_DIRECT_CALL(tail_leaf_caller, &c);
+    CHECK(c.n == 2);
+    CHECK(c.log[0] == 13 && c.log[1] == 14);
+    CHECK(wc3_guest_depth_get(&c) == 0u);
+    CHECK(c.disp_pending_valid == 0u);
+
+    /* 11. the leaf own ret pops the caller return address; the tail adds no
+     * extra esp adjustment of its own. */
+    c.n = 0;
+    c.esp = 0x100u;
+    WC3_DIRECT_CALL(leaf_ret_caller, &c);
+    CHECK(c.n == 1 && c.log[0] == 15);
+    CHECK(c.esp == 0x104u);
+    CHECK(wc3_guest_depth_get(&c) == 0u);
+    CHECK(c.disp_pending_valid == 0u);
+
+    /* 12. clean frame: drain a tailful callee, restore the caller's draining */
     c.n = 0;
     c.disp_draining = 1u;
     WC3_DIRECT_CALL_CLEAN(f_a, &c);
@@ -191,7 +235,7 @@ int main(void)
     CHECK(c.disp_draining == 1u);
     c.disp_draining = 0u;
 
-    printf("direct_call_test: OK (tail chain, nesting, depth/clean frames, "
-           "100000 hops)\n");
+    printf("direct_call_test: OK (tail chain, nesting, depth/clean/leaf-tail "
+           "frames, return-address pop, 100000 hops)\n");
     return 0;
 }

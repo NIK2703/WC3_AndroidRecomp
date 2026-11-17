@@ -221,7 +221,7 @@ struct ThinSlot {
 
 static inline uint32_t thin_arg(CPU *c, unsigned n)
 {
-    return *(volatile uint32_t *)(uintptr_t)(c->esp + 4u + n * 4u);
+    return rd32g(c->esp + 4u + n * 4u);
 }
 static inline float thin_argf(CPU *c, unsigned n)
 {

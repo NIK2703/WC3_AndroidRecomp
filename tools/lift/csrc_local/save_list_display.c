@@ -322,16 +322,20 @@ static int func_header_at(const char *s, size_t n, size_t p, Func *out)
 static FuncVec find_funcs(const char *s, size_t n)
 {
     FuncVec f = {0};
-    size_t i;
-    for (i = 0; i < n; i++) {
+    size_t i = 0;
+    while (i < n) {
+        const char *hit = (const char *)memchr(s + i, 'v', n - i);
         Func fn;
-        if (s[i] != 'v') continue;
-        if (!func_header_at(s, n, i, &fn)) continue;
+        if (!hit) break;
+        i = (size_t)(hit - s);
+        if (i != 0 && s[i - 1] != '\n') { i++; continue; }
+        if (!func_header_at(s, n, i, &fn)) { i++; continue; }
         if (f.n == f.cap) {
             f.cap = f.cap ? f.cap * 2 : 64;
             f.v = (Func *)xrealloc(f.v, f.cap * sizeof(*f.v));
         }
         f.v[f.n++] = fn;
+        i++;
     }
     return f;
 }
@@ -339,12 +343,17 @@ static FuncVec find_funcs(const char *s, size_t n)
 static int find_site_line(const char *s, size_t start, size_t end, size_t *pos)
 {
     static const char needle[] = "/* 6F2A953D:";
-    size_t i;
-    for (i = start; i + sizeof(needle) - 1 <= end; i++) {
-        if (memcmp(s + i, needle, sizeof(needle) - 1) == 0) {
+    size_t nl = sizeof(needle) - 1;
+    size_t i = start;
+    while (i + nl <= end) {
+        const char *hit = (const char *)memchr(s + i, '/', end - i);
+        if (!hit) break;
+        i = (size_t)(hit - s);
+        if (i + nl <= end && memcmp(s + i, needle, nl) == 0) {
             *pos = start;
             return 1;
         }
+        i++;
     }
     return 0;
 }
@@ -502,22 +511,28 @@ static Buf transform(const char *s, size_t n, const FuncVec *funcs,
     return out;
 }
 
-static Buf add_build_marker(const char *s, size_t n, int *added)
+static void add_build_marker(Buf *out, int *added)
 {
-    Buf out = {0};
     size_t ml = strlen(MARKER_SYMBOL);
-    size_t i;
-    for (i = 0; i + ml <= n; i++) {
-        if (memcmp(s + i, MARKER_SYMBOL, ml) == 0) {
-            buf_add(&out, s, n);
-            *added = 0;
-            return out;
+    size_t i = 0;
+    int found = 0;
+    while (i + ml <= out->n) {
+        const char *hit =
+            (const char *)memchr(out->p + i, MARKER_SYMBOL[0], out->n - i);
+        if (!hit) break;
+        i = (size_t)(hit - out->p);
+        if (i + ml <= out->n && memcmp(out->p + i, MARKER_SYMBOL, ml) == 0) {
+            found = 1;
+            break;
         }
+        i++;
     }
-    buf_add(&out, s, n);
-    buf_str(&out, MARKER_BLOCK);
-    *added = 1;
-    return out;
+    if (!found) {
+        buf_str(out, MARKER_BLOCK);
+        *added = 1;
+    } else {
+        *added = 0;
+    }
 }
 
 /* Normalize a function body exactly like the Python reference: strip closed
@@ -564,23 +579,21 @@ static Buf normalize(const char *s, size_t n)
     return out;
 }
 
-static int function_span(const char *s, size_t n, const char *name,
-                         size_t *start, size_t *end)
+static int function_span(const char *s, size_t n, const FuncVec *funcs,
+                         const char *name, size_t *start, size_t *end)
 {
-    FuncVec funcs = find_funcs(s, n);
     size_t i;
-    for (i = 0; i < funcs.n; i++) {
-        if (strcmp(funcs.v[i].name, name) == 0) {
-            size_t p = funcs.v[i].body;
+    for (i = 0; i < funcs->n; i++) {
+        if (strcmp(funcs->v[i].name, name) == 0) {
+            size_t p = funcs->v[i].body;
             int depth = 1;
             while (p < n) {
                 if (s[p] == '{') depth++;
                 else if (s[p] == '}') {
                     depth--;
                     if (depth == 0) {
-                        *start = funcs.v[i].body;
+                        *start = funcs->v[i].body;
                         *end = p;
-                        free(funcs.v);
                         return 1;
                     }
                 }
@@ -588,17 +601,17 @@ static int function_span(const char *s, size_t n, const char *name,
             }
         }
     }
-    free(funcs.v);
     return 0;
 }
 
-static void function_hash(const char *s, size_t n, const char *name, char out[65])
+static void function_hash(const char *s, size_t n, const FuncVec *funcs,
+                          const char *name, char out[65])
 {
     size_t start, end;
     Buf norm;
     unsigned char digest[32];
     sha256_ctx ctx;
-    if (!function_span(s, n, name, &start, &end))
+    if (!function_span(s, n, funcs, name, &start, &end))
         die("function body not found");
     norm = normalize(s + start, end - start);
     sha256_init(&ctx);
@@ -608,13 +621,30 @@ static void function_hash(const char *s, size_t n, const char *name, char out[65
     free(norm.p);
 }
 
+static void hash_functions(const char *s, size_t n, const char **names,
+                           size_t nnames, char *out)
+{
+    FuncVec funcs = find_funcs(s, n);
+    size_t i;
+    for (i = 0; i < nnames; i++)
+        function_hash(s, n, &funcs, names[i], out + i * 65);
+    free(funcs.v);
+}
+
 static int count_substr(const char *s, size_t n, const char *needle)
 {
     size_t nl = strlen(needle);
-    size_t i;
+    size_t i = 0;
     int count = 0;
-    for (i = 0; i + nl <= n; i++)
-        if (memcmp(s + i, needle, nl) == 0) count++;
+    if (!nl) return 0;
+    while (i + nl <= n) {
+        const char *hit = (const char *)memchr(s + i, needle[0], n - i);
+        if (!hit) break;
+        i = (size_t)(hit - s);
+        if (i + nl <= n && memcmp(s + i, needle, nl) == 0)
+            count++;
+        i++;
+    }
     return count;
 }
 
@@ -695,7 +725,7 @@ static int process_file(const char *src, const char *dst, const char *json,
     FuncVec funcs;
     SiteVec sites;
     int changed, marker_added = 0;
-    Buf out, marked;
+    Buf out;
     const char **names = NULL;
     size_t nnames = 0;
     char *before = NULL, *after = NULL;
@@ -728,18 +758,16 @@ static int process_file(const char *src, const char *dst, const char *json,
     }
     before = (char *)xrealloc(NULL, nnames * 65);
     after = (char *)xrealloc(NULL, nnames * 65);
-    for (i = 0; i < nnames; i++)
-        function_hash(text, text_n, names[i], before + i * 65);
+    hash_functions(text, text_n, names, nnames, before);
 
     out = transform(text, text_n, &funcs, &sites, &changed);
+    free(text);
+    text = NULL;
     if (marker) {
-        marked = add_build_marker(out.p, out.n, &marker_added);
-        free(out.p);
-        out = marked;
+        add_build_marker(&out, &marker_added);
         changed = changed || marker_added;
     }
-    for (i = 0; i < nnames; i++)
-        function_hash(out.p, out.n, names[i], after + i * 65);
+    hash_functions(out.p, out.n, names, nnames, after);
 
     if (changed || !is_dir(dst)) {
         /* A regular file is not a directory; use the file existence check
@@ -892,16 +920,22 @@ static int self_test(void)
     }
     {
         int added, added2;
-        Buf marked = add_build_marker(out.p, out.n, &added);
-        Buf marked2 = add_build_marker(marked.p, marked.n, &added2);
-        int ok = added && strstr(marked.p, MARKER_SYMBOL) &&
-                 !added2 && marked2.n == marked.n &&
-                 memcmp(marked2.p, marked.p, marked.n) == 0;
-        free(marked.p);
-        free(marked2.p);
-        if (!ok) {
-            fputs(PASS " self-test: marker not idempotent\n", stderr);
-            return 1;
+        Buf marked = {0};
+        Buf marked2 = {0};
+        buf_add(&marked, out.p, out.n);
+        add_build_marker(&marked, &added);
+        buf_add(&marked2, marked.p, marked.n);
+        add_build_marker(&marked2, &added2);
+        {
+            int ok = added && strstr(marked.p, MARKER_SYMBOL) &&
+                     !added2 && marked2.n == marked.n &&
+                     memcmp(marked2.p, marked.p, marked.n) == 0;
+            free(marked.p);
+            free(marked2.p);
+            if (!ok) {
+                fputs(PASS " self-test: marker not idempotent\n", stderr);
+                return 1;
+            }
         }
     }
     free(out.p);

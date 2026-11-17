@@ -2,6 +2,8 @@ package wc3.recomp;
 
 import android.os.Bundle;
 
+import wc3.recomp.launch.GameMode;
+
 /**
  * Reign of Chaos launcher.
  *
@@ -11,6 +13,11 @@ import android.os.Bundle;
  * live guest with the Frozen Throne activity.</p>
  */
 public final class Wc3RocActivity extends Wc3GameActivity {
+    @Override
+    protected GameMode hostGameMode() {
+        return GameMode.ROC;
+    }
+
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
         setGameMode("roc");

@@ -10,6 +10,7 @@
 #include "wc3_debug.h"
 #include "dxvk3_gate.h"
 #include "dxvk_trace.h"
+#include "present_pass.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -108,6 +109,14 @@ extern "C" void wc3_dxvk_prepare(void)
     wc3_dxvk_trace_mark("prepare: traced gipa installed");
     DX_LOG("prepare wrapped gipa=%p", gipa);
 #endif
+    /* Install the present pass last, so the boundary trace above still sees the
+     * guest's own calls.  The wrapper is installed even when native resolution
+     * bypasses the pass: a runtime display-mode change may start a target
+     * later, and DXVK caches the device entry points.  While no target is
+     * published every hook forwards to the real entry point. */
+    gipa = (void *)wc3_present_pass_wrap_gipa(
+        (PFN_vkGetInstanceProcAddr)gipa);
+    DX_LOG("prepare present pass gipa=%p", gipa);
     wc3_dxvk1_dxvk_set_vulkan_get_instance_proc_addr(gipa);
     wc3_dxvk3_dxvk_set_vulkan_get_instance_proc_addr(gipa);
     wc3_dxvkll_dxvk_set_vulkan_get_instance_proc_addr(gipa);

@@ -194,6 +194,7 @@
             </LinearLayout>
 
             <LinearLayout
+                android:id="@+id/selection24_row"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
@@ -238,6 +239,149 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="12dp"
                     android:contentDescription="@string/launch_hide_cursor_label"
+                    android:saveEnabled="false"
+                    app:thumbTint="@color/switch_thumb"
+                    app:trackTint="@color/switch_track" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/grid_row"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/grid_label"
+                    style="@style/Wc3RowLabel"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/launch_grid_label" />
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/grid_switch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:contentDescription="@string/launch_grid_label"
+                    android:saveEnabled="false"
+                    app:thumbTint="@color/switch_thumb"
+                    app:trackTint="@color/switch_track" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/grid_options_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        style="@style/Wc3RowLabel"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/launch_grid_darken_label" />
+
+                    <TextView
+                        android:id="@+id/grid_darken_value"
+                        style="@style/Wc3RowLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:gravity="end"
+                        android:minWidth="72dp"
+                        android:textColor="@color/launch_gold_light" />
+                </LinearLayout>
+
+                <SeekBar
+                    android:id="@+id/grid_darken_slider"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:contentDescription="@string/launch_grid_darken_label"
+                    android:max="100"
+                    android:saveEnabled="false"
+                    android:progressBackgroundTint="@color/launch_muted"
+                    android:progressTint="@color/launch_gold"
+                    android:thumbTint="@color/launch_gold_light" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        style="@style/Wc3RowLabel"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/launch_grid_cycle_label" />
+
+                    <TextView
+                        android:id="@+id/grid_cycle_value"
+                        style="@style/Wc3RowLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:gravity="end"
+                        android:minWidth="72dp"
+                        android:textColor="@color/launch_gold_light" />
+                </LinearLayout>
+
+                <SeekBar
+                    android:id="@+id/grid_cycle_slider"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:contentDescription="@string/launch_grid_cycle_label"
+                    android:max="60"
+                    android:saveEnabled="false"
+                    android:progressBackgroundTint="@color/launch_muted"
+                    android:progressTint="@color/launch_gold"
+                    android:thumbTint="@color/launch_gold_light" />
+
+                <TextView
+                    style="@style/Wc3Helper"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/launch_grid_hint" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/parallel_execution_row"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/Wc3RowLabel"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/launch_parallel_label" />
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/parallel_execution_switch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:contentDescription="@string/launch_parallel_label"
                     android:saveEnabled="false"
                     app:thumbTint="@color/switch_thumb"
                     app:trackTint="@color/switch_track" />
@@ -407,6 +551,13 @@
                     android:progressBackgroundTint="@color/launch_muted"
                     android:progressTint="@color/launch_gold"
                     android:thumbTint="@color/launch_gold_light" />
+
+                <TextView
+                    style="@style/Wc3Helper"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/launch_tap_click_delay_hint" />
             </LinearLayout>
 
             <LinearLayout

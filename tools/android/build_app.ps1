@@ -9,19 +9,29 @@
 # APK can no longer disagree with its Gradle half.  Debug stays optimised
 # (BV-1.1): CMAKE_BUILD_TYPE is Release for both variants.
 #
+# userdebug is a diagnostic profile of the debug package, not a third package:
+# the same applicationId, Gradle debug build type and WC3_DEBUG=1, but only
+# the BOOT/CRASH tags, the boot log in Download/wc3_log.txt and the gameplay
+# experiments off by default.  It is the target for a black-screen boot report.
+#
 # There is deliberately no -Clean switch; delete build\android_app\<variant>
 # and build\android\dxvk by hand if a true clean rebuild is required.
 #
-# All native variants automatically use the IDEAPAD distcc worker when it is
-# reachable and keep the normal local path otherwise.  Debug-info commands
-# still compile locally by construction.  The optimized variants also allow
-# PGO/LTO commands; a final release_optimized build copies its merged profile
-# to IDEAPAD before compiling.  See tools/dist/README.md.  Set WC3_DIST_AUTO=0
-# for a forced local build.
+# All native variants automatically use whichever distributed workers are
+# reachable: IDEAPAD and/or the hotspot phone.  Each is optional, and the
+# normal local path runs when neither is available.  The optimized variants
+# use IDEAPAD by default and exclude the phone unless
+# WC3_DIST_PHONE_OPTIMIZED=1.  Debug-info commands still compile locally by
+# construction.  The optimized variants also allow PGO/LTO commands; a final
+# release_optimized build copies its merged profile to IDEAPAD before
+# compiling when IDEAPAD is used.  See tools/dist/README.md.  Set
+# WC3_DIST_AUTO=0 for a forced local build, WC3_DIST_IDEAPAD=0 to use the
+# phone only, or WC3_DIST_PHONE=0 to use IDEAPAD only.
 
 [CmdletBinding()]
 param(
-    [ValidateSet('release', 'debug', 'release_optimized', 'release_optimized_pgo')]
+    [ValidateSet('release', 'debug', 'userdebug',
+                 'release_optimized', 'release_optimized_pgo')]
     [string]$Variant = 'release',
     [string]$GamesActivityAar = '',
     # release_optimized is release plus ThinLTO and a two-stage PGO profile.
@@ -80,7 +90,9 @@ param(
     # follows the product profile: on with a W3L product corpus, off for the
     # exact baseline.  The headless DUT never receives this profile.
     [ValidateSet('auto', 'on', 'off')]
-    [string]$Selection24 = 'auto'
+    [string]$Selection24 = 'auto',
+    [string]$CMakeArgs = '',
+    [string]$NativeBuildArgs = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -95,7 +107,8 @@ function ConvertTo-CMakeBool {
     if ($Value) { return 'ON' }
     return 'OFF'
 }
-$isDebug = $Variant -eq 'debug'
+$isDebug = $Variant -in @('debug', 'userdebug')
+$isUserDebug = $Variant -eq 'userdebug'
 $isOptimized = $Variant -in @('release_optimized', 'release_optimized_pgo')
 $isProfileBuild = $Variant -eq 'release_optimized_pgo'
 if (-not $isOptimized -and $Pgo -ne 'off') {
@@ -122,8 +135,8 @@ if (-not $isOptimized) {
     foreach ($name in $experimentalParams) {
         if ($PSBoundParameters.ContainsKey($name)) {
             throw "-$name is only valid with -Variant release_optimized or " +
-                  'release_optimized_pgo; release/debug must keep their ' +
-                  'historical code generation'
+                  'release_optimized_pgo; release/debug/userdebug must keep ' +
+                  'their historical code generation'
         }
     }
 }
@@ -334,7 +347,12 @@ function Read-DebugTagsFile {
 if (-not $isDebug) {
     $DebugTags = ''
 } else {
-    $tagPath = Join-Path $root 'config\debug_tags.txt'
+    $tagFileName = if ($isUserDebug) {
+        'debug_tags_userdebug.txt'
+    } else {
+        'debug_tags.txt'
+    }
+    $tagPath = Join-Path $root "config\$tagFileName"
     $knownTags = Get-DeclaredDebugTags `
         -HeaderPath (Join-Path $root 'runtime\diag\wc3_debug.h')
     $tagList = @(Read-DebugTagsFile -Path $tagPath -Known $knownTags)
@@ -474,8 +492,9 @@ if (-not (Test-Path $cmake) -or -not (Test-Path $ninja) -or
     exit 2
 }
 
-# One trampoline call: when IDEAPAD is reachable, the helper starts the tunnel
-# and re-runs this same script with WC3_DIST_ACTIVE=1.  The original body below
+# One trampoline call: when at least one worker is reachable (IDEAPAD and the
+# phone are independent), the helper starts the tunnels and re-runs this same
+# script with WC3_DIST_ACTIVE=1.  The original body below
 # then executes unchanged in the child scope; no try/finally wraps it.  If the
 # peer is unavailable or WC3_DIST_AUTO=0, this returns and the body runs locally.
 # The profile is copied before the child starts so every profile-use compile
@@ -557,6 +576,12 @@ $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
 $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
 $configure += "-DWC3_SELECTION_24=$selection24Value"
+# The userdebug diagnostic writes stdout/stderr to the public Download folder
+# (native side falls back to the app-private state dir when it is not
+# writable).  Other variants keep the historical run.txt in the state dir.
+$logToDownloadsValue = if ($isUserDebug) { 'ON' } else { 'OFF' }
+$configure += "-DWC3_LOG_TO_DOWNLOADS=$logToDownloadsValue"
+$configure += '-DWC3_CORPUS_WERROR=OFF'
 # release_optimized is the release product plus ThinLTO and PGO.  The training
 # build deliberately skips LTO; it exists only to collect counters.  The final
 # build uses both flags and the same release product inputs.
@@ -643,6 +668,9 @@ if ($hideDynsym) {
 } else {
     $configure += '-DWC3_HIDE_DYNSYM=OFF'
 }
+if ($CMakeArgs) {
+    $configure += ($CMakeArgs -split '\s+')
+}
 Write-Host "[app] ndk   $($ndk.Root)"
 Write-Host "[app] pack_dyn_relocs $($packDynRelocsValue -eq 'ON') ($packDynRelocsMode)"
 Write-Host "[app] icf $($icfValue -eq 'ON') (safe)"
@@ -651,6 +679,7 @@ Write-Host "[app] lift_p0_1/2/6 unconditional"
 Write-Host "[app] thin_skip_writeonly_copyin $($thinSkipCopyinValue -eq 'ON')"
 Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"
 Write-Host "[app] selection24 $selection24Value"
+Write-Host "[app] log_to_downloads $($logToDownloadsValue -eq 'ON')"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
 Write-Host "[app] hide_dynsym $hideDynsym"
 Write-Host "[app] lto   $ltoValue"
@@ -670,6 +699,7 @@ if ($isOptimized) {
     }
 }
 Write-Host "[app] aar   $GamesActivityAar"
+Write-Host "[app] variant $Variant"
 Write-Host "[app] debug $isDebug"
 $ErrorActionPreference = 'Continue'
 $configureOut = @(& $cmake @configure 2>&1)
@@ -677,7 +707,12 @@ $configureOut | ForEach-Object { Write-Host $_ }
 Add-Wc3BuildWarnings -Lines $configureOut -Phase 'cmake-configure'
 $rc = $LASTEXITCODE
 if ($rc -eq 0) {
-    $buildOut = @(& $cmake --build (Join-Path $out 'cmake') --config Release 2>&1)
+    $cmakeBuildArgs = @('--build', (Join-Path $out 'cmake'), '--config', 'Release')
+    if ($NativeBuildArgs) {
+        $cmakeBuildArgs += '--'
+        $cmakeBuildArgs += ($NativeBuildArgs -split '\s+')
+    }
+    $buildOut = @(& $cmake @cmakeBuildArgs 2>&1)
     $buildOut | ForEach-Object { Write-Host $_ }
     Add-Wc3BuildWarnings -Lines $buildOut -Phase 'cmake-build'
     $rc = $LASTEXITCODE

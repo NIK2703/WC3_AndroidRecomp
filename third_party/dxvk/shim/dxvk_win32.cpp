@@ -108,25 +108,56 @@ static std::mutex g_androidWindowMutex;
 static ANativeWindow* g_androidWindow = nullptr;
 static uint32_t g_androidWindowWidth  = 0;
 static uint32_t g_androidWindowHeight = 0;
-/* Incremented whenever a different ANativeWindow is published.  DXVK needs
- * this because its swap chain is tied to the old VkSurfaceKHR: the fake guest
- * HWND never changes, so DXVK cannot notice the Android surface replacement on
- * its own.  The generation is read together with the pointer so a presenter
- * never observes a new window with an old surface generation. */
-static uint32_t g_androidWindowGeneration;
+
+/* Present target, published by runtime/platform/android/present_target.c when
+ * the half-resolution pipeline is active.  Two different sizes live here:
+ *
+ *   g_androidWindow*   the real SurfaceView window and its size - the monitor
+ *                      and the consumer of the final image.
+ *   g_presentWindow*   the producer surface DXVK renders into and the guest
+ *                      render size - what GetClientRect reports, so DXVK's
+ *                      present rectangle equals the guest image and its
+ *                      swapchain blitter takes the texel-fetch copy path.
+ *
+ * The real window keeps its meaning for everything that talks to the display;
+ * only the guest-visible size and the surface DXVK is handed move.  When no
+ * target is published (the default, present_scale=off) both are the real
+ * window and behaviour is unchanged.
+ *
+ * The real window stays a gate: with no display surface there is nothing to
+ * present to, so both accessors report "no window" even while a producer is
+ * published.  DXVK's own Present path then returns D3D_OK without rendering,
+ * exactly as it does without the pass. */
+static ANativeWindow* g_presentWindow = nullptr;
+static uint32_t g_presentWidth  = 0;
+static uint32_t g_presentHeight = 0;
+
+/* The generation DXVK compares against.  It must be one monotonic counter for
+ * the *effective* window: switching the present target on or off, and replacing
+ * the real window, both change what DXVK's swap chain is attached to, so both
+ * must invalidate the presenter.  Two separate counters could collide on the
+ * same value across such a switch. */
+static uint32_t g_presenterGeneration;
+
+static ANativeWindow* presenterWindowLocked() {
+    if (!g_androidWindow) return nullptr;
+    return g_presentWindow ? g_presentWindow : g_androidWindow;
+}
+
 
 extern "C" void wc3_android_set_window(ANativeWindow* window,
                                        uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> lock(g_androidWindowMutex);
-    ANativeWindow* previous = g_androidWindow;
+    ANativeWindow* previous = presenterWindowLocked();
     g_androidWindow = window;
     g_androidWindowWidth = width;
     g_androidWindowHeight = height;
-    if (window && window != previous)
-        g_androidWindowGeneration++;
-    DXVK_SHIM_TRACE("set_window old=%p new=%p %ux%u generation=%u",
+    ANativeWindow* current = presenterWindowLocked();
+    if (current && current != previous)
+        g_presenterGeneration++;
+    DXVK_SHIM_TRACE("set_window old=%p new=%p %ux%u presenter=%p generation=%u",
                     (void*)previous, (void*)window, width, height,
-                    g_androidWindowGeneration);
+                    (void*)current, g_presenterGeneration);
 }
 
 /* Set the physical Android surface buffer geometry and publish that same size
@@ -171,29 +202,48 @@ extern "C" void wc3_android_clear_window(ANativeWindow* window) {
     }
 }
 
+/* The window DXVK creates its surface from.  Once the present target is
+ * published this is the producer; the real window is still required, because a
+ * backgrounded activity has nothing to show and DXVK must not render. */
 extern "C" ANativeWindow* wc3_android_window(void) {
     std::lock_guard<std::mutex> lock(g_androidWindowMutex);
-    return g_androidWindow;
+    return presenterWindowLocked();
 }
 
 /* Atomic snapshot for DXVK's Present path.  Reading the pointer and the
  * generation under one lock avoids a frame that sees the replacement window
- * but still believes the old VkSurfaceKHR is current. */
+ * but still believes the old VkSurfaceKHR is current.  The generation follows
+ * whichever window is handed out, so switching the present target on or off
+ * invalidates DXVK's surface exactly like a window replacement does. */
 extern "C" ANativeWindow* wc3_android_window_state(uint32_t* generation) {
     std::lock_guard<std::mutex> lock(g_androidWindowMutex);
-    if (generation)
-        *generation = g_androidWindowGeneration;
-    return g_androidWindow;
+    if (generation) *generation = g_presenterGeneration;
+    return presenterWindowLocked();
 }
 
-/* Physical surface size the fake monitor and DXVK's presenter report.  Once
- * the activity has created the window this is the window's native size, not
- * the guest display mode; DXVK uses it as the swap-chain/present extent and
- * scales the guest back buffer to it.  The fallback only covers the
- * windowless case (the standalone dxvk_probe) and the guest asking before the
- * activity is up. */
-void surfaceSize(uint32_t& w, uint32_t& h) {
+/* Publish the producer surface of the half-resolution pipeline and the guest
+ * render size.  `window` is owned by the caller and must outlive the clear.
+ * Passing null restores the ordinary path: DXVK presents into the real window
+ * at the surface size and stretches the guest image bilinearly. */
+extern "C" void wc3_android_set_present_target(ANativeWindow* window,
+                                               uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> lock(g_androidWindowMutex);
+    ANativeWindow* previous = presenterWindowLocked();
+    g_presentWindow = window;
+    g_presentWidth = window ? width : 0;
+    g_presentHeight = window ? height : 0;
+    ANativeWindow* current = presenterWindowLocked();
+    if (current != previous)
+        g_presenterGeneration++;
+    DXVK_SHIM_TRACE("present_target window=%p %ux%u presenter=%p generation=%u",
+                    (void*)window, g_presentWidth, g_presentHeight,
+                    (void*)current, g_presenterGeneration);
+}
+
+/* Physical surface size: the real SurfaceView window, i.e. what the display
+ * shows.  The fallback only covers the windowless case (the standalone
+ * dxvk_probe) and the guest asking before the activity is up. */
+static void surfaceSizeLocked(uint32_t& w, uint32_t& h) {
     if (g_androidWindow && g_androidWindowWidth && g_androidWindowHeight) {
         w = g_androidWindowWidth;
         h = g_androidWindowHeight;
@@ -203,6 +253,26 @@ void surfaceSize(uint32_t& w, uint32_t& h) {
     h = 720;
     if (const char* e = getenv("WC3_DXVK_WIDTH"))  { if (atoi(e) > 0) w = uint32_t(atoi(e)); }
     if (const char* e = getenv("WC3_DXVK_HEIGHT")) { if (atoi(e) > 0) h = uint32_t(atoi(e)); }
+}
+
+void surfaceSize(uint32_t& w, uint32_t& h) {
+    std::lock_guard<std::mutex> lock(g_androidWindowMutex);
+    surfaceSizeLocked(w, h);
+}
+
+/* Guest render size: what GetClientRect, the fake monitor and the enumerated
+ * display modes report.  With a present target published this is the guest
+ * extent, so DXVK's present rectangle equals the guest image and its swapchain
+ * blitter copies instead of scaling.  Without one it is the surface size,
+ * which is the behaviour of a build without the present pass. */
+static void presentExtent(uint32_t& w, uint32_t& h) {
+    std::lock_guard<std::mutex> lock(g_androidWindowMutex);
+    if (g_presentWindow && g_presentWidth && g_presentHeight) {
+        w = g_presentWidth;
+        h = g_presentHeight;
+        return;
+    }
+    surfaceSizeLocked(w, h);
 }
 
 std::string wideToUtf8(const WCHAR* s) {
@@ -1401,7 +1471,7 @@ HWND     const kWindow  = (HWND)(intptr_t)1;
 
 void fillMonitorInfo(RECT& rcMonitor, RECT& rcWork, DWORD& flags) {
     uint32_t w, h;
-    surfaceSize(w, h);
+    presentExtent(w, h);
     rcMonitor.left = 0; rcMonitor.top = 0;
     rcMonitor.right = LONG(w); rcMonitor.bottom = LONG(h);
     rcWork = rcMonitor;
@@ -1465,7 +1535,7 @@ BOOL EnumDisplaySettingsA(LPCSTR /*device*/, DWORD /*mode*/, DEVMODEA* dm) {
     if (!dm) { SetLastError(87); return FALSE; }
 
     uint32_t w, h;
-    surfaceSize(w, h);
+    presentExtent(w, h);
 
     memset(dm, 0, sizeof(*dm));
     dm->dmSize = sizeof(*dm);
@@ -1560,7 +1630,7 @@ BOOL IsZoomed(HWND) { return FALSE; }
 BOOL GetClientRect(HWND, RECT* rc) {
     if (!rc) { SetLastError(87); return FALSE; }
     uint32_t w, h;
-    surfaceSize(w, h);
+    presentExtent(w, h);
     rc->left = 0; rc->top = 0; rc->right = LONG(w); rc->bottom = LONG(h);
     return TRUE;
 }

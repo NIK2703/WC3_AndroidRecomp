@@ -183,6 +183,53 @@ def test_cpu_helpers() -> int:
     return run([str(exe)])
 
 
+def test_grid_pattern() -> int:
+    """T0: half-resolution grid phase and darken mapping."""
+    cc = gcc()
+    if not cc:
+        print("grid pattern: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "grid_pattern_test.exe"
+    obj = BUILD / "grid_pattern_test.o"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "platform" / "android"),
+        "-c", str(ROOT / "tests" / "grid_pattern_test.c"),
+        "-o", str(obj),
+    ])
+    if rc != 0:
+        return rc
+    rc = run([cc, str(obj), "-o", str(exe)])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_present_scale() -> int:
+    """T0: integer factor, rectangle and crop of the present pass."""
+    cc = gcc()
+    if not cc:
+        print("present scale: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "present_scale_test.exe"
+    obj = BUILD / "present_scale_test.o"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "gfx" / "android"),
+        "-I" + str(ROOT / "runtime" / "platform" / "android"),
+        "-c", str(ROOT / "tests" / "present_scale_test.c"),
+        "-o", str(obj),
+    ])
+    if rc != 0:
+        return rc
+    rc = run([cc, str(obj), "-o", str(exe)])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
 def test_cpu_selftest() -> int:
     """T0: native x87 codec, BCD, environment, tags and rounding."""
     cc = gcc()
@@ -3140,7 +3187,6 @@ def test_game_state() -> int:
     rc = run([
         cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
         "-I" + str(ROOT / "runtime" / "ipc"),
-        "-I" + str(ROOT / "runtime" / "diag"),
         str(ROOT / "tests" / "game_state_test.c"),
         str(ROOT / "runtime" / "ipc" / "game_state.c"),
         "-o", str(exe),
@@ -3521,6 +3567,8 @@ def test_overlay() -> int:
 TESTS = {
     "cpu_helpers": test_cpu_helpers,
     "cpu_selftest": test_cpu_selftest,
+    "grid_pattern": test_grid_pattern,
+    "present_scale": test_present_scale,
     "hle_abi": test_hle_abi,
     "direct_call": test_direct_call,
     "direct_call_multi_tu": test_direct_call_multi_tu,

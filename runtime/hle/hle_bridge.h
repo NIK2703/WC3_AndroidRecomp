@@ -33,6 +33,13 @@ const char *wc3_legacy_hle_describe(uint32_t thunk);
  * no register file in the crash report.  Release compiles this to a no-op. */
 void        wc3_legacy_note_cpu(CPU *c);
 
+/* Debug-only target trace for an unknown dispatch.  Implemented by the
+ * as-built Android HLE when WC3_DEBUG && WC3_DEBUG_BATTLE_NET is on; the
+ * dispatcher only calls it under the same condition.  It reports the live
+ * VirtualAlloc range, the dynamic-exec range table, the bytes at the target,
+ * and the object passed in ECX (Warden's module/map object). */
+void        wc3_va_trace_target(uint32_t target, uint32_t obj);
+
 /* M5 strangler seam (H6.2/H6.3).  A target module installs its own handler over
  * an as-built table row while the as-built implementation is still linked.
  * The as-built row keeps argc and call convention, so the replacement must
@@ -114,6 +121,20 @@ void wc3_legacy_set_screen_size(uint32_t width, uint32_t height);
 int  wc3_legacy_current_display_mode(uint32_t *width, uint32_t *height);
 int  wc3_legacy_default_display_mode(uint32_t *width, uint32_t *height);
 int  wc3_legacy_select_display_mode(uint32_t width, uint32_t height);
+/* Half-aware USER32 change path: a non-half mode chosen at runtime disables
+ * the grid and retires the half present target before the mode is applied. */
+int  wc3_legacy_request_display_mode(uint32_t width, uint32_t height);
+/* Half-resolution grid rendering: call before set_screen_size so the default
+ * guest mode is half of the native one. */
+void wc3_legacy_set_half_resolution(int enabled);
+int  wc3_legacy_half_resolution(void);
+
+/* The guest changed resolution in its own Video options while the half grid
+ * was active.  The HLE has already retired the present target and turned the
+ * half flag off; the host callback receives the new guest extent, hides the
+ * grid layer and persists the option off.  It runs on the guest thread. */
+void wc3_legacy_set_grid_disabled_callback(void (*cb)(uint32_t width,
+                                                      uint32_t height));
 
 /* The as-built mode table, for USER32 display enumeration.  `display_mode_at`
  * returns the width/height of one entry; `display_mode_supported` says whether

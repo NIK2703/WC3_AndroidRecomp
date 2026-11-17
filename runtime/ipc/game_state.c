@@ -2,48 +2,6 @@
 
 #include <stdatomic.h>
 
-#include "wc3_debug.h"
-
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-#include <android/log.h>
-#define GAME_STATE_LOG(...) \
-    __android_log_print(ANDROID_LOG_INFO, "wc3state", __VA_ARGS__)
-#else
-#define GAME_STATE_LOG(...) ((void)0)
-#endif
-
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-static const char *hook_name(unsigned kind)
-{
-    switch (kind) {
-    case WC3_GAME_STATE_HOOK_CGAMEUI_CREATED:
-        return "cgameui_created";
-    case WC3_GAME_STATE_HOOK_CGAMEUI_SEEN:
-        return "cgameui_seen";
-    case WC3_GAME_STATE_HOOK_CGAMEUI_DESTROYED:
-        return "cgameui_destroyed";
-    case WC3_GAME_STATE_HOOK_PAUSE:
-        return "pause";
-    case WC3_GAME_STATE_HOOK_GAMEOVER:
-        return "gameover";
-    case WC3_GAME_STATE_HOOK_GAMEOVER_CLEARED:
-        return "gameover_cleared";
-    case WC3_GAME_STATE_HOOK_CINEMATIC_ENTER_TIMED:
-        return "cinematic_enter_timed";
-    case WC3_GAME_STATE_HOOK_CINEMATIC_ENTER_INSTANT:
-        return "cinematic_enter_instant";
-    case WC3_GAME_STATE_HOOK_CINEMATIC_LEAVE_TIMED:
-        return "cinematic_leave_timed";
-    case WC3_GAME_STATE_HOOK_CINEMATIC_LEAVE_INSTANT:
-        return "cinematic_leave_instant";
-    case WC3_GAME_STATE_HOOK_INTERFACE_TIMED_COMPLETE:
-        return "interface_timed_complete";
-    default:
-        return "unknown";
-    }
-}
-#endif
-
 static _Atomic uint32_t g_state_bits;
 static _Atomic(Wc3GameStateWake) g_wake;
 static _Atomic(void *) g_wake_user;
@@ -94,9 +52,6 @@ void wc3_game_state_set_wake(Wc3GameStateWake wake, void *user)
 
 void wc3_game_state_hook(unsigned kind, uint32_t value)
 {
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-    uint32_t before = wc3_game_state_get();
-#endif
     switch (kind) {
     case WC3_GAME_STATE_HOOK_CGAMEUI_CREATED:
         if (value) {
@@ -184,12 +139,4 @@ void wc3_game_state_hook(unsigned kind, uint32_t value)
     default:
         break;
     }
-
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-    {
-        uint32_t after = wc3_game_state_get();
-        GAME_STATE_LOG("hook %s(kind=%u) value=%u bits %08x -> %08x",
-                       hook_name(kind), kind, value, before, after);
-    }
-#endif
 }

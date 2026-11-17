@@ -1,5 +1,6 @@
 /* Fixed low-address guest mappings. See host.h. */
 #include "host.h"
+#include "guest_window.h"
 #include "wc3_debug.h"
 #include <stdio.h>
 #include <string.h>
@@ -226,6 +227,10 @@ int guest_commit(uint32_t base, uint32_t size) {
 #include <unistd.h>
 #include <errno.h>
 
+#ifndef MADV_DONTNEED
+#define MADV_DONTNEED 4
+#endif
+
 /* Which existing mapping is in the way.  A bare EEXIST from
  * MAP_FIXED_NOREPLACE says nothing, and the answer differs between a shell
  * process (where the whole low address space is empty) and an app process
@@ -250,7 +255,45 @@ void guest_describe_conflict(uint32_t base, uint32_t size) {
 #endif
 }
 
+/* VirtualAlloc makes every fresh MEM_COMMIT visible as zero-filled memory.
+ * The guest window is one long-lived anonymous mapping, so mapping a range
+ * only changes its protection: pages that were used and released earlier still
+ * hold their old bytes.  The Warden unpacker relies on the zero fill - its
+ * terminal 2-byte span at RVA 0x3078 would otherwise inherit the next two
+ * stale bytes and turn the export RVA 0x2532 into 0x00082532.
+ *
+ * MADV_DONTNEED keeps the zero fill lazy for the large Storm buffers.  It is
+ * only used for page-aligned requests so it cannot clear a neighbouring range;
+ * the memset fallback covers everything else. */
+static void guest_zero_fresh(uint32_t base, uint32_t size)
+{
+    if (!size) return;
+    long ps = sysconf(_SC_PAGESIZE);
+    size_t page = ps > 0 ? (size_t)ps : 4096u;
+    uint64_t mask = (uint64_t)page - 1u;
+    if (((uint64_t)base & mask) == 0 && ((uint64_t)size & mask) == 0) {
+        if (madvise(guest_host_ptr(base), size, MADV_DONTNEED) == 0)
+            return;
+    }
+    memset(guest_host_ptr(base), 0, size);
+}
+
 void *guest_map(uint32_t base, uint32_t size) {
+    if (wc3_guest_window_init() != 0) {
+        fprintf(stderr, "[mem] guest window init failed; map %08X+%X refused\n",
+                base, size);
+        return NULL;
+    }
+    if (wc3_guest_window_active()) {
+        if (wc3_guest_window_map(base, size) != 0) {
+            fprintf(stderr, "[mem] guest window map %08X+%X failed\n",
+                    base, size);
+            return NULL;
+        }
+        guest_zero_fresh(base, size);
+        return guest_host_ptr(base);
+    }
+
     void *want = (void *)(uintptr_t)base;
     void *p = mmap(want, size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
@@ -267,7 +310,12 @@ void *guest_map(uint32_t base, uint32_t size) {
     return p;
 }
 void guest_unmap(uint32_t base, uint32_t size) {
-    if (base) munmap((void *)(uintptr_t)base, size);
+    if (!base) return;
+    if (wc3_guest_window_active()) {
+        (void)wc3_guest_window_release(base, size);
+        return;
+    }
+    munmap((void *)(uintptr_t)base, size);
 }
 /* Commit a reserved range: Windows spells this MEM_COMMIT, POSIX spells it
  * mprotect.  It is not a no-op even though guest_map() maps RW, because the
@@ -276,6 +324,11 @@ void guest_unmap(uint32_t base, uint32_t size) {
  * an inaccessible page and the guest died on the first LockRect. */
 int guest_commit(uint32_t base, uint32_t size) {
     if (!base || !size) return 0;
+    if (wc3_guest_window_active()) {
+        if (wc3_guest_window_commit(base, size) != 0) return 0;
+        guest_range_add(base, size);
+        return 1;
+    }
     if (mprotect((void *)(uintptr_t)base, size, PROT_READ | PROT_WRITE) != 0)
         return 0;
     guest_range_add(base, size);

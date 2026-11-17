@@ -20,6 +20,10 @@
 #include "sha256.h"
 
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #include <direct.h>
 #define make_dir(p) _mkdir(p)
 #else
@@ -55,6 +59,15 @@ typedef struct {
     int reads_return_address;
     StrVec tail_targets;
     int tail_unknown;
+    /* Phase-A metadata: the cleanup performed by this function's normal
+     * return paths, and the value resolved through direct tail calls.  The
+     * value is the number of bytes removed from the caller's stack when
+     * control returns (return address plus stdcall arguments). */
+    int has_normal_ret;
+    int normal_cleanup_known;
+    long normal_cleanup;
+    int cleanup_known;
+    long cleanup;
 } FuncInfo;
 
 typedef struct {
@@ -122,6 +135,32 @@ typedef struct {
     char ret[9];
     char target[9];
 } CallSite;
+
+static FuncInfo *info_lookup(InfoVec *v, const char *va);
+
+/* Diagnostic counters for the call-aware stack analysis.  They are cheap
+ * increments and are printed only when WC3_RA_DIAG is set. */
+static unsigned long long ra_diag_calls_known;
+static unsigned long long ra_diag_calls_unknown;
+static unsigned long long ra_diag_calls_none;
+static unsigned long long ra_diag_pop0_known;
+static unsigned long long ra_diag_pop0_other;
+static unsigned long long ra_diag_popunk_known;
+static unsigned long long ra_diag_popunk_other;
+static unsigned long long ra_diag_cleanup_known;
+static unsigned long long ra_diag_cleanup_unknown;
+static int ra_diag_threaded;
+
+static void ra_diag_inc(unsigned long long *p)
+{
+#if defined(_WIN32)
+    if (ra_diag_threaded) {
+        InterlockedIncrement64((volatile LONG64 *)p);
+        return;
+    }
+#endif
+    (*p)++;
+}
 
 static void die(const char *msg)
 {
@@ -293,6 +332,7 @@ static FuncSpan *find_functions(const char *s, size_t n, size_t *out_n)
         char va[9];
         size_t end;
         if (s[i] != 'v') continue;
+        if (i != 0 && s[i - 1] != '\n') continue;
         end = function_header_at(s, n, i, va);
         if (!end) continue;
         if (count == cap) {
@@ -310,45 +350,38 @@ static FuncSpan *find_functions(const char *s, size_t n, size_t *out_n)
     return v;
 }
 
-static char *sub_block_comments(const char *s, size_t n)
+/* Strip comments and string contents in place.  The analysis only needs the
+ * normalized line, so three temporary copies per source line were pure
+ * allocation and copy overhead.  The order matches the old helpers: block
+ * comments, then line comments, then string literals. */
+static void clean_line_inplace(char *s)
 {
-    Buf b = {0};
-    size_t i = 0;
+    size_t i, w, n = strlen(s);
+
+    i = w = 0;
     while (i < n) {
         if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
             size_t j = i + 2;
-            size_t end;
             while (j + 1 < n && !(s[j] == '*' && s[j + 1] == '/')) j++;
-            end = (j + 1 < n) ? j + 2 : n;
-            buf_ch(&b, ' ');
-            i = end;
+            i = (j + 1 < n) ? j + 2 : n;
+            s[w++] = ' ';
         } else {
-            buf_ch(&b, s[i]);
-            i++;
+            s[w++] = s[i++];
         }
     }
-    return buf_take(&b);
-}
+    s[w] = '\0';
+    n = w;
 
-static char *sub_line_comments(const char *s, size_t n)
-{
-    Buf b = {0};
-    size_t i = 0;
-    while (i < n) {
-        if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
-            buf_ch(&b, ' ');
+    for (i = 0; i + 1 < n; i++) {
+        if (s[i] == '/' && s[i + 1] == '/') {
+            s[i] = ' ';
+            s[i + 1] = '\0';
+            n = i + 1;
             break;
         }
-        buf_ch(&b, s[i]);
-        i++;
     }
-    return buf_take(&b);
-}
 
-static char *sub_strings(const char *s, size_t n)
-{
-    Buf b = {0};
-    size_t i = 0;
+    i = w = 0;
     while (i < n) {
         if (s[i] == '"') {
             size_t j = i + 1;
@@ -364,25 +397,15 @@ static char *sub_strings(const char *s, size_t n)
                 j++;
             }
             if (j <= n && j > i + 1) {
-                buf_str(&b, "\"\"");
+                s[w++] = '"';
+                s[w++] = '"';
                 i = j;
                 continue;
             }
         }
-        buf_ch(&b, s[i]);
-        i++;
+        s[w++] = s[i++];
     }
-    return buf_take(&b);
-}
-
-static char *clean_line(const char *s, size_t n)
-{
-    char *a = sub_block_comments(s, n);
-    char *b = sub_line_comments(a, strlen(a));
-    char *c = sub_strings(b, strlen(b));
-    free(a);
-    free(b);
-    return c;
+    s[w] = '\0';
 }
 
 static char *collapse_ws(const char *s, size_t n)
@@ -407,13 +430,13 @@ static char *collapse_ws(const char *s, size_t n)
 
 static char *normalize_body(const char *s, size_t n)
 {
-    char *a = sub_block_comments(s, n);
-    char *b = sub_line_comments(a, strlen(a));
-    char *c = sub_strings(b, strlen(b));
-    char *out = collapse_ws(c, strlen(c));
-    free(a);
-    free(b);
-    free(c);
+    char *tmp = (char *)xrealloc(NULL, n + 1);
+    char *out;
+    memcpy(tmp, s, n);
+    tmp[n] = '\0';
+    clean_line_inplace(tmp);
+    out = collapse_ws(tmp, strlen(tmp));
+    free(tmp);
     return out;
 }
 
@@ -467,6 +490,7 @@ static int word_at(const char *s, size_t n, size_t p, const char *w,
                    size_t *end)
 {
     size_t m = strlen(w);
+    if (p >= n || s[p] != w[0]) return 0;
     if (p + m > n) return 0;
     if (memcmp(s + p, w, m) != 0) return 0;
     if (p > 0 && is_word((unsigned char)s[p - 1])) return 0;
@@ -675,6 +699,28 @@ static int find_esp_op(const char *s, size_t n, const char *op,
             return 1;
         }
         p++;
+    }
+    return 0;
+}
+
+/* Parse the epilogue form `c->esp += N; ... return;` on one line.  The
+ * value is the number of bytes the lifted `ret` removes (return address and,
+ * for stdcall, the arguments).  A line without a literal `+= N` is not a
+ * clean ret and must keep the callee's cleanup unknown. */
+static int parse_ret_cleanup(const char *s, size_t n, long *value)
+{
+    size_t p = 0;
+    while (p < n) {
+        size_t e, i, st, en;
+        long v;
+        if (!word_at(s, n, p, "return", &e)) { p++; continue; }
+        i = skip_ws(s, n, e);
+        if (i >= n || s[i] != ';') { p++; continue; }
+        if (find_esp_op(s, p, "+=", &st, &v, &en)) {
+            *value = v;
+            return 1;
+        }
+        return 0;
     }
     return 0;
 }
@@ -1007,6 +1053,128 @@ static int collect_dispatch_tails(const char *s, size_t n, StrVec *out)
     return (int)(out->n - before);
 }
 
+/* Net stack effect of the calls on one generated line.
+ *
+ * Returns 0 when the line has no call, 1 when it has exactly one direct call
+ * whose target has a resolved `ret` cleanup, and -1 when the line must reset
+ * the stack state (indirect/HLE/tail call, unknown target, several calls).
+ * The cleanup is the number of bytes the callee's `ret` removes: the return
+ * address plus stdcall arguments.  The caller's explicit cdecl argument
+ * cleanup is a separate `c->esp += N` and is already tracked by the analyzer. */
+static int line_call_cleanup(const char *s, size_t n,
+                             const InfoVec *cleanup, long *out)
+{
+    size_t p = 0;
+    int ncalls = 0, unknown = 0;
+    long total = 0;
+    while (p < n) {
+        size_t start, end, i;
+        int kind = 0;
+        if (!(isalpha((unsigned char)s[p]) || s[p] == '_')) { p++; continue; }
+        start = p;
+        p++;
+        while (p < n && is_word((unsigned char)s[p])) p++;
+        end = p;
+        if (end - start == 8 && memcmp(s + start, "dispatch", 8) == 0) {
+            kind = 1;
+        } else if (end - start == 12 &&
+                   memcmp(s + start, "dispatch_jmp", 12) == 0) {
+            kind = 2;
+        } else if (end - start == 15 &&
+                   memcmp(s + start, "WC3_DIRECT_TAIL", 15) == 0) {
+            kind = 2;
+        } else if (end - start >= 15 &&
+                   memcmp(s + start, "WC3_DIRECT_CALL", 15) == 0 &&
+                   (end - start == 15 || s[start + 15] == '_')) {
+            kind = 3;
+        } else if ((end - start == 19 &&
+                    memcmp(s + start, "wc3_legacy_hle_call", 19) == 0) ||
+                   (end - start == 8 &&
+                    memcmp(s + start, "hle_call", 8) == 0) ||
+                   (end - start >= 4 &&
+                    memcmp(s + start, "hle_", 4) == 0)) {
+            kind = 4;
+        }
+        if (!kind) continue;
+        i = skip_ws(s, n, end);
+        if (i >= n || s[i] != '(') continue;
+        ncalls++;
+        if (kind == 2 || kind == 4) { unknown = 1; continue; }
+        if (kind == 1) {
+            i = skip_ws(s, n, i + 1);
+            if (i >= n || s[i] != 'c') { unknown = 1; continue; }
+            i = skip_ws(s, n, i + 1);
+            if (i >= n || s[i] != ',') { unknown = 1; continue; }
+            i = skip_ws(s, n, i + 1);
+            if (i + 2 <= n && s[i] == '0' &&
+                (s[i + 1] == 'x' || s[i + 1] == 'X')) {
+                char va[9];
+                size_t z;
+                i += 2;
+                if (hex8_at(s, n, i, va)) {
+                    i += 8;
+                    z = skip_ws(s, n, i);
+                    if (z < n && (s[z] == 'u' || s[z] == 'U')) z++;
+                    z = skip_ws(s, n, z);
+                    if (z < n && s[z] == ')') {
+                        unsigned long t = strtoul(va, NULL, 16);
+                        FuncInfo *f = NULL;
+                        if (t >= HLE_LO && t < HLE_HI) {
+                            unknown = 1;
+                        } else if (cleanup != NULL) {
+                            f = info_lookup((InfoVec *)cleanup, va);
+                        }
+                        if (f != NULL && f->cleanup_known) {
+                            total += f->cleanup;
+                        } else {
+                            unknown = 1;
+                        }
+                        p = z + 1;
+                        continue;
+                    }
+                }
+            }
+            unknown = 1;
+            continue;
+        }
+        if (kind == 3) {
+            char va[9];
+            i = skip_ws(s, n, i + 1);
+            if (i + 2 > n || s[i] != 'L' || s[i + 1] != '_') {
+                unknown = 1;
+                continue;
+            }
+            i += 2;
+            if (!hex8_at(s, n, i, va)) { unknown = 1; continue; }
+            i += 8;
+            i = skip_ws(s, n, i);
+            if (i >= n || s[i] != ',') { unknown = 1; continue; }
+            i = skip_ws(s, n, i + 1);
+            if (i >= n || s[i] != 'c') { unknown = 1; continue; }
+            i = skip_ws(s, n, i + 1);
+            if (i >= n || s[i] != ')') { unknown = 1; continue; }
+            {
+                FuncInfo *f = cleanup ? info_lookup((InfoVec *)cleanup, va) : NULL;
+                if (f != NULL && f->cleanup_known) total += f->cleanup;
+                else unknown = 1;
+            }
+            p = i + 1;
+            continue;
+        }
+    }
+    if (ncalls == 0) {
+        ra_diag_inc(&ra_diag_calls_none);
+        return 0;
+    }
+    if (unknown || ncalls != 1) {
+        ra_diag_inc(&ra_diag_calls_unknown);
+        return -1;
+    }
+    ra_diag_inc(&ra_diag_calls_known);
+    *out = total;
+    return 1;
+}
+
 static int find_goto(const char *s, size_t n, char **out)
 {
     size_t p = 0;
@@ -1163,8 +1331,9 @@ static long match_end(size_t i, size_t n, const int *depth_before,
 }
 
 static void analyze_body(const char *body, size_t body_len,
-                         const char *va, int *out_unsafe,
-                         StrVec *out_tails, int *out_tail_unknown)
+                         const char *va, const InfoVec *cleanup,
+                         int *out_unsafe, StrVec *out_tails,
+                         int *out_tail_unknown)
 {
     size_t n = 0, i;
     char **raw = split_lines(body, body_len, &n);
@@ -1175,17 +1344,20 @@ static void analyze_body(const char *body, size_t body_len,
     long *ebp_writes = NULL;
     size_t nebp = 0, capebp = 0;
     long prologue = -1;
+    int prologue_ok = 0;
+    int frame_rel_set = 0;
     long frame_rel = LONG_MIN;
     StateSet *states = NULL;
     long *work = NULL;
     size_t nwork = 0;
     int unsafe = 0, tail_unknown = 0;
+    int saw_known_call = 0;
     StrVec tails = {0};
     int depth = 0;
 
     for (i = 0; i < n; i++) {
-        lines[i] = clean_line(raw[i], strlen(raw[i]));
-        free(raw[i]);
+        clean_line_inplace(raw[i]);
+        lines[i] = raw[i];
     }
     free(raw);
     if (n == 0) {
@@ -1258,12 +1430,7 @@ static void analyze_body(const char *body, size_t body_len,
                 break;
             }
         }
-        if (!others) {
-            long rel = 0;
-            for (k = 0; k < (size_t)prologue; k++)
-                if (strstr(lines[k], "push32") != NULL) rel -= 4;
-            frame_rel = rel;
-        }
+        if (!others) prologue_ok = 1;
     }
 
     states = (StateSet *)xrealloc(NULL, n * sizeof(*states));
@@ -1351,8 +1518,22 @@ static void analyze_body(const char *body, size_t body_len,
             }
 
             if (find_pop32(rest, strlen(rest), 0, &push_start, &push_end)) {
-                if (delta == LONG_MIN || delta == 0) unsafe = 1;
-                else delta += 4;
+                if (delta == LONG_MIN || delta == 0) {
+                    if (delta == 0) {
+                        if (saw_known_call)
+                            ra_diag_inc(&ra_diag_pop0_known);
+                        else
+                            ra_diag_inc(&ra_diag_pop0_other);
+                    } else {
+                        if (saw_known_call)
+                            ra_diag_inc(&ra_diag_popunk_known);
+                        else
+                            ra_diag_inc(&ra_diag_popunk_other);
+                    }
+                    unsafe = 1;
+                } else {
+                    delta += 4;
+                }
             }
 
             if (find_esp_op(rest, strlen(rest), "+=", &op_start, &add,
@@ -1387,6 +1568,14 @@ static void analyze_body(const char *body, size_t body_len,
                 rest = tmp;
             }
 
+            if (li == prologue && prologue_ok) {
+                if (!frame_rel_set) {
+                    frame_rel = (delta == LONG_MIN) ? LONG_MIN : delta;
+                    frame_rel_set = 1;
+                } else if (delta == LONG_MIN || frame_rel != delta) {
+                    frame_rel = LONG_MIN;
+                }
+            }
             if (li == prologue) {
                 tmp = replace_literal(rest, strlen(rest), "c->esp");
                 free(rest);
@@ -1394,7 +1583,18 @@ static void analyze_body(const char *body, size_t body_len,
             }
             if (strstr(rest, "c->esp") != NULL) unsafe = 1;
 
-            if (has_call(line, strlen(line))) delta = LONG_MIN;
+            {
+                long call_cleanup = 0;
+                int call_kind = line_call_cleanup(line, strlen(line),
+                                                  cleanup, &call_cleanup);
+                if (call_kind < 0) {
+                    delta = LONG_MIN;
+                    saw_known_call = 0;
+                } else if (call_kind > 0) {
+                    saw_known_call = 1;
+                    if (delta != LONG_MIN) delta += call_cleanup;
+                }
+            }
 
             if (has_ebp_assign(rest, strlen(rest))) {
                 if (li == prologue) {
@@ -1526,6 +1726,103 @@ static void analyze_body(const char *body, size_t body_len,
     *out_tail_unknown = tail_unknown;
 }
 
+/* Parse only the return-cleanup metadata of a function.  A normal `ret`
+ * removes a fixed number of bytes (return address plus stdcall arguments);
+ * a tail call removes whatever the ultimate tail target's `ret` removes.
+ * Anything that cannot be resolved to exactly one value keeps the summary
+ * unknown, which makes the caller-side analysis fall back to the old
+ * conservative `delta = unknown` rule. */
+static void analyze_meta(const char *body, size_t body_len,
+                         int *out_has_normal, int *out_normal_known,
+                         long *out_normal_cleanup, StrVec *out_tails,
+                         int *out_tail_unknown)
+{
+    size_t n = 0, i;
+    char **raw = split_lines(body, body_len, &n);
+    char **lines = (char **)xrealloc(NULL, (n ? n : 1) * sizeof(*lines));
+    StrVec tails = {0};
+    int has_normal = 0, normal_have = 0, normal_bad = 0;
+    long normal_val = 0;
+    int tail_unknown = 0, tail_pending = 0;
+
+    for (i = 0; i < n; i++) {
+        clean_line_inplace(raw[i]);
+        lines[i] = raw[i];
+    }
+    free(raw);
+
+    for (i = 0; i < n; i++) {
+        const char *line = lines[i];
+        size_t len = strlen(line);
+        size_t before = tails.n;
+        int nd, nj, has_djmp, line_has_tail, line_has_return;
+        size_t r;
+
+        nd = collect_direct_tails(line, len, &tails);
+        nj = collect_dispatch_tails(line, len, &tails);
+        has_djmp = has_dispatch_jmp(line, len);
+        for (r = before; r < tails.n; r++) {
+            unsigned long t = strtoul(tails.v[r], NULL, 16);
+            if (t >= HLE_LO && t < HLE_HI) {
+                tail_unknown = 1;
+                free(tails.v[r]);
+                memmove(&tails.v[r], &tails.v[r + 1],
+                        (tails.n - r - 1) * sizeof(*tails.v));
+                tails.n--;
+                r--;
+            }
+        }
+        if (has_djmp && nd + nj == 0) tail_unknown = 1;
+        if (strstr(line, "WC3_DIRECT_TAIL(") != NULL && nd == 0)
+            tail_unknown = 1;
+
+        line_has_tail = (nd + nj > 0) || has_djmp ||
+                        strstr(line, "WC3_DIRECT_TAIL(") != NULL;
+        line_has_return = strstr(line, "return;") != NULL;
+
+        if (line_has_tail) {
+            /* A tail does not return through this function's own `ret`; its
+             * cleanup follows the tail target. */
+            if (!line_has_return) tail_pending = 1;
+            else tail_pending = 0;
+            continue;
+        }
+        if (line_has_return) {
+            if (tail_pending) {
+                tail_pending = 0;
+            } else {
+                long v;
+                has_normal = 1;
+                if (parse_ret_cleanup(line, len, &v)) {
+                    if (!normal_have) {
+                        normal_have = 1;
+                        normal_val = v;
+                    } else if (normal_val != v) {
+                        normal_bad = 1;
+                    }
+                } else {
+                    normal_bad = 1;
+                }
+            }
+            continue;
+        }
+        if (tail_pending) {
+            const char *q = line;
+            while (*q && isspace((unsigned char)*q)) q++;
+            if (*q && strcmp(q, "}") != 0) tail_pending = 0;
+        }
+    }
+
+    for (i = 0; i < n; i++) free(lines[i]);
+    free(lines);
+
+    *out_has_normal = has_normal;
+    *out_normal_known = has_normal && normal_have && !normal_bad;
+    *out_normal_cleanup = normal_val;
+    *out_tails = tails;
+    *out_tail_unknown = tail_unknown;
+}
+
 /* ---- function index and closure -------------------------------------- */
 
 static void info_free(FuncInfo *f)
@@ -1562,7 +1859,8 @@ static FuncInfo *info_lookup(InfoVec *v, const char *va)
     return NULL;
 }
 
-static InfoVec index_functions(const char *text, size_t n)
+static InfoVec index_functions(const char *text, size_t n,
+                               const InfoVec *cleanup)
 {
     InfoVec v = {0};
     size_t nspans = 0, i;
@@ -1577,7 +1875,8 @@ static InfoVec index_functions(const char *text, size_t n)
         memcpy(f->va, spans[i].va, 9);
         f->body = xstrndup(text + spans[i].start, len);
         f->body_len = len;
-        analyze_body(f->body, len, f->va, &f->reads_return_address,
+        analyze_body(f->body, len, f->va, cleanup,
+                     &f->reads_return_address,
                      &f->tail_targets, &f->tail_unknown);
         v.n++;
     }
@@ -1598,6 +1897,115 @@ static InfoVec index_functions(const char *text, size_t n)
         v.n = w;
     }
     return v;
+}
+
+/* Phase-A metadata pass: extract bodies, but keep only the return-cleanup
+ * summary and tail targets.  Bodies are freed immediately so the whole
+ * 202k-function corpus fits in memory. */
+static InfoVec index_meta(const char *text, size_t n)
+{
+    InfoVec v = {0};
+    size_t nspans = 0, i;
+    FuncSpan *spans = find_functions(text, n, &nspans);
+    v.v = (FuncInfo *)xrealloc(NULL, (nspans ? nspans : 1) * sizeof(*v.v));
+    v.cap = nspans ? nspans : 1;
+    for (i = 0; i < nspans; i++) {
+        FuncInfo *f = &v.v[v.n];
+        size_t len = spans[i].end - spans[i].start;
+        memset(f, 0, sizeof(*f));
+        memcpy(f->va, spans[i].va, 9);
+        f->body = xstrndup(text + spans[i].start, len);
+        f->body_len = len;
+        analyze_meta(f->body, len, &f->has_normal_ret,
+                     &f->normal_cleanup_known, &f->normal_cleanup,
+                     &f->tail_targets, &f->tail_unknown);
+        free(f->body);
+        f->body = NULL;
+        f->body_len = 0;
+        v.n++;
+    }
+    free(spans);
+    qsort(v.v, v.n, sizeof(*v.v), cmp_info);
+    {
+        size_t w = 0;
+        for (i = 0; i < v.n; i++) {
+            if (w > 0 && strcmp(v.v[w - 1].va, v.v[i].va) == 0) {
+                FuncInfo *keep = &v.v[w - 1];
+                FuncInfo *dup = &v.v[i];
+                size_t k;
+                if (dup->has_normal_ret) {
+                    if (!keep->has_normal_ret) {
+                        keep->has_normal_ret = 1;
+                        keep->normal_cleanup_known = dup->normal_cleanup_known;
+                        keep->normal_cleanup = dup->normal_cleanup;
+                    } else if (!keep->normal_cleanup_known ||
+                               !dup->normal_cleanup_known ||
+                               keep->normal_cleanup != dup->normal_cleanup) {
+                        keep->normal_cleanup_known = 0;
+                    }
+                }
+                if (dup->tail_unknown) keep->tail_unknown = 1;
+                for (k = 0; k < dup->tail_targets.n; k++)
+                    strvec_push(&keep->tail_targets,
+                                dup->tail_targets.v[k]);
+                info_free(dup);
+                continue;
+            }
+            if (w != i) v.v[w] = v.v[i];
+            w++;
+        }
+        v.n = w;
+    }
+    return v;
+}
+
+/* Resolve each function's `ret` cleanup through tail calls.  A function is
+ * resolved only when every normal return path and every tail path agrees on
+ * one value; cycles, unknown tails and HLE tails stay unknown. */
+static void compute_cleanup_closures(InfoVec *infos)
+{
+    int changed = 1;
+    size_t i;
+    for (i = 0; i < infos->n; i++) {
+        infos->v[i].cleanup_known = 0;
+        infos->v[i].cleanup = 0;
+    }
+    while (changed) {
+        changed = 0;
+        for (i = 0; i < infos->n; i++) {
+            FuncInfo *f = &infos->v[i];
+            int unknown = f->tail_unknown;
+            int have = 0;
+            long val = 0;
+            size_t k;
+            if (f->cleanup_known) continue;
+            if (f->has_normal_ret) {
+                if (!f->normal_cleanup_known) {
+                    unknown = 1;
+                } else {
+                    have = 1;
+                    val = f->normal_cleanup;
+                }
+            }
+            for (k = 0; k < f->tail_targets.n && !unknown; k++) {
+                FuncInfo *t = info_lookup(infos, f->tail_targets.v[k]);
+                if (t == NULL || !t->cleanup_known) {
+                    unknown = 1;
+                    break;
+                }
+                if (!have) {
+                    have = 1;
+                    val = t->cleanup;
+                } else if (val != t->cleanup) {
+                    unknown = 1;
+                }
+            }
+            if (unknown || !have) continue;
+            f->cleanup = val;
+            f->cleanup_known = 1;
+            changed = 1;
+        }
+    }
 }
 
 static void compute_tail_closures(InfoVec *infos)
@@ -1769,32 +2177,300 @@ static int write_index(const char *path, InfoVec *infos)
     return 0;
 }
 
+typedef void (*IndexTaskFn)(size_t index, void *ctx);
+
+typedef struct {
+    size_t n;
+    size_t next;
+    IndexTaskFn fn;
+    void *ctx;
+#if defined(_WIN32)
+    CRITICAL_SECTION lock;
+#endif
+} IndexWork;
+
+#if defined(_WIN32)
+static DWORD WINAPI index_worker(LPVOID arg)
+{
+    IndexWork *w = (IndexWork *)arg;
+    for (;;) {
+        size_t i;
+        EnterCriticalSection(&w->lock);
+        i = w->next;
+        if (i < w->n) w->next = i + 1;
+        LeaveCriticalSection(&w->lock);
+        if (i >= w->n) break;
+        w->fn(i, w->ctx);
+    }
+    return 0;
+}
+#endif
+
+/* The per-file work is independent until the final merge/sort.  Four workers
+ * turn the two full-corpus scans into the dominant-but-bounded part of a
+ * configure instead of a single-threaded 50 s stall. */
+static void index_parallel_for(size_t n, IndexTaskFn fn, void *ctx)
+{
+#if defined(_WIN32)
+    SYSTEM_INFO si;
+    unsigned jobs, created = 0, i;
+    HANDLE threads[8];
+    IndexWork w;
+
+    GetSystemInfo(&si);
+    jobs = si.dwNumberOfProcessors;
+    if (jobs < 1) jobs = 1;
+    if (jobs > 8) jobs = 8;
+    if (jobs > n) jobs = (unsigned)n;
+    if (jobs <= 1) {
+        for (i = 0; i < n; i++) fn(i, ctx);
+        return;
+    }
+    memset(&w, 0, sizeof(w));
+    w.n = n;
+    w.fn = fn;
+    w.ctx = ctx;
+    InitializeCriticalSection(&w.lock);
+    for (i = 0; i < jobs; i++) {
+        threads[created] = CreateThread(NULL, 0, index_worker, &w, 0, NULL);
+        if (threads[created]) created++;
+        else break;
+    }
+    if (created == 0) {
+        DeleteCriticalSection(&w.lock);
+        for (i = 0; i < n; i++) fn(i, ctx);
+        return;
+    }
+    WaitForMultipleObjects(created, threads, TRUE, INFINITE);
+    for (i = 0; i < created; i++) CloseHandle(threads[i]);
+    DeleteCriticalSection(&w.lock);
+#else
+    size_t i;
+    for (i = 0; i < n; i++) fn(i, ctx);
+#endif
+}
+
+static void dedup_meta_infos(InfoVec *v)
+{
+    size_t i, w = 0;
+    for (i = 0; i < v->n; i++) {
+        if (w > 0 && strcmp(v->v[w - 1].va, v->v[i].va) == 0) {
+            FuncInfo *keep = &v->v[w - 1];
+            FuncInfo *dup = &v->v[i];
+            size_t k;
+            if (dup->has_normal_ret) {
+                if (!keep->has_normal_ret) {
+                    keep->has_normal_ret = 1;
+                    keep->normal_cleanup_known =
+                        dup->normal_cleanup_known;
+                    keep->normal_cleanup = dup->normal_cleanup;
+                } else if (!keep->normal_cleanup_known ||
+                           !dup->normal_cleanup_known ||
+                           keep->normal_cleanup != dup->normal_cleanup) {
+                    keep->normal_cleanup_known = 0;
+                }
+            }
+            if (dup->tail_unknown) keep->tail_unknown = 1;
+            for (k = 0; k < dup->tail_targets.n; k++)
+                strvec_push(&keep->tail_targets,
+                            dup->tail_targets.v[k]);
+            info_free(dup);
+            continue;
+        }
+        if (w != i) v->v[w] = v->v[i];
+        w++;
+    }
+    v->n = w;
+}
+
+static void dedup_func_infos(InfoVec *v)
+{
+    size_t i, w = 0;
+    for (i = 0; i < v->n; i++) {
+        if (w > 0 && strcmp(v->v[w - 1].va, v->v[i].va) == 0) {
+            FuncInfo *keep = &v->v[w - 1];
+            FuncInfo *dup = &v->v[i];
+            size_t k;
+            if (dup->reads_return_address) keep->reads_return_address = 1;
+            if (dup->tail_unknown) keep->tail_unknown = 1;
+            for (k = 0; k < dup->tail_targets.n; k++)
+                strvec_push(&keep->tail_targets, dup->tail_targets.v[k]);
+            info_free(dup);
+            continue;
+        }
+        if (w != i) v->v[w] = v->v[i];
+        w++;
+    }
+    v->n = w;
+}
+
+typedef struct {
+    const char *text;
+    const FuncSpan *spans;
+    FuncInfo *out;
+} MetaSpanCtx;
+
+static void meta_span_task(size_t i, void *p)
+{
+    MetaSpanCtx *c = (MetaSpanCtx *)p;
+    FuncInfo *f = &c->out[i];
+    size_t len = c->spans[i].end - c->spans[i].start;
+    memset(f, 0, sizeof(*f));
+    memcpy(f->va, c->spans[i].va, 9);
+    analyze_meta(c->text + c->spans[i].start, len,
+                 &f->has_normal_ret,
+                 &f->normal_cleanup_known,
+                 &f->normal_cleanup,
+                 &f->tail_targets,
+                 &f->tail_unknown);
+}
+
+static InfoVec index_meta_parallel(const char *text, size_t n)
+{
+    InfoVec v = {0};
+    size_t nspans = 0;
+    FuncSpan *spans = find_functions(text, n, &nspans);
+    MetaSpanCtx ctx;
+
+    v.v = (FuncInfo *)xrealloc(NULL, (nspans ? nspans : 1) *
+                               sizeof(*v.v));
+    v.cap = nspans ? nspans : 1;
+    memset(v.v, 0, v.cap * sizeof(*v.v));
+    ctx.text = text;
+    ctx.spans = spans;
+    ctx.out = v.v;
+    index_parallel_for(nspans, meta_span_task, &ctx);
+    v.n = nspans;
+    free(spans);
+    if (v.n > 1) qsort(v.v, v.n, sizeof(*v.v), cmp_info);
+    dedup_meta_infos(&v);
+    return v;
+}
+
+typedef struct {
+    const char *text;
+    const FuncSpan *spans;
+    FuncInfo *out;
+    const InfoVec *cleanup;
+} FuncSpanCtx;
+
+static void func_span_task(size_t i, void *p)
+{
+    FuncSpanCtx *c = (FuncSpanCtx *)p;
+    FuncInfo *f = &c->out[i];
+    size_t len = c->spans[i].end - c->spans[i].start;
+    memset(f, 0, sizeof(*f));
+    memcpy(f->va, c->spans[i].va, 9);
+    analyze_body(c->text + c->spans[i].start, len, f->va, c->cleanup,
+                 &f->reads_return_address,
+                 &f->tail_targets, &f->tail_unknown);
+}
+
+static InfoVec index_functions_parallel(const char *text, size_t n,
+                                        const InfoVec *cleanup)
+{
+    InfoVec v = {0};
+    size_t nspans = 0;
+    FuncSpan *spans = find_functions(text, n, &nspans);
+    FuncSpanCtx ctx;
+
+    v.v = (FuncInfo *)xrealloc(NULL, (nspans ? nspans : 1) *
+                               sizeof(*v.v));
+    v.cap = nspans ? nspans : 1;
+    memset(v.v, 0, v.cap * sizeof(*v.v));
+    ctx.text = text;
+    ctx.spans = spans;
+    ctx.out = v.v;
+    ctx.cleanup = cleanup;
+    index_parallel_for(nspans, func_span_task, &ctx);
+    v.n = nspans;
+    free(spans);
+    if (v.n > 1) qsort(v.v, v.n, sizeof(*v.v), cmp_info);
+    dedup_func_infos(&v);
+    return v;
+}
+
 /* Phase A: analyze every function of every input, run one global tail
  * closure, and write the compact safety map.  Bodies are dropped right after
  * analysis so a multi-hundred-MB module can be indexed in one process. */
 static int build_index(char **inputs, size_t ninputs, const char *out)
 {
+    InfoVec meta = {0};
     InfoVec all = {0};
     size_t i, unsafe = 0;
+
+    /* Pass 1: collect ret-cleanup summaries for every function before
+     * analyzing any caller.  A direct call's stack effect depends on the
+     * callee's `ret`, which may live in another chunk or module. */
     for (i = 0; i < ninputs; i++) {
-        size_t n = 0, k;
+        size_t n = 0;
         char *text = slurp_file(inputs[i], &n);
-        InfoVec part = index_functions(text, n);
+        InfoVec part = index_meta_parallel(text, n);
         free(text);
-        for (k = 0; k < part.n; k++) {
-            free(part.v[k].body);
-            part.v[k].body = NULL;
-            part.v[k].body_len = 0;
-        }
         if (part.n) {
-            all.v = (FuncInfo *)xrealloc(all.v,
-                                         (all.n + part.n) * sizeof(*all.v));
+            meta.v = (FuncInfo *)xrealloc(
+                meta.v, (meta.n + part.n) * sizeof(*meta.v));
+            memcpy(meta.v + meta.n, part.v, part.n * sizeof(*part.v));
+            meta.n += part.n;
+        }
+        meta.cap = meta.n;
+        free(part.v);
+    }
+    if (meta.n > 1) qsort(meta.v, meta.n, sizeof(*meta.v), cmp_info);
+    {
+        size_t w = 0;
+        for (i = 0; i < meta.n; i++) {
+            if (w > 0 && strcmp(meta.v[w - 1].va, meta.v[i].va) == 0) {
+                FuncInfo *keep = &meta.v[w - 1];
+                FuncInfo *dup = &meta.v[i];
+                size_t k;
+                if (dup->has_normal_ret) {
+                    if (!keep->has_normal_ret) {
+                        keep->has_normal_ret = 1;
+                        keep->normal_cleanup_known =
+                            dup->normal_cleanup_known;
+                        keep->normal_cleanup = dup->normal_cleanup;
+                    } else if (!keep->normal_cleanup_known ||
+                               !dup->normal_cleanup_known ||
+                               keep->normal_cleanup != dup->normal_cleanup) {
+                        keep->normal_cleanup_known = 0;
+                    }
+                }
+                if (dup->tail_unknown) keep->tail_unknown = 1;
+                for (k = 0; k < dup->tail_targets.n; k++)
+                    strvec_push(&keep->tail_targets,
+                                dup->tail_targets.v[k]);
+                info_free(dup);
+                continue;
+            }
+            if (w != i) meta.v[w] = meta.v[i];
+            w++;
+        }
+        meta.n = w;
+    }
+    compute_cleanup_closures(&meta);
+    for (i = 0; i < meta.n; i++) {
+        if (meta.v[i].cleanup_known) ra_diag_cleanup_known++;
+        else ra_diag_cleanup_unknown++;
+    }
+
+    /* Pass 2: analyze each body with the global cleanup map. */
+    ra_diag_threaded = 1;
+    for (i = 0; i < ninputs; i++) {
+        size_t n = 0;
+        char *text = slurp_file(inputs[i], &n);
+        InfoVec part = index_functions_parallel(text, n, &meta);
+        free(text);
+        if (part.n) {
+            all.v = (FuncInfo *)xrealloc(
+                all.v, (all.n + part.n) * sizeof(*all.v));
             memcpy(all.v + all.n, part.v, part.n * sizeof(*part.v));
             all.n += part.n;
         }
         all.cap = all.n;
         free(part.v);
     }
+    ra_diag_threaded = 0;
     if (all.n > 1) qsort(all.v, all.n, sizeof(*all.v), cmp_info);
     /* Merge duplicate VAs conservatively: either body reading the slot or an
      * unresolved tail makes the summary unsafe.  The corpus is expected to be
@@ -1825,6 +2501,17 @@ static int build_index(char **inputs, size_t ninputs, const char *out)
     if (i == 0)
         printf("return_address_elide: indexed %zu function(s), %zu unsafe\n",
                all.n, unsafe);
+    if (getenv("WC3_RA_DIAG") != NULL) {
+        fprintf(stderr,
+                "return_address_elide diag: cleanup known=%llu unknown=%llu; "
+                "call lines known=%llu unknown=%llu none=%llu; "
+                "pop0 known=%llu other=%llu; popunknown known=%llu other=%llu\n",
+                ra_diag_cleanup_known, ra_diag_cleanup_unknown,
+                ra_diag_calls_known, ra_diag_calls_unknown,
+                ra_diag_calls_none, ra_diag_pop0_known, ra_diag_pop0_other,
+                ra_diag_popunk_known, ra_diag_popunk_other);
+    }
+    infovec_free(&meta);
     infovec_free(&all);
     return (int)i;
 }
@@ -2110,6 +2797,8 @@ static char *transform_text(const char *text, size_t n, InfoVec *infos,
     }
     buf_add(&out, text + last, n - last);
     free(mask);
+    if (report->elided == 0)
+        return buf_take(&out);
 
     {
         size_t nb = 0, na = 0, ib = 0, ia = 0;
@@ -2145,9 +2834,10 @@ static char *transform_text(const char *text, size_t n, InfoVec *infos,
                         /* inline structural canonicalization */
                         Buf bb = {0};
                         size_t q = 0;
-                        while (q < strlen(nb_norm)) {
+                        size_t len_b = strlen(nb_norm);
+                        while (q < len_b) {
                             size_t ps, pe, pa, pb;
-                            if (find_push32(nb_norm, strlen(nb_norm), q,
+                            if (find_push32(nb_norm, len_b, q,
                                             &ps, &pe, &pa, &pb) &&
                                 ps == q) {
                                 buf_str(&bb, "SITE;");
@@ -2155,16 +2845,16 @@ static char *transform_text(const char *text, size_t n, InfoVec *infos,
                                 continue;
                             }
                             if (memcmp(nb_norm + q, "c->esp", 6) == 0) {
-                                size_t z = skip_ws(nb_norm, strlen(nb_norm),
+                                size_t z = skip_ws(nb_norm, len_b,
                                                    q + 6);
-                                if (z + 1 < strlen(nb_norm) &&
+                                if (z + 1 < len_b &&
                                     nb_norm[z] == '-' && nb_norm[z + 1] == '=') {
-                                    z = skip_ws(nb_norm, strlen(nb_norm), z + 2);
-                                    if (z < strlen(nb_norm) && nb_norm[z] == '4') {
+                                    z = skip_ws(nb_norm, len_b, z + 2);
+                                    if (z < len_b && nb_norm[z] == '4') {
                                         size_t e = skip_ws(nb_norm,
-                                                           strlen(nb_norm),
+                                                           len_b,
                                                            z + 1);
-                                        if (e < strlen(nb_norm) &&
+                                        if (e < len_b &&
                                             nb_norm[e] == ';') {
                                             buf_str(&bb, "SITE;");
                                             q = e + 1;
@@ -2181,9 +2871,10 @@ static char *transform_text(const char *text, size_t n, InfoVec *infos,
                     {
                         Buf ab = {0};
                         size_t q = 0;
-                        while (q < strlen(na_norm)) {
+                        size_t len_a = strlen(na_norm);
+                        while (q < len_a) {
                             size_t ps, pe, pa, pb;
-                            if (find_push32(na_norm, strlen(na_norm), q,
+                            if (find_push32(na_norm, len_a, q,
                                             &ps, &pe, &pa, &pb) &&
                                 ps == q) {
                                 buf_str(&ab, "SITE;");
@@ -2191,16 +2882,16 @@ static char *transform_text(const char *text, size_t n, InfoVec *infos,
                                 continue;
                             }
                             if (memcmp(na_norm + q, "c->esp", 6) == 0) {
-                                size_t z = skip_ws(na_norm, strlen(na_norm),
+                                size_t z = skip_ws(na_norm, len_a,
                                                    q + 6);
-                                if (z + 1 < strlen(na_norm) &&
+                                if (z + 1 < len_a &&
                                     na_norm[z] == '-' && na_norm[z + 1] == '=') {
-                                    z = skip_ws(na_norm, strlen(na_norm), z + 2);
-                                    if (z < strlen(na_norm) && na_norm[z] == '4') {
+                                    z = skip_ws(na_norm, len_a, z + 2);
+                                    if (z < len_a && na_norm[z] == '4') {
                                         size_t e = skip_ws(na_norm,
-                                                           strlen(na_norm),
+                                                           len_a,
                                                            z + 1);
-                                        if (e < strlen(na_norm) &&
+                                        if (e < len_a &&
                                             na_norm[e] == ';') {
                                             buf_str(&ab, "SITE;");
                                             q = e + 1;
@@ -2418,6 +3109,7 @@ static int process_file(const char *src, const char *dst, const FlagMap *map,
     size_t n;
     char *out;
     InfoVec infos;
+    InfoVec meta;
     size_t i;
     FILE *f = fopen(src, "rb");
     long sz;
@@ -2444,8 +3136,11 @@ static int process_file(const char *src, const char *dst, const FlagMap *map,
     report->file = xstrdup(src);
 
     memset(&infos, 0, sizeof(infos));
+    memset(&meta, 0, sizeof(meta));
     if (!map) {
-        infos = index_functions(text, n);
+        meta = index_meta(text, n);
+        compute_cleanup_closures(&meta);
+        infos = index_functions(text, n, &meta);
         compute_tail_closures(&infos);
     }
     {
@@ -2498,6 +3193,7 @@ static int process_file(const char *src, const char *dst, const FlagMap *map,
     free(out);
     free(text);
     infovec_free(&infos);
+    infovec_free(&meta);
     for (i = 0; i < report->errors.n; i++)
         fprintf(stderr, "%s: %s\n", src, report->errors.v[i]);
     return report->errors.n ? 1 : 0;
@@ -2572,6 +3268,103 @@ static const char SELF_TEST[] =
     "    c->esp += 4; return;\n"
     "}\n";
 
+/* Call-aware stack tracking cases.  These are analyzed but not transformed;
+ * the assertions inspect the resulting safety/cleanup summaries directly. */
+static const char SELF_TEST_META[] =
+    "void L_00401000(CPU *c)\n"
+    "{\n"
+    "    c->esp += 4; return;\n"
+    "}\n"
+    "void L_00401100(CPU *c)\n"
+    "{\n"
+    "    push32(c, c->ebx);\n"
+    "    push32(c, 0x00401110u); dispatch(c, 0x00401000u);\n"
+    "    c->ebx = (uint32_t)(pop32(c));\n"
+    "    c->esp += 4; return;\n"
+    "}\n"
+    "void L_00401120(CPU *c)\n"
+    "{\n"
+    "    c->esp += 8; return;\n"
+    "}\n"
+    "void L_00401130(CPU *c)\n"
+    "{\n"
+    "    push32(c, 1u);\n"
+    "    push32(c, c->ebx);\n"
+    "    push32(c, 0x00401140u); dispatch(c, 0x00401120u);\n"
+    "    c->ebx = (uint32_t)(pop32(c));\n"
+    "    c->esp += 4; return;\n"
+    "}\n"
+    "void L_00401150(CPU *c)\n"
+    "{\n"
+    "    push32(c, 0x00401160u); dispatch(c, 0x00401000u);\n"
+    "    c->eax = (uint32_t)(pop32(c));\n"
+    "    c->esp += 4; return;\n"
+    "}\n"
+    "void L_00401170(CPU *c)\n"
+    "{\n"
+    "    push32(c, c->ebx);\n"
+    "    push32(c, 0x00401180u); dispatch(c, c->eax);\n"
+    "    c->ebx = (uint32_t)(pop32(c));\n"
+    "    c->esp += 4; return;\n"
+    "}\n"
+    "void L_00401190(CPU *c)\n"
+    "{\n"
+    "    WC3_DIRECT_TAIL(L_00401120, c);\n"
+    "    return;\n"
+    "}\n"
+    "void L_004011A0(CPU *c)\n"
+    "{\n"
+    "    push32(c, 1u);\n"
+    "    push32(c, c->ebx);\n"
+    "    push32(c, 0x004011B0u); dispatch(c, 0x00401190u);\n"
+    "    c->ebx = (uint32_t)(pop32(c));\n"
+    "    c->esp += 4; return;\n"
+    "}\n"
+    "void L_004011C0(CPU *c)\n"
+    "{\n"
+    "    dispatch_jmp(c, c->eax); return;\n"
+    "}\n"
+    "void L_004011D0(CPU *c)\n"
+    "{\n"
+    "    push32(c, c->ebx);\n"
+    "    push32(c, 0x004011E0u); dispatch(c, 0x004011C0u);\n"
+    "    c->ebx = (uint32_t)(pop32(c));\n"
+    "    c->esp += 4; return;\n"
+    "}\n"
+    "void L_004011F0(CPU *c)\n"
+    "{\n"
+    "    return;\n"
+    "}\n"
+    "void L_00401200(CPU *c)\n"
+    "{\n"
+    "    push32(c, c->ebx);\n"
+    "    push32(c, 0x00401210u); dispatch(c, 0x004011F0u);\n"
+    "    c->ebx = (uint32_t)(pop32(c));\n"
+    "    c->esp += 4; return;\n"
+    "}\n"
+    "void L_00401220(CPU *c)\n"
+    "{\n"
+    "    if (c->eax != 0u) {\n"
+    "        WC3_DIRECT_TAIL(L_00401120, c);\n"
+    "        return;\n"
+    "    }\n"
+    "    c->esp += 4; return;\n"
+    "}\n"
+    "void L_00401230(CPU *c)\n"
+    "{\n"
+    "    push32(c, c->ebx);\n"
+    "    push32(c, 0x00401240u); dispatch(c, 0x00401220u);\n"
+    "    c->ebx = (uint32_t)(pop32(c));\n"
+    "    c->esp += 4; return;\n"
+    "}\n"
+    "void L_00401300(CPU *c)\n"
+    "{\n"
+    "    c->esp -= 4;\n"
+    "    c->ebp = c->esp;\n"
+    "    if (rd32(c->ebp + 4) != 0u) { c->eax = 1u; }\n"
+    "    c->esp += 4; return;\n"
+    "}\n";
+
 static int self_test(void)
 {
     Report report;
@@ -2594,7 +3387,12 @@ static int self_test(void)
     size_t i;
     memset(&report, 0, sizeof(report));
     report.file = xstrdup("self-test");
-    infos = index_functions(SELF_TEST, n);
+    {
+        InfoVec meta = index_meta(SELF_TEST, n);
+        compute_cleanup_closures(&meta);
+        infos = index_functions(SELF_TEST, n, &meta);
+        infovec_free(&meta);
+    }
     compute_tail_closures(&infos);
     {
         /* The pipeline always runs phase B with the global map; exercise that
@@ -2668,6 +3466,74 @@ static int self_test(void)
             return 1;
         }
         report_free(&probe);
+    }
+    {
+        static const struct {
+            const char *va;
+            int safe;
+            int cleanup_known;
+            long cleanup;
+        } expect[] = {
+            { "00401100", 1, 1, 4 },
+            { "00401120", 1, 1, 8 },
+            { "00401130", 1, 1, 4 },
+            { "00401150", 0, 1, 4 },
+            { "00401170", 0, 1, 4 },
+            { "00401190", 1, 1, 8 },
+            { "004011A0", 1, 1, 4 },
+            { "004011C0", 0, 0, 0 },
+            { "004011D0", 0, 1, 4 },
+            { "004011F0", 1, 0, 0 },
+            { "00401200", 0, 1, 4 },
+            { "00401220", 1, 0, 0 },
+            { "00401230", 0, 1, 4 },
+            { "00401300", 0, 1, 4 },
+            { NULL, 0, 0, 0 }
+        };
+        InfoVec mmeta = index_meta(SELF_TEST_META,
+                                   sizeof(SELF_TEST_META) - 1);
+        InfoVec minfos;
+        int bad = 0;
+        size_t k;
+        compute_cleanup_closures(&mmeta);
+        minfos = index_functions(SELF_TEST_META,
+                                 sizeof(SELF_TEST_META) - 1, &mmeta);
+        compute_tail_closures(&minfos);
+        for (k = 0; expect[k].va; k++) {
+            FuncInfo *sf = info_lookup(&minfos, expect[k].va);
+            FuncInfo *mf = info_lookup(&mmeta, expect[k].va);
+            int safe;
+            if (sf == NULL || mf == NULL) {
+                fprintf(stderr, "return_address_elide self-test: FAIL "
+                                "missing L_%s\n", expect[k].va);
+                bad = 1;
+                continue;
+            }
+            safe = sf->reads_return_address == 0;
+            if (safe != expect[k].safe) {
+                fprintf(stderr, "return_address_elide self-test: FAIL "
+                                "L_%s safe=%d want %d\n",
+                        expect[k].va, safe, expect[k].safe);
+                bad = 1;
+            }
+            if (mf->cleanup_known != expect[k].cleanup_known ||
+                (mf->cleanup_known &&
+                 mf->cleanup != expect[k].cleanup)) {
+                fprintf(stderr, "return_address_elide self-test: FAIL "
+                                "L_%s cleanup=%ld known=%d want %ld/%d\n",
+                        expect[k].va, mf->cleanup, mf->cleanup_known,
+                        expect[k].cleanup, expect[k].cleanup_known);
+                bad = 1;
+            }
+        }
+        infovec_free(&minfos);
+        infovec_free(&mmeta);
+        if (bad) {
+            free(out);
+            infovec_free(&infos);
+            report_free(&report);
+            return 1;
+        }
     }
     free(out);
     infovec_free(&infos);

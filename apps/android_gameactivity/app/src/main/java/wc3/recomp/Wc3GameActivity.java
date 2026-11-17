@@ -15,8 +15,13 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
+
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.google.androidgamesdk.GameActivity;
 
@@ -25,17 +30,22 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
+import wc3.recomp.launch.DisplayCapabilities;
+import wc3.recomp.launch.GameMode;
 import wc3.recomp.launch.LaunchContract;
+import wc3.recomp.launch.LaunchCoordinator;
+import wc3.recomp.launch.LaunchSettingsStore;
 
 /**
  * Android host entry point.  GameActivity owns the game SurfaceView and native
- * window; this activity adds one transparent SurfaceView above it for the
- * touch-control overlay.
+ * window; this activity adds transparent SurfaceViews above it: one for the
+ * optional half-resolution grid and one for the touch-control overlay.
  *
- * <p>The overlay is a separate hardware surface: DXVK still owns the game
- * surface, while the native overlay renderer locks only the control surface.
- * The Java side passes the surface to native code and never parses the .icp
- * profile or injects input itself.</p>
+ * <p>Both overlays are separate hardware surfaces: DXVK still owns the game
+ * surface, the native grid layer fills only its own buffer, and the native
+ * overlay renderer locks only the control surface.  The Java side passes the
+ * surfaces to native code and never parses the .icp profile or injects input
+ * itself.</p>
  */
 public class Wc3GameActivity extends GameActivity {
     static {
@@ -47,6 +57,8 @@ public class Wc3GameActivity extends GameActivity {
     }
 
     private SurfaceView overlayView;
+    private SurfaceView gridView;
+    private boolean gridRuntimeDisabled;
     private MoviePlayer moviePlayer;
 
     /* True once this process has started android_main.  The launch overrides
@@ -60,20 +72,35 @@ public class Wc3GameActivity extends GameActivity {
     /* JNI matches by name only; host_shell.c must keep the same parameter
      * order (driver id before driver root, DXVK version and config path, then
      * the gesture flag and timers, the SIMPLE tap delay, the selection24
-     * toggle, the hideCursor toggle and the overlay opacity percent last).
-     * These values are strings, so a swap compiles and fails only at
-     * runtime. */
+     * toggle, the hideCursor toggle, the parallelExecution toggle, the overlay
+     * opacity percent, the grid toggle, darken percent and cycle seconds, and
+     * the presentation scale string last).  These values are strings, so a swap
+     * compiles and fails only at runtime. */
     private static native void nativeApplyLaunchSettings(
             String gameDir, int width, int height, boolean sound,
             String extraArgs, String driverId, String driverRoot,
             String hookDir, String dxvkVersion, String dxvkConfigPath,
             boolean doubleTapGestures, int doubleTapTimeoutMs,
             int longPressTimeoutMs, int tapClickDelayMs,
-            boolean selection24, boolean hideCursor, int overlayOpacityPercent);
+            boolean selection24, boolean hideCursor, boolean parallelExecution,
+            int overlayOpacityPercent, boolean gridEnabled,
+            int gridDarkenPercent, int gridCycleSeconds, String presentScale);
 
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
     private native void nativeClearOverlaySurface(Surface surface);
+
+    /*
+     * Half-resolution grid layer.  The activity only owns the SurfaceView
+     * lifecycle; the native module rasterises the pattern once per phase and
+     * SurfaceFlinger composites the buffer, so no Java code runs while the
+     * game presents frames.
+     */
+    private native void nativeSetGridSurface(Surface surface, int width,
+                                             int height);
+    private native void nativeClearGridSurface(Surface surface);
+    private native void nativeSetGridActive(boolean active);
+
     private static native void nativeMovieFinished(int status);
 
     /* Current host-side IME translation in physical pixels.  The native input
@@ -87,10 +114,11 @@ public class Wc3GameActivity extends GameActivity {
     private native boolean nativeImeBackspace(boolean down);
 
     /**
-     * Applies the host-side IME pan on the UI thread.  Both full-screen
-     * SurfaceViews move together: the game surface and the touch overlay.
-     * Reading the value inside the runnable makes the newest pan win even when
-     * a guest-thread show races an inset update from the UI thread.
+     * Applies the host-side IME pan on the UI thread.  All full-screen
+     * SurfaceViews move together: the game surface, the grid layer and the
+     * touch overlay.  Reading the value inside the runnable makes the newest
+     * pan win even when a guest-thread show races an inset update from the UI
+     * thread.
      */
     public void requestImePan() {
         runOnUiThread(() -> {
@@ -101,6 +129,9 @@ public class Wc3GameActivity extends GameActivity {
             }
             if (overlayView != null) {
                 overlayView.setTranslationY(offset);
+            }
+            if (gridView != null) {
+                gridView.setTranslationY(offset);
             }
         });
     }
@@ -141,15 +172,21 @@ public class Wc3GameActivity extends GameActivity {
     public static void setDiagnostics(final String text) {
     }
 
+    protected GameMode hostGameMode() {
+        return GameMode.TFT;
+    }
+
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
+        final Bundle launch = resolveLaunchBundle(getIntent());
         if (!sNativeStarted) {
-            applyLaunchSettings(getIntent());
+            applyLaunchSettings(launch);
         }
         super.onCreate(savedInstanceState);
         sNativeStarted = true;
         applyDisplayCutoutMode();
-        ensureSharedDataAccess();
+        applyImmersiveMode();
+        ensureSharedDataAccess(launch);
 
         // Visible-password commits every key instead of leaving a composing
         // word in the IME strip.  The guest owns the real field and receives
@@ -162,8 +199,68 @@ public class Wc3GameActivity extends GameActivity {
                         | EditorInfo.IME_FLAG_NO_EXTRACT_UI
                         | EditorInfo.IME_FLAG_NO_FULLSCREEN);
 
+        installGridSurface(launch);
         installOverlaySurface();
         installMoviePlayer();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        applyImmersiveMode();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) applyImmersiveMode();
+    }
+
+    private void applyImmersiveMode() {
+        final Window window = getWindow();
+        WindowCompat.setDecorFitsSystemWindows(window, false);
+        final WindowInsetsControllerCompat controller =
+                WindowCompat.getInsetsController(window, window.getDecorView());
+        controller.hide(WindowInsetsCompat.Type.systemBars());
+        controller.setSystemBarsBehavior(
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+    }
+
+    /**
+     * The grid cycle is meaningful only while the grid is visible.  A native
+     * Surface producer that keeps posting to a background window can fill the
+     * BufferQueue; stopping the worker here keeps the UI-thread join bounded.
+     */
+    @Override
+    protected void onStart() {
+        super.onStart();
+        if (gridView != null && !gridRuntimeDisabled) nativeSetGridActive(true);
+    }
+
+    @Override
+    protected void onStop() {
+        if (gridView != null) nativeSetGridActive(false);
+        super.onStop();
+    }
+
+    /**
+     * Called through JNI from the guest thread when the game's own Video options
+     * changed the resolution while the half-resolution grid was active.  Native
+     * has already retired the half present target and switched the new mode to
+     * the normal compositor path, so this hides the mask and persists the
+     * option off for the next launch.  The actual view and preference work runs
+     * on the UI thread.
+     */
+    public void onGridRuntimeDisabled(int width, int height) {
+        runOnUiThread(() -> {
+            gridRuntimeDisabled = true;
+            if (gridView != null) {
+                nativeSetGridActive(false);
+                gridView.setVisibility(View.GONE);
+            }
+            new LaunchSettingsStore(this).disableHalfGrid(
+                    hostGameMode(), width, height);
+        });
     }
 
     /**
@@ -199,15 +296,21 @@ public class Wc3GameActivity extends GameActivity {
         });
     }
 
+    private Bundle resolveLaunchBundle(final Intent intent) {
+        if (intent != null) {
+            final Bundle explicit = intent.getBundleExtra(
+                    LaunchContract.EXTRA_LAUNCH);
+            if (explicit != null) return explicit;
+        }
+        return LaunchCoordinator.resolveForHost(this, hostGameMode());
+    }
+
     /**
      * Applies only the environment variables the settings screen owns.  A
      * direct host launch without the launch bundle leaves the native defaults
      * and any diagnostic shell environment untouched.
      */
-    private void applyLaunchSettings(final Intent intent) {
-        if (intent == null) return;
-        final Bundle settings = intent.getBundleExtra(
-                LaunchContract.EXTRA_LAUNCH);
+    private void applyLaunchSettings(final Bundle settings) {
         if (settings == null) return;
         final String driverId = settings.getString(LaunchContract.KEY_DRIVER_ID, "");
         final String dxvkVersion = settings.getString(
@@ -216,11 +319,28 @@ public class Wc3GameActivity extends GameActivity {
         final String dxvkConfig = settings.getString(
                 LaunchContract.KEY_DXVK_CONFIG,
                 LaunchContract.DEFAULT_DXVK_CONFIG);
+        /* A negative preference is the "auto" OLED default; resolve it once
+         * here so the native grid layer only sees a concrete interval. */
+        final int gridCycleSeconds = DisplayCapabilities.gridCycleSeconds(
+                this,
+                settings.getInt(
+                        LaunchContract.KEY_GRID_CYCLE_SECONDS,
+                        LaunchContract.DEFAULT_GRID_CYCLE_SECONDS));
         final String driverRoot = new java.io.File(getFilesDir(), "drivers")
                 .getAbsolutePath();
         final String hookDir = driverId == null || driverId.isEmpty()
                 ? "" : wc3.recomp.launch.VulkanDriverStore.ensureHookDir(this);
         final String dxvkConfigPath = writeDxvkConfig(dxvkConfig);
+        final boolean gridEnabled = settings.getBoolean(
+                LaunchContract.KEY_GRID_ENABLED,
+                LaunchContract.DEFAULT_GRID_ENABLED);
+        /* Scaling is derived, never chosen: the grid masks the exact 2x source,
+         * so it implies the half-surface nearest path; without the grid the
+         * compositor gets the guest mode.  Deriving it here keeps every launch
+         * path, including old shortcuts, on the same rule. */
+        final String presentScale = gridEnabled
+                ? LaunchContract.PRESENT_SCALE_HALF
+                : LaunchContract.PRESENT_SCALE_SYSTEM;
         nativeApplyLaunchSettings(
                 settings.getString(LaunchContract.KEY_GAME_DIR),
                 settings.getInt(LaunchContract.KEY_WIDTH, 0),
@@ -245,9 +365,18 @@ public class Wc3GameActivity extends GameActivity {
                 settings.getBoolean(
                         LaunchContract.KEY_HIDE_CURSOR,
                         LaunchContract.DEFAULT_HIDE_CURSOR),
+                settings.getBoolean(
+                        LaunchContract.KEY_PARALLEL_EXECUTION,
+                        LaunchContract.DEFAULT_PARALLEL_EXECUTION),
                 settings.getInt(
                         LaunchContract.KEY_OVERLAY_OPACITY_PERCENT,
-                        LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT));
+                        LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT),
+                gridEnabled,
+                settings.getInt(
+                        LaunchContract.KEY_GRID_DARKEN_PERCENT,
+                        LaunchContract.DEFAULT_GRID_DARKEN_PERCENT),
+                gridCycleSeconds,
+                presentScale);
     }
 
     /**
@@ -289,6 +418,11 @@ public class Wc3GameActivity extends GameActivity {
     @Override
     protected void onDestroy() {
         if (moviePlayer != null) moviePlayer.stop();
+        /* The source cancels the grid cycle callback in onDestroy.  The native
+         * side owns the cycle worker, so stop it here as well; the later
+         * surfaceDestroyed callback then only clears the surface and never
+         * leaves a worker running against a torn-down window. */
+        if (gridView != null) nativeClearGridSurface(null);
         if (isFinishing()) {
             sNativeStarted = false;
         }
@@ -317,17 +451,13 @@ public class Wc3GameActivity extends GameActivity {
      * are not enough on API 30+.  The user grants All files access once; the
      * native side falls back to the package directory until then.
      */
-    private void ensureSharedDataAccess() {
+    private void ensureSharedDataAccess(final Bundle launch) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
         if (Environment.isExternalStorageManager()) return;
 
         // A game directory inside the app sandbox needs no All files access.
         // The settings screen accepts that fallback; do not interrupt the game
         // with a permission screen it does not need.
-        final Intent launchIntent = getIntent();
-        final Bundle launch = launchIntent == null
-                ? null
-                : launchIntent.getBundleExtra(LaunchContract.EXTRA_LAUNCH);
         if (launch != null && isAppPrivatePath(
                 launch.getString(LaunchContract.KEY_GAME_DIR))) {
             return;
@@ -384,6 +514,52 @@ public class Wc3GameActivity extends GameActivity {
             return false;
         return getSharedPreferences("wc3_debug", MODE_PRIVATE)
                 .getBoolean("overlay_hidden", false);
+    }
+
+    /**
+     * Adds the half-resolution grid below the touch overlay.  The layer has no
+     * Java draw path: the native grid module rasterises the 2x2 pattern into
+     * this SurfaceView buffer once per phase, and only the OLED cycle posts a
+     * new buffer.  With the switch off the view is never created, so the
+     * compositor has one layer less.
+     */
+    private void installGridSurface(final Bundle launch) {
+        if (launch == null) return;
+        if (!launch.getBoolean(LaunchContract.KEY_GRID_ENABLED,
+                LaunchContract.DEFAULT_GRID_ENABLED)) return;
+        final int darken = launch.getInt(
+                LaunchContract.KEY_GRID_DARKEN_PERCENT,
+                LaunchContract.DEFAULT_GRID_DARKEN_PERCENT);
+        if (darken <= 0) return;
+
+        final SurfaceView view = new SurfaceView(this);
+        view.setZOrderMediaOverlay(true);
+        view.setFocusable(false);
+        view.setFocusableInTouchMode(false);
+        view.setClickable(false);
+        view.setBackgroundColor(Color.TRANSPARENT);
+        view.getHolder().setFormat(PixelFormat.TRANSLUCENT);
+        view.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(final SurfaceHolder holder) {
+                nativeSetGridSurface(holder.getSurface(), 0, 0);
+            }
+
+            @Override
+            public void surfaceChanged(final SurfaceHolder holder, final int format,
+                                       final int width, final int height) {
+                nativeSetGridSurface(holder.getSurface(), width, height);
+            }
+
+            @Override
+            public void surfaceDestroyed(final SurfaceHolder holder) {
+                nativeClearGridSurface(holder.getSurface());
+            }
+        });
+        addContentView(view, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        gridView = view;
     }
 
     private void installOverlaySurface() {

@@ -34,6 +34,21 @@ extern "C" {
  */
 uint32_t wc3_sel24_cap(void);
 
+/*
+ * 24-entry ground-order formation workspace.
+ *
+ * The lifted solver 0x6F16B2F0 keeps a local count, a 24-entry index array and
+ * a 24-entry pair array at count+0, count+4 and count+0x64.  The original
+ * helper 0x6F169300 zeroes only twelve pairs because it hard-codes
+ * eax=count+0x34 and edx=2; the original sort 0x6F16DFD0 reads the pair array
+ * at count+0x34/count+0x38 and is still used by the 12-entry caller
+ * 0x6F16A6E0.  These two helpers contain the same memory operations for the
+ * 24-entry layout; the pass calls them only from 0x6F16B2F0.  pair_base is the
+ * guest address count+0x64.
+ */
+void wc3_sel24_init24(uint32_t pair_base);
+void wc3_sel24_sort24(uint32_t count_ptr);
+
 /* Reports an object reference that did not resolve: kind 1 = the selection
  * object's weak pair target, kind 2 = a handle slot with a released object. */
 void wc3_sel24_trace_stale(CPU *c, uint32_t kind, uint32_t a, uint32_t b,
@@ -186,6 +201,18 @@ void wc3_sel24_trace_order_loop(CPU *c, uint32_t cursor_off, uint32_t cursor,
                                 uint32_t unit, uint32_t event);
 
 /*
+ * Inserted after the element write of the three per-unit assignment lists
+ * (0x6F6BB731 and 0x6F6BB90C for the class A container, 0x6F6BBFCC for the
+ * old one).  `tag` is 1/2 for the class A layout (count +0x4C, array +0x50)
+ * and 3 for the old layout (count +0x28, array +0x2C); `list` is the object
+ * the writer appends to and `element` the slot it just stored.  The trace
+ * prints both counts and the derived index, so a list that still stops at
+ * twelve while the batch holds fourteen is visible in one line.
+ */
+void wc3_sel24_trace_order_slots(CPU *c, uint32_t tag, uint32_t list,
+                                 uint32_t element);
+
+/*
  * Inserted in 0x6F6B93A0 after the two calls to 0x6F04CDD0.  Those calls are
  * the last points where a per-unit order can still be rejected: the function
  * returns without touching the unit when the result is zero.  The unit is the
@@ -228,6 +255,15 @@ void wc3_sel24_trace_remove(CPU *c, uint32_t phase, uint32_t group,
  */
 void wc3_sel24_trace_evbirth(CPU *c, uint32_t object, uint32_t desc);
 void wc3_sel24_trace_evinit(CPU *c, uint32_t object, uint32_t desc);
+
+/*
+ * Inserted at 0x6F1CBFB3, the first instruction of the negative handle-table
+ * release wrapper 0x6F1CBFB0.  The free list links slots through their own
+ * value word, so one index released twice links to itself and the allocator
+ * later returns 0xFFFFFFFE.  `slotval` equal to 0xFFFFFFFE on a repeated
+ * `index` is the duplicate release.
+ */
+void wc3_sel24_trace_evrelease(CPU *c, uint32_t table, uint32_t handle);
 
 /*
  * Inserted in 0x6F04CE16, the function that applies the order to one unit.

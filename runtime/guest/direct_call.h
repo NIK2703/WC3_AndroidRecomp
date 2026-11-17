@@ -17,7 +17,11 @@
  * calls it directly.  The loop, not recursion, bounds host stack growth.
  * Pending targets are drained at every direct-call boundary where the callee
  * can publish one; a callee proven tail-free is entered with the depth-only
- * WC3_DIRECT_CALL_DEPTH/LEAF frame instead.
+ * WC3_DIRECT_CALL_DEPTH/LEAF frame instead.  A tail to a bare `ret` leaf in a
+ * one-tail body needs neither the pending slot nor the drain:
+ * WC3_DIRECT_TAIL_LEAF is a direct host call followed by the generated
+ * `return;`, so the leaf's guest `ret` still consumes the caller's return
+ * address and the compiler can emit a sibling call.
  *
  * State is per guest thread and lives in CPU (ABI-4).  Do not add a TLS copy
  * here: the corpus is split into translation units, and one header-level
@@ -186,6 +190,22 @@ static inline void wc3_guest_leave(CPU *c, const Wc3DispFrame *saved)
     do {                                                                     \
         wc3_guest_set_pending_fn((c), (fn));                                 \
     } while (0)
+
+/* D4c: a tail to a bare `ret` leaf in a one-tail body.  The callee cannot
+ * enter another guest, publish a pending target, or read dispatcher state; its
+ * whole body is the guest return-address pop.  The pending/drain round-trip is
+ * therefore dead.  Call it directly and let the generated `return;` finish the
+ * caller: the leaf's guest `ret` pops the same guest return address it would
+ * have popped after the drain loop, and the host call/return pair remains a
+ * legal sibling-call candidate.
+ *
+ * The one-tail restriction is deliberate.  In a mixed-tail body the direct
+ * form changes the compiler's tail/merge and inlining decisions; the release
+ * A/B showed that non-trivial leaf bodies could inline into the caller and grow
+ * it by hundreds of bytes.  leaf_call emits this form only for a target whose
+ * body is exactly `{ c->esp += 4; return; }`, when the caller is the generated
+ * `tail; return;` form and has passed the pending-safety check. */
+#define WC3_DIRECT_TAIL_LEAF(fn, c) (fn)((c))
 
 /* Top-level guest entry must drain any pending target left by an indirect
  * dispatch_jmp before the guest frame is considered finished. */

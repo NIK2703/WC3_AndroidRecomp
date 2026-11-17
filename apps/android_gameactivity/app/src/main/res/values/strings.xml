@@ -23,6 +23,7 @@
     <string name="launch_sound_label">Sound</string>
     <string name="launch_selection24_label">24-unit selection</string>
     <string name="launch_hide_cursor_label">Hide game cursor</string>
+    <string name="launch_parallel_label">Parallel game loops</string>
     <string name="launch_gesture_mode_label">Touchscreen control gestures</string>
     <string name="launch_gesture_mode_double">Double tap, single tap with delay</string>
     <string name="launch_gesture_mode_single">No double tap, single tap without delay</string>
@@ -36,10 +37,18 @@
     <string name="launch_double_tap_delay_label">Double-tap delay</string>
     <string name="launch_long_press_delay_label">Long-press delay</string>
     <string name="launch_tap_click_delay_label">Click press delay in simplified profile</string>
+    <string name="launch_tap_click_delay_hint">Increase this if the click happens before the cursor moves on a tap in the game main menu</string>
     <string name="launch_gesture_delay_value">%1$d ms</string>
     <string name="launch_overlay_opacity_label">Control overlay opacity</string>
     <string name="launch_overlay_opacity_value">%1$d %%</string>
-
+    <string name="launch_grid_label">Half-resolution grid</string>
+    <string name="launch_grid_label_resolution">Half-resolution grid (%1$d × %2$d)</string>
+    <string name="launch_grid_darken_label">Grid darken</string>
+    <string name="launch_grid_darken_value">%1$d %%</string>
+    <string name="launch_grid_cycle_label">Grid cycle interval (OLED)</string>
+    <string name="launch_grid_cycle_value">%1$d s</string>
+    <string name="launch_grid_cycle_off">Off</string>
+    <string name="launch_grid_hint">One pixel of each 2×2 cell stays untouched; the other three are dimmed. The cycle moves the bright pixel to spread OLED wear. Turning this on starts the game at exactly half the screen resolution with 2× nearest scaling; changing the resolution in the game\'s Video options turns the grid and half scaling off and returns to normal smoothed display.</string>
     <string name="launch_driver_label">Vulkan driver</string>
     <string name="launch_driver_system">System Vulkan driver (recommended)</string>
     <string name="launch_driver_import">Install ZIP</string>

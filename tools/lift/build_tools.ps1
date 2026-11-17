@@ -110,6 +110,7 @@ $targets = @(
     @{ out = 'xmm_local.exe'; src = @('xmm_local.c'); dir = $csrcLocal },
     @{ out = 'xmm_lane.exe'; src = @('xmm_lane.c'); dir = $csrcLocal },
     @{ out = 'leaf_call.exe'; src = @('leaf_call.c'); dir = $csrcLocal },
+    @{ out = 'parallel_raycast.exe'; src = @('parallel_raycast.c'); dir = $csrcLocal },
     @{ out = 'return_address_elide.exe'; src = @('return_address_elide.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'w3l_compat.exe'; src = @('w3l_compat.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'selection24.exe'; src = @('selection24.c', 'sha256.c'); dir = $csrcLocal },
@@ -122,7 +123,8 @@ $targets = @(
     @{ out = 'thunkseeds.exe'; srcfull = @((Join-Path $csrcLocal 'thunkseeds.c'), (Join-Path $csrc 'csglue.c')) },
     @{ out = 'corpusinput.exe'; src = @('corpusinput.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'corpusclosure.exe'; src = @('corpusclosure.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
-    @{ out = 'splitcorpus.exe'; src = @('splitcorpus.c', 'dirwalk.c'); dir = $csrcLocal }
+    @{ out = 'splitcorpus.exe'; src = @('splitcorpus.c', 'dirwalk.c'); dir = $csrcLocal },
+    @{ out = 'jobpool.exe'; src = @('jobpool.c'); dir = $csrcLocal }
 )
 
 $scriptTime = [IO.File]::GetLastWriteTimeUtc($PSCommandPath)
@@ -366,6 +368,12 @@ void L_00401000(CPU *c)
         $slOut | ForEach-Object { Write-Host $_ }
         throw 'save_list_display self-test failed'
     }
+    $jp = Join-Path $bin 'jobpool.exe'
+    $jpOut = & $jp --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($jpOut -match 'self-test: OK')) {
+        $jpOut | ForEach-Object { Write-Host $_ }
+        throw 'jobpool self-test failed'
+    }
     $df = Join-Path $bin 'dead_flags.exe'
     $dfOut = & $df --self-test 2>&1
     if ($LASTEXITCODE -ne 0 -or -not ($dfOut -match 'self-test: OK')) {
@@ -389,6 +397,12 @@ void L_00401000(CPU *c)
     if ($LASTEXITCODE -ne 0 -or -not ($lcOut -match 'self-test: OK')) {
         $lcOut | ForEach-Object { Write-Host $_ }
         throw 'leaf_call self-test failed'
+    }
+    $ray = Join-Path $bin 'parallel_raycast.exe'
+    $rayOut = & $ray --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($rayOut -match 'self-test: ok')) {
+        $rayOut | ForEach-Object { Write-Host $_ }
+        throw 'parallel_raycast self-test failed'
     }
     $ra = Join-Path $bin 'return_address_elide.exe'
     $raOut = & $ra --self-test 2>&1

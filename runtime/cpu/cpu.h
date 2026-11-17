@@ -24,6 +24,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "guest_host.h"
+
 /* x87/MMX register slot.  The low 64 bits are the x87 double or the MMX
  * integer register; the upper 64 bits are padding so the slot keeps the
  * 16-byte stride the frozen CPU layout expects.  See x87.h. */
@@ -145,6 +147,19 @@ typedef struct {
     uint32_t hle_last_error;
     uint32_t hle_tmp_guest;      /* guest VA of cr_qsort's 256-byte scratch */
     uint32_t hle_tls[64];        /* Win32 TLS slots; index allocation is global */
+    /* Added to every wc3_vertex_global() address.  Zero on normal CPUs and on
+     * the main thread, so the helper compiles to one ADD with no branch.  A
+     * pool worker sets private_block - WC3_VERTEX_GLOBAL_FIRST.  Kept after the
+     * frozen fields above, so no existing offset changes. */
+    uint32_t parallel_vertex_delta;
+    /* Set only on a triangle-loop worker, on the private sequential oracle,
+     * and for the one epilogue call on the caller.  The generated loop's entry
+     * guard checks it, so a worker chunk and the final epilogue run the
+     * original body instead of re-entering the dispatcher. */
+    uint32_t parallel_triangle_bypass;
+    /* Same idea for a vertex recovery call after a worker setup failure.  A
+     * CPU field keeps the hot wrapper free of a general-dynamic TLS lookup. */
+    uint32_t parallel_vertex_bypass;
 } CPU;
 
 /* Frozen source-level layout.  Generated C names fields, but these two offsets
@@ -265,12 +280,12 @@ void wc3_watch32(uint32_t a, uint32_t v);
 #else
 #define WC3_WR32_HOOK(a, v) ((void)0)
 #endif
-static inline uint8_t  rd8 (uint32_t a) { return *(uint8_t  *)(uintptr_t)a; }
-static inline uint16_t rd16(uint32_t a) { return *(uint16_t *)(uintptr_t)a; }
-static inline uint32_t rd32(uint32_t a) { return *(uint32_t *)(uintptr_t)a; }
-static inline void wr8 (uint32_t a, uint8_t  v) { WC3_WR32_HOOK(a, v); *(uint8_t  *)(uintptr_t)a = v; }
-static inline void wr16(uint32_t a, uint16_t v) { *(uint16_t *)(uintptr_t)a = v; }
-static inline void wr32(uint32_t a, uint32_t v) { WC3_WR32_HOOK(a, v); *(uint32_t *)(uintptr_t)a = v; }
+static inline uint8_t  rd8 (uint32_t a) { return *(uint8_t  *)(uintptr_t)guest_host_ptr(a); }
+static inline uint16_t rd16(uint32_t a) { return *(uint16_t *)(uintptr_t)guest_host_ptr(a); }
+static inline uint32_t rd32(uint32_t a) { return *(uint32_t *)(uintptr_t)guest_host_ptr(a); }
+static inline void wr8 (uint32_t a, uint8_t  v) { WC3_WR32_HOOK(a, v); *(uint8_t  *)(uintptr_t)guest_host_ptr(a) = v; }
+static inline void wr16(uint32_t a, uint16_t v) { *(uint16_t *)(uintptr_t)guest_host_ptr(a) = v; }
+static inline void wr32(uint32_t a, uint32_t v) { WC3_WR32_HOOK(a, v); *(uint32_t *)(uintptr_t)guest_host_ptr(a) = v; }
 
 /* ---- fs:-relative access (TIB / SEH chain) ----
  *
@@ -307,8 +322,8 @@ static inline void wr32(uint32_t a, uint32_t v) { WC3_WR32_HOOK(a, v); *(uint32_
  * round-trip would be exact for every value except the signalling NaNs a
  * mask-producing compare leaves behind. memcpy, because the address need
  * not be aligned. */
-static inline uint64_t rd64(uint32_t a) { uint64_t v; memcpy(&v, (void *)(uintptr_t)a, 8); return v; }
-static inline void wr64(uint32_t a, uint64_t v) { memcpy((void *)(uintptr_t)a, &v, 8); }
+static inline uint64_t rd64(uint32_t a) { uint64_t v; memcpy(&v, (void *)(uintptr_t)guest_host_ptr(a), 8); return v; }
+static inline void wr64(uint32_t a, uint64_t v) { memcpy((void *)(uintptr_t)guest_host_ptr(a), &v, 8); }
 
 /* ---- LSE atomics (C.6) ----
  *
@@ -336,49 +351,49 @@ static inline uint32_t wc3_lse_xadd32(uint32_t a, uint32_t v) {
     uint32_t old;
     __asm__ volatile(".arch armv8.1-a\n\tldaddal %w1, %w0, [%2]\n\t.arch armv8-a\n\t"
                      "dmb ish\n"
-                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)a) : "memory");
+                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)guest_host_ptr(a)) : "memory");
     return old;
 }
 static inline uint32_t wc3_lse_cmpxchg32(uint32_t a, uint32_t cmp, uint32_t nv) {
     uint32_t old = cmp;
     __asm__ volatile(".arch armv8.1-a\n\tcasal %w0, %w1, [%2]\n\t.arch armv8-a\n\t"
                      "dmb ish\n"
-                     : "+r"(old) : "r"(nv), "r"((uintptr_t)a) : "memory");
+                     : "+r"(old) : "r"(nv), "r"((uintptr_t)guest_host_ptr(a)) : "memory");
     return old;
 }
 static inline uint32_t wc3_lse_xchg32(uint32_t a, uint32_t v) {
     uint32_t old;
     __asm__ volatile(".arch armv8.1-a\n\tswpal %w1, %w0, [%2]\n\t.arch armv8-a\n\t"
                      "dmb ish\n"
-                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)a) : "memory");
+                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)guest_host_ptr(a)) : "memory");
     return old;
 }
 static inline uint32_t wc3_lse_and32(uint32_t a, uint32_t v) {
     uint32_t old, inv = ~v;
     __asm__ volatile(".arch armv8.1-a\n\tldclral %w1, %w0, [%2]\n\t.arch armv8-a\n\t"
                      "dmb ish\n"
-                     : "=&r"(old), "+r"(inv) : "r"((uintptr_t)a) : "memory");
+                     : "=&r"(old), "+r"(inv) : "r"((uintptr_t)guest_host_ptr(a)) : "memory");
     return old;
 }
 static inline uint32_t wc3_lse_or32(uint32_t a, uint32_t v) {
     uint32_t old;
     __asm__ volatile(".arch armv8.1-a\n\tldsetal %w1, %w0, [%2]\n\t.arch armv8-a\n\t"
                      "dmb ish\n"
-                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)a) : "memory");
+                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)guest_host_ptr(a)) : "memory");
     return old;
 }
 static inline uint32_t wc3_lse_xor32(uint32_t a, uint32_t v) {
     uint32_t old;
     __asm__ volatile(".arch armv8.1-a\n\tldeoral %w1, %w0, [%2]\n\t.arch armv8-a\n\t"
                      "dmb ish\n"
-                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)a) : "memory");
+                     : "=&r"(old), "+r"(v) : "r"((uintptr_t)guest_host_ptr(a)) : "memory");
     return old;
 }
 static inline uint64_t wc3_lse_cmpxchg64(uint32_t a, uint64_t cmp, uint64_t nv) {
     uint64_t old = cmp;
     __asm__ volatile(".arch armv8.1-a\n\tcasal %x0, %x1, [%2]\n\t.arch armv8-a\n\t"
                      "dmb ish\n"
-                     : "+r"(old) : "r"(nv), "r"((uintptr_t)a) : "memory");
+                     : "+r"(old) : "r"(nv), "r"((uintptr_t)guest_host_ptr(a)) : "memory");
     return old;
 }
 #endif
@@ -398,50 +413,50 @@ static inline uint64_t wc3_lse_cmpxchg64(uint32_t a, uint64_t cmp, uint64_t nv) 
  * sets follows from that. */
 #if defined(_MSC_VER)
 static inline uint32_t atomic_xadd32(uint32_t a, uint32_t v) {
-    return (uint32_t)_InterlockedExchangeAdd((volatile long *)(uintptr_t)a, (long)v);
+    return (uint32_t)_InterlockedExchangeAdd((volatile long *)(uintptr_t)guest_host_ptr(a), (long)v);
 }
 static inline uint32_t atomic_cmpxchg32(uint32_t a, uint32_t cmp, uint32_t nv) {
-    return (uint32_t)_InterlockedCompareExchange((volatile long *)(uintptr_t)a,
+    return (uint32_t)_InterlockedCompareExchange((volatile long *)(uintptr_t)guest_host_ptr(a),
                                                  (long)nv, (long)cmp);
 }
 static inline uint32_t atomic_xchg32(uint32_t a, uint32_t v) {
-    return (uint32_t)_InterlockedExchange((volatile long *)(uintptr_t)a, (long)v);
+    return (uint32_t)_InterlockedExchange((volatile long *)(uintptr_t)guest_host_ptr(a), (long)v);
 }
 static inline uint64_t atomic_cmpxchg64_aligned(uint32_t a, uint64_t cmp, uint64_t nv) {
     return (uint64_t)_InterlockedCompareExchange64(
-        (volatile __int64 *)(uintptr_t)a, (__int64)nv, (__int64)cmp);
+        (volatile __int64 *)(uintptr_t)guest_host_ptr(a), (__int64)nv, (__int64)cmp);
 }
 #elif defined(__aarch64__) && defined(__linux__)
 static inline uint32_t atomic_xadd32(uint32_t a, uint32_t v) {
     if (wc3_cpu_has_lse()) return wc3_lse_xadd32(a, v);
-    return __sync_fetch_and_add((volatile uint32_t *)(uintptr_t)a, v);
+    return __sync_fetch_and_add((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), v);
 }
 static inline uint32_t atomic_cmpxchg32(uint32_t a, uint32_t cmp, uint32_t nv) {
     if (wc3_cpu_has_lse()) return wc3_lse_cmpxchg32(a, cmp, nv);
-    return __sync_val_compare_and_swap((volatile uint32_t *)(uintptr_t)a, cmp, nv);
+    return __sync_val_compare_and_swap((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), cmp, nv);
 }
 static inline uint32_t atomic_xchg32(uint32_t a, uint32_t v) {
     if (wc3_cpu_has_lse()) return wc3_lse_xchg32(a, v);
-    return __atomic_exchange_n((uint32_t *)(uintptr_t)a, v, __ATOMIC_SEQ_CST);
+    return __atomic_exchange_n((uint32_t *)(uintptr_t)guest_host_ptr(a), v, __ATOMIC_SEQ_CST);
 }
 static inline uint64_t atomic_cmpxchg64_aligned(uint32_t a, uint64_t cmp, uint64_t nv) {
     if (wc3_cpu_has_lse()) return wc3_lse_cmpxchg64(a, cmp, nv);
-    return __sync_val_compare_and_swap((volatile uint64_t *)(uintptr_t)a, cmp, nv);
+    return __sync_val_compare_and_swap((volatile uint64_t *)(uintptr_t)guest_host_ptr(a), cmp, nv);
 }
 #else
 static inline uint32_t atomic_xadd32(uint32_t a, uint32_t v) {
-    return __sync_fetch_and_add((volatile uint32_t *)(uintptr_t)a, v);
+    return __sync_fetch_and_add((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), v);
 }
 static inline uint32_t atomic_cmpxchg32(uint32_t a, uint32_t cmp, uint32_t nv) {
-    return __sync_val_compare_and_swap((volatile uint32_t *)(uintptr_t)a, cmp, nv);
+    return __sync_val_compare_and_swap((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), cmp, nv);
 }
 static inline uint32_t atomic_xchg32(uint32_t a, uint32_t v) {
     /* x86 xchg with a memory operand is locked and a full barrier; __sync's
      * test-and-set is only an acquire barrier on some targets. */
-    return __atomic_exchange_n((uint32_t *)(uintptr_t)a, v, __ATOMIC_SEQ_CST);
+    return __atomic_exchange_n((uint32_t *)(uintptr_t)guest_host_ptr(a), v, __ATOMIC_SEQ_CST);
 }
 static inline uint64_t atomic_cmpxchg64_aligned(uint32_t a, uint64_t cmp, uint64_t nv) {
-    return __sync_val_compare_and_swap((volatile uint64_t *)(uintptr_t)a, cmp, nv);
+    return __sync_val_compare_and_swap((volatile uint64_t *)(uintptr_t)guest_host_ptr(a), cmp, nv);
 }
 #endif
 
@@ -452,20 +467,20 @@ static inline uint64_t atomic_cmpxchg64_aligned(uint32_t a, uint64_t cmp, uint64
  * a bit mask; `lock not` is xor with all ones; `lock neg` is a CAS loop. */
 #if defined(_MSC_VER)
 static inline uint32_t atomic_sub32(uint32_t a, uint32_t v) {
-    return (uint32_t)_InterlockedExchangeAdd((volatile long *)(uintptr_t)a, -(long)v);
+    return (uint32_t)_InterlockedExchangeAdd((volatile long *)(uintptr_t)guest_host_ptr(a), -(long)v);
 }
 static inline uint32_t atomic_and32(uint32_t a, uint32_t v) {
-    return (uint32_t)_InterlockedAnd((volatile long *)(uintptr_t)a, (long)v);
+    return (uint32_t)_InterlockedAnd((volatile long *)(uintptr_t)guest_host_ptr(a), (long)v);
 }
 static inline uint32_t atomic_or32(uint32_t a, uint32_t v) {
-    return (uint32_t)_InterlockedOr((volatile long *)(uintptr_t)a, (long)v);
+    return (uint32_t)_InterlockedOr((volatile long *)(uintptr_t)guest_host_ptr(a), (long)v);
 }
 static inline uint32_t atomic_xor32(uint32_t a, uint32_t v) {
-    return (uint32_t)_InterlockedXor((volatile long *)(uintptr_t)a, (long)v);
+    return (uint32_t)_InterlockedXor((volatile long *)(uintptr_t)guest_host_ptr(a), (long)v);
 }
 static inline uint32_t atomic_neg32(uint32_t a) {
     uint32_t old = rd32(a);
-    while ((uint32_t)_InterlockedCompareExchange((volatile long *)(uintptr_t)a,
+    while ((uint32_t)_InterlockedCompareExchange((volatile long *)(uintptr_t)guest_host_ptr(a),
                                                  (long)(0u - old), (long)old) != old)
         old = rd32(a);
     return old;
@@ -473,19 +488,19 @@ static inline uint32_t atomic_neg32(uint32_t a) {
 #elif defined(__aarch64__) && defined(__linux__)
 static inline uint32_t atomic_sub32(uint32_t a, uint32_t v) {
     if (wc3_cpu_has_lse()) return wc3_lse_xadd32(a, 0u - v);
-    return __sync_fetch_and_sub((volatile uint32_t *)(uintptr_t)a, v);
+    return __sync_fetch_and_sub((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), v);
 }
 static inline uint32_t atomic_and32(uint32_t a, uint32_t v) {
     if (wc3_cpu_has_lse()) return wc3_lse_and32(a, v);
-    return __sync_fetch_and_and((volatile uint32_t *)(uintptr_t)a, v);
+    return __sync_fetch_and_and((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), v);
 }
 static inline uint32_t atomic_or32(uint32_t a, uint32_t v) {
     if (wc3_cpu_has_lse()) return wc3_lse_or32(a, v);
-    return __sync_fetch_and_or((volatile uint32_t *)(uintptr_t)a, v);
+    return __sync_fetch_and_or((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), v);
 }
 static inline uint32_t atomic_xor32(uint32_t a, uint32_t v) {
     if (wc3_cpu_has_lse()) return wc3_lse_xor32(a, v);
-    return __sync_fetch_and_xor((volatile uint32_t *)(uintptr_t)a, v);
+    return __sync_fetch_and_xor((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), v);
 }
 static inline uint32_t atomic_neg32(uint32_t a) {
     uint32_t old = rd32(a);
@@ -495,20 +510,20 @@ static inline uint32_t atomic_neg32(uint32_t a) {
 }
 #else
 static inline uint32_t atomic_sub32(uint32_t a, uint32_t v) {
-    return __sync_fetch_and_sub((volatile uint32_t *)(uintptr_t)a, v);
+    return __sync_fetch_and_sub((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), v);
 }
 static inline uint32_t atomic_and32(uint32_t a, uint32_t v) {
-    return __sync_fetch_and_and((volatile uint32_t *)(uintptr_t)a, v);
+    return __sync_fetch_and_and((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), v);
 }
 static inline uint32_t atomic_or32(uint32_t a, uint32_t v) {
-    return __sync_fetch_and_or((volatile uint32_t *)(uintptr_t)a, v);
+    return __sync_fetch_and_or((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), v);
 }
 static inline uint32_t atomic_xor32(uint32_t a, uint32_t v) {
-    return __sync_fetch_and_xor((volatile uint32_t *)(uintptr_t)a, v);
+    return __sync_fetch_and_xor((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), v);
 }
 static inline uint32_t atomic_neg32(uint32_t a) {
     uint32_t old = rd32(a);
-    while (__sync_val_compare_and_swap((volatile uint32_t *)(uintptr_t)a, old,
+    while (__sync_val_compare_and_swap((volatile uint32_t *)(uintptr_t)guest_host_ptr(a), old,
                                        0u - old) != old)
         old = rd32(a);
     return old;
@@ -523,10 +538,10 @@ static inline uint32_t atomic_neg32(uint32_t a) {
 static inline uint64_t atomic_cmpxchg64_slow(uint32_t a, uint64_t cmp, uint64_t nv) {
 #if defined(_MSC_VER)
     return (uint64_t)_InterlockedCompareExchange64(
-        (volatile __int64 *)(uintptr_t)a, (__int64)nv, (__int64)cmp);
+        (volatile __int64 *)(uintptr_t)guest_host_ptr(a), (__int64)nv, (__int64)cmp);
 #else
     uint64_t expected = cmp;
-    __atomic_compare_exchange_n((uint64_t *)(uintptr_t)a, &expected, nv, 0,
+    __atomic_compare_exchange_n((uint64_t *)(uintptr_t)guest_host_ptr(a), &expected, nv, 0,
                                 __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     return expected;
 #endif
@@ -1203,16 +1218,16 @@ static inline uint16_t vs_tag_rol(uint16_t tag, int top) {
 
 /* Double-precision helpers for SSE/scalar code. These are NOT x87 helpers:
  * x87 memory operands use x87_ld_f32/f64 and x87_st_f32/f64 in x87.h. */
-static inline double rdf32(uint32_t a) { float  f; memcpy(&f, (void *)(uintptr_t)a, 4); return (double)f; }
-static inline double rdf64(uint32_t a) { double d; memcpy(&d, (void *)(uintptr_t)a, 8); return d; }
-static inline double rdi16(uint32_t a) { int16_t i; memcpy(&i, (void *)(uintptr_t)a, 2); return (double)i; }
-static inline double rdi32(uint32_t a) { int32_t i; memcpy(&i, (void *)(uintptr_t)a, 4); return (double)i; }
-static inline double rdi64(uint32_t a) { int64_t i; memcpy(&i, (void *)(uintptr_t)a, 8); return (double)i; }
-static inline void   wrf32(uint32_t a, double v) { float  f = (float)v; memcpy((void *)(uintptr_t)a, &f, 4); }
-static inline void   wrf64(uint32_t a, double v) { memcpy((void *)(uintptr_t)a, &v, 8); }
-static inline void   wri32(uint32_t a, double v) { int32_t i = (int32_t)nearbyint(v); memcpy((void *)(uintptr_t)a, &i, 4); }
-static inline void   wri16(uint32_t a, double v) { int16_t i = (int16_t)nearbyint(v); memcpy((void *)(uintptr_t)a, &i, 2); }
-static inline void   wri64(uint32_t a, double v) { int64_t i = (int64_t)nearbyint(v); memcpy((void *)(uintptr_t)a, &i, 8); }
+static inline double rdf32(uint32_t a) { float  f; memcpy(&f, (void *)(uintptr_t)guest_host_ptr(a), 4); return (double)f; }
+static inline double rdf64(uint32_t a) { double d; memcpy(&d, (void *)(uintptr_t)guest_host_ptr(a), 8); return d; }
+static inline double rdi16(uint32_t a) { int16_t i; memcpy(&i, (void *)(uintptr_t)guest_host_ptr(a), 2); return (double)i; }
+static inline double rdi32(uint32_t a) { int32_t i; memcpy(&i, (void *)(uintptr_t)guest_host_ptr(a), 4); return (double)i; }
+static inline double rdi64(uint32_t a) { int64_t i; memcpy(&i, (void *)(uintptr_t)guest_host_ptr(a), 8); return (double)i; }
+static inline void   wrf32(uint32_t a, double v) { float  f = (float)v; memcpy((void *)(uintptr_t)guest_host_ptr(a), &f, 4); }
+static inline void   wrf64(uint32_t a, double v) { memcpy((void *)(uintptr_t)guest_host_ptr(a), &v, 8); }
+static inline void   wri32(uint32_t a, double v) { int32_t i = (int32_t)nearbyint(v); memcpy((void *)(uintptr_t)guest_host_ptr(a), &i, 4); }
+static inline void   wri16(uint32_t a, double v) { int16_t i = (int16_t)nearbyint(v); memcpy((void *)(uintptr_t)guest_host_ptr(a), &i, 2); }
+static inline void   wri64(uint32_t a, double v) { int64_t i = (int64_t)nearbyint(v); memcpy((void *)(uintptr_t)guest_host_ptr(a), &i, 8); }
 
 /* ---- MMX ---------------------------------------------------------------
  *
@@ -1435,12 +1450,12 @@ static inline void do_sahf(CPU *c, uint8_t ah) {
 /* Memory operands. Separate from the x87 rdf32/rdf64 above because those
  * widen to double for the 80-bit stack, and these must not. memcpy because an
  * SSE memory operand is frequently unaligned (movups exists for a reason). */
-static inline float  rdss(uint32_t a) { float  f; memcpy(&f, (void *)(uintptr_t)a, 4); return f; }
-static inline double rdsd(uint32_t a) { double d; memcpy(&d, (void *)(uintptr_t)a, 8); return d; }
-static inline XMM    rdxm(uint32_t a) { XMM x;    memcpy(&x, (void *)(uintptr_t)a, 16); return x; }
-static inline void   wrss(uint32_t a, float  v) { memcpy((void *)(uintptr_t)a, &v, 4); }
-static inline void   wrsd(uint32_t a, double v) { memcpy((void *)(uintptr_t)a, &v, 8); }
-static inline void   wrxm(uint32_t a, XMM    v) { memcpy((void *)(uintptr_t)a, &v, 16); }
+static inline float  rdss(uint32_t a) { float  f; memcpy(&f, (void *)(uintptr_t)guest_host_ptr(a), 4); return f; }
+static inline double rdsd(uint32_t a) { double d; memcpy(&d, (void *)(uintptr_t)guest_host_ptr(a), 8); return d; }
+static inline XMM    rdxm(uint32_t a) { XMM x;    memcpy(&x, (void *)(uintptr_t)guest_host_ptr(a), 16); return x; }
+static inline void   wrss(uint32_t a, float  v) { memcpy((void *)(uintptr_t)guest_host_ptr(a), &v, 4); }
+static inline void   wrsd(uint32_t a, double v) { memcpy((void *)(uintptr_t)guest_host_ptr(a), &v, 8); }
+static inline void   wrxm(uint32_t a, XMM    v) { memcpy((void *)(uintptr_t)guest_host_ptr(a), &v, 16); }
 
 /* MOVSS/MOVSD loading from memory zero the rest of the register; the
  * register-to-register forms leave the high lanes alone. Getting that

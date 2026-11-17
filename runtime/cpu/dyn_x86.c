@@ -40,6 +40,7 @@ static uint32_t g_dyn_size[WC3_DYN_RANGE_MAX];
  * first few call targets are the useful evidence when an interpreter
  * instruction is still missing. */
 static unsigned g_dyn_call_trace;
+static unsigned g_dyn_run_trace;
 static void dyn_trace_call(uint32_t site, uint32_t target, uint32_t ret)
 {
     if (g_dyn_call_trace++ < 128)
@@ -54,6 +55,10 @@ void wc3_dyn_x86_register(uint32_t base, uint32_t size)
     for (unsigned i = 0; i < WC3_DYN_RANGE_MAX; i++) {
         if (__atomic_load_n(&g_dyn_base[i], __ATOMIC_ACQUIRE) == base) {
             __atomic_store_n(&g_dyn_size[i], size, __ATOMIC_RELEASE);
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+            fprintf(stderr, "[dyn] register update %08X+%X slot=%u\n",
+                    base, size, i);
+#endif
             return;
         }
     }
@@ -67,6 +72,10 @@ void wc3_dyn_x86_register(uint32_t base, uint32_t size)
              * sees the real base also sees the matching size. */
             __atomic_store_n(&g_dyn_size[i], size, __ATOMIC_RELAXED);
             __atomic_store_n(&g_dyn_base[i], base, __ATOMIC_RELEASE);
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+            fprintf(stderr, "[dyn] register add %08X+%X slot=%u\n",
+                    base, size, i);
+#endif
             return;
         }
     }
@@ -82,6 +91,9 @@ void wc3_dyn_x86_unregister(uint32_t base)
         if (__atomic_load_n(&g_dyn_base[i], __ATOMIC_ACQUIRE) == base) {
             __atomic_store_n(&g_dyn_base[i], 0, __ATOMIC_RELEASE);
             __atomic_store_n(&g_dyn_size[i], 0, __ATOMIC_RELAXED);
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+            fprintf(stderr, "[dyn] unregister %08X slot=%u\n", base, i);
+#endif
         }
     }
 }
@@ -470,6 +482,11 @@ static void dyn_string_op(CPU *c, uint8_t op, int rep, int rep_zf)
 
 void wc3_dyn_x86_run(CPU *c, uint32_t start)
 {
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    if (g_dyn_run_trace++ < 64)
+        fprintf(stderr, "[dyn] run start=%08X esp=%08X ecx=%08X esi=%08X\n",
+                start, c->esp, c->ecx, c->esi);
+#endif
     uint32_t pc = start;
     uint32_t steps = 0;
     for (;;) {

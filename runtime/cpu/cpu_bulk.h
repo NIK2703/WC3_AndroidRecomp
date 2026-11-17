@@ -19,13 +19,13 @@ static inline void rep_stosw(uint32_t dst, uint16_t val, uint32_t n)
 #if defined(__aarch64__)
     uint16x8_t q = vdupq_n_u16(val);
     while (n >= 8) {
-        vst1q_u16((uint16_t *)(uintptr_t)dst, q);
+        vst1q_u16((uint16_t *)guest_host_ptr(dst), q);
         dst += 16;
         n -= 8;
     }
 #endif
     while (n--) {
-        memcpy((void *)(uintptr_t)dst, &val, sizeof val);
+        memcpy((void *)guest_host_ptr(dst), &val, sizeof val);
         dst += 2;
     }
 }
@@ -35,13 +35,13 @@ static inline void rep_stosd(uint32_t dst, uint32_t val, uint32_t n)
 #if defined(__aarch64__)
     uint32x4_t q = vdupq_n_u32(val);
     while (n >= 4) {
-        vst1q_u32((uint32_t *)(uintptr_t)dst, q);
+        vst1q_u32((uint32_t *)guest_host_ptr(dst), q);
         dst += 16;
         n -= 4;
     }
 #endif
     while (n--) {
-        memcpy((void *)(uintptr_t)dst, &val, sizeof val);
+        memcpy((void *)guest_host_ptr(dst), &val, sizeof val);
         dst += 4;
     }
 }

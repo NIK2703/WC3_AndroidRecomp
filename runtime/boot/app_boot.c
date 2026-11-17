@@ -23,10 +23,15 @@
 
 #include "init_array_probe.h"
 #include "hle_bridge.h"
+#include "present_target.h"
+#include "wc3_debug.h"
 #include "wc3_trace.h"
 
 #ifndef WC3_DEBUG
 #define WC3_DEBUG 0
+#endif
+#ifndef WC3_LOG_TO_DOWNLOADS
+#define WC3_LOG_TO_DOWNLOADS 0
 #endif
 
 #if WC3_DEBUG
@@ -36,6 +41,16 @@
 #else
 #define LOGI(...) ((void)0)
 #define LOGE(...) ((void)0)
+#endif
+
+/* Present-scaling trace.  Kept on the graphics tag: the scaling decision and
+ * the graphics path are the same investigation, and the debug APK already
+ * enables GRAPHICS. */
+#if WC3_DEBUG && WC3_DEBUG_GRAPHICS
+#define SCALE_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "wc3present", __VA_ARGS__)
+#else
+#define SCALE_LOG(...) ((void)0)
 #endif
 
 /* Implemented by runtime/hle/android/boot_probe.c. */
@@ -51,23 +66,57 @@ static void set_default(const char *name, const char *value)
         setenv(name, value, 1);
 }
 
+/* userdebug writes its boot log to the public Download folder.  The app can
+ * start before MANAGE_EXTERNAL_STORAGE is granted, and some devices expose a
+ * read-only Download through FUSE, so probe first and fall back to the
+ * app-private state dir instead of losing stdout/stderr entirely. */
+#define WC3_DOWNLOAD_LOG "/storage/emulated/0/Download/wc3_log.txt"
+
+static int open_log(const char *path)
+{
+    FILE *f = freopen(path, "w", stdout);
+    if (!f)
+        return -1;
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    f = freopen(path, "a", stderr);
+    if (!f)
+        return -1;
+    setvbuf(stderr, NULL, _IOLBF, 0);
+    LOGI("boot log %s", path);
+    return 0;
+}
+
+static int log_is_writable(const char *path)
+{
+    FILE *f = fopen(path, "a");
+    if (!f)
+        return 0;
+    fclose(f);
+    return 1;
+}
+
 static void redirect_output(const char *state_dir)
 {
     char path[1024];
-    int n = snprintf(path, sizeof path, "%s/run.txt", state_dir);
+    int n;
+
+#if WC3_LOG_TO_DOWNLOADS
+    if (log_is_writable(WC3_DOWNLOAD_LOG) &&
+        open_log(WC3_DOWNLOAD_LOG) == 0)
+        return;
+    LOGE("cannot open %s: %s; using state dir", WC3_DOWNLOAD_LOG,
+         strerror(errno));
+#endif
+
+    n = snprintf(path, sizeof path, "%s/wc3_log.txt", state_dir);
     if (n <= 0 || (size_t)n >= sizeof path)
         return;
-    FILE *f = freopen(path, "w", stdout);
-    if (f)
-        setvbuf(stdout, NULL, _IOLBF, 0);
-    f = freopen(path, "a", stderr);
-    if (f)
-        setvbuf(stderr, NULL, _IOLBF, 0);
+    open_log(path);
 }
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
 /* On-device diagnostics: SIGUSR1 dumps the HLE last-call ring and the last
- * dispatch targets into run.txt without stopping the guest.  The crash
+ * dispatch targets into the boot log without stopping the guest.  The crash
  * handler already calls the same reporter from a signal context. */
 extern void hle_android_report(void);
 
@@ -143,9 +192,9 @@ static void set_game_args(int roc)
         setenv("WC3_ARGS", merged, 1);
 }
 
-/* A separate small marker is reliable even though run.txt is opened twice
- * (stdout truncates, stderr appends) and the two streams can overwrite each
- * other at boot.  It is also the release-visible acceptance signal. */
+/* A separate small marker is reliable even though the boot log is opened
+ * twice (stdout truncates, stderr appends) and the two streams can overwrite
+ * each other at boot.  It is also the release-visible acceptance signal. */
 static void write_game_mode_marker(const char *state_dir, int roc)
 {
     char path[1024];
@@ -197,6 +246,20 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
     set_default("WC3_HIDDEN", "1");
     set_default("WC3_VULKAN_DRIVER_DIR", data_dir);
 
+    /* Half-resolution grid rendering: the game renders at half the surface and
+     * the present pass upscales it 2x with nearest sampling, which is what the
+     * grid mask is drawn against.  "off"/"system" (the default) leaves the
+     * default mode at native and lets the compositor scale anything smaller. */
+    const char *present_scale = getenv("WC3_PRESENT_SCALE");
+    const int half_resolution =
+        present_scale && (!strcmp(present_scale, "half") ||
+                          !strcmp(present_scale, "1"));
+    wc3_legacy_set_half_resolution(half_resolution);
+    /* Publish the policy before any screen-size/select call can create the
+     * target: the plan must see half mode from its first ensure, not only from
+     * the explicit call below. */
+    wc3_present_target_set_half_grid(half_resolution);
+
     wc3_legacy_set_screen_size(width, height);
 
     uint32_t guest_w = width;
@@ -205,24 +268,54 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
         guest_w = width;
         guest_h = height;
     }
-    const char *e = getenv("WC3_DXVK_WIDTH");
-    if (e && atoi(e) > 0)
-        guest_w = (uint32_t)atoi(e);
-    e = getenv("WC3_DXVK_HEIGHT");
-    if (e && atoi(e) > 0)
-        guest_h = (uint32_t)atoi(e);
-    if (guest_w != width || guest_h != height) {
-        /* The settings screen keeps a resolution from an older device or
-         * display size.  Applying it as the guest mode is only meaningful if
-         * the current surface mode table still contains that pair. */
-        if (!display_mode_supported(guest_w, guest_h)) {
+    /* The launch resolution is a normal system-mode choice.  In half mode the
+     * guest extent is fixed by the exact half of the surface; applying a saved
+     * native/lower launch resolution here would silently defeat the grid and
+     * send a non-2x extent into the present plan. */
+    if (!half_resolution) {
+        const char *e = getenv("WC3_DXVK_WIDTH");
+        if (e && atoi(e) > 0)
+            guest_w = (uint32_t)atoi(e);
+        e = getenv("WC3_DXVK_HEIGHT");
+        if (e && atoi(e) > 0)
+            guest_h = (uint32_t)atoi(e);
+        if ((guest_w != width || guest_h != height) &&
+            !display_mode_supported(guest_w, guest_h)) {
+            /* The settings screen keeps a resolution from an older device or
+             * display size.  Applying it as the guest mode is only meaningful
+             * if the current surface mode table still contains that pair. */
             LOGE("launch resolution %ux%u is not in the device mode table; "
                  "using native %ux%u", guest_w, guest_h, width, height);
             guest_w = width;
             guest_h = height;
-        } else {
-            wc3_legacy_select_display_mode(guest_w, guest_h);
         }
+    }
+
+    /* The activity can publish the surface before this boot path, and at that
+     * moment the half flag was not set yet, so the earlier screen-size update
+     * may have selected the native default.  Apply the final launch mode
+     * unconditionally, then read it back: select is idempotent and also
+     * refreshes the guest client rectangle the shim reports to DXVK. */
+    wc3_legacy_select_display_mode(guest_w, guest_h);
+    uint32_t applied_w = guest_w, applied_h = guest_h;
+    if (wc3_legacy_current_display_mode(&applied_w, &applied_h)) {
+        guest_w = applied_w;
+        guest_h = applied_h;
+    }
+
+    /* The present pass needs a producer surface before DXVK creates its device
+     * (wc3_dxvk_prepare installs the pass, and DXVK asks the Win32 shim for the
+     * window once).  Publishing it here also makes GetClientRect report the
+     * guest extent, so DXVK's own blitter copies the back buffer instead of
+     * rescaling it.
+     *
+     * At native resolution the pass would only copy the image 1:1, so ensure()
+     * leaves the target unpublished and DXVK presents straight into the real
+     * window.  A failure is not fatal: the shim then keeps the real window and
+     * the ordinary stretched path stays available. */
+    if (wc3_present_target_ensure(guest_w, guest_h, width, height) != 0) {
+        LOGE("present target unavailable for %ux%u; DXVK will scale into the "
+             "window", guest_w, guest_h);
     }
 
     /* Keep the native buffer at the physical surface size; DXVK scales the
@@ -235,7 +328,14 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
         LOGE("setBuffersGeometry(%ux%u) failed", width, height);
     wc3_android_set_window(window, width, height);
     WC3_TRACE_END();
-    LOGI("window %ux%u guest %ux%u", width, height, guest_w, guest_h);
+    SCALE_LOG("boot: window=%ux%u present_scale=%s half=%d guest=%ux%u "
+              "applied=%ux%u target=%s halfGrid=%d",
+              width, height, present_scale ? present_scale : "(unset)",
+              half_resolution, guest_w, guest_h, applied_w, applied_h,
+              wc3_present_target_active() ? "target" : "direct",
+              wc3_present_target_half_grid());
+    LOGI("window %ux%u guest %ux%u present=%s", width, height, guest_w, guest_h,
+         wc3_present_target_active() ? "target" : "direct");
 
     char exe[1024];
     int n = snprintf(exe, sizeof exe, "%s/war3.exe", data_dir);

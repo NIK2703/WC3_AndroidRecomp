@@ -17,8 +17,11 @@ param(
     [switch]$Launch,
     [switch]$KeepDynsym,
     # Internal explicit variant selector for the two-stage release_optimized
-    # profile flow.  Public callers normally use -Release or -ReleaseOptimized.
-    [ValidateSet('release', 'debug', 'release_optimized', 'release_optimized_pgo')]
+    # profile flow and the userdebug diagnostic profile.  Public callers
+    # normally use -Release or -ReleaseOptimized; userdebug is selected with
+    # -Variant userdebug and packages as wc3.recomp.debug.
+    [ValidateSet('release', 'debug', 'userdebug',
+                 'release_optimized', 'release_optimized_pgo')]
     [string]$Variant = '',
     [ValidateSet('off', 'generate', 'use')]
     [string]$Pgo = 'off',
@@ -63,7 +66,11 @@ param(
     [string]$GamesActivityAar = '',
     # Product builds use the relifted corpus by default.  Pass -CorpusRoot ''
     # together with -W3LCompat off for the legacy exact-baseline build.
-    [string]$CorpusRoot = 'build/corpus-full'
+    [string]$CorpusRoot = 'build/corpus-full',
+    # Extra CMake configure arguments forwarded to build_app.ps1, e.g.
+    # -DWC3_PARALLEL_RAYCAST=ON for a performance-test APK.  Kept as a string
+    # so callers can pass several -D options without changing this script.
+    [string]$CMakeArgs = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -88,7 +95,8 @@ if ($Variant) {
 } else {
     $variant = 'debug'
 }
-$isDebug = $variant -eq 'debug'
+$isDebug = $variant -in @('debug', 'userdebug')
+$isUserDebug = $variant -eq 'userdebug'
 $isOptimized = $variant -in @('release_optimized', 'release_optimized_pgo')
 $isRelease = -not $isDebug
 if ($isOptimized) {
@@ -212,6 +220,7 @@ New-Item -ItemType Directory -Force $outDir | Out-Null
 # Native library first; the APK must contain this exact build.
 $nativeScript = Join-Path $PSScriptRoot 'build_app.ps1'
 $nativeParams = @{ Variant = $variant }
+if ($CMakeArgs) { $nativeParams['CMakeArgs'] = $CMakeArgs }
 if ($GamesActivityAar) { $nativeParams['GamesActivityAar'] = $GamesActivityAar }
 # Always forward the value, including an explicit empty string: the empty
 # value is the legacy exact-baseline escape hatch and must override the
@@ -355,7 +364,8 @@ if (-not (Test-Path $readelf)) {
 # localizes every non-JNI definition at link time; .dynsym still exists for the
 # Java_* entry points, android_main and JNI_OnLoad.  Crash triage uses the module
 # base plus the unstripped .symtab through tools/symbolize_crash.py.
-# The debug copy intentionally keeps symbols for the wc3.recomp.debug package.
+# The debug/userdebug copy intentionally keeps symbols for the
+# wc3.recomp.debug package.
 # The release_optimized_pgo training APK is not a product: keep its symbols and
 # profile-name metadata so the raw counters remain mergeable.
 $stripProduct = $isRelease -and ($variant -ne 'release_optimized_pgo')
@@ -472,7 +482,7 @@ $gradleVariant = if ($isDebug) { 'debug' } else { 'release' }
 $gradleTask = if ($isDebug) { 'assembleDebug' } else { 'assembleRelease' }
 # BV-3.2: jniLibs belong to the Gradle buildType source set, so use the
 # per-buildType property and keep the native directories separate.
-$jniProperty = if ($variant -eq 'debug') {
+$jniProperty = if ($isDebug) {
     "-Pwc3JniLibsDebug=$jniRoot"
 } else {
     "-Pwc3JniLibsRelease=$jniRoot"
@@ -490,6 +500,7 @@ $gradleArgs = @(
     '-p', $projectDir,
     "-Pwc3GameActivityBuildDir=$gradleApp",
     $jniProperty,
+    "-Pwc3UserDebug=$(if ($isUserDebug) { 'true' } else { 'false' })",
     "-Pwc3LocalMaven=$localMaven",
     "-Pandroid.aapt2FromMavenOverride=$aapt2",
     ':app:clean',

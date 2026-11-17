@@ -248,6 +248,7 @@ static int has_word(const char *s, size_t n, const char *w)
     size_t i;
     if (wl == 0 || wl > n) return 0;
     for (i = 0; i + wl <= n; i++) {
+        if (s[i] != w[0]) continue;
         if (strncmp(s + i, w, wl) != 0) continue;
         if (i > 0 && word_char(s[i - 1])) continue;
         if (i + wl < n && word_char(s[i + wl])) continue;
@@ -260,10 +261,46 @@ static int starts_word(const char *s, size_t n, size_t i, const char *w)
 {
     size_t wl = strlen(w);
     if (i + wl > n) return 0;
+    if (s[i] != w[0]) return 0;
     if (strncmp(s + i, w, wl) != 0) return 0;
     if (i > 0 && word_char(s[i - 1])) return 0;
     if (i + wl < n && word_char(s[i + wl])) return 0;
     return 1;
+}
+
+/* Dispatch a control keyword by its first byte before comparing the whole
+ * word.  The generated corpus is dense with identifiers, so the first-byte
+ * reject avoids most of the starts_word calls in the line scanners. */
+static int starts_control_keyword(const char *s, size_t n, size_t p)
+{
+    switch (s[p]) {
+    case 'i': return starts_word(s, n, p, "if");
+    case 'e': return starts_word(s, n, p, "else");
+    case 's': return starts_word(s, n, p, "switch");
+    case 'w': return starts_word(s, n, p, "while");
+    case 'f': return starts_word(s, n, p, "for");
+    case 'd': return starts_word(s, n, p, "do") ||
+                     starts_word(s, n, p, "default");
+    case 'g': return starts_word(s, n, p, "goto");
+    case 'r': return starts_word(s, n, p, "return");
+    case 'b': return starts_word(s, n, p, "break");
+    case 'c': return starts_word(s, n, p, "continue") ||
+                     starts_word(s, n, p, "case");
+    default: return 0;
+    }
+}
+
+static int starts_branch_keyword(const char *s, size_t n, size_t p)
+{
+    switch (s[p]) {
+    case 'i': return starts_word(s, n, p, "if");
+    case 'e': return starts_word(s, n, p, "else");
+    case 's': return starts_word(s, n, p, "switch");
+    case 'w': return starts_word(s, n, p, "while");
+    case 'f': return starts_word(s, n, p, "for");
+    case 'd': return starts_word(s, n, p, "do");
+    default: return 0;
+    }
 }
 
 /* Parse one canonical c->xmm[N] access at i.  Returns the index and stores
@@ -1619,6 +1656,7 @@ static int starts_macro_prefix(const char *s, size_t n, size_t i, const char *w)
 {
     size_t wl = strlen(w);
     if (i + wl > n) return 0;
+    if (s[i] != w[0]) return 0;
     if (i > 0 && word_char(s[i - 1])) return 0;
     return strncmp(s + i, w, wl) == 0;
 }
@@ -1631,6 +1669,7 @@ static int line_has_guest_call(const char *s, size_t n, size_t ls, size_t le)
     size_t i;
     for (i = ls; i < le; i++) {
         size_t p;
+        if (s[i] != 'W' && s[i] != 'w' && s[i] != 'd') continue;
         if (starts_macro_prefix(s, n, i, "WC3_DIRECT_CALL") ||
             starts_macro_prefix(s, n, i, "WC3_DIRECT_TAIL") ||
             starts_macro_prefix(s, n, i, "WC3_GUEST_DRAIN") ||
@@ -1698,19 +1737,7 @@ static int line_has_top_level_control(const char *s, size_t n, size_t ls,
         }
         if (paren || brace) continue;
         if (label_at(s, n, p, le)) return 1;
-        if (starts_word(s, n, p, "if") ||
-            starts_word(s, n, p, "else") ||
-            starts_word(s, n, p, "switch") ||
-            starts_word(s, n, p, "while") ||
-            starts_word(s, n, p, "for") ||
-            starts_word(s, n, p, "do") ||
-            starts_word(s, n, p, "goto") ||
-            starts_word(s, n, p, "return") ||
-            starts_word(s, n, p, "break") ||
-            starts_word(s, n, p, "continue") ||
-            starts_word(s, n, p, "case") ||
-            starts_word(s, n, p, "default"))
-            return 1;
+        if (starts_control_keyword(s, n, p)) return 1;
     }
     return 0;
 }
@@ -1768,12 +1795,7 @@ static int line_is_unbraced_control(const char *s, size_t n, size_t ls,
             continue;
         }
         if (paren || brace) continue;
-        if (starts_word(s, n, p, "if") ||
-            starts_word(s, n, p, "else") ||
-            starts_word(s, n, p, "while") ||
-            starts_word(s, n, p, "for") ||
-            starts_word(s, n, p, "do") ||
-            starts_word(s, n, p, "switch")) {
+        if (starts_branch_keyword(s, n, p)) {
             control = 1;
             p += 1;
         }

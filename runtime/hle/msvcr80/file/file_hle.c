@@ -432,7 +432,7 @@ static void h_read(CPU *c)
     if (!wc3_legacy_guest_ok(buffer, count)) return;
 
     uint32_t got = 0;
-    if (wc3_hle_msvcr80_fd_read(fd, (void *)(uintptr_t)buffer, count,
+    if (wc3_hle_msvcr80_fd_read(fd, guest_host_ptr(buffer), count,
                                 &got) != 0)
         return;
     c->eax = got;
@@ -453,7 +453,7 @@ static void h_write(CPU *c)
     if (!wc3_legacy_guest_ok(buffer, count)) return;
 
     uint32_t written = 0;
-    if (wc3_hle_msvcr80_fd_write(fd, (const void *)(uintptr_t)buffer, count,
+    if (wc3_hle_msvcr80_fd_write(fd, guest_host_ptr(buffer), count,
                                  &written) != 0)
         return;
     c->eax = written;

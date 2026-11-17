@@ -1,40 +1,52 @@
-# Distributed C/C++ compilation on IDEAPAD
+# Distributed C/C++ compilation on IDEAPAD and the hotspot phone
 
 Accelerator for the canonical Android build. Every native variant
-(`release`, `debug`, `release_optimized`, `release_optimized_pgo`) tries
-IDEAPAD automatically and falls back to a plain local build when the peer is
-unreachable. `build_dist.ps1` remains the explicit entry point for transport,
-capacity and diagnostic overrides. `ccache` remains the compiler launcher. On
-a cache miss `wc3_dist_cc.py` either hands the command to a remote `distccd`
-through a persistent TCP-over-SSH tunnel (default), or uses the original SSH
-helper protocol in `compile_one.py`.
+(`release`, `debug`, `release_optimized`, `release_optimized_pgo`) automatically
+uses whichever workers are reachable: IDEAPAD, the local-network hotspot phone
+(POCO F5, Termux), or both. Either worker is optional; with neither one the
+build is a plain local build. The `release` and `debug` variants use both; the
+optimized variants use IDEAPAD by default and exclude the phone unless opted
+in. `build_dist.ps1` remains the explicit entry point for transport, capacity
+and diagnostic overrides. `ccache` remains the compiler launcher. On a cache
+miss `wc3_dist_cc.py` either hands the command to a remote `distccd` through a
+persistent TCP-over-SSH tunnel (default), or uses the original SSH helper
+protocol in `compile_one.py` (IDEAPAD only). If the phone's `sshd` is down,
+`phone_tunnel.ps1` first tries to start it through wireless adb and the phone's
+root `su`; the phone stays optional either way.
 
-The remote worker uses the same NDK at the same absolute path, so the object
-layout is the same as a local compile. The local dependency file, macros and
-`__FILE__` expansion still come from the local preprocessor.
+IDEAPAD runs the same NDK at the same absolute path and produces byte-identical
+objects. The phone runs the native aarch64 build of the same NDK revision; its
+object bytes can differ from the Windows-hosted compiler, but the objects are
+ABI- and link-compatible. A function compiled on the phone, linked with the
+host NDK and run on the POCO F5 returned 0. The local dependency file, macros
+and `__FILE__` expansion still come from the local preprocessor.
 
 ## Capacity model
 
-The scripts read the capacity of both machines instead of using a fixed split:
+The scripts read the capacity of every machine instead of using a fixed split:
 
 | Machine | Source of slot count | Typical count |
 | --- | --- | --- |
 | this PC | `[Environment]::ProcessorCount` | 4 |
 | IDEAPAD | remote `NUMBER_OF_PROCESSORS` | 12 |
-| Ninja | local + remote slots | 16 |
+| hotspot phone | boosted top-app `Cpus_allowed_list`, else `nproc` | 6-8, or 3 without root |
+| Ninja | local + whichever workers are available | 4-24 |
 
 `build_dist.ps1` writes:
 
 ```
-DISTCC_HOSTS=127.0.0.1:<free-port>/12 localhost/4 --localslots=4 --localslots_cpp=4
-CMAKE_BUILD_PARALLEL_LEVEL=16
+DISTCC_HOSTS=127.0.0.1:<ideapad-port>/12 127.0.0.1:<phone-port>/8 localhost/4 --localslots=4 --localslots_cpp=4
+CMAKE_BUILD_PARALLEL_LEVEL=24
 ```
 
-distcc tries the remote host first. The first 12 compiles go to IDEAPAD; the
-next four use the local four slots. In steady state a free remote slot is
-always preferred, so the faster machine receives proportionally more work. The
+The host list only contains the workers that actually started, in this order:
+IDEAPAD, then the phone, then the local slots. With both, the first 12 compiles
+go to IDEAPAD, the next up to 8 to the phone, and the remaining four run
+locally. With only one worker, its term is the first and only remote term. The
 local compiler concurrency is capped at four by the `localhost/4` slots, even
-though Ninja has 16 jobs in flight.
+though Ninja may have more jobs in flight. The phone's slot count is whatever
+the worker measured after the cpuset boost; without root it is the Termux
+`nproc`, usually 3.
 
 Commands that cannot be distributed for identity reasons (debug info,
 modules, response files, non-clang compilers, unsupported profile modes) are
@@ -49,23 +61,34 @@ are explicit: `-flto*` needs `WC3_DIST_ALLOW_LTO=1`; profile-generate needs
 `WC3_DIST_PGO_PROFILE_READY=1`. A final `release_optimized` build copies its
 merged profile to the same absolute path on IDEAPAD before the first compile,
 so the local preprocessor and the remote compiler both see a real profile.
-Without that copy, profile-use commands stay local instead of failing.
+Without that copy, or without IDEAPAD, profile-use commands stay local instead
+of failing. The phone is excluded from both optimized variants by default: it
+has no merged PGO profile. Set `WC3_DIST_PHONE_OPTIMIZED=1` to include it; the
+LTO-only variant is the supported opt-in. PGO profile-use jobs will fall back
+locally on the phone because the profile is not copied there. If IDEAPAD is
+disabled and the phone is not opted in, an optimized build is simply local.
 
-`-LocalSlots`, `-RemoteSlots` and `-Jobs` override the detected values.
-The default `Jobs` is `local + remote` for every native variant. Debug corpus
+`-LocalSlots`, `-RemoteSlots`, `-PhoneSlots` and `-Jobs` override the detected
+values. The default `Jobs` is the local slot count plus every available
+worker's slots (IDEAPAD and/or phone); an optimized variant counts IDEAPAD by
+default and the phone only when `WC3_DIST_PHONE_OPTIMIZED=1`. Debug corpus
 objects end in `-g0` and are distributable; commands whose final state keeps
 debug info use the localhost-only distcc host list and stay capped by
 `LocalSlots`. `-Jobs` only changes how many commands Ninja starts; it does not
-remove the distcc local slot limit. Leaving it below
-`LocalSlots + RemoteSlots` leaves remote capacity idle.
+remove the distcc local slot limit. Leaving it below the total slots leaves
+remote capacity idle.
 
 A ccache hit does not enter distcc at all; it is cheap and finishes without a
 slot. ccache itself still runs one local preprocessor per miss, so a burst of
-16 misses briefly adds local preprocessing load beyond the four compile slots.
+24 misses briefly adds local preprocessing load beyond the four compile slots.
 That is the main reason small translation units are not faster when
 distributed.
 
 ## Prerequisites
+
+Both workers are optional. These are the requirements for each one; if a
+worker is not configured, not running or not reachable, the build simply does
+not use it.
 
 IDEAPAD needs:
 
@@ -76,22 +99,101 @@ IDEAPAD needs:
 * an SSH server reachable through the existing `id_ideapad` key and `nikita`
   account.
 
+The hotspot phone (POCO F5, Termux) needs:
+
+* Termux with `openssh` and `distcc` (`pkg install -y openssh distcc`);
+* the Android NDK r29 at `~/tools/android-ndk-r29`; its `source.properties`
+  must be `Pkg.Revision = 29.0.14206865`;
+* `sshd` on 8022, with the `id_marble` public key in
+  `~/.ssh/authorized_keys`. The script logs in as the Termux UID (`u0_a360`
+  here; override with `WC3_PHONE_USER`);
+* wireless adb on port 5555 (or `WC3_PHONE_ADB_PORT`/`WC3_PHONE_ADB_SERIAL`)
+  and root `su` granted to the adb shell for auto-start. If port 8022 is closed,
+  `phone_tunnel.ps1` runs `su` as the Termux UID, asks a live `runsvdir` to
+  start the `sshd` service, or starts `sshd` directly if the supervisor is
+  gone. The build waits for 8022 and then continues. If adb or root is
+  unavailable, the phone is skipped and IDEAPAD or the local build continues;
+  `WC3_PHONE_AUTOSTART=0` disables this attempt;
+* root through `su` for the top-app cpuset boost. Without root the worker still
+  starts, but is limited to the Termux background cpuset (`nproc`, usually 3);
+* battery optimization disabled for Termux, and the phantom-process killer
+  disabled on Android 12+ (`settings put global
+  settings_enable_monitor_phantom_procs false`). The worker holds
+  `termux-wake-lock` for the duration of the tunnel.
+
+The phone's NDK is the native aarch64 build. The worker creates executable
+shims whose filenames are the exact Windows compiler paths distcc sends, so
+`execvp` finds them through the work directory on `PATH`. `wc3_dist_cc.py`
+sends the compiler in Windows backslash form, so CMake's forward-slash compiler
+path still matches those shims. The worker verifies the NDK revision on every
+start and refuses a mismatch unless `WC3_PHONE_ALLOW_VERSION_MISMATCH=1`.
+`WC3_HOST_NDK` (or `ANDROID_NDK_ROOT`/`ANDROID_NDK_HOME`) selects the host NDK
+whose compiler path becomes the shim name; the default is
+`E:\Android\Sdk\ndk\29.0.14206865`.
+
 This machine needs `C:\msys64\usr\bin\distcc.exe`. That location is deliberate:
 ccache fails to launch the client with exit 127 from `.local\bin` and temporary
 directories, while the MSYS2 `usr\bin` path works through `CCACHE_PREFIX`.
 
-The peer is resolved through the local DNS name `ideapad`; the current IPv4
-neighbor entry is then matched to its IPv6 link-local address and interface
-index. No address, suffix or interface index is stored in the scripts, so a
-new DHCP lease or link-local change is picked up on the next start.
-`WC3_DIST_HOST` overrides the resolver.
+The IDEAPAD peer is resolved through the local DNS name `ideapad`; the current
+IPv4 neighbor entry is then matched to its IPv6 link-local address and
+interface index. No address, suffix or interface index is stored in the
+scripts, so a new DHCP lease or link-local change is picked up on the next
+start. `WC3_DIST_HOST` overrides the resolver.
+
+The phone is resolved on every start, with no stored address. The resolver uses
+the IPv4 default route only to find the hotspot interface; the SSH candidates
+themselves include IPv4 and IPv6: the interface's DNS IPv4 servers, the default
+gateway, the IPv4 neighbor entry for the phone's MAC, the IPv6 neighbor entry,
+and the link-local address derived from the MAC (`fe80::...` with the interface
+zone index). It accepts the first candidate whose port 8022 is reachable. When
+none is reachable, the start action reuses the same candidate list for the adb
+auto-start; `-Action resolve` stays a pure reachability check. The adb transport
+itself is IPv4-only, while SSH can use an IPv6 candidate.
+
+A new DHCP lease or link-local change is picked up on the next start. A tunnel
+that is already open stays bound to the address it was opened to: if the phone
+changes address mid-build, that tunnel breaks, its commands fall back locally,
+and the next start resolves the new address. `WC3_PHONE_HOST` is an explicit
+static override and defeats this behavior; leave it unset for a changing
+address. `WC3_PHONE_MAC` changes the default `12-23-73-4E-0F-F4` when the phone's
+MAC changes. The phone's SSH host key is stored under the `wc3-phone` alias, so
+the changing IP does not change the known-host entry. The IDEAPAD and phone
+resolvers are independent; each tunnel starts or fails on its own.
+
+Worker environment overrides: `WC3_DIST_IDEAPAD=0` keeps only the phone and
+`WC3_DIST_PHONE=0` keeps only IDEAPAD; setting both to `0` forces a local
+build. Phone-specific: `WC3_PHONE_HOST`, `WC3_PHONE_MAC`, `WC3_PHONE_USER`,
+`WC3_PHONE_SSH_PORT`, `WC3_PHONE_KEY`, `WC3_PHONE_HOME`, `WC3_PHONE_NDK`,
+`WC3_PHONE_BOOST=0`, `WC3_PHONE_ALLOW_VERSION_MISMATCH=1`,
+`WC3_DIST_PHONE_OPTIMIZED=1`, and `WC3_DIST_PHONE_SLOTS=N`. Auto-start uses
+`WC3_PHONE_AUTOSTART=0` to disable, `WC3_PHONE_ADB` for an explicit `adb.exe`,
+`WC3_PHONE_ADB_PORT` (default 5555), `WC3_PHONE_ADB_SERIAL` for an already
+connected serial, and `WC3_PHONE_UID` to skip UID detection.
 
 ## Usage
 
 ```powershell
-# normal release build: IDEAPAD is used when reachable, otherwise local
+# normal release build: both workers are used when reachable
 .\tools\android\build_app.ps1 -Variant release
 .\tools\android\build_apk.ps1 -Release
+
+# IDEAPAD only
+$env:WC3_DIST_PHONE = '0'
+.\tools\android\build_app.ps1 -Variant release
+
+# phone only (IDEAPAD disabled); the phone is still resolved every start
+$env:WC3_DIST_IDEAPAD = '0'
+.\tools\android\build_app.ps1 -Variant release
+# or, for one explicit run:
+.\tools\dist\build_dist.ps1 -Variant release -NoIdeapad
+
+# neither worker: the same canonical build runs locally
+.\tools\dist\build_dist.ps1 -Variant release -NoIdeapad -NoPhone
+
+# include the phone in an optimized build (LTO is the supported case)
+$env:WC3_DIST_PHONE_OPTIMIZED = '1'
+.\tools\dist\build_dist.ps1 -Variant release_optimized
 
 # force a local build for one invocation
 $env:WC3_DIST_AUTO = '0'
@@ -121,43 +223,69 @@ $env:WC3_DIST_AUTO = '0'
 .\tools\dist\build_dist.ps1 -Variant release -KeepTunnel
 ```
 
-`build_app.ps1` uses one trampoline call before the DXVK object build. When the
-peer is reachable, the helper starts the tunnel and re-runs the same script with
-`WC3_DIST_ACTIVE=1`; the original script body executes unchanged in the child
-scope, and the helper stops the tunnel in `finally` after the child exits. No
-`try/finally` wraps the build body, so ordinary local builds keep the same code
-path. Automatic mode covers all four native variants and uses
-`Jobs=local+remote`: the debug corpus objects are `-g0` and run remotely, while
-`-g` commands stay on this machine through the localhost-only distcc path and
-remain capped by the local slots. `release_optimized_pgo` distributes the
-profile-generate training objects. `release_optimized` distributes ThinLTO and
-profile-use objects after the merged profile has been copied to IDEAPAD; if
-that copy fails, only profile-use commands stay local. Set
-`WC3_DIST_JOBS=N` to override the detected Ninja concurrency for the automatic
-path. `build_dist.ps1` owns its tunnel explicitly and sets
-`WC3_DIST_ACTIVE=1`, so a nested `build_app.ps1` cannot start a second one.
+`build_app.ps1` uses one trampoline call before the DXVK object build. When at
+least one worker is reachable, the helper starts its tunnel and re-runs the
+same script with `WC3_DIST_ACTIVE=1`; the original script body executes
+unchanged in the child scope, and the helper stops the tunnels in `finally`
+after the child exits. No `try/finally` wraps the build body, so ordinary local
+builds keep the same code path. Automatic mode covers all four native
+variants. Ordinary variants use `Jobs=local+every available worker`: the debug
+corpus objects are `-g0` and run remotely, while `-g` commands stay on this
+machine through the localhost-only distcc path and remain capped by the local
+slots. `release_optimized_pgo` distributes the profile-generate training
+objects to IDEAPAD when it is available. `release_optimized` distributes
+ThinLTO and profile-use objects after the merged profile has been copied to
+IDEAPAD; if that copy fails, or IDEAPAD is absent, only profile-use commands
+stay local. The phone is left out of both optimized variants by default; set
+`WC3_DIST_PHONE_OPTIMIZED=1` to include it for the LTO-only case. Set
+`WC3_DIST_IDEAPAD=0` for phone only, `WC3_DIST_PHONE=0` for IDEAPAD only (set
+both for local), and `WC3_DIST_JOBS=N` to override the detected Ninja
+concurrency for the automatic path. `build_dist.ps1` owns its tunnels
+explicitly and sets `WC3_DIST_ACTIVE=1`, so a nested `build_app.ps1` cannot
+start a second set.
 
-The tunnel can also be managed directly:
+The tunnels can also be managed directly:
 
 ```powershell
 $t = .\tools\dist\distcc_tunnel.ps1 -Action start
+$t = .\tools\dist\distcc_tunnel.ps1 -Action start -NoIdeapad
+$t = .\tools\dist\distcc_tunnel.ps1 -Action start -NoPhone
 .\tools\dist\distcc_tunnel.ps1 -Action status
 .\tools\dist\distcc_tunnel.ps1 -Action stop
+
+# the phone independently, without the main orchestrator
+$p = .\tools\dist\phone_tunnel.ps1 -Action start
+.\tools\dist\phone_tunnel.ps1 -Action resolve
+.\tools\dist\phone_tunnel.ps1 -Action status
+.\tools\dist\phone_tunnel.ps1 -Action stop
 ```
 
-The start action prints one JSON object with `Port`, `RemoteSlots`,
-`LocalSlots`, `Pid`, `PgoProfile` and `PgoProfileSynced`. State lives in
-`%LOCALAPPDATA%\wc3-dist\distcc-tunnel.json`; tunnel logs are in
-`%LOCALAPPDATA%\wc3-dist\distccd-*.log` and the remote daemon writes
-`E:\wc3-dist\distccd-tunnel.log`.
+The main start action prints one JSON object with `Port`, `RemoteSlots`,
+`LocalSlots`, `Pid`, `PgoProfile`, `PgoProfileSynced`, `PhonePort`,
+`PhoneSlots`, `PhoneTarget` and a nested `Phone` object. A worker that is
+disabled or unavailable has zero slots and an empty port; a phone-only start
+has `Pid=0` and `Port=0`. If both workers are unavailable the start still
+succeeds with zero slots and no state file, which callers treat as a local
+build. State lives in `%LOCALAPPDATA%\wc3-dist\distcc-tunnel.json`; the phone
+tunnel keeps its own state in `phone-tunnel.json`. Main tunnel logs are
+`%LOCALAPPDATA%\wc3-dist\distccd-*.log`, the phone logs are
+`phone-tunnel-*.out.log` and `.err.log`, IDEAPAD's daemon writes
+`E:\wc3-dist\distccd-tunnel.log`, and the phone's daemon writes
+`~/.wc3-dist/distccd.log`. The main `-Action stop` stops both workers; the
+phone script is also safe to call on its own. `-NoIdeapad` and `-NoPhone` skip
+the corresponding worker for a single explicit start; both switches give a
+zero-slot start that callers treat as local. `-PhoneSlots N` and
+`-PhoneLocalPort N` pin the phone capacity and loopback port.
 
-`-Action start` refuses to replace a tunnel whose SSH process is still alive.
-This is deliberate: an automatic build or a diagnostic run must not steal the
-transport of a build that is already running. The state records the PowerShell
-owner in `OwnerPid`. Pass `-Force` only after the owning build has stopped.
-`-LocalPort <port>` starts the tunnel on an exact loopback port; use it to
-restore a tunnel for a process whose `DISTCC_HOSTS` was already captured (for
-example after a dropped SSH connection).
+`-Action start` refuses to replace a tunnel whose recorded IDEAPAD SSH process
+is still alive. This is deliberate: an automatic build or a diagnostic run
+must not steal the transport of a build that is already running. A phone-only
+start has no main SSH process (`Pid=0`), so a new start replaces it; the
+one-build rule still applies. The state records the PowerShell owner in
+`OwnerPid`. Pass `-Force` only after the owning build has stopped. `-LocalPort
+<port>` starts the tunnel on an exact loopback port; use it to restore a tunnel
+for a process whose `DISTCC_HOSTS` was already captured (for example after a
+dropped SSH connection).
 
 For a C-only target, the same environment can be set by hand:
 
@@ -166,11 +294,15 @@ $env:WC3_DIST = '1'
 $env:WC3_DIST_TRANSPORT = 'distcc'
 $env:WC3_DIST_LOCAL_SLOTS = '4'
 $env:CCACHE_PREFIX = 'C:/msys64/ucrt64/bin/python.exe E:/projects/wc3_android_recomp/tools/dist/wc3_dist_cc.py'
-$env:DISTCC_HOSTS = '127.0.0.1:<port>/12 localhost/4 --localslots=4 --localslots_cpp=4'
+$env:DISTCC_HOSTS = '127.0.0.1:<ideapad-port>/12 127.0.0.1:<phone-port>/8 localhost/4 --localslots=4 --localslots_cpp=4'
 $env:DISTCC_DIR = "$env:LOCALAPPDATA\wc3-dist\distcc-state"
 $env:TMPDIR = $env:TEMP
-& C:\msys64\ucrt64\bin\ninja.exe -C build\android_app\release\cmake -j 16 <target>
+& C:\msys64\ucrt64\bin\ninja.exe -C build\android_app\release\cmake -j 24 <target>
 ```
+
+Drop the phone term and use `-j 16` when only IDEAPAD is in use; drop the
+IDEAPAD term for phone-only, or drop both remote terms for a local build. The
+phone-only host list is `127.0.0.1:<phone-port>/8 localhost/4 ...`.
 
 `WC3_DIST_DEBUG=1` appends client events to
 `%LOCALAPPDATA%\wc3-dist\client.log`. `WC3_DIST_SLOTS` still controls the
@@ -186,7 +318,8 @@ occurrence.
 A `-g` command cannot use the remote path because distcc preprocesses locally
 and the resulting debug metadata no longer matches a direct compile. It is not
 a correctness problem for release objects: all measured debug-off objects and
-dependency files are byte-identical to the local reference.
+dependency files through IDEAPAD are byte-identical to the local reference.
+Phone-produced objects are ABI- and link-compatible, but not byte-identical.
 
 ## Measured identity and throughput
 
@@ -210,6 +343,37 @@ labelled as such.
   `C794A457161F6346745F9944BC1B5484E77F3209E116A0AA05993079081C2BC2`
   and the depfile matched the direct compile through the local-only path.
 
+The hotspot phone was measured through the same managed tunnel:
+
+* Single 3.37 MB corpus file (`ijl15_closed_0000.c`): local reference 5.19 s;
+  the phone with the top-app boost completed in 3.44 s. The phone object is
+  2,192,680 bytes (SHA-256 starts `83393EF53709E1EE`); the local reference is
+  2,192,624 bytes, so the bytes differ as expected from the native aarch64
+  host build. A separate function compiled on the phone linked with the host
+  NDK and ran on the POCO F5 with exit status 0.
+* 16 concurrent wrapper compiles with the exact two-remote host list
+  (IDEAPAD 12 + phone 7/8 + local 4): 16/16 succeeded in 4.83 s. The phone's
+  `distccd` log recorded `COMPILE_OK` entries for several `game`/`ijl15`
+  objects, and IDEAPAD handled the rest; this is a scheduling smoke test, not
+  corpus throughput.
+* Dry runs with the final worker selection:
+  * both: `local=4 remote=12 phone=7 jobs=23 remote_cpu_share=83%`;
+  * IDEAPAD only: `local=4 remote=12 phone=0 jobs=16 remote_cpu_share=75%`;
+  * phone only (`WC3_DIST_IDEAPAD=0` or `-NoIdeapad`):
+    `local=4 remote=0 phone=7-8 jobs=11-12 remote_cpu_share=64-67%`;
+  * neither (`-NoIdeapad -NoPhone`): `local=4 remote=0 phone=0 jobs=4
+    remote_cpu_share=0%`, with the canonical local build.
+  The phone slot count varies with the active top-app cpuset (6-8 on this
+  device). The automatic helper was also exercised with
+  `WC3_DIST_IDEAPAD=0`: it produced
+  `DISTCC_HOSTS=127.0.0.1:<phone-port>/8 localhost/4 ...` and
+  `CMAKE_BUILD_PARALLEL_LEVEL=12`, then restored both variables on disable.
+* Phone-only transport probe: a 7,866-byte preprocessed C translation unit was
+  compiled with the phone as the only host (`127.0.0.1:<phone-port>/8`, no
+  localhost term). distcc logged `exec on 127.0.0.1:<phone-port>/8`, the
+  compile exited 0 in 0.345 s, and the 1,120-byte object was ELF64 AArch64
+  relocatable. This path does not depend on IDEAPAD.
+
 The PGO/LTO transport path was probed separately with a small C translation
 unit and the same NDK clang.  These are transport/identity probes, not corpus
 throughput numbers:
@@ -230,34 +394,88 @@ throughput numbers:
   also matched: profile-generate 2,528 bytes / `99E3BE71...`, and
   profile-use + ThinLTO 3,572 bytes / `18DA0799...`.
 
-A full debug app Ninja build through this path completed with
+A full debug app Ninja build through the IDEAPAD-only path completed with
 `local=4 remote=12 jobs=16` and produced and installed the APK. The first
 automatic full-build attempt had reached CMake configure and stopped on a
 stale local lift tool (`selection24.exe` older than `selection24.c`) before any
-corpus compilation; that failure was not a transport failure. A full
-`release_optimized` build with the new PGO/LTO transport has not completed yet;
-the probes above establish object identity for the affected command shapes.
-The automatic path also covers the DXVK probe compiles when they are stale, but
-DXVK object identity under distcc has not yet been measured separately.
-`build_dist.ps1` and the explicit `-DryRun` path do not start a project build
-by themselves.
+corpus compilation; that failure was not a transport failure. The two-worker
+path has been validated by the dry run, the 16-job mixed compile, and the phone
+link/run test above. The independent paths are covered by the four dry runs and
+the phone-only transport probe; a full app link and install using
+phone-produced objects has not been run yet, and a full phone-only app build
+has not been run. A full `release_optimized` build with the new PGO/LTO
+transport has not completed yet; the probes above establish object identity for
+the affected command shapes. The automatic path also covers the DXVK probe
+compiles when they are stale, but DXVK object identity under distcc has not yet
+been measured separately. `build_dist.ps1` and the explicit `-DryRun` path do
+not start a project build by themselves.
+
+## Failure behavior
+
+* IDEAPAD and the phone are independent optional workers. The automatic path
+  starts whichever is reachable; if neither is, the same build runs locally.
+  A phone-only run uses the phone and the local slots; an IDEAPAD-only run uses
+  IDEAPAD and the local slots.
+* `build_dist.ps1` with the default distcc transport uses whichever worker is
+  available. If neither is available it prints a warning and runs the
+  canonical build locally; it does not fail just because IDEAPAD is absent.
+  `-NoIdeapad` and `-NoPhone` select a subset, and both select the local path.
+* If IDEAPAD disappears while the phone is up, only IDEAPAD's commands fall
+  back locally; the phone tunnel remains usable. If the phone disappears, its
+  commands fall back locally; IDEAPAD remains usable.
+* The phone worker normally connects to an existing Termux `sshd`. If port 8022
+  is closed, `phone_tunnel.ps1` tries to start it through wireless adb: it
+  switches to the Termux UID with `su`, runs `sv up sshd` when `runsvdir` is
+  alive, or starts `sshd` directly when the supervisor is gone, then waits for
+  8022. If adb is not connected or authorized, root `su` is unavailable, or
+  `sshd` still does not come up, the phone is skipped; IDEAPAD or the local
+  build continues. This starts the Termux SSH service, not the Termux UI.
+  `WC3_PHONE_AUTOSTART=0` restores the old skip-if-down behavior. Termux:Boot
+  covers reboots; the adb path also revives a Termux process killed mid-session.
+* A direct cold-start `sshd` runs from the adb/root shell. The worker then may
+  not obtain the top-app cpuset and reports the smaller `nproc` slot count
+  (usually 3). The supervised `sv up` path keeps the normal app context and the
+  6-8 slot boost.
+* The optimized variants use IDEAPAD by default. With IDEAPAD disabled and the
+  phone not opted in they are local; `WC3_DIST_PHONE_OPTIMIZED=1` enables the
+  phone-only LTO path. PGO profile-use remains local on the phone.
 
 ## Limits
 
 * Only one distributed build at a time. Tunnel start and stop remove stale
-  remote `distccd.exe` processes with `taskkill /F /IM distccd.exe`; a second
-  concurrent build would lose its worker.
-* The remote compiler and sysroot must match the local NDK version and path.
-  The source tree does not need to exist on IDEAPAD because the preprocessed
-  translation unit is transferred.
+  remote daemons with `taskkill /F /IM distccd.exe` on IDEAPAD and
+  `pkill -f '[d]istccd'` on the phone; a second concurrent build would lose
+  whichever workers the first build owns.
+* The remote compiler and sysroot must match the local NDK revision. IDEAPAD
+  uses the same absolute NDK path. The phone uses the same NDK revision at
+  `~/tools/android-ndk-r29` and gets executable shims named after the Windows
+  compiler paths, so the source tree does not need to exist on either peer.
+* Phone object bytes are not guaranteed identical to the Windows-hosted
+  compiler. ABI and link compatibility are verified, but a full app link with
+  phone-produced objects has not been run yet.
+* The phone's capacity follows Android's cpuset. With root the worker pins
+  `distccd` to `top-app` and reports the daemon's effective
+  `Cpus_allowed_list` (6-8 CPUs here). Without root it reports `nproc`, usually
+  3. The count is re-measured on every start, so it can change between builds.
+* The phone is excluded from `release_optimized` and `release_optimized_pgo`
+  by default. `WC3_DIST_PHONE_OPTIMIZED=1` opts in; the PGO profile is copied
+  only to IDEAPAD, so profile-use jobs on the phone fall back locally. With
+  IDEAPAD disabled, an optimized build is local unless the phone is opted in;
+  the LTO-only variant is the supported opt-in.
 * Network cost is per translation unit. Large files with long compile times
   benefit most; small files can be slower than a local compile.
-* Automatic distribution covers all four native variants. Debug-info commands
-  still run locally through the local-only path; an explicit
-  `build_dist.ps1 -Variant debug` follows the same rule. Optimized variants
-  distribute ThinLTO and profile-generate commands; profile-use needs a
-  successful profile copy to the same absolute path on IDEAPAD. The custom
-  `ssh` transport leaves profile-use local because it has no profile copy step.
+* Automatic distribution covers all four native variants and every available
+  worker. Debug-info commands still run locally through the local-only path;
+  an explicit `build_dist.ps1 -Variant debug` follows the same rule. Optimized
+  variants distribute ThinLTO and profile-generate commands; profile-use needs
+  a successful profile copy to the same absolute path on IDEAPAD. The custom
+  `ssh` transport leaves profile-use local because it has no profile copy step,
+  and it does not use the phone; with IDEAPAD disabled it builds locally.
+* If the phone disappears mid-build, distcc retries those commands locally;
+  the IDEAPAD tunnel is unaffected. If IDEAPAD disappears, its commands retry
+  locally and the phone tunnel remains usable. The main state records whichever
+  workers started; a phone-only start has `Pid=0`/`Port=0` and is still stopped
+  by `-Action stop`.
 * `TMPDIR` must name an existing Windows directory and `DISTCC_DIR` must be
   creatable; the scripts create the state directory. Without `TMPDIR`, distcc
   logs `can't use TMPDIR "/tmp"` and falls back to local compilation.

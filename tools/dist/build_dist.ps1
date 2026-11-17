@@ -1,4 +1,5 @@
-# Run the canonical Android build with ccache misses compiled on IDEAPAD.
+# Run the canonical Android build with ccache misses compiled on every
+# available distributed worker: IDEAPAD and/or the hotspot phone.
 #
 # This is an opt-in accelerator, not a second build pipeline: it sets
 # CCACHE_PREFIX before calling tools/android/build_app.ps1, so ccache keeps
@@ -7,14 +8,18 @@
 # Capacity model (distcc transport):
 #   * the local machine contributes ProcessorCount compiler slots;
 #   * IDEAPAD contributes its own NUMBER_OF_PROCESSORS slots;
-#   * Ninja starts local+remote jobs, distcc fills the remote slots first and
-#     runs at most the local slot count on this machine.
-# The faster machine therefore receives proportionally more work instead of a
-# fixed 50/50 split, and the local compiler concurrency never exceeds its
-# processor count.
+#   * the hotspot phone contributes its boosted top-app CPU count, or nproc
+#     when Termux cannot use root to reach the big cores;
+#   * Ninja starts local plus every available worker, distcc fills the
+#     workers, and runs at most the local slot count on this machine.
+# Either worker is optional: -NoIdeapad, -NoPhone, or both.  If neither
+# worker is available the canonical build runs locally.  The optimized
+# variants use IDEAPAD by default and exclude the phone because it has no
+# merged PGO profile; set WC3_DIST_PHONE_OPTIMIZED=1 to include the phone.
 [CmdletBinding()]
 param(
-    [ValidateSet('release', 'debug', 'release_optimized', 'release_optimized_pgo')]
+    [ValidateSet('release', 'debug', 'userdebug',
+                 'release_optimized', 'release_optimized_pgo')]
     [string]$Variant = 'release',
     [ValidateSet('distcc', 'ssh')]
     [string]$Transport = 'distcc',
@@ -27,6 +32,11 @@ param(
     [string]$PgoProfile = '',
     # Legacy name for the custom SSH transport's remote slot count.
     [int]$Slots = 0,
+    # Either worker can be skipped; the other one is still used if available.
+    [switch]$NoIdeapad,
+    [switch]$NoPhone,
+    [int]$PhoneSlots = 0,
+    [int]$PhoneLocalPort = 0,
     [switch]$KeepTunnel,
     # Validate environment/tunnel setup without invoking build_app.ps1.
     [switch]$DryRun,
@@ -76,9 +86,20 @@ if ($PgoProfile) {
 }
 $allowPgo = $Variant -in @('release_optimized', 'release_optimized_pgo')
 $allowLto = $Variant -eq 'release_optimized'
+$useIdeapad = -not $NoIdeapad
+if ($env:WC3_DIST_IDEAPAD -eq '0') { $useIdeapad = $false }
+$usePhone = -not $NoPhone
+if ($env:WC3_DIST_PHONE -eq '0') { $usePhone = $false }
+if ($Variant -in @('release_optimized', 'release_optimized_pgo') -and
+    $env:WC3_DIST_PHONE_OPTIMIZED -ne '1') {
+    $usePhone = $false
+}
 
 $tunnel = $null
 $distccState = $null
+$phoneSlots = 0
+$phonePort = 0
+$phoneTarget = ''
 $started = Get-Date
 
 try {
@@ -86,43 +107,81 @@ try {
         $tunnelScript = Join-Path $PSScriptRoot 'distcc_tunnel.ps1'
         $tunnelJson = & $tunnelScript -Action start -LocalSlots $LocalSlots `
             -RemoteSlots $RemoteSlots -RemotePort $RemotePort `
-            -PgoProfile $PgoProfile
+            -PgoProfile $PgoProfile -NoIdeapad:(-not $useIdeapad) `
+            -NoPhone:(-not $usePhone) -PhoneSlots $PhoneSlots `
+            -PhoneLocalPort $PhoneLocalPort
         $tunnel = $tunnelJson | ConvertFrom-Json
-        if ($RemoteSlots -le 0) { $RemoteSlots = [int]$tunnel.RemoteSlots }
-        if ($RemoteSlots -le 0) { throw 'IDEAPAD reported no compiler slots' }
+        if (-not $tunnel) { throw 'distcc tunnel returned no state' }
+        # The state is authoritative: a requested worker may be unavailable.
+        $RemoteSlots = [int]$tunnel.RemoteSlots
+        if ($tunnel.PhoneSlots) { $phoneSlots = [int]$tunnel.PhoneSlots }
+        if ($tunnel.PhonePort) { $phonePort = [int]$tunnel.PhonePort }
+        if ($tunnel.PhoneTarget) { $phoneTarget = [string]$tunnel.PhoneTarget }
 
-        if ($Jobs -le 0) {
-            # Both variants have distributable objects.  In debug the corpus
-            # objects end in -g0 and run remotely; -g commands use the
-            # localhost-only host list and remain capped by LocalSlots, so the
-            # total local+remote jobs does not raise the local compiler limit.
-            $Jobs = $LocalSlots + $RemoteSlots
+        $remoteTotal = $RemoteSlots + $phoneSlots
+        if ($remoteTotal -le 0) {
+            # Both workers are optional.  With neither one this is still the
+            # canonical build, just local.
+            Remove-Item Env:\DISTCC_HOSTS -ErrorAction SilentlyContinue
+            Remove-Item Env:\CCACHE_PREFIX -ErrorAction SilentlyContinue
+            Remove-Item Env:\WC3_DIST_TRANSPORT -ErrorAction SilentlyContinue
+            $env:WC3_DIST = '0'
+            $env:WC3_DIST_LOCAL_SLOTS = "$LocalSlots"
+            if ($Jobs -le 0) { $Jobs = $LocalSlots }
+            Write-Warning '[dist] no workers available; building locally'
+        } else {
+            if ($Jobs -le 0) {
+                # Both variants have distributable objects.  In debug the
+                # corpus objects end in -g0 and run remotely; -g commands use
+                # the localhost-only host list and remain capped by LocalSlots,
+                # so local plus every worker does not raise the local limit.
+                $Jobs = $LocalSlots + $RemoteSlots + $phoneSlots
+            }
+            $env:WC3_DIST = '1'
+            $env:WC3_DIST_TRANSPORT = 'distcc'
+            $env:WC3_DIST_LOCAL_SLOTS = "$LocalSlots"
+            $env:WC3_DISTCC_EXE = 'C:/msys64/usr/bin/distcc.exe'
+            $env:CCACHE_PREFIX = ('{0} {1}' -f ($python -replace '\\', '/'),
+                                  ($wrapper -replace '\\', '/'))
+            $hosts = @()
+            if ($RemoteSlots -gt 0) {
+                $hosts += '127.0.0.1:{0}/{1}' -f $tunnel.Port, $RemoteSlots
+            }
+            if ($phoneSlots -gt 0) {
+                $hosts += '127.0.0.1:{0}/{1}' -f $phonePort, $phoneSlots
+            }
+            $hosts += 'localhost/{0} --localslots={0} --localslots_cpp={0}' -f $LocalSlots
+            $env:DISTCC_HOSTS = $hosts -join ' '
+            $distccState = Join-Path $env:LOCALAPPDATA (
+                'wc3-dist\distcc-state-{0}-{1}' -f $PID, $started.ToString('HHmmss'))
+            New-Item -ItemType Directory -Force -Path $distccState | Out-Null
+            $env:DISTCC_DIR = $distccState
+            $env:TMPDIR = $env:TEMP
         }
-        $env:WC3_DIST = '1'
-        $env:WC3_DIST_TRANSPORT = 'distcc'
-        $env:WC3_DIST_LOCAL_SLOTS = "$LocalSlots"
-        $env:WC3_DISTCC_EXE = 'C:/msys64/usr/bin/distcc.exe'
-        $env:CCACHE_PREFIX = ('{0} {1}' -f ($python -replace '\\', '/'),
-                              ($wrapper -replace '\\', '/'))
-        $env:DISTCC_HOSTS = (
-            '127.0.0.1:{0}/{1} localhost/{2} --localslots={2} --localslots_cpp={2}' -f
-            $tunnel.Port, $RemoteSlots, $LocalSlots)
-        $distccState = Join-Path $env:LOCALAPPDATA (
-            'wc3-dist\distcc-state-{0}-{1}' -f $PID, $started.ToString('HHmmss'))
-        New-Item -ItemType Directory -Force -Path $distccState | Out-Null
-        $env:DISTCC_DIR = $distccState
-        $env:TMPDIR = $env:TEMP
     } else {
-        if ($RemoteSlots -le 0) { $RemoteSlots = 8 }
-        if ($Jobs -le 0) {
-            $Jobs = $LocalSlots + $RemoteSlots
+        # The legacy SSH transport only knows IDEAPAD.  With IDEAPAD disabled
+        # there is no worker for this transport, so keep the build canonical
+        # and local instead of silently dialing the disabled peer.
+        if (-not $useIdeapad) {
+            Remove-Item Env:\DISTCC_HOSTS -ErrorAction SilentlyContinue
+            Remove-Item Env:\CCACHE_PREFIX -ErrorAction SilentlyContinue
+            Remove-Item Env:\WC3_DIST_TRANSPORT -ErrorAction SilentlyContinue
+            $env:WC3_DIST = '0'
+            $RemoteSlots = 0
+            if ($Jobs -le 0) { $Jobs = $LocalSlots }
+            Write-Warning '[dist] the SSH transport needs IDEAPAD; building locally'
+        } else {
+            if ($RemoteSlots -le 0) { $RemoteSlots = 8 }
+            if ($Jobs -le 0) {
+                $Jobs = $LocalSlots + $RemoteSlots
+            }
+            $env:WC3_DIST = '1'
+            $env:WC3_DIST_TRANSPORT = 'ssh'
+            $env:CCACHE_PREFIX = ('{0} {1}' -f ($python -replace '\\', '/'),
+                                  ($wrapper -replace '\\', '/'))
+            $env:WC3_DIST_SLOTS = "$RemoteSlots"
+            Remove-Item Env:\DISTCC_HOSTS -ErrorAction SilentlyContinue
         }
-        $env:WC3_DIST = '1'
-        $env:WC3_DIST_TRANSPORT = 'ssh'
-        $env:CCACHE_PREFIX = ('{0} {1}' -f ($python -replace '\\', '/'),
-                              ($wrapper -replace '\\', '/'))
-        $env:WC3_DIST_SLOTS = "$RemoteSlots"
-        Remove-Item Env:\DISTCC_HOSTS -ErrorAction SilentlyContinue
     }
 
     $pgoReady = $false
@@ -137,23 +196,32 @@ try {
     # build_app.ps1 must not probe or replace the transport this caller owns.
     $env:WC3_DIST_ACTIVE = '1'
 
-    $share = if ($RemoteSlots + $LocalSlots -gt 0) {
-        [math]::Round(100.0 * $RemoteSlots / ($RemoteSlots + $LocalSlots))
+    $remoteTotal = $RemoteSlots + $phoneSlots
+    $share = if ($remoteTotal + $LocalSlots -gt 0) {
+        [math]::Round(100.0 * $remoteTotal / ($remoteTotal + $LocalSlots))
     } else { 0 }
-    Write-Host ("[dist] transport={0} local_slots={1} remote_slots={2} jobs={3} remote_cpu_share={4}% pgo={5} lto={6}" -f
-        $Transport, $LocalSlots, $RemoteSlots, $Jobs, $share,
+    Write-Host ("[dist] transport={0} local_slots={1} remote_slots={2} phone_slots={3} jobs={4} remote_cpu_share={5}% pgo={6} lto={7}" -f
+        $Transport, $LocalSlots, $RemoteSlots, $phoneSlots, $Jobs, $share,
         $(if ($allowPgo) { 'on' } else { 'off' }),
         $(if ($allowLto) { 'on' } else { 'off' }))
-    Write-Host "[dist] ccache_prefix=$env:CCACHE_PREFIX"
+    $prefixText = if ($env:CCACHE_PREFIX) { $env:CCACHE_PREFIX } else { 'off' }
+    Write-Host "[dist] ccache_prefix=$prefixText"
     if ($tunnel) {
-        Write-Host ("[dist] tunnel local_port={0} target={1}" -f $tunnel.Port, $tunnel.Target)
+        $phoneLog = if ($phoneSlots -gt 0) {
+            '{0}@127.0.0.1:{1}/{2}' -f $phoneTarget, $phonePort, $phoneSlots
+        } else { 'off' }
+        $ideapadLog = if ($RemoteSlots -gt 0) {
+            '{0}@127.0.0.1:{1}/{2}' -f $tunnel.Target, $tunnel.Port, $RemoteSlots
+        } else { 'off' }
+        Write-Host ("[dist] workers ideapad={0} phone={1}" -f `
+            $ideapadLog, $phoneLog)
     }
 
     if ($DryRun) {
-        if ($tunnel) {
+        if ($remoteTotal -gt 0) {
             Write-Host '[dist] dry run: tunnel and environment are ready; build not started'
         } else {
-            Write-Host '[dist] dry run: environment is ready; build not started'
+            Write-Host '[dist] dry run: no workers available; build would run locally'
         }
         $code = 0
     } else {
@@ -170,7 +238,8 @@ try {
     }
 } finally {
     if ($Transport -eq 'distcc' -and -not $KeepTunnel) {
-        & (Join-Path $PSScriptRoot 'distcc_tunnel.ps1') -Action stop -Quiet | Out-Null
+        & (Join-Path $PSScriptRoot 'distcc_tunnel.ps1') -Action stop `
+            -NoIdeapad:(-not $useIdeapad) -Quiet | Out-Null
     }
     if ($distccState -and (Test-Path -LiteralPath $distccState)) {
         Remove-Item -LiteralPath $distccState -Recurse -Force -ErrorAction SilentlyContinue

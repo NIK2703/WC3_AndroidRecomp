@@ -83,6 +83,16 @@ if(NOT WC3_LEAF_CALL_EXE)
         "before configuring")
 endif()
 
+find_program(WC3_PARALLEL_RAYCAST_EXE
+    NAMES parallel_raycast parallel_raycast.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+if(WC3_PARALLEL_RAYCAST AND NOT WC3_PARALLEL_RAYCAST_EXE)
+    message(FATAL_ERROR
+        "parallel_raycast.exe missing; run tools/lift/build_tools.ps1 "
+        "before configuring with -DWC3_PARALLEL_RAYCAST=ON")
+endif()
+
 find_program(WC3_ATOMICCHECK_EXE
     NAMES atomiccheck atomiccheck.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -91,6 +101,46 @@ if(NOT WC3_ATOMICCHECK_EXE)
     message(FATAL_ERROR
         "atomiccheck.exe missing; run tools/lift/build_tools.ps1 before configuring")
 endif()
+
+find_program(WC3_JOBPOOL_EXE
+    NAMES jobpool jobpool.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+if(NOT WC3_JOBPOOL_EXE)
+    message(FATAL_ERROR
+        "jobpool.exe missing; run tools/lift/build_tools.ps1 before configuring")
+endif()
+
+set(WC3_CORPUS_JOBS "0" CACHE STRING
+    "Parallel lift-tool jobs per corpus stage (0 = host CPU count + 2, capped)")
+set(WC3_CORPUS_RETRIES "2" CACHE STRING
+    "Retries for a failed parallel lift-tool job (transient file locks)")
+set(WC3_CORPUS_TIMING "OFF" CACHE BOOL
+    "Print elapsed time for corpus generation stages")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/jobs")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/jobpool_logs")
+
+function(wc3_run_jobpool _jobfile _stage)
+    if(NOT EXISTS "${_jobfile}")
+        return()
+    endif()
+    file(SIZE "${_jobfile}" _wc3_job_size)
+    if(_wc3_job_size EQUAL 0)
+        return()
+    endif()
+    execute_process(
+        COMMAND "${WC3_JOBPOOL_EXE}"
+                --file "${_jobfile}"
+                --jobs "${WC3_CORPUS_JOBS}"
+                --retries "${WC3_CORPUS_RETRIES}"
+                --log-dir "${CMAKE_CURRENT_BINARY_DIR}/jobpool_logs"
+        RESULT_VARIABLE _wc3_job_rc)
+    if(NOT _wc3_job_rc EQUAL 0)
+        message(FATAL_ERROR
+            "${_stage} failed (rc=${_wc3_job_rc}); "
+            "see ${CMAKE_CURRENT_BINARY_DIR}/jobpool_logs")
+    endif()
+endfunction()
 
 file(READ "${WC3_RELIFTED_MANIFEST}" _wc3_manifest)
 string(JSON _wc3_nmod LENGTH "${_wc3_manifest}" modules)
@@ -122,29 +172,75 @@ endif()
 # checker reads the guest instruction comments and rejects any memory xchg or
 # lock-prefixed RMW that was lowered through plain rd32/wr32.
 set(_wc3_atomic_args)
+set(_wc3_atomic_sources)
 foreach(_mi RANGE 0 ${_wc3_last_mod})
     string(JSON _name GET "${_wc3_manifest}" modules ${_mi} name)
     foreach(_kind seed closed)
-        list(APPEND _wc3_atomic_args
-             --file "${WC3_RELIFTED_ROOT_ABS}/${_name}/${_kind}.c")
+        set(_wc3_atomic_src "${WC3_RELIFTED_ROOT_ABS}/${_name}/${_kind}.c")
+        list(APPEND _wc3_atomic_sources "${_wc3_atomic_src}")
+        list(APPEND _wc3_atomic_args --file "${_wc3_atomic_src}")
     endforeach()
 endforeach()
 file(MAKE_DIRECTORY "${WC3_ROOT}/reports/generated")
-execute_process(
-    COMMAND "${WC3_ATOMICCHECK_EXE}" ${_wc3_atomic_args}
-            --require-any
-            --report "${WC3_ROOT}/reports/generated/corpus_atomic.json"
-    RESULT_VARIABLE _wc3_atomic_rc
-    OUTPUT_VARIABLE _wc3_atomic_out
-    ERROR_VARIABLE _wc3_atomic_err)
-if(NOT _wc3_atomic_rc EQUAL 0)
-    message(FATAL_ERROR
-        "relifted corpus has non-atomic memory operations (rc=${_wc3_atomic_rc}).\n"
-        "${_wc3_atomic_out}\n${_wc3_atomic_err}\n"
-        "Rebuild the lift toolchain (tools/lift/build_tools.ps1 -Force) and "
-        "relift; never hand-edit generated C.")
+set(_wc3_atomic_report "${WC3_ROOT}/reports/generated/corpus_atomic.json")
+set(_wc3_atomic_stamp "${CMAKE_CURRENT_BINARY_DIR}/atomiccheck.stamp")
+set(_wc3_atomic_out_file "${CMAKE_CURRENT_BINARY_DIR}/atomiccheck.out")
+set(_wc3_atomic_fp "")
+file(TIMESTAMP "${WC3_ATOMICCHECK_EXE}" _wc3_atomic_ts "%Y%m%d%H%M%S")
+file(SIZE "${WC3_ATOMICCHECK_EXE}" _wc3_atomic_sz)
+string(APPEND _wc3_atomic_fp "exe:${_wc3_atomic_ts}:${_wc3_atomic_sz}")
+foreach(_wc3_atomic_src IN LISTS _wc3_atomic_sources)
+    if(EXISTS "${_wc3_atomic_src}")
+        file(TIMESTAMP "${_wc3_atomic_src}" _wc3_atomic_ts "%Y%m%d%H%M%S")
+        file(SIZE "${_wc3_atomic_src}" _wc3_atomic_sz)
+        string(APPEND _wc3_atomic_fp
+            "|${_wc3_atomic_src}:${_wc3_atomic_ts}:${_wc3_atomic_sz}")
+    else()
+        string(APPEND _wc3_atomic_fp "|${_wc3_atomic_src}:missing")
+    endif()
+endforeach()
+set(_wc3_atomic_need 1)
+if(EXISTS "${_wc3_atomic_stamp}" AND
+   EXISTS "${_wc3_atomic_out_file}" AND
+   EXISTS "${_wc3_atomic_report}")
+    file(READ "${_wc3_atomic_stamp}" _wc3_atomic_fp_old)
+    string(STRIP "${_wc3_atomic_fp_old}" _wc3_atomic_fp_old)
+    if("${_wc3_atomic_fp_old}" STREQUAL "${_wc3_atomic_fp}")
+        set(_wc3_atomic_need 0)
+    endif()
 endif()
-string(STRIP "${_wc3_atomic_out}" _wc3_atomic_out)
+string(TIMESTAMP _wc3_atomic_t0 "%s")
+if(_wc3_atomic_need)
+    execute_process(
+        COMMAND "${WC3_ATOMICCHECK_EXE}" ${_wc3_atomic_args}
+                --require-any
+                --report "${_wc3_atomic_report}"
+        RESULT_VARIABLE _wc3_atomic_rc
+        OUTPUT_VARIABLE _wc3_atomic_out
+        ERROR_VARIABLE _wc3_atomic_err)
+    if(NOT _wc3_atomic_rc EQUAL 0)
+        message(FATAL_ERROR
+            "relifted corpus has non-atomic memory operations (rc=${_wc3_atomic_rc}).\n"
+            "${_wc3_atomic_out}\n${_wc3_atomic_err}\n"
+            "Rebuild the lift toolchain (tools/lift/build_tools.ps1 -Force) and "
+            "relift; never hand-edit generated C.")
+    endif()
+    string(STRIP "${_wc3_atomic_out}" _wc3_atomic_out)
+    file(WRITE "${_wc3_atomic_stamp}" "${_wc3_atomic_fp}\n")
+    file(WRITE "${_wc3_atomic_out_file}" "${_wc3_atomic_out}\n")
+else()
+    file(READ "${_wc3_atomic_out_file}" _wc3_atomic_out)
+    string(STRIP "${_wc3_atomic_out}" _wc3_atomic_out)
+endif()
+string(TIMESTAMP _wc3_atomic_t1 "%s")
+if(WC3_CORPUS_TIMING)
+    if(_wc3_atomic_need)
+        math(EXPR _wc3_atomic_dt "${_wc3_atomic_t1} - ${_wc3_atomic_t0}")
+        message(STATUS "corpus timing: atomiccheck: ${_wc3_atomic_dt}s")
+    else()
+        message(STATUS "corpus timing: atomiccheck: cached")
+    endif()
+endif()
 message(STATUS "${_wc3_atomic_out}")
 
 if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
@@ -200,6 +296,7 @@ if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
         endif()
     endforeach()
     if(_ra_index_need)
+        string(TIMESTAMP _ra_index_t0 "%s")
         execute_process(
             COMMAND "${WC3_RETURN_ADDRESS_ELIDE_EXE}"
                     --index-out "${_ra_index}"
@@ -211,6 +308,11 @@ if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
             message(FATAL_ERROR
                 "return_address_elide index failed (rc=${_ra_index_rc}):\n"
                 "${_ra_index_out}\n${_ra_index_err}")
+        endif()
+        string(TIMESTAMP _ra_index_t1 "%s")
+        if(WC3_CORPUS_TIMING)
+            math(EXPR _ra_index_dt "${_ra_index_t1} - ${_ra_index_t0}")
+            message(STATUS "corpus timing: return_address_elide index: ${_ra_index_dt}s")
         endif()
         string(STRIP "${_ra_index_out}" _ra_index_out)
         message(STATUS "${_ra_index_out}")
@@ -245,10 +347,13 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             set(_save_need 1)
             if(EXISTS "${_save_src}" AND EXISTS "${_save_json}" AND
                NOT "${_src}" IS_NEWER_THAN "${_save_src}" AND
-               NOT "${WC3_SAVE_LIST_DISPLAY_EXE}" IS_NEWER_THAN "${_save_src}")
+               NOT "${WC3_SAVE_LIST_DISPLAY_EXE}" IS_NEWER_THAN "${_save_src}" AND
+               NOT "${_src}" IS_NEWER_THAN "${_save_json}" AND
+               NOT "${WC3_SAVE_LIST_DISPLAY_EXE}" IS_NEWER_THAN "${_save_json}")
                 set(_save_need 0)
             endif()
             if(_save_need)
+                string(TIMESTAMP _save_t0 "%s")
                 execute_process(
                     COMMAND "${WC3_SAVE_LIST_DISPLAY_EXE}"
                             --lift "${_src}"
@@ -265,13 +370,24 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                         "(rc=${_save_rc}):\n"
                         "${_save_out}\n${_save_err}")
                 endif()
+                string(TIMESTAMP _save_t1 "%s")
+                if(WC3_CORPUS_TIMING)
+                    math(EXPR _save_dt "${_save_t1} - ${_save_t0}")
+                    message(STATUS
+                        "corpus timing: save_list_display ${_name}/${_kind}: ${_save_dt}s")
+                endif()
                 string(STRIP "${_save_out}" _save_out)
                 message(STATUS "${_save_out}")
             endif()
-            file(READ "${_save_src}" _save_text)
-            string(REGEX MATCHALL "WC3_SAVE_LIST_STRIP_W3Z"
-                   _save_markers "${_save_text}")
-            list(LENGTH _save_markers _save_marker_count)
+            file(READ "${_save_json}" _save_report)
+            string(JSON _save_marker_count
+                   ERROR_VARIABLE _save_json_err
+                   GET "${_save_report}" marker_count)
+            if(_save_json_err)
+                message(FATAL_ERROR
+                    "cannot read marker_count from ${_save_json}: "
+                    "${_save_json_err}")
+            endif()
             if(NOT _save_marker_count EQUAL 4)
                 message(FATAL_ERROR
                     "relifted game corpus has ${_save_marker_count} save-list "
@@ -289,6 +405,7 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             if(_old_chunks)
                 file(REMOVE ${_old_chunks})
             endif()
+            string(TIMESTAMP _split_t0 "%s")
             execute_process(
                 COMMAND "${WC3_SPLITCORPUS_EXE}" "${_src}" "${_chunk_dir}"
                         "${_name}_${_kind}" 800 16
@@ -298,6 +415,12 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             if(NOT _rc EQUAL 0)
                 message(FATAL_ERROR
                     "splitcorpus failed for ${_src} (rc=${_rc}):\n${_out}\n${_err}")
+            endif()
+            string(TIMESTAMP _split_t1 "%s")
+            if(WC3_CORPUS_TIMING)
+                math(EXPR _split_dt "${_split_t1} - ${_split_t0}")
+                message(STATUS
+                    "corpus timing: splitcorpus ${_name}/${_kind}: ${_split_dt}s")
             endif()
             file(TOUCH "${_stamp}")
         endif()
@@ -319,6 +442,9 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             set(_devirt_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/devirtualized/${_name}/${_kind}")
             file(MAKE_DIRECTORY "${_devirt_dir}")
+            set(_devirt_jobs
+                "${CMAKE_CURRENT_BINARY_DIR}/jobs/${_name}_${_kind}_devirtualize.txt")
+            set(_devirt_job_text "")
             set(_transformed_chunks)
             foreach(_chunk IN LISTS _chunks)
                 get_filename_component(_chunk_name "${_chunk}" NAME)
@@ -329,24 +455,17 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                    "${_chunk}" IS_NEWER_THAN "${_devirt_out}" OR
                    "${WC3_BOOT_LIST}" IS_NEWER_THAN "${_devirt_out}" OR
                    "${WC3_DEVIRTUALIZE_EXE}" IS_NEWER_THAN "${_devirt_out}")
-                    execute_process(
-                        COMMAND "${WC3_DEVIRTUALIZE_EXE}"
-                                --list "${WC3_BOOT_LIST}"
-                                --lift "${_chunk}"
-                                --out "${_devirt_out}"
-                                --json "${_devirt_json}"
-                        RESULT_VARIABLE _devirt_rc
-                        OUTPUT_VARIABLE _devirt_stdout
-                        ERROR_VARIABLE _devirt_stderr)
-                    if(NOT _devirt_rc EQUAL 0)
-                        message(FATAL_ERROR
-                            "devirtualize failed for ${_chunk} "
-                            "(rc=${_devirt_rc}):\n"
-                            "${_devirt_stdout}\n${_devirt_stderr}")
-                    endif()
+                    string(APPEND _devirt_job_text
+                        "9\n${WC3_DEVIRTUALIZE_EXE}\n"
+                        "--list\n${WC3_BOOT_LIST}\n"
+                        "--lift\n${_chunk}\n"
+                        "--out\n${_devirt_out}\n"
+                        "--json\n${_devirt_json}\n")
                 endif()
                 list(APPEND _transformed_chunks "${_devirt_out}")
             endforeach()
+            file(WRITE "${_devirt_jobs}" "${_devirt_job_text}")
+            wc3_run_jobpool("${_devirt_jobs}" "devirtualize ${_name}/${_kind}")
             set(_chunks "${_transformed_chunks}")
         endif()
         if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
@@ -364,6 +483,9 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             set(_ra_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/return_address_elide/${_name}/${_kind}")
             file(MAKE_DIRECTORY "${_ra_dir}")
+            set(_ra_jobs
+                "${CMAKE_CURRENT_BINARY_DIR}/jobs/${_name}_${_kind}_return_address_elide.txt")
+            set(_ra_job_text "")
             set(_ra_chunks)
             foreach(_chunk IN LISTS _chunks)
                 get_filename_component(_chunk_name "${_chunk}" NAME)
@@ -374,25 +496,18 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                    "${_chunk}" IS_NEWER_THAN "${_ra_out}" OR
                    "${_ra_index}" IS_NEWER_THAN "${_ra_out}" OR
                    "${WC3_RETURN_ADDRESS_ELIDE_EXE}" IS_NEWER_THAN "${_ra_out}")
-                    execute_process(
-                        COMMAND "${WC3_RETURN_ADDRESS_ELIDE_EXE}"
-                                --lift "${_chunk}"
-                                --out "${_ra_out}"
-                                --json "${_ra_json}"
-                                --index "${_ra_index}"
-                                --quiet
-                        RESULT_VARIABLE _ra_rc
-                        OUTPUT_VARIABLE _ra_stdout
-                        ERROR_VARIABLE _ra_stderr)
-                    if(NOT _ra_rc EQUAL 0)
-                        message(FATAL_ERROR
-                            "return_address_elide failed for ${_chunk} "
-                            "(rc=${_ra_rc}):\n"
-                            "${_ra_stdout}\n${_ra_stderr}")
-                    endif()
+                    string(APPEND _ra_job_text
+                        "10\n${WC3_RETURN_ADDRESS_ELIDE_EXE}\n"
+                        "--lift\n${_chunk}\n"
+                        "--out\n${_ra_out}\n"
+                        "--json\n${_ra_json}\n"
+                        "--index\n${_ra_index}\n"
+                        "--quiet\n")
                 endif()
                 list(APPEND _ra_chunks "${_ra_out}")
             endforeach()
+            file(WRITE "${_ra_jobs}" "${_ra_job_text}")
+            wc3_run_jobpool("${_ra_jobs}" "return_address_elide ${_name}/${_kind}")
             set(_chunks "${_ra_chunks}")
         endif()
         if(WC3_DEAD_FLAGS_P0_2)
@@ -409,6 +524,9 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             set(_dead_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/dead_flags/${_name}/${_kind}")
             file(MAKE_DIRECTORY "${_dead_dir}")
+            set(_dead_jobs
+                "${CMAKE_CURRENT_BINARY_DIR}/jobs/${_name}_${_kind}_dead_flags.txt")
+            set(_dead_job_text "")
             set(_dead_chunks)
             foreach(_chunk IN LISTS _chunks)
                 get_filename_component(_chunk_name "${_chunk}" NAME)
@@ -418,24 +536,17 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                    NOT EXISTS "${_dead_json}" OR
                    "${_chunk}" IS_NEWER_THAN "${_dead_out}" OR
                    "${WC3_DEAD_FLAGS_EXE}" IS_NEWER_THAN "${_dead_out}")
-                    execute_process(
-                        COMMAND "${WC3_DEAD_FLAGS_EXE}"
-                                --lift "${_chunk}"
-                                --out "${_dead_out}"
-                                --json "${_dead_json}"
-                                --quiet
-                        RESULT_VARIABLE _dead_rc
-                        OUTPUT_VARIABLE _dead_stdout
-                        ERROR_VARIABLE _dead_stderr)
-                    if(NOT _dead_rc EQUAL 0)
-                        message(FATAL_ERROR
-                            "dead_flags failed for ${_chunk} "
-                            "(rc=${_dead_rc}):\n"
-                            "${_dead_stdout}\n${_dead_stderr}")
-                    endif()
+                    string(APPEND _dead_job_text
+                        "8\n${WC3_DEAD_FLAGS_EXE}\n"
+                        "--lift\n${_chunk}\n"
+                        "--out\n${_dead_out}\n"
+                        "--json\n${_dead_json}\n"
+                        "--quiet\n")
                 endif()
                 list(APPEND _dead_chunks "${_dead_out}")
             endforeach()
+            file(WRITE "${_dead_jobs}" "${_dead_job_text}")
+            wc3_run_jobpool("${_dead_jobs}" "dead_flags ${_name}/${_kind}")
             set(_chunks "${_dead_chunks}")
         endif()
         # D3b first increment: a label-free leaf function without a guest
@@ -455,6 +566,9 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
         set(_xmm_dir
             "${CMAKE_CURRENT_BINARY_DIR}/xmm_local/${_xmm_profile}/${_name}/${_kind}")
         file(MAKE_DIRECTORY "${_xmm_dir}")
+        set(_xmm_jobs
+            "${CMAKE_CURRENT_BINARY_DIR}/jobs/${_name}_${_kind}_xmm_local.txt")
+        set(_xmm_job_text "")
         set(_xmm_chunks)
         foreach(_chunk IN LISTS _chunks)
             get_filename_component(_chunk_name "${_chunk}" NAME)
@@ -464,26 +578,19 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                NOT EXISTS "${_xmm_json}" OR
                "${_chunk}" IS_NEWER_THAN "${_xmm_out}" OR
                "${WC3_XMM_LOCAL_EXE}" IS_NEWER_THAN "${_xmm_out}")
-                execute_process(
-                    COMMAND "${WC3_XMM_LOCAL_EXE}"
-                            --lift "${_chunk}"
-                            --out "${_xmm_out}"
-                            --json "${_xmm_json}"
-                            --block
-                            --block-lazy
-                            --quiet
-                    RESULT_VARIABLE _xmm_rc
-                    OUTPUT_VARIABLE _xmm_stdout
-                    ERROR_VARIABLE _xmm_stderr)
-                if(NOT _xmm_rc EQUAL 0)
-                    message(FATAL_ERROR
-                        "xmm_local failed for ${_chunk} "
-                        "(rc=${_xmm_rc}):\n"
-                        "${_xmm_stdout}\n${_xmm_stderr}")
-                endif()
+                string(APPEND _xmm_job_text
+                    "10\n${WC3_XMM_LOCAL_EXE}\n"
+                    "--lift\n${_chunk}\n"
+                    "--out\n${_xmm_out}\n"
+                    "--json\n${_xmm_json}\n"
+                    "--block\n"
+                    "--block-lazy\n"
+                    "--quiet\n")
             endif()
             list(APPEND _xmm_chunks "${_xmm_out}")
         endforeach()
+        file(WRITE "${_xmm_jobs}" "${_xmm_job_text}")
+        wc3_run_jobpool("${_xmm_jobs}" "xmm_local ${_name}/${_kind}")
         set(_chunks "${_xmm_chunks}")
         # D3c first increment: exact upper-lane zero reuse.  It must see the
         # xmm_local text (it rewrites the local XMM[8] stores), and it runs
@@ -499,6 +606,9 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
         set(_lane_dir
             "${CMAKE_CURRENT_BINARY_DIR}/xmm_lane/${_xmm_profile}/${_name}/${_kind}")
         file(MAKE_DIRECTORY "${_lane_dir}")
+        set(_lane_jobs
+            "${CMAKE_CURRENT_BINARY_DIR}/jobs/${_name}_${_kind}_xmm_lane.txt")
+        set(_lane_job_text "")
         set(_lane_chunks)
         foreach(_chunk IN LISTS _chunks)
             get_filename_component(_chunk_name "${_chunk}" NAME)
@@ -508,24 +618,17 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                NOT EXISTS "${_lane_json}" OR
                "${_chunk}" IS_NEWER_THAN "${_lane_out}" OR
                "${WC3_XMM_LANE_EXE}" IS_NEWER_THAN "${_lane_out}")
-                execute_process(
-                    COMMAND "${WC3_XMM_LANE_EXE}"
-                            --lift "${_chunk}"
-                            --out "${_lane_out}"
-                            --json "${_lane_json}"
-                            --quiet
-                    RESULT_VARIABLE _lane_rc
-                    OUTPUT_VARIABLE _lane_stdout
-                    ERROR_VARIABLE _lane_stderr)
-                if(NOT _lane_rc EQUAL 0)
-                    message(FATAL_ERROR
-                        "xmm_lane failed for ${_chunk} "
-                        "(rc=${_lane_rc}):\n"
-                        "${_lane_stdout}\n${_lane_stderr}")
-                endif()
+                string(APPEND _lane_job_text
+                    "8\n${WC3_XMM_LANE_EXE}\n"
+                    "--lift\n${_chunk}\n"
+                    "--out\n${_lane_out}\n"
+                    "--json\n${_lane_json}\n"
+                    "--quiet\n")
             endif()
             list(APPEND _lane_chunks "${_lane_out}")
         endforeach()
+        file(WRITE "${_lane_jobs}" "${_lane_job_text}")
+        wc3_run_jobpool("${_lane_jobs}" "xmm_lane ${_name}/${_kind}")
         set(_chunks "${_lane_chunks}")
         if(WC3_W3L_COMPAT)
             # The W3L/PvPGN/rubattle profile runs after every other enabled
@@ -535,6 +638,9 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             set(_compat_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/w3l_compat/${_name}/${_kind}/${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}")
             file(MAKE_DIRECTORY "${_compat_dir}")
+            set(_compat_jobs
+                "${CMAKE_CURRENT_BINARY_DIR}/jobs/${_name}_${_kind}_w3l_compat.txt")
+            set(_compat_job_text "")
             set(_compat_chunks)
             foreach(_chunk IN LISTS _chunks)
                 get_filename_component(_chunk_name "${_chunk}" NAME)
@@ -544,26 +650,20 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                    NOT EXISTS "${_compat_json}" OR
                    "${_chunk}" IS_NEWER_THAN "${_compat_out}" OR
                    "${WC3_W3L_PASS}" IS_NEWER_THAN "${_compat_out}")
-                    execute_process(
-                        COMMAND "${WC3_W3L_PASS}"
-                                --profile "${WC3_W3L_PROFILE}"
-                                --latency "${WC3_W3L_LATENCY}"
-                                --lift "${_chunk}"
-                                --out "${_compat_out}"
-                                --json "${_compat_json}"
-                                --quiet
-                        RESULT_VARIABLE _compat_rc
-                        OUTPUT_VARIABLE _compat_stdout
-                        ERROR_VARIABLE _compat_stderr)
-                    if(NOT _compat_rc EQUAL 0)
-                        message(FATAL_ERROR
-                            "w3l_compat failed for ${_chunk} (rc=${_compat_rc}):\n"
-                            "${_compat_stdout}\n${_compat_stderr}")
-                    endif()
+                    string(APPEND _compat_job_text
+                        "12\n${WC3_W3L_PASS}\n"
+                        "--profile\n${WC3_W3L_PROFILE}\n"
+                        "--latency\n${WC3_W3L_LATENCY}\n"
+                        "--lift\n${_chunk}\n"
+                        "--out\n${_compat_out}\n"
+                        "--json\n${_compat_json}\n"
+                        "--quiet\n")
                 endif()
                 list(APPEND _compat_chunks "${_compat_out}")
                 list(APPEND _wc3_compat_jsons "${_compat_json}")
             endforeach()
+            file(WRITE "${_compat_jobs}" "${_compat_job_text}")
+            wc3_run_jobpool("${_compat_jobs}" "w3l_compat ${_name}/${_kind}")
             set(_chunks "${_compat_chunks}")
         endif()
         if(WC3_SELECTION_24)
@@ -601,6 +701,9 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             set(_sel24_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/selection24/${_name}/${_kind}/${_sel24_tag}")
             file(MAKE_DIRECTORY "${_sel24_dir}")
+            set(_sel24_jobs
+                "${CMAKE_CURRENT_BINARY_DIR}/jobs/${_name}_${_kind}_selection24.txt")
+            set(_sel24_job_text "")
             set(_sel24_chunks)
             foreach(_chunk IN LISTS _chunks)
                 get_filename_component(_chunk_name "${_chunk}" NAME)
@@ -610,25 +713,18 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                    NOT EXISTS "${_sel24_json}" OR
                    "${_chunk}" IS_NEWER_THAN "${_sel24_out}" OR
                    "${WC3_SELECTION24_EXE}" IS_NEWER_THAN "${_sel24_out}")
-                    execute_process(
-                        COMMAND "${WC3_SELECTION24_EXE}"
-                                --lift "${_chunk}"
-                                --out "${_sel24_out}"
-                                --json "${_sel24_json}"
-                                --quiet
-                        RESULT_VARIABLE _sel24_rc
-                        OUTPUT_VARIABLE _sel24_stdout
-                        ERROR_VARIABLE _sel24_stderr)
-                    if(NOT _sel24_rc EQUAL 0)
-                        message(FATAL_ERROR
-                            "selection24 failed for ${_chunk} "
-                            "(rc=${_sel24_rc}):\n"
-                            "${_sel24_stdout}\n${_sel24_stderr}")
-                    endif()
+                    string(APPEND _sel24_job_text
+                        "8\n${WC3_SELECTION24_EXE}\n"
+                        "--lift\n${_chunk}\n"
+                        "--out\n${_sel24_out}\n"
+                        "--json\n${_sel24_json}\n"
+                        "--quiet\n")
                 endif()
                 list(APPEND _sel24_chunks "${_sel24_out}")
                 list(APPEND _wc3_sel24_jsons "${_sel24_json}")
             endforeach()
+            file(WRITE "${_sel24_jobs}" "${_sel24_job_text}")
+            wc3_run_jobpool("${_sel24_jobs}" "selection24 ${_name}/${_kind}")
             set(_chunks "${_sel24_chunks}")
         endif()
         list(APPEND WC3_RELIFTED_SOURCES ${_chunks})
@@ -647,10 +743,11 @@ if(WC3_W3L_COMPAT)
     # profile must be applied exactly once, or the configure fails closed.
     set(_wc3_compat_manifest
         "${CMAKE_CURRENT_BINARY_DIR}/w3l_compat_change_sets.txt")
-    file(WRITE "${_wc3_compat_manifest}" "")
+    set(_wc3_compat_manifest_text "")
     foreach(_json IN LISTS _wc3_compat_jsons)
-        file(APPEND "${_wc3_compat_manifest}" "${_json}\n")
+        string(APPEND _wc3_compat_manifest_text "${_json}\n")
     endforeach()
+    file(WRITE "${_wc3_compat_manifest}" "${_wc3_compat_manifest_text}")
     execute_process(
         COMMAND "${WC3_W3L_PASS}"
                 --profile "${WC3_W3L_PROFILE}"
@@ -673,10 +770,11 @@ if(WC3_SELECTION_24)
     # game corpus.  A missing or duplicated site fails the configure.
     set(_wc3_sel24_manifest
         "${CMAKE_CURRENT_BINARY_DIR}/selection24_change_sets.txt")
-    file(WRITE "${_wc3_sel24_manifest}" "")
+    set(_wc3_sel24_manifest_text "")
     foreach(_json IN LISTS _wc3_sel24_jsons)
-        file(APPEND "${_wc3_sel24_manifest}" "${_json}\n")
+        string(APPEND _wc3_sel24_manifest_text "${_json}\n")
     endforeach()
+    file(WRITE "${_wc3_sel24_manifest}" "${_wc3_sel24_manifest_text}")
     execute_process(
         COMMAND "${WC3_SELECTION24_EXE}"
                 --verify-coverage "@${_wc3_sel24_manifest}"
@@ -772,10 +870,12 @@ if(_wc3_leaf_need)
     file(MAKE_DIRECTORY "${_wc3_leaf_dir}")
     get_filename_component(_wc3_leaf_report_dir "${_wc3_leaf_report}" DIRECTORY)
     file(MAKE_DIRECTORY "${_wc3_leaf_report_dir}")
-    file(WRITE "${_wc3_leaf_list}" "")
+    set(_wc3_leaf_list_text "")
     foreach(_wc3_src IN LISTS WC3_RELIFTED_SOURCES)
-        file(APPEND "${_wc3_leaf_list}" "${_wc3_src}\n")
+        string(APPEND _wc3_leaf_list_text "${_wc3_src}\n")
     endforeach()
+    file(WRITE "${_wc3_leaf_list}" "${_wc3_leaf_list_text}")
+    string(TIMESTAMP _wc3_leaf_t0 "%s")
     execute_process(
         COMMAND "${WC3_LEAF_CALL_EXE}"
                 --inputs "${_wc3_leaf_list}"
@@ -790,6 +890,11 @@ if(_wc3_leaf_need)
             "leaf_call failed (rc=${_wc3_leaf_rc}).\n"
             "${_wc3_leaf_out}\n${_wc3_leaf_err}")
     endif()
+    string(TIMESTAMP _wc3_leaf_t1 "%s")
+    if(WC3_CORPUS_TIMING)
+        math(EXPR _wc3_leaf_dt "${_wc3_leaf_t1} - ${_wc3_leaf_t0}")
+        message(STATUS "corpus timing: leaf_call: ${_wc3_leaf_dt}s")
+    endif()
     file(WRITE "${_wc3_leaf_fingerprint_file}"
         "${_wc3_leaf_fingerprint}\n")
     file(TOUCH "${_wc3_leaf_stamp}")
@@ -803,6 +908,110 @@ if(_wc3_leaf_outputs)
         PROPERTY OBJECT_DEPENDS "${_wc3_leaf_stamp}")
 endif()
 set(WC3_RELIFTED_SOURCES "${_wc3_leaf_outputs}")
+
+# Optional post-lift pass: replace the single
+# WC3_DIRECT_CALL_CLEAN(L_6F749F90, c) with the runtime wrapper.  It runs on
+# the final leaf chunks so leaf_call's classification of that call is kept.
+# The stage has the same fingerprint/stamp discipline as leaf_call: the
+# generated chunks and their objects must change identity when any input or
+# the tool changes, not only their timestamps.
+if(WC3_PARALLEL_RAYCAST)
+    set(_wc3_ray_dir "${CMAKE_CURRENT_BINARY_DIR}/parallel_raycast/${_wc3_leaf_tag}")
+    set(_wc3_ray_list "${CMAKE_CURRENT_BINARY_DIR}/parallel_raycast_inputs.txt")
+    set(_wc3_ray_report "${WC3_ROOT}/reports/generated/parallel_raycast.json")
+    set(_wc3_ray_stamp "${_wc3_ray_dir}/.stamp")
+    set(_wc3_ray_fingerprint_file "${_wc3_ray_dir}/.inputs")
+    string(SHA256 _wc3_ray_fingerprint
+        "${WC3_PARALLEL_RAYCAST_EXE}|${WC3_RELIFTED_SOURCES}")
+    set(_wc3_ray_outputs)
+    foreach(_wc3_src IN LISTS WC3_RELIFTED_SOURCES)
+        get_filename_component(_wc3_base "${_wc3_src}" NAME)
+        list(APPEND _wc3_ray_outputs "${_wc3_ray_dir}/${_wc3_base}")
+    endforeach()
+    list(LENGTH _wc3_ray_outputs _wc3_ray_count)
+    list(REMOVE_DUPLICATES _wc3_ray_outputs)
+    list(LENGTH _wc3_ray_outputs _wc3_ray_unique)
+    if(NOT _wc3_ray_count EQUAL _wc3_ray_unique)
+        message(FATAL_ERROR "parallel_raycast output basenames are not unique")
+    endif()
+
+    set(_wc3_ray_need 0)
+    if(NOT EXISTS "${_wc3_ray_stamp}" OR
+       NOT EXISTS "${_wc3_ray_fingerprint_file}" OR
+       "${WC3_PARALLEL_RAYCAST_EXE}" IS_NEWER_THAN "${_wc3_ray_stamp}")
+        set(_wc3_ray_need 1)
+    else()
+        file(READ "${_wc3_ray_fingerprint_file}" _wc3_ray_fingerprint_old)
+        string(STRIP "${_wc3_ray_fingerprint_old}" _wc3_ray_fingerprint_old)
+        if(NOT _wc3_ray_fingerprint_old STREQUAL _wc3_ray_fingerprint)
+            set(_wc3_ray_need 1)
+        endif()
+        if(NOT _wc3_ray_need)
+            foreach(_wc3_src IN LISTS WC3_RELIFTED_SOURCES)
+                if("${_wc3_src}" IS_NEWER_THAN "${_wc3_ray_stamp}")
+                    set(_wc3_ray_need 1)
+                    break()
+                endif()
+            endforeach()
+        endif()
+    endif()
+    if(NOT _wc3_ray_need AND NOT EXISTS "${_wc3_ray_report}")
+        set(_wc3_ray_need 1)
+    endif()
+    if(NOT _wc3_ray_need)
+        foreach(_wc3_out IN LISTS _wc3_ray_outputs)
+            if(NOT EXISTS "${_wc3_out}")
+                set(_wc3_ray_need 1)
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    if(_wc3_ray_need)
+        file(REMOVE_RECURSE "${_wc3_ray_dir}")
+        file(MAKE_DIRECTORY "${_wc3_ray_dir}")
+        get_filename_component(_wc3_ray_report_dir "${_wc3_ray_report}" DIRECTORY)
+        file(MAKE_DIRECTORY "${_wc3_ray_report_dir}")
+        set(_wc3_ray_list_text "")
+        foreach(_wc3_src IN LISTS WC3_RELIFTED_SOURCES)
+            string(APPEND _wc3_ray_list_text "${_wc3_src}\n")
+        endforeach()
+        file(WRITE "${_wc3_ray_list}" "${_wc3_ray_list_text}")
+        string(TIMESTAMP _wc3_ray_t0 "%s")
+        execute_process(
+            COMMAND "${WC3_PARALLEL_RAYCAST_EXE}"
+                    --inputs "${_wc3_ray_list}"
+                    --out-dir "${_wc3_ray_dir}"
+                    --report "${_wc3_ray_report}"
+                    --expect-sites 1
+                    --vertex
+                    --expect-vertex-sites 2
+                    --triangle
+                    --expect-triangle-sites 1
+                    --quiet
+            RESULT_VARIABLE _wc3_ray_rc
+            OUTPUT_VARIABLE _wc3_ray_out
+            ERROR_VARIABLE _wc3_ray_err)
+        if(NOT _wc3_ray_rc EQUAL 0)
+            message(FATAL_ERROR
+                "parallel_raycast failed (rc=${_wc3_ray_rc}).\n"
+                "${_wc3_ray_out}\n${_wc3_ray_err}")
+        endif()
+        string(TIMESTAMP _wc3_ray_t1 "%s")
+        if(WC3_CORPUS_TIMING)
+            math(EXPR _wc3_ray_dt "${_wc3_ray_t1} - ${_wc3_ray_t0}")
+            message(STATUS "corpus timing: parallel_raycast: ${_wc3_ray_dt}s")
+        endif()
+        file(WRITE "${_wc3_ray_fingerprint_file}"
+            "${_wc3_ray_fingerprint}\n")
+        file(TOUCH "${_wc3_ray_stamp}")
+    endif()
+    if(_wc3_ray_outputs)
+        set_property(SOURCE ${_wc3_ray_outputs}
+            PROPERTY OBJECT_DEPENDS "${_wc3_ray_stamp}")
+    endif()
+    set(WC3_RELIFTED_SOURCES "${_wc3_ray_outputs}")
+endif()
 
 add_library(wc3_corpus_relifted STATIC ${WC3_RELIFTED_SOURCES})
 target_include_directories(wc3_corpus_relifted PRIVATE
@@ -846,6 +1055,9 @@ target_compile_options(wc3_corpus_relifted PRIVATE
     -Wno-unused-parameter
     -Wno-sign-compare
     -Wno-parentheses-equality)
+if(WC3_CORPUS_WERROR)
+    target_compile_options(wc3_corpus_relifted PRIVATE -Werror)
+endif()
 set_target_properties(wc3_corpus_relifted PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
 

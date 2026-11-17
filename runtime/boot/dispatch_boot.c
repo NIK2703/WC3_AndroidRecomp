@@ -197,8 +197,17 @@ static void dispatch_unknown(CPU *c, uint32_t target, int tail)
     /* The dump is diagnostic only.  Release keeps the fatal outcome above
      * all, but must not retain the target/stack formatter or its string
      * literals (BV-10, O-72). */
+#if WC3_DEBUG && WC3_DEBUG_BATTLE_NET
+    /* Warden's lookup turns a map value into the next call target.  When that
+     * target is not a lifted function and not a registered dynamic range, the
+     * map object in ECX is the only place that still explains where the value
+     * came from.  Print it before the abort ends the process. */
+    wc3_va_trace_target(target, c->ecx);
+#endif
 #if WC3_DEBUG && WC3_DEBUG_HLE
-    uint32_t *sp = (uint32_t *)(uintptr_t)c->esp;
+    uint32_t *sp = NULL;
+    if (c->esp && wc3_legacy_guest_ok(c->esp, 24))
+        sp = (uint32_t *)guest_host_ptr(c->esp);
     fprintf(stderr,
             "[dispatch] %s unknown guest target %08X (eip=%08X esp=%08X ra=%08X %s)\n",
             tail ? "jmp" : "call", target, c->eip, c->esp,

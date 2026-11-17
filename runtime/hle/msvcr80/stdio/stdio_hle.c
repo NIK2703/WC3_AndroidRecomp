@@ -980,7 +980,7 @@ static void h_fread(CPU *c)
     stream_trace_begin(&trace, stream);
 #endif
     uint32_t got = 0;
-    if (stream_read(stream, (void *)(uintptr_t)buffer, (uint32_t)total,
+    if (stream_read(stream, guest_host_ptr(buffer), (uint32_t)total,
                     &got) == 0)
         c->eax = got / size;
     pthread_mutex_unlock(&stream->lock);
@@ -1009,7 +1009,7 @@ static void h_fwrite(CPU *c)
     stream_trace_begin(&trace, stream);
 #endif
     uint32_t put = 0;
-    if (stream_write(stream, (const void *)(uintptr_t)buffer,
+    if (stream_write(stream, guest_host_ptr(buffer),
                      (uint32_t)total, &put) == 0)
         c->eax = put / size;
     pthread_mutex_unlock(&stream->lock);

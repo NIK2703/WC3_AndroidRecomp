@@ -164,6 +164,11 @@ int wc3_legacy_select_display_mode(uint32_t width, uint32_t height)
     return display_mode_supported(width, height);
 }
 
+int wc3_legacy_request_display_mode(uint32_t width, uint32_t height)
+{
+    return wc3_legacy_select_display_mode(width, height);
+}
+
 static void (*find_impl(const char *name))(CPU *c)
 {
     for (unsigned i = 0; i < g_row_count; i++)

@@ -306,45 +306,45 @@ static inline void x87_fabs(CPU *c) {
 
 static inline double x87_ld_f32(uint32_t a) {
     float f;
-    memcpy(&f, (void *)(uintptr_t)a, 4);
+    memcpy(&f, (void *)guest_host_ptr(a), 4);
     return x87_from_f64((double)f);
 }
 static inline double x87_ld_f64(uint32_t a) {
     double d;
-    memcpy(&d, (void *)(uintptr_t)a, 8);
+    memcpy(&d, (void *)guest_host_ptr(a), 8);
     return x87_from_f64(d);
 }
 static inline double x87_ld_f80(uint32_t a) {
     uint64_t sig;
     uint16_t se;
-    memcpy(&sig, (void *)(uintptr_t)a, 8);
-    memcpy(&se, (void *)((uintptr_t)a + 8), 2);
+    memcpy(&sig, (void *)guest_host_ptr(a), 8);
+    memcpy(&se, (void *)guest_host_ptr(a + 8), 2);
     return x87_from_f64(x87_f80_to_d(sig, se));
 }
 static inline double x87_ld_i16(uint32_t a) {
-    int16_t i; memcpy(&i, (void *)(uintptr_t)a, 2); return x87_from_i16(i);
+    int16_t i; memcpy(&i, (void *)guest_host_ptr(a), 2); return x87_from_i16(i);
 }
 static inline double x87_ld_i32(uint32_t a) {
-    int32_t i; memcpy(&i, (void *)(uintptr_t)a, 4); return x87_from_i32(i);
+    int32_t i; memcpy(&i, (void *)guest_host_ptr(a), 4); return x87_from_i32(i);
 }
 static inline double x87_ld_i64(uint32_t a) {
-    int64_t i; memcpy(&i, (void *)(uintptr_t)a, 8); return x87_from_i64(i);
+    int64_t i; memcpy(&i, (void *)guest_host_ptr(a), 8); return x87_from_i64(i);
 }
 static inline void x87_st_f32(CPU *c, uint32_t a, double v) {
     (void)c;   /* SNaN handling at the m32 boundary is accepted as a deviation */
     float f = (float)v;
-    memcpy((void *)(uintptr_t)a, &f, 4);
+    memcpy((void *)guest_host_ptr(a), &f, 4);
 }
 static inline void x87_st_f64(CPU *c, uint32_t a, double v) {
     (void)c;
-    memcpy((void *)(uintptr_t)a, &v, 8);
+    memcpy((void *)guest_host_ptr(a), &v, 8);
 }
 static inline void x87_st_f80(uint32_t a, double v) {
     uint64_t sig;
     uint16_t se;
     x87_d_to_f80(v, &sig, &se);
-    memcpy((void *)(uintptr_t)a, &sig, 8);
-    memcpy((void *)((uintptr_t)a + 8), &se, 2);
+    memcpy((void *)guest_host_ptr(a), &sig, 8);
+    memcpy((void *)guest_host_ptr(a + 8), &se, 2);
 }
 
 #define X87_DEFINE_STORE_INT(fn, type, minv, maxv, indef, truncate)           \
@@ -358,7 +358,7 @@ static inline void fn(CPU *c, uint32_t a, double v) {                        \
             x87_raise_invalid(c); i = (type)(indef);                           \
         } else i = (type)r;                                                    \
     }                                                                          \
-    memcpy((void *)(uintptr_t)a, &i, sizeof i);                                \
+    memcpy((void *)guest_host_ptr(a), &i, sizeof i);                                \
 }
 X87_DEFINE_STORE_INT(x87_st_i16,    int16_t, -32768.0, 32768.0, 0x8000, 0)
 X87_DEFINE_STORE_INT(x87_st_i16_rz, int16_t, -32768.0, 32768.0, 0x8000, 1)
@@ -378,7 +378,7 @@ static inline double x87_ld_bcd(CPU *c, uint32_t a) {
     uint8_t b[10];
     double value = 0.0;
     (void)c;
-    memcpy(b, (void *)(uintptr_t)a, sizeof b);
+    memcpy(b, (void *)guest_host_ptr(a), sizeof b);
     /* Invalid BCD digits have an undefined result; masking the nibbles is a
      * deterministic integer codec and, unlike IE, matches the no-exception
      * behaviour of the hardware. */
@@ -394,7 +394,7 @@ static inline void x87_bcd_indefinite(uint32_t a) {
     memset(b, 0, sizeof b);
     b[7] = 0xC0u;                 /* invalid packed BCD: 00..00 C0 FF FF */
     b[8] = b[9] = 0xFFu;
-    memcpy((void *)(uintptr_t)a, b, sizeof b);
+    memcpy((void *)guest_host_ptr(a), b, sizeof b);
 }
 static inline void x87_st_bcd(CPU *c, uint32_t a, double v) {
     uint8_t b[10];
@@ -421,7 +421,7 @@ static inline void x87_st_bcd(CPU *c, uint32_t a, double v) {
         n /= 100u;
     }
     b[9] = (uint8_t)(signbit(d) ? 0x80u : 0u);
-    memcpy((void *)(uintptr_t)a, b, sizeof b);
+    memcpy((void *)guest_host_ptr(a), b, sizeof b);
 }
 
 /* ---- protected-mode environment (32-bit) --------------------------------

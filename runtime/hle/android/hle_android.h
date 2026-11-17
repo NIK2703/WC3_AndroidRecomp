@@ -32,8 +32,13 @@ void hle_android_start(const char *exe_path, const char *cmdline);
  * enumerates modes; the activity calls it as soon as the native window exists,
  * and the shell falls back to WC3_DXVK_WIDTH/HEIGHT (or 800x600).
  *
+ * In half-resolution grid mode the exact half extent is appended when the
+ * step table does not already contain it, so the game's Video options can
+ * select either the half mode or any normal mode.  Selecting a normal mode at
+ * runtime disables the grid and returns to compositor scaling.
+ *
  * The current mode is what GetSystemMetrics, EnumDisplaySettings(-1) and
- * D3D9's GetAdapterDisplayMode report.  `select` accepts an exact table entry
+ * D3D9's GetAdapterDisplayMode report.  `select` applies an enumerated entry
  * only, so the guest's hardcoded fallback modes (800x600/640x480) cannot
  * silently replace the device-relative choice. */
 #define HLE_ANDROID_DISPLAY_MODE_MAX 32
@@ -47,6 +52,36 @@ int      hle_android_select_display_mode(uint32_t width, uint32_t height);
 int      hle_android_display_mode_supported(uint32_t width, uint32_t height);
 uint32_t hle_android_display_refresh_rate(void);
 
+/* Half-resolution grid rendering (present_scale = half): the default guest
+ * mode becomes half of the native extent on both axes, so the present pass can
+ * upscale it by exactly 2 with nearest sampling.  The exact half is appended to
+ * the device mode list when the 180-pixel table does not already contain it;
+ * choosing any other mode at runtime disables the grid and returns to the
+ * normal compositor path.  Must be called before hle_android_set_screen_size
+ * picks a default mode. */
+void     hle_android_set_half_resolution(int enabled);
+int      hle_android_half_resolution(void);
+
+/* Runtime resolution change from the guest (ChangeDisplaySettings/Reset).  When
+ * half mode is active and the guest is already presenting, a request for any
+ * other mode disables the grid, retires the present target and applies the
+ * requested mode; before the first presented frame the half mode is kept and
+ * the request is reported as accepted.  Returns 1 when the mode was applied,
+ * 0 when it is not in the device table. */
+int      hle_android_request_display_mode(uint32_t width, uint32_t height);
+
+/* Set once the guest has presented a frame.  Before that, a stale native mode
+ * or a hardcoded fallback must not turn the launch half mode off. */
+void     hle_android_note_present(void);
+int      hle_android_guest_presented(void);
+
+/* Host notification for an in-game resolution change that disabled the grid.
+ * Called on the guest thread with the newly selected guest extent; the host
+ * marshals UI and preference work to its own thread.  The native half mode is
+ * already disabled when this runs. */
+typedef void (*hle_android_grid_disabled_fn)(uint32_t width, uint32_t height);
+void     hle_android_set_grid_disabled_callback(hle_android_grid_disabled_fn fn);
+
 /* Platform layer: set the physical Android buffer geometry and publish the
  * same present size to DXVK's Win32 shim.  This must be the native surface
  * size, not the guest display mode: DXVK keeps the swap chain at this extent
@@ -54,6 +89,20 @@ uint32_t hle_android_display_refresh_rate(void);
  * success, or the negative errno from ANativeWindow_setBuffersGeometry.  A
  * windowless shell updates only the published size and returns 0. */
 int wc3_android_set_surface_size(uint32_t width, uint32_t height);
+
+/* Present pass: publish the new guest extent to the producer surface DXVK
+ * presents into, so its swap chain is recreated at the new size on the next
+ * Present.  Returns 0 when applied or when no target is active. */
+int wc3_present_target_set_extent(uint32_t width, uint32_t height);
+
+/* Present pass: follow a runtime display-mode change.  Starts the producer
+ * when the guest extent differs from the surface, retires it when the mode
+ * returns to native, and resizes it while it stays active.  Returns 0 on
+ * success (including "not needed"), -errno on failure. */
+int wc3_present_target_ensure(uint32_t guest_w, uint32_t guest_h,
+                              uint32_t surface_w, uint32_t surface_h);
+void wc3_present_target_retire(void);
+void wc3_present_target_set_half_grid(int enabled);
 
 /* Print the import report: resolved/unimplemented imports, call counts, and
  * the last calls that ran.  Safe to call from the crash handler (it only

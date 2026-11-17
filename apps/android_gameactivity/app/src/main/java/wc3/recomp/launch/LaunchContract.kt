@@ -25,6 +25,11 @@ object LaunchContract {
     const val KEY_SELECTION_24 = "selection_24"
     const val KEY_HIDE_CURSOR = "hide_cursor"
     const val KEY_OVERLAY_OPACITY_PERCENT = "overlay_opacity_percent"
+    const val KEY_PARALLEL_EXECUTION = "parallel_execution"
+    const val KEY_GRID_ENABLED = "grid_enabled"
+    const val KEY_GRID_DARKEN_PERCENT = "grid_darken_percent"
+    const val KEY_GRID_CYCLE_SECONDS = "grid_cycle_seconds"
+    const val KEY_PRESENT_SCALE = "present_scale"
 
     /* The authored .icp profile uses 120 ms for both gesture timers.  The
      * settings screen exposes only the product range 100..200 ms, step 10. */
@@ -54,6 +59,37 @@ object LaunchContract {
     const val DEFAULT_OVERLAY_OPACITY_PERCENT = 40
     const val MIN_OVERLAY_OPACITY_PERCENT = 10
     const val MAX_OVERLAY_OPACITY_PERCENT = 50
+
+    /* Half-resolution grid presentation: one pixel of every 2x2 screen cell
+     * stays untouched and the other three are dimmed by the darken percent.
+     * Off by default; the native grid layer is created only when enabled, so
+     * a disabled build composites the game surface exactly as before. */
+    const val DEFAULT_GRID_ENABLED = false
+    const val DEFAULT_GRID_DARKEN_PERCENT = 50
+    const val MIN_GRID_DARKEN_PERCENT = 0
+    const val MAX_GRID_DARKEN_PERCENT = 100
+
+    /* Seconds between phase rotations.  0 keeps one static phase.  The
+     * special -1 means "auto": 60 s on an OLED panel and off on other
+     * displays.  LaunchSettingsStore resolves it before the intent bundle is
+     * built and the slider only writes 0..60. */
+    const val DEFAULT_GRID_CYCLE_SECONDS = -1
+    const val MIN_GRID_CYCLE_SECONDS = 0
+    const val MAX_GRID_CYCLE_SECONDS = 60
+
+    /* Presentation scaling is derived, not selected.  "system" keeps the guest
+     * at the display's own mode and hands any lower in-game mode to the Android
+     * compositor, which stretches the layer.  "half" renders the guest at half
+     * the surface and upscales it 2x with nearest sampling - the grid path,
+     * where every grid cell must be an exact 2x2 block of the guest image. */
+    const val PRESENT_SCALE_SYSTEM = "system"
+    const val PRESENT_SCALE_HALF = "half"
+
+    /* Parallel guest gameplay loops are opt-in.  The default keeps the
+     * original sequential functions (WC3_PARALLEL_GAMEPLAY=0) for every
+     * build; the switch enables the deterministic multi-core paths for the
+     * next launch. */
+    const val DEFAULT_PARALLEL_EXECUTION = false
 
     /* The product default is DXVK 1.10.3 ("1").  An empty version is the
      * explicit "Auto" choice and keeps the driver-based compatibility gate. */

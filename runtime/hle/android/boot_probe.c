@@ -29,6 +29,7 @@
 #include <dirent.h>
 
 #include "host.h"
+#include "guest_window.h"
 #include "hle_android.h"
 #include "wc3_trace.h"
 
@@ -175,14 +176,15 @@ static uint32_t resolve_import(const char *dll, const char *name,
 static void teb_init(CPU *c, uint32_t teb, uint32_t stack_base,
                      uint32_t stack_size, uint32_t tid)
 {
-    memset((void *)(uintptr_t)teb, 0, 0x1000);
-    *(uint32_t *)(uintptr_t)(teb + 0x00) = 0xFFFFFFFFu;      /* SEH chain end */
-    *(uint32_t *)(uintptr_t)(teb + 0x04) = stack_base + stack_size;
-    *(uint32_t *)(uintptr_t)(teb + 0x08) = stack_base;
-    *(uint32_t *)(uintptr_t)(teb + 0x18) = teb;
-    *(uint32_t *)(uintptr_t)(teb + 0x20) = 1234;
-    *(uint32_t *)(uintptr_t)(teb + 0x24) = tid;
-    *(uint32_t *)(uintptr_t)(teb + 0x34) = 0;
+    uint8_t *p = (uint8_t *)guest_host_ptr(teb);
+    memset(p, 0, 0x1000);
+    *(uint32_t *)(p + 0x00) = 0xFFFFFFFFu;      /* SEH chain end */
+    *(uint32_t *)(p + 0x04) = stack_base + stack_size;
+    *(uint32_t *)(p + 0x08) = stack_base;
+    *(uint32_t *)(p + 0x18) = teb;
+    *(uint32_t *)(p + 0x20) = 1234;
+    *(uint32_t *)(p + 0x24) = tid;
+    *(uint32_t *)(p + 0x34) = 0;
     c->fs_base = teb;
     c->fs = 0x53;
     c->ds = c->es = c->ss = 0x2B;
@@ -471,6 +473,11 @@ int wc3_boot_probe_main(int argc, char **argv)
 
     hle_install_crash_handler();
 
+    if (wc3_guest_window_init() != 0) {
+        fprintf(stderr, "cannot initialize the guest window\n");
+        return 1;
+    }
+
     if (!guest_map(GUEST_STACK_BASE, GUEST_STACK_SIZE)) {
         fprintf(stderr, "cannot map the guest stack\n");
         return 1;
@@ -489,9 +496,10 @@ int wc3_boot_probe_main(int argc, char **argv)
 
     CPU c;
     memset(&c, 0, sizeof c);
-    /* `CPU *restrict` in the lifted functions: the guest lives below 4 GiB,
-     * so the host CPU object must not be reachable through a guest VA. */
-    if ((uintptr_t)&c < 0x100000000ull) abort();
+    /* `CPU *restrict` in the lifted functions: the host CPU object must not be
+     * reachable through a guest VA.  In window mode that means it must be
+     * outside the window, not merely above 4 GiB. */
+    if (guest_host_contains(&c)) abort();
     cpu_x87_init_thread(&c);
     c.esp = GUEST_STACK_BASE + GUEST_STACK_SIZE - 0x200;
     teb_init(&c, GUEST_TEB_BASE, GUEST_STACK_BASE, GUEST_STACK_SIZE, 5678);
@@ -507,7 +515,8 @@ int wc3_boot_probe_main(int argc, char **argv)
      * The Android layout puts Storm at a base other than its PE ImageBase
      * (docs/ANDROID_WSI.md §10), so the loader has to apply base relocations.
      * The corpus linked here was lifted from a copy rebased to the same
-     * address, which is what makes the guest VA equal the host one again. */
+     * address.  Guest VAs are not host addresses any more; the guest-memory
+     * window translates each mapping and keeps g_image_delta at zero. */
     pe_image *storm = &g_probe_mods[g_probe_mod_count];
     memset(storm, 0, sizeof *storm);
     int have_storm = (pe_load(storm_path, GUEST_IMAGE_STORM, storm, 1) == 0);

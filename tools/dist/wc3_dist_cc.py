@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
-"""ccache prefix that distributes an NDK clang compile to IDEAPAD.
+"""ccache prefix that distributes an NDK clang compile to a remote worker.
 
 Two transports are selectable with WC3_DIST_TRANSPORT:
 
-  distcc  - the default; a persistent TCP-over-SSH tunnel feeds a remote
-            distccd.  distcc owns the remote and local compiler slots.
-  ssh     - the original helper protocol in tools/dist/compile_one.py.
+  distcc  - the default; persistent TCP-over-SSH tunnels feed one or more
+            remote distccd workers (IDEAPAD and/or the hotspot phone).  distcc
+            owns the remote and local compiler slots.
+  ssh     - the original helper protocol in tools/dist/compile_one.py; this
+            transport uses IDEAPAD only.
 
 Enable either with WC3_DIST=1 and:
 
   CCACHE_PREFIX="<python.exe> E:/projects/wc3_android_recomp/tools/dist/wc3_dist_cc.py"
 
-ccache keeps owning the cache and the build graph.  On a cache miss this
-wrapper preprocesses locally (so headers, macros, __FILE__ and the dependency
-file stay local), ships the preprocessed translation unit to IDEAPAD, and
-writes the returned object to the path the build expects.  Anything unusual
-(debug info, modules, response files) is compiled on this machine, either
-through distcc's localhost slots or through a counted local slot.  PGO and LTO
-commands are eligible only when the automatic helper explicitly enables them:
-profile-generate and ThinLTO objects can be produced remotely; profile-use
-requires the helper to have copied the merged profile to the same absolute
-path on IDEAPAD.  Any transport failure falls back to a normal local compile,
-so a missing helper cannot break a build.
+ccache keeps owning the cache and the build graph.  On a cache miss the
+distributed path preprocesses locally (so headers, macros, __FILE__ and the
+dependency file stay local), ships the preprocessed translation unit to the
+chosen peer, and writes the returned object to the path the build expects.
+Anything unusual (debug info, modules, response files) is compiled on this
+machine, either through distcc's localhost slots or through a counted local
+slot.  PGO and LTO commands are eligible only when the automatic helper
+explicitly enables them: profile-generate and ThinLTO objects can be produced
+remotely; profile-use requires the helper to have copied the merged profile to
+the same absolute path on the peer running it (IDEAPAD today).  Any transport
+failure falls back to a normal local compile, so a missing helper cannot break
+a build.
 """
 
 import atexit
@@ -165,8 +168,14 @@ def run_distcc(compiler, args, local_only=False):
         slots = max(1, slots)
         child_env["DISTCC_HOSTS"] = (
             "localhost/{0} --localslots={0} --localslots_cpp={0}".format(slots))
-    log("distcc%s: %s" % (" local" if local_only else "", compiler))
-    return subprocess.call([distcc, compiler] + args, env=child_env)
+    # CMake stores the NDK compiler with forward slashes.  The phone shims are
+    # named with the Windows backslash form and found through PATH; a compiler
+    # argument containing "/" would instead be treated as a path relative to
+    # distccd's working directory.  Windows accepts either separator, so hand
+    # distcc the backslash form.
+    distcc_compiler = compiler.replace("/", "\\")
+    log("distcc%s: %s" % (" local" if local_only else "", distcc_compiler))
+    return subprocess.call([distcc, distcc_compiler] + args, env=child_env)
 
 
 def find_output(args):

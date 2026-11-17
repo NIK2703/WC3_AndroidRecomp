@@ -42,6 +42,8 @@
  */
 #include "d3d9_thin.h"
 #include "wc3_lowmem.h"
+#include "guest_host.h"
+#include "guest_window.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -219,7 +221,7 @@ static const struct { uint32_t lo, hi; } g_keep[] = {
 };
 
 static uint64_t g_map[THIN_WORDS];
-static uint32_t g_base;
+static uintptr_t g_base;
 static uint32_t g_size;
 static uint32_t g_npages;
 static uint32_t g_hint;
@@ -230,6 +232,33 @@ static int low_ready(void)
 {
     if (g_state) return g_state > 0;
     g_state = -1;
+
+    /* In window mode the guest VA is not a host address.  Reserve a range of
+     * guest address space and use the window mapping for every host access;
+     * VirtualQuery() would only find free host addresses outside the window. */
+    if (wc3_guest_window_active()) {
+        static const struct { uint32_t base, size; } gaps[] = {
+            { 0x90000000u, 0x10000000u }, /* VA3 end .. VA5 start: 256 MiB */
+            { 0x65000000u, 0x0A000000u }, /* IJL end .. game.dll:  160 MiB */
+            { 0xD1000000u, 0x08000000u }, /* VA5 end .. VA6 start: 128 MiB */
+            { 0xE9800000u, 0x02000000u }, /* VA6 end .. VA7 start:  32 MiB */
+            { 0x3E000000u, 0x01000000u }, /* HLE heap end .. TEB:   16 MiB */
+        };
+        for (size_t i = 0; i < sizeof gaps / sizeof gaps[0]; i++) {
+            if (wc3_guest_window_reserve(gaps[i].base, gaps[i].size) != 0)
+                continue;
+            g_base = (uintptr_t)guest_host_ptr(gaps[i].base);
+            g_size = gaps[i].size;
+            g_npages = g_size / THIN_PAGE;
+            g_state = 1;
+            THIN_LOG("staging arena %08X+%X (window, %u pages)",
+                     gaps[i].base, g_size, g_npages);
+            return 1;
+        }
+        THIN_LOG("staging arena unavailable (window)");
+        return 0;
+    }
+
     uintptr_t best_lo = 0, best_size = 0, big_lo = 0, big_size = 0;
     uintptr_t a = 0x00100000;
     const uintptr_t limit = 0x7F000000;
@@ -271,12 +300,12 @@ static int low_ready(void)
         want &= ~(size_t)(THIN_PAGE - 1);
         void *p = VirtualAlloc((void *)lo, want, MEM_RESERVE, PAGE_NOACCESS);
         if (p) {
-            g_base = (uint32_t)(uintptr_t)p;
+            g_base = (uintptr_t)p;
             g_size = (uint32_t)want;
             g_npages = g_size / THIN_PAGE;
             g_state = 1;
-            THIN_LOG("staging arena %08X+%X (%u pages)",
-                     g_base, g_size, g_npages);
+            THIN_LOG("staging arena %p+%X (%u pages)",
+                     (void *)g_base, g_size, g_npages);
             return 1;
         }
     }
@@ -360,6 +389,12 @@ static void low_free(void *p, size_t n)
 static int low_buffer_usable(void *ptr, uint32_t off, uint32_t size,
                              uint32_t total)
 {
+    /* A DXVK mapping below 4 GiB is a host address, not a guest VA.  The guest
+     * reaches its memory through window_base + gva, so the native pointer can
+     * only be used directly when it already lies inside that window. */
+    if (wc3_guest_window_active() &&
+        (!wc3_guest_window_aligned() || !guest_host_contains(ptr)))
+        return 0;
     uintptr_t a = (uintptr_t)ptr;
     if (!a || a >= 0x100000000ull) return 0;
     if ((uint64_t)a + size > 0x100000000ull) return 0;
@@ -757,12 +792,16 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
 
     uint32_t rx = 0, ry = 0, rz = 0, rw = w, rh = h, rd = d;
     if (is_box) {
-        if (!box_span((const D3DBOX *)(uintptr_t)guest_rect, w, h, d,
-                      &rx, &ry, &rz, &rw, &rh, &rd))
+        if (!box_span(guest_rect
+                          ? (const D3DBOX *)guest_host_ptr(guest_rect)
+                          : NULL,
+                      w, h, d, &rx, &ry, &rz, &rw, &rh, &rd))
             return D3DERR_INVALIDCALL;
     } else {
-        if (!rect_span((const RECT *)(uintptr_t)guest_rect, w, h,
-                       &rx, &ry, &rw, &rh))
+        if (!rect_span(guest_rect
+                           ? (const RECT *)guest_host_ptr(guest_rect)
+                           : NULL,
+                       w, h, &rx, &ry, &rw, &rh))
             return D3DERR_INVALIDCALL;
     }
 
@@ -788,12 +827,12 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
             lb.RowPitch = s->pitch;
             lb.SlicePitch = s->slice_pitch;
             lb.pBits = p;
-            if (guest_out) *(LockedBox32 *)(uintptr_t)guest_out = lb;
+            if (guest_out) *(LockedBox32 *)guest_host_ptr(guest_out) = lb;
         } else {
             LockedRect32 lr;
             lr.Pitch = s->pitch;
             lr.pBits = p;
-            if (guest_out) *(LockedRect32 *)(uintptr_t)guest_out = lr;
+            if (guest_out) *(LockedRect32 *)guest_host_ptr(guest_out) = lr;
         }
         return D3D_OK;
     }
@@ -819,7 +858,8 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
     if (is_box) {
         D3DLOCKED_BOX lb;
         memset(&lb, 0, sizeof lb);
-        const D3DBOX *box = (const D3DBOX *)(uintptr_t)guest_rect;
+        const D3DBOX *box = guest_rect
+            ? (const D3DBOX *)guest_host_ptr(guest_rect) : NULL;
         if (kind == THIN_LK_VOLTEX)
             hr = ((IDirect3DVolumeTexture9 *)o->host)->LockBox(
                 sub & 0xFFFF, &lb, box, dflags);
@@ -836,7 +876,8 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
     } else {
         D3DLOCKED_RECT lr;
         memset(&lr, 0, sizeof lr);
-        const RECT *rect = (const RECT *)(uintptr_t)guest_rect;
+        const RECT *rect = guest_rect
+            ? (const RECT *)guest_host_ptr(guest_rect) : NULL;
         if (kind == THIN_LK_TEXTURE)
             hr = ((IDirect3DTexture9 *)o->host)->LockRect(
                 sub & 0xFFFF, &lr, rect, dflags);
@@ -905,12 +946,12 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
             lb.RowPitch = pitch;
             lb.SlicePitch = s->slice_pitch;
             lb.pBits = p;
-            if (guest_out) *(LockedBox32 *)(uintptr_t)guest_out = lb;
+            if (guest_out) *(LockedBox32 *)guest_host_ptr(guest_out) = lb;
         } else {
             LockedRect32 lr;
             lr.Pitch = pitch;
             lr.pBits = p;
-            if (guest_out) *(LockedRect32 *)(uintptr_t)guest_out = lr;
+            if (guest_out) *(LockedRect32 *)guest_host_ptr(guest_out) = lr;
         }
         thin_count(THIN_STAT_LOCK);
         THIN_LOG("lock kind=%d sub=%u flags=%08X pitch=%u bpp=%u ptr=%08X "
@@ -968,12 +1009,12 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
         lb.RowPitch = pitch;
         lb.SlicePitch = s->slice_pitch;
         lb.pBits = p;
-        if (guest_out) *(LockedBox32 *)(uintptr_t)guest_out = lb;
+        if (guest_out) *(LockedBox32 *)guest_host_ptr(guest_out) = lb;
     } else {
         LockedRect32 lr;
         lr.Pitch = pitch;
         lr.pBits = p;
-        if (guest_out) *(LockedRect32 *)(uintptr_t)guest_out = lr;
+        if (guest_out) *(LockedRect32 *)guest_host_ptr(guest_out) = lr;
     }
 
     thin_count(THIN_STAT_LOCK);

@@ -21,6 +21,7 @@ void wc3_dispatch_shutdown(void);
 void L_00401000(CPU *c);
 void L_00401030(CPU *c);
 void L_00401050(CPU *c);
+void L_00401070(CPU *c);
 
 static int fail(const char *what)
 {
@@ -45,6 +46,7 @@ int main(void)
 {
     static const int want_direct[] = { 1, 2, 3, 4 };
     static const int want_tail[] = { 5, 6 };
+    static const int want_leaf[] = { 7 };
     TestCPU t;
     pthread_t threads[2];
     TestCPU workers[2];
@@ -61,6 +63,13 @@ int main(void)
     dispatch(&t.cpu, 0x00401030u);
     if (!check_log(&t, want_tail, 2)) return fail("cross-TU tail order");
     if (t.cpu.disp_depth != 0u) return fail("tail depth");
+
+    memset(&t, 0, sizeof t);
+    dispatch(&t.cpu, 0x00401070u);
+    if (!check_log(&t, want_leaf, 1)) return fail("cross-TU leaf-tail order");
+    if (t.cpu.esp != 4u) return fail("leaf-tail return-address pop");
+    if (t.cpu.disp_depth != 0u) return fail("leaf-tail depth");
+    if (t.cpu.disp_pending_valid != 0u) return fail("leaf-tail pending");
 
     memset(&t, 0, sizeof t);
     dispatch(&t.cpu, 0x00401050u);
@@ -81,6 +90,6 @@ int main(void)
     }
 
     wc3_dispatch_shutdown();
-    printf("direct_call_multi_tu_test: OK (cross-TU, mixed path, 2 threads)\n");
+    printf("direct_call_multi_tu_test: OK (cross-TU, mixed path, leaf tail, 2 threads)\n");
     return 0;
 }

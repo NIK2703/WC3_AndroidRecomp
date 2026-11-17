@@ -2,6 +2,7 @@
 #include "direct_call_multi_tu_common.h"
 
 void L_00401010(CPU *c);
+void L_00401060(CPU *c);
 
 void L_00401000(CPU *c)
 {
@@ -27,5 +28,14 @@ void L_00401050(CPU *c)
     s->hops++;
     if (s->hops < 100000L)
         WC3_DIRECT_TAIL(L_00401050, c);
+    return;
+}
+
+/* D4c cross-TU leaf tail: the caller lives here, the leaf target lives in
+ * direct_call_multi_tu_b.c.  The leaf's own ret is the only return-address
+ * pop; the caller adds nothing. */
+void L_00401070(CPU *c)
+{
+    WC3_DIRECT_TAIL_LEAF(L_00401060, c);
     return;
 }

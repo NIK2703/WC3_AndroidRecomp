@@ -330,6 +330,7 @@ static FuncSpan *find_functions(const char *s, size_t n, size_t *out_n)
         char va[9];
         size_t end;
         if (s[i] != 'v') continue;
+        if (i != 0 && s[i - 1] != '\n') continue;
         end = function_header_at(s, n, i, va);
         if (!end) continue;
         if (count == cap) {
@@ -505,6 +506,7 @@ static unsigned flag_reads(const char *s, size_t n)
 static int word_at(const char *s, size_t n, size_t p, const char *w)
 {
     size_t wl = strlen(w);
+    if (p >= n || s[p] != w[0]) return 0;
     if (p + wl > n || memcmp(s + p, w, wl) != 0) return 0;
     if (p > 0 && is_word((unsigned char)s[p - 1])) return 0;
     if (p + wl < n && is_word((unsigned char)s[p + wl])) return 0;

@@ -13,6 +13,7 @@
     <string name="launch_sound_label">Звук</string>
     <string name="launch_selection24_label">Выделение до 24 юнитов</string>
     <string name="launch_hide_cursor_label">Скрыть игровой курсор</string>
+    <string name="launch_parallel_label">Параллельные игровые циклы</string>
     <string name="launch_gesture_mode_label">Жесты тачскрин управления</string>
     <string name="launch_gesture_mode_double">Двойное касание, одиночное с задержкой</string>
     <string name="launch_gesture_mode_single">Без двойного касания, одиночное без задержки</string>
@@ -26,10 +27,18 @@
     <string name="launch_double_tap_delay_label">Задержка двойного касания</string>
     <string name="launch_long_press_delay_label">Задержка долгого нажатия</string>
     <string name="launch_tap_click_delay_label">Задержка зажатия клика в упрощённом профиле</string>
+    <string name="launch_tap_click_delay_hint">Увеличьте, если клик происходит до перемещения курсора по тапу в главном меню игры</string>
     <string name="launch_gesture_delay_value">%1$d мс</string>
     <string name="launch_overlay_opacity_label">Непрозрачность элементов управления</string>
     <string name="launch_overlay_opacity_value">%1$d %%</string>
-
+    <string name="launch_grid_label">Сетка половинного разрешения</string>
+    <string name="launch_grid_label_resolution">Сетка половинного разрешения (%1$d × %2$d)</string>
+    <string name="launch_grid_darken_label">Затемнение сетки</string>
+    <string name="launch_grid_darken_value">%1$d %%</string>
+    <string name="launch_grid_cycle_label">Период сдвига сетки (OLED)</string>
+    <string name="launch_grid_cycle_value">%1$d с</string>
+    <string name="launch_grid_cycle_off">Выкл.</string>
+    <string name="launch_grid_hint">Один пиксель каждой ячейки 2×2 остаётся ярким, остальные затемняются. Сдвиг периода перемещает яркий пиксель, чтобы распределить износ OLED. При включении игра стартует ровно в половине разрешения экрана с 2× целочисленным масштабированием; смена разрешения в настройках игры выключает сетку и половинное масштабирование и возвращает обычное сглаженное отображение.</string>
     <string name="launch_driver_label">Драйвер Vulkan</string>
     <string name="launch_driver_system">Системный драйвер Vulkan (рекомендуется)</string>
     <string name="launch_driver_import">Установить ZIP</string>

@@ -82,7 +82,44 @@ endif()
 # carries the same flags), so it must be paired with PM-22/T0/T1 evidence.
 option(WC3_HOST_HARDENING
        "Keep NDK stack-protector and Fortify on non-corpus targets" ON)
+# Variant identity.  WC3_VARIANT is the label passed by build_app.ps1; it is
+# not the master switch (WC3_DEBUG is), but an unknown value is rejected so a
+# typo cannot silently produce a differently named artifact with the wrong
+# profile.  userdebug is the diagnostic build of the debug package: same
+# applicationId and Gradle build type, WC3_DEBUG=1, reduced tag set, Download
+# log and gameplay experiments off by default.
+set(WC3_VARIANT "" CACHE STRING "Build variant label")
+set_property(CACHE WC3_VARIANT PROPERTY STRINGS
+    release debug userdebug release_optimized release_optimized_pgo)
+if(WC3_VARIANT AND NOT WC3_VARIANT MATCHES
+   "^(release|debug|userdebug|release_optimized|release_optimized_pgo)$")
+    message(FATAL_ERROR
+        "WC3_VARIANT='${WC3_VARIANT}' is not a known build variant")
+endif()
 option(WC3_DEBUG "Build with debug-only diagnostics" OFF)
+# The userdebug boot log belongs in the public Download folder so it can be
+# pulled with a normal file manager/adb pull without run-as.  app_boot.c falls
+# back to the app-private state dir when Download is not writable yet.
+set(_wc3_log_to_downloads_default OFF)
+if(WC3_VARIANT STREQUAL "userdebug")
+    set(_wc3_log_to_downloads_default ON)
+endif()
+option(WC3_LOG_TO_DOWNLOADS
+       "Write the boot log to /storage/emulated/0/Download/wc3_log.txt"
+       ${_wc3_log_to_downloads_default})
+if(WC3_VARIANT STREQUAL "userdebug" AND NOT WC3_DEBUG)
+    message(FATAL_ERROR
+        "WC3_VARIANT=userdebug requires WC3_DEBUG=ON; it is the diagnostic "
+        "profile of the debug package.")
+endif()
+if(WC3_LOG_TO_DOWNLOADS AND NOT WC3_DEBUG)
+    message(FATAL_ERROR
+        "WC3_LOG_TO_DOWNLOADS=ON is a debug diagnostic; keep WC3_DEBUG=ON or "
+        "leave the option OFF in a release build.")
+endif()
+if(WC3_VARIANT STREQUAL "userdebug")
+    message(STATUS "userdebug: diagnostic profile, Download boot log")
+endif()
 # Phase 2 of docs/THIN_D3D9_COPY_PLAN.md.  D3DUSAGE_WRITEONLY promises the
 # application will not read the resource, so the copy-in from DXVK's mapping
 # into the low shadow is not observable.  This is part of the normal Android
@@ -612,6 +649,31 @@ if(WC3_SELECTION_24)
         "selection24: 24-unit selection profile, 6x2 for <=12, 8x3 for 13..24")
 endif()
 
+# Optional post-lift parallel raycast.  The pass rewrites exactly one call to
+# L_6F749F90 in the generated leaf corpus; it needs a generated corpus, the
+# Android app target and the as-built HLE library that owns the runtime pool.
+option(WC3_PARALLEL_RAYCAST
+    "Rewrite the L_6F749F90 call for deterministic multi-core raycasts" OFF)
+if(WC3_PARALLEL_RAYCAST)
+    if(NOT WC3_RELIFTED_CORPUS_ROOT)
+        message(FATAL_ERROR
+            "WC3_PARALLEL_RAYCAST=ON requires WC3_RELIFTED_CORPUS_ROOT; the "
+            "prebuilt legacy corpus has no L_6F749F90 call site to rewrite.")
+    endif()
+    if(NOT WC3_BUILD_APP)
+        message(FATAL_ERROR
+            "WC3_PARALLEL_RAYCAST=ON is an app profile; set "
+            "-DWC3_BUILD_APP=ON.")
+    endif()
+    if(NOT WC3_WITH_ASBUILT_HLE)
+        message(FATAL_ERROR
+            "WC3_PARALLEL_RAYCAST=ON requires WC3_WITH_ASBUILT_HLE=ON; the "
+            "worker pool is linked into wc3_hle_android.")
+    endif()
+    message(STATUS
+        "parallel_raycast: one L_6F749F90 site, deterministic chunk merge")
+endif()
+
 include("${WC3_ROOT}/cmake/Wc3CompilerCache.cmake")
 # O-51/O-52: this must be a directory-level option, before every target that
 # can contain a THREAD_LOCAL object (corpus, boot, shim, HLE, platform and the
@@ -646,12 +708,17 @@ set(WC3_INCLUDES
     "${WC3_ROOT}/runtime/platform/android")
 
 add_library(wc3_platform STATIC
+    "${WC3_ROOT}/runtime/cpu/guest_host.c"
     "${WC3_ROOT}/runtime/platform/platform.c"
     "${WC3_ROOT}/runtime/platform/android/asset_snapshot.c"
+    "${WC3_ROOT}/runtime/platform/android/guest_window_android.c"
+    "${WC3_ROOT}/runtime/platform/android/grid_android.c"
     "${WC3_ROOT}/runtime/platform/android/net_android.c"
     "${WC3_ROOT}/runtime/platform/android/platform_android.c"
+    "${WC3_ROOT}/runtime/platform/android/present_target.c"
     "${WC3_ROOT}/runtime/ipc/game_state.c")
 target_include_directories(wc3_platform PUBLIC
+    "${WC3_ROOT}/runtime/cpu"
     "${WC3_ROOT}/runtime/ipc"
     "${WC3_ROOT}/runtime/diag"
     "${WC3_ROOT}/runtime/platform"
@@ -803,7 +870,7 @@ if(WC3_BUILD_APP)
         wc3_ffmpeg_swscale
         wc3_ffmpeg_avutil
         -Wl,--whole-archive game_activity_static -Wl,--no-whole-archive
-        android log aaudio m)
+        android log aaudio mediandk m)
     if(NOT WC3_WITH_ASBUILT_HLE)
         target_link_libraries(wc3gameactivity PRIVATE wc3_guest)
     endif()

@@ -23,6 +23,8 @@
 #include "platform_android.h"
 #include "asset_snapshot.h"
 #include "audio_mixer.h"
+#include "guest_host.h"
+#include "guest_window.h"
 #include "sound_switch.h"
 #if WC3_DEBUG && WC3_DEBUG_AUDIO
 #include "audio_tap.h"
@@ -108,6 +110,9 @@ static void *android_map_fixed(uint32_t base, uint32_t size, int prot)
 static int android_mem_reserve(void *ctx, uint32_t base, uint32_t size)
 {
     (void)ctx;
+    if (wc3_guest_window_init() != 0) return -1;
+    if (wc3_guest_window_active())
+        return wc3_guest_window_reserve(base, size);
     void *p = android_map_fixed(base, size, PROT_NONE);
     return p == MAP_FAILED ? -1 : 0;
 }
@@ -116,6 +121,8 @@ static int android_mem_commit(void *ctx, uint32_t base, uint32_t size)
 {
     (void)ctx;
     if (size == 0u) return -1;
+    if (wc3_guest_window_active())
+        return wc3_guest_window_commit(base, size);
     return mprotect((void *)(uintptr_t)base, (size_t)size,
                     PROT_READ | PROT_WRITE) == 0
                ? 0
@@ -126,6 +133,8 @@ static int android_mem_decommit(void *ctx, uint32_t base, uint32_t size)
 {
     (void)ctx;
     if (size == 0u) return -1;
+    if (wc3_guest_window_active())
+        return wc3_guest_window_decommit(base, size);
 #ifdef MADV_DONTNEED
     (void)madvise((void *)(uintptr_t)base, (size_t)size, MADV_DONTNEED);
 #endif
@@ -138,6 +147,8 @@ static int android_mem_release(void *ctx, uint32_t base, uint32_t size)
 {
     (void)ctx;
     if (size == 0u) return -1;
+    if (wc3_guest_window_active())
+        return wc3_guest_window_release(base, size);
     return munmap((void *)(uintptr_t)base, (size_t)size) == 0 ? 0 : -1;
 }
 
@@ -149,6 +160,8 @@ static int android_mem_protect(void *ctx, uint32_t base, uint32_t size,
     if (prot & WC3_MEM_READ) p |= PROT_READ;
     if (prot & WC3_MEM_WRITE) p |= PROT_WRITE;
     if (prot & WC3_MEM_EXEC) p |= PROT_EXEC;
+    if (wc3_guest_window_active())
+        return wc3_guest_window_protect(base, size, p);
     return mprotect((void *)(uintptr_t)base, (size_t)size, p) == 0 ? 0 : -1;
 }
 

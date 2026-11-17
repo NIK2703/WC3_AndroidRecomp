@@ -54,7 +54,7 @@ int pe_load(const char *path, uint32_t preferred_base, pe_image *out, int allow_
     }
     uint32_t hdr = opt->SizeOfHeaders;
     if (hdr > flen) hdr = (uint32_t)flen;
-    memcpy((void *)(uintptr_t)base, file, hdr);
+    memcpy((void *)(uintptr_t)guest_host_ptr(base), file, hdr);
 
     pe_section_header *sec = (pe_section_header *)((uint8_t *)&nt->OptionalHeader
                                                    + nt->FileHeader.SizeOfOptionalHeader);
@@ -62,7 +62,7 @@ int pe_load(const char *path, uint32_t preferred_base, pe_image *out, int allow_
         uint32_t copy = sec[i].SizeOfRawData;
         if (copy > sec[i].VirtualSize) copy = sec[i].VirtualSize;
         if (copy && (size_t)sec[i].PointerToRawData + copy <= flen)
-            memcpy((void *)(uintptr_t)(base + sec[i].VirtualAddress),
+            memcpy((void *)(uintptr_t)guest_host_ptr(base + sec[i].VirtualAddress),
                    file + sec[i].PointerToRawData, copy);
     }
     int32_t delta = (int32_t)(base - image_base);
@@ -70,14 +70,14 @@ int pe_load(const char *path, uint32_t preferred_base, pe_image *out, int allow_
     if (delta && rel.VirtualAddress && rel.Size) {
         uint32_t off = 0;
         while (off < rel.Size) {
-            pe_base_reloc *blk = (pe_base_reloc *)(uintptr_t)(base + rel.VirtualAddress + off);
+            pe_base_reloc *blk = (pe_base_reloc *)(uintptr_t)guest_host_ptr(base + rel.VirtualAddress + off);
             if (blk->SizeOfBlock < sizeof *blk) break;
             unsigned n = (blk->SizeOfBlock - (unsigned)sizeof *blk) / 2;
             uint16_t *e = (uint16_t *)(blk + 1);
             for (unsigned i = 0; i < n; i++) {
                 uint32_t type = e[i] >> 12, where = e[i] & 0xFFF;
                 if (type == PE_REL_HIGHLOW) {
-                    uint32_t *p = (uint32_t *)(uintptr_t)(base + blk->VirtualAddress + where);
+                    uint32_t *p = (uint32_t *)(uintptr_t)guest_host_ptr(base + blk->VirtualAddress + where);
                     *p += (uint32_t)delta;
                 }
             }
@@ -108,17 +108,17 @@ int pe_load(const char *path, uint32_t preferred_base, pe_image *out, int allow_
 
 static const pe_export_dir *export_dir(const pe_image *img) {
     if (!img->export_rva) return NULL;
-    return (const pe_export_dir *)(uintptr_t)(img->base + img->export_rva);
+    return (const pe_export_dir *)(uintptr_t)guest_host_ptr(img->base + img->export_rva);
 }
 
 uint32_t pe_export(const pe_image *img, const char *name) {
     const pe_export_dir *d = export_dir(img);
     if (!d) return 0;
-    const uint32_t *funcs = (const uint32_t *)(uintptr_t)(img->base + d->AddressOfFunctions);
-    const uint32_t *names = (const uint32_t *)(uintptr_t)(img->base + d->AddressOfNames);
-    const uint16_t *ords = (const uint16_t *)(uintptr_t)(img->base + d->AddressOfNameOrdinals);
+    const uint32_t *funcs = (const uint32_t *)(uintptr_t)guest_host_ptr(img->base + d->AddressOfFunctions);
+    const uint32_t *names = (const uint32_t *)(uintptr_t)guest_host_ptr(img->base + d->AddressOfNames);
+    const uint16_t *ords = (const uint16_t *)(uintptr_t)guest_host_ptr(img->base + d->AddressOfNameOrdinals);
     for (uint32_t i = 0; i < d->NumberOfNames; i++) {
-        const char *n = (const char *)(uintptr_t)(img->base + names[i]);
+        const char *n = (const char *)(uintptr_t)guest_host_ptr(img->base + names[i]);
         if (strcmp(n, name) == 0) {
             uint32_t rva = funcs[ords[i]];
             if (rva >= img->export_rva && rva < img->export_rva + img->export_size) {
@@ -137,7 +137,7 @@ uint32_t pe_export_ordinal(const pe_image *img, uint16_t ordinal) {
     if (ordinal < d->Base) return 0;
     uint32_t index = (uint32_t)ordinal - d->Base;
     if (index >= d->NumberOfFunctions) return 0;
-    const uint32_t *funcs = (const uint32_t *)(uintptr_t)(img->base + d->AddressOfFunctions);
+    const uint32_t *funcs = (const uint32_t *)(uintptr_t)guest_host_ptr(img->base + d->AddressOfFunctions);
     uint32_t rva = funcs[index];
     if (!rva) return 0;
     if (rva >= img->export_rva && rva < img->export_rva + img->export_size) {
@@ -176,7 +176,7 @@ static const res_data_entry *res_find(const pe_image *img, unsigned type,
 {
     if (!img->resource_rva || !img->resource_size) return NULL;
     uint32_t root = img->base + img->resource_rva;
-    const res_dir *d = (const res_dir *)(uintptr_t)root;
+    const res_dir *d = (const res_dir *)(uintptr_t)guest_host_ptr(root);
     const res_dir_entry *e = (const res_dir_entry *)(d + 1);
 
     const res_dir *found = NULL;
@@ -184,7 +184,7 @@ static const res_data_entry *res_find(const pe_image *img, unsigned type,
     for (unsigned i = 0; i < total; i++) {
         if (!(e[i].Name & 0x80000000u) && (e[i].Name & 0xFFFFu) == type &&
             (e[i].OffsetToData & 0x80000000u)) {
-            found = (const res_dir *)(uintptr_t)(root + (e[i].OffsetToData & 0x7FFFFFFFu));
+            found = (const res_dir *)(uintptr_t)guest_host_ptr(root + (e[i].OffsetToData & 0x7FFFFFFFu));
             break;
         }
     }
@@ -197,7 +197,7 @@ static const res_data_entry *res_find(const pe_image *img, unsigned type,
     for (unsigned i = 0; i < total; i++) {
         if (!(e[i].Name & 0x80000000u) && (e[i].Name & 0xFFFFu) == name &&
             (e[i].OffsetToData & 0x80000000u)) {
-            found = (const res_dir *)(uintptr_t)(root + (e[i].OffsetToData & 0x7FFFFFFFu));
+            found = (const res_dir *)(uintptr_t)guest_host_ptr(root + (e[i].OffsetToData & 0x7FFFFFFFu));
             break;
         }
     }
@@ -208,7 +208,7 @@ static const res_data_entry *res_find(const pe_image *img, unsigned type,
     total = d->NumberOfNamedEntries + d->NumberOfIdEntries;
     if (!total) return NULL;
     /* First language is enough: the launcher's messages are the same text. */
-    return (const res_data_entry *)(uintptr_t)(root + e[0].OffsetToData);
+    return (const res_data_entry *)(uintptr_t)guest_host_ptr(root + e[0].OffsetToData);
 }
 
 int pe_string_resource(const pe_image *img, unsigned id, char *out, size_t cap)
@@ -218,7 +218,7 @@ int pe_string_resource(const pe_image *img, unsigned id, char *out, size_t cap)
     const res_data_entry *de = res_find(img, RT_STRING, (id >> 4) + 1);
     if (!de) return 0;
 
-    const uint8_t *blk = (const uint8_t *)(uintptr_t)(img->base + de->OffsetToData);
+    const uint8_t *blk = (const uint8_t *)(uintptr_t)guest_host_ptr(img->base + de->OffsetToData);
     uint32_t size = de->Size;
     unsigned want = id & 15;
     uint32_t off = 0;
@@ -245,12 +245,12 @@ int pe_bind_imports(const pe_image *img,
                     void *user) {
     if (!img->import_rva) return 0;
     unsigned bound = 0, missing = 0;
-    pe_import_descriptor *d = (pe_import_descriptor *)(uintptr_t)(img->base + img->import_rva);
+    pe_import_descriptor *d = (pe_import_descriptor *)(uintptr_t)guest_host_ptr(img->base + img->import_rva);
     for (; d->Name; d++) {
-        const char *dll = (const char *)(uintptr_t)(img->base + d->Name);
-        uint32_t *ilt = (uint32_t *)(uintptr_t)(img->base
+        const char *dll = (const char *)(uintptr_t)guest_host_ptr(img->base + d->Name);
+        uint32_t *ilt = (uint32_t *)(uintptr_t)guest_host_ptr(img->base
                         + (d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk));
-        uint32_t *iat = (uint32_t *)(uintptr_t)(img->base + d->FirstThunk);
+        uint32_t *iat = (uint32_t *)(uintptr_t)guest_host_ptr(img->base + d->FirstThunk);
         for (; *ilt; ilt++, iat++) {
             uint32_t va = 0;
             if (*ilt & PE_ORDINAL_FLAG) {
@@ -258,7 +258,7 @@ int pe_bind_imports(const pe_image *img,
                 if (!va) { fprintf(stderr, "[pe] %s: unresolved %s#%u\n",
                                    img->path, dll, *ilt & 0xFFFF); missing++; }
             } else {
-                const char *nm = (const char *)(uintptr_t)(img->base + *ilt + 2);
+                const char *nm = (const char *)(uintptr_t)guest_host_ptr(img->base + *ilt + 2);
                 va = resolve(dll, nm, 0, user);
                 if (!va) { fprintf(stderr, "[pe] %s: unresolved %s!%s\n",
                                    img->path, dll, nm); missing++; }

@@ -329,12 +329,12 @@ int wc3_legacy_guest_ok(uint32_t addr, uint32_t size)
 
 uint8_t wc3_legacy_rd8g(uint32_t addr)
 {
-    return *(volatile uint8_t *)(uintptr_t)addr;
+    return *(volatile uint8_t *)(uintptr_t)guest_host_ptr(addr);
 }
 
 uint16_t wc3_legacy_rd16g(uint32_t addr)
 {
-    return *(volatile uint16_t *)(uintptr_t)addr;
+    return *(volatile uint16_t *)(uintptr_t)guest_host_ptr(addr);
 }
 
 uint32_t wc3_legacy_rd32g(uint32_t addr)
@@ -344,12 +344,12 @@ uint32_t wc3_legacy_rd32g(uint32_t addr)
 
 void wc3_legacy_wr8g(uint32_t addr, uint8_t value)
 {
-    *(volatile uint8_t *)(uintptr_t)addr = value;
+    *(volatile uint8_t *)(uintptr_t)guest_host_ptr(addr) = value;
 }
 
 void wc3_legacy_wr16g(uint32_t addr, uint16_t value)
 {
-    *(volatile uint16_t *)(uintptr_t)addr = value;
+    *(volatile uint16_t *)(uintptr_t)guest_host_ptr(addr) = value;
 }
 
 void wc3_legacy_wr32g(uint32_t addr, uint32_t value)
@@ -372,7 +372,7 @@ uint32_t wc3_legacy_guest_alloc0(uint32_t size)
 {
     uint32_t n = size ? size : 1u;
     uint32_t p = hle_guest_alloc(n);
-    if (p) memset((void *)(uintptr_t)p, 0, n);
+    if (p) memset((void *)(uintptr_t)guest_host_ptr(p), 0, n);
     return p;
 }
 
@@ -398,7 +398,7 @@ void wc3_legacy_guest_copy(uint32_t dst, uint32_t src, uint32_t size)
     if (!size || !wc3_legacy_guest_ok(dst, size) ||
         !wc3_legacy_guest_ok(src, size))
         return;
-    memcpy((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, size);
+    memcpy((void *)(uintptr_t)guest_host_ptr(dst), (const void *)(uintptr_t)guest_host_ptr(src), size);
 }
 
 void wc3_legacy_guest_move(uint32_t dst, uint32_t src, uint32_t size)
@@ -406,19 +406,19 @@ void wc3_legacy_guest_move(uint32_t dst, uint32_t src, uint32_t size)
     if (!size || !wc3_legacy_guest_ok(dst, size) ||
         !wc3_legacy_guest_ok(src, size))
         return;
-    memmove((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, size);
+    memmove((void *)(uintptr_t)guest_host_ptr(dst), (const void *)(uintptr_t)guest_host_ptr(src), size);
 }
 
 void wc3_legacy_guest_fill(uint32_t dst, uint8_t value, uint32_t size)
 {
     if (!size || !wc3_legacy_guest_ok(dst, size)) return;
-    memset((void *)(uintptr_t)dst, (int)value, size);
+    memset((void *)(uintptr_t)guest_host_ptr(dst), (int)value, size);
 }
 
 void wc3_legacy_guest_zero(uint32_t dst, uint32_t size)
 {
     if (!size || !wc3_legacy_guest_ok(dst, size)) return;
-    memset((void *)(uintptr_t)dst, 0, size);
+    memset((void *)(uintptr_t)guest_host_ptr(dst), 0, size);
 }
 
 void wc3_legacy_post_message(uint32_t hwnd, uint32_t msg, uint32_t wp,
@@ -455,6 +455,27 @@ int wc3_legacy_default_display_mode(uint32_t *width, uint32_t *height)
 int wc3_legacy_select_display_mode(uint32_t width, uint32_t height)
 {
     return hle_android_select_display_mode(width, height);
+}
+
+int wc3_legacy_request_display_mode(uint32_t width, uint32_t height)
+{
+    return hle_android_request_display_mode(width, height);
+}
+
+void wc3_legacy_set_half_resolution(int enabled)
+{
+    hle_android_set_half_resolution(enabled);
+}
+
+int wc3_legacy_half_resolution(void)
+{
+    return hle_android_half_resolution();
+}
+
+void wc3_legacy_set_grid_disabled_callback(void (*cb)(uint32_t width,
+                                                      uint32_t height))
+{
+    hle_android_set_grid_disabled_callback(cb);
 }
 
 int display_mode_at(uint32_t index, uint32_t *width, uint32_t *height)

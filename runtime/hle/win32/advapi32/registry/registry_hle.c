@@ -1360,10 +1360,25 @@ static void seed_defaults_locked(void)
 /* A launch setting is an explicit override, like choosing a mode in the game's
  * own Video options.  Persisted values are restored first so every other saved
  * preference survives; reswidth/resheight are then replaced with the mode
- * app_boot selected for this launch.  An empty/auto launcher value leaves the
- * game's saved resolution untouched. */
+ * app_boot selected for this launch.  In half-resolution grid mode the mode
+ * table has exactly one legal entry, so a saved native/lower value must be
+ * overwritten as well: otherwise the game would Reset to a non-2x back buffer
+ * and DXVK would rescale it linearly into the half swap chain. */
 static void apply_launch_resolution_locked(void)
 {
+    if (wc3_legacy_half_resolution()) {
+        uint32_t hw = 0, hh = 0;
+        if (wc3_legacy_default_display_mode(&hw, &hh)) {
+            seed_dword_locked(REG_VIDEO, "reswidth", hw);
+            seed_dword_locked(REG_VIDEO, "resheight", hh);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+            fprintf(stderr, "[registry] half mode forces video %ux%u\n", hw,
+                    hh);
+#endif
+            return;
+        }
+    }
+
     const char *ew = getenv("WC3_DXVK_WIDTH");
     const char *eh = getenv("WC3_DXVK_HEIGHT");
     char *end = NULL;

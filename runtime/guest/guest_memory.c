@@ -536,32 +536,32 @@ typedef uint32_t wc3_guest_u32 WC3_MAY_ALIAS;
 
 uint8_t wc3_rd8g(uint32_t addr)
 {
-    return *(volatile wc3_guest_u8 *)(uintptr_t)addr;
+    return *(volatile wc3_guest_u8 *)guest_host_ptr(addr);
 }
 
 uint16_t wc3_rd16g(uint32_t addr)
 {
-    return *(volatile wc3_guest_u16 *)(uintptr_t)addr;
+    return *(volatile wc3_guest_u16 *)guest_host_ptr(addr);
 }
 
 uint32_t wc3_rd32g(uint32_t addr)
 {
-    return *(volatile wc3_guest_u32 *)(uintptr_t)addr;
+    return *(volatile wc3_guest_u32 *)guest_host_ptr(addr);
 }
 
 void wc3_wr8g(uint32_t addr, uint8_t value)
 {
-    *(volatile wc3_guest_u8 *)(uintptr_t)addr = value;
+    *(volatile wc3_guest_u8 *)guest_host_ptr(addr) = value;
 }
 
 void wc3_wr16g(uint32_t addr, uint16_t value)
 {
-    *(volatile wc3_guest_u16 *)(uintptr_t)addr = value;
+    *(volatile wc3_guest_u16 *)guest_host_ptr(addr) = value;
 }
 
 void wc3_wr32g(uint32_t addr, uint32_t value)
 {
-    *(volatile wc3_guest_u32 *)(uintptr_t)addr = value;
+    *(volatile wc3_guest_u32 *)guest_host_ptr(addr) = value;
 }
 
 uint32_t wc3_arg32(const CPU *cpu, unsigned n)

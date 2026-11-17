@@ -16,3 +16,10 @@ void L_00401030(CPU *c)
     WC3_DIRECT_TAIL(L_00401040, c);
     return;
 }
+
+/* D4c leaf target in a different translation unit from L_00401070. */
+void L_00401060(CPU *c)
+{
+    c->esp += 4u; /* model the leaf's guest ret */
+    tc_note(c, 7);
+}

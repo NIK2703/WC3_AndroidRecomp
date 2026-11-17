@@ -562,7 +562,7 @@ static int guest_read(uint32_t addr, void *dst, uint32_t size)
 {
     if (!size) return 1;
     if (!dst || !wc3_legacy_guest_ok(addr, size)) return 0;
-    memcpy(dst, (const void *)(uintptr_t)addr, size);
+    memcpy(dst, (const void *)(uintptr_t)guest_host_ptr(addr), size);
     return 1;
 }
 
@@ -570,7 +570,7 @@ static int guest_write(uint32_t addr, const void *src, uint32_t size)
 {
     if (!size) return 1;
     if (!src || !wc3_legacy_guest_ok(addr, size)) return 0;
-    memcpy((void *)(uintptr_t)addr, src, size);
+    memcpy((void *)(uintptr_t)guest_host_ptr(addr), src, size);
     return 1;
 }
 
@@ -593,7 +593,7 @@ static int guest_cstr_write(uint32_t addr, const char *src, uint32_t cap)
     size_t n = strlen(src);
     if (!addr || n + 1u > cap) return 0;
     if (!wc3_legacy_guest_ok(addr, (uint32_t)n + 1u)) return 0;
-    memcpy((void *)(uintptr_t)addr, src, n + 1u);
+    memcpy((void *)(uintptr_t)guest_host_ptr(addr), src, n + 1u);
     return 1;
 }
 
@@ -1561,7 +1561,7 @@ static void io_submit(CPU *c, int is_send)
     uint8_t *data = NULL;
     int data_owned = 0;
     if (parsed.buffer_count == 1u && parsed.total_length > 0u) {
-        data = (uint8_t *)(uintptr_t)parsed.guest_buf[0];
+        data = (uint8_t *)guest_host_ptr(parsed.guest_buf[0]);
     } else {
         uint32_t alloc = parsed.total_length ? parsed.total_length : 1u;
         data = (uint8_t *)malloc(alloc);
@@ -1694,12 +1694,12 @@ static void socket_file_io(CPU *c, int is_send)
 #if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
             if (length)
                 debug_dump_packet("send", handle,
-                                  (const void *)(uintptr_t)buffer, length);
+                                  (const void *)(uintptr_t)guest_host_ptr(buffer), length);
 #endif
             while (total < length) {
                 uint32_t moved = 0;
                 int r = g_net->send(g_net->ctx, host,
-                                    (const uint8_t *)(uintptr_t)buffer + total,
+                                    (const uint8_t *)(uintptr_t)guest_host_ptr(buffer) + total,
                                     length - total, 0, &moved);
                 if (r < 0) {
                     if (r == -WC3_NET_ERR_AGAIN ||
@@ -1726,7 +1726,7 @@ static void socket_file_io(CPU *c, int is_send)
         } else {
             uint32_t moved = 0;
             uint8_t dummy = 0;
-            void *dst = length ? (void *)(uintptr_t)buffer : (void *)&dummy;
+            void *dst = length ? (void *)(uintptr_t)guest_host_ptr(buffer) : (void *)&dummy;
             int r = g_net->recv(g_net->ctx, host, dst,
                                 length, 0, &moved);
             if (r < 0) {
@@ -1743,7 +1743,7 @@ static void socket_file_io(CPU *c, int is_send)
 #if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
             if (moved)
                 debug_dump_packet("recv", handle,
-                                  (const void *)(uintptr_t)buffer, moved);
+                                  (const void *)(uintptr_t)guest_host_ptr(buffer), moved);
 #endif
             c->eax = 1;
         }
@@ -1783,7 +1783,7 @@ static void socket_file_io(CPU *c, int is_send)
     request.guest_buf[0] = buffer;
     request.guest_len[0] = length;
     if (length) {
-        request.data = (uint8_t *)(uintptr_t)buffer;
+        request.data = (uint8_t *)(uintptr_t)guest_host_ptr(buffer);
     } else {
         request.data = (uint8_t *)malloc(1u);
         if (!request.data) {
@@ -1797,7 +1797,7 @@ static void socket_file_io(CPU *c, int is_send)
 #if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
     if (is_send && length)
         debug_dump_packet("send", handle,
-                          (const void *)(uintptr_t)buffer, length);
+                          (const void *)(uintptr_t)guest_host_ptr(buffer), length);
 #endif
 
     /* Overlapped ReadFile/WriteFile do not use lpNumberOfBytes*.  The guest
@@ -2133,7 +2133,7 @@ static void h_bind(CPU *c)
         c->eax = fail_wsa(WSAEFAULT);
         return;
     }
-    int r = g_net->bind(g_net->ctx, host, (const void *)(uintptr_t)addr, len);
+    int r = g_net->bind(g_net->ctx, host, (const void *)(uintptr_t)guest_host_ptr(addr), len);
     if (r < 0) {
         c->eax = fail_net(r);
         return;
@@ -2158,7 +2158,7 @@ static void h_connect(CPU *c)
         return;
     }
     int r = g_net->connect(g_net->ctx, host,
-                           (const void *)(uintptr_t)addr, len);
+                           (const void *)(uintptr_t)guest_host_ptr(addr), len);
 #if WC3_DEBUG && WC3_DEBUG_NET
     uint32_t ip = 0;
     uint16_t port = 0;
@@ -2235,7 +2235,7 @@ static void h_accept(CPU *c)
 
     Wc3NetSocket accepted = 0;
     int r = g_net->accept(g_net->ctx, host, &accepted,
-                          addr ? (void *)(uintptr_t)addr : NULL,
+                          addr ? (void *)(uintptr_t)guest_host_ptr(addr) : NULL,
                           len_ptr ? &len : NULL);
     if (r < 0) {
         c->eax = fail_net(r);
@@ -2272,7 +2272,7 @@ static void h_getpeername(CPU *c)
     }
     uint32_t capacity = len;
     int r = g_net->getpeername(g_net->ctx, host,
-                               (void *)(uintptr_t)addr, &len);
+                               (void *)(uintptr_t)guest_host_ptr(addr), &len);
     if (r < 0) { c->eax = fail_net(r); return; }
     if (len > capacity) len = capacity;
     guest_write(len_ptr, &len, 4u);
@@ -2295,7 +2295,7 @@ static void h_getsockname(CPU *c)
     }
     uint32_t capacity = len;
     int r = g_net->getsockname(g_net->ctx, host,
-                               (void *)(uintptr_t)addr, &len);
+                               (void *)(uintptr_t)guest_host_ptr(addr), &len);
     if (r < 0) { c->eax = fail_net(r); return; }
     if (len > capacity) len = capacity;
     guest_write(len_ptr, &len, 4u);
@@ -2320,10 +2320,10 @@ static void h_send(CPU *c)
     uint32_t sent = 0;
 #if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
     debug_dump_packet("send", wc3_legacy_arg32(c, 0),
-                      (const void *)(uintptr_t)buf, len);
+                      (const void *)(uintptr_t)guest_host_ptr(buf), len);
 #endif
     int r = g_net->send(g_net->ctx, host,
-                        (const void *)(uintptr_t)buf, len, flags, &sent);
+                        (const void *)(uintptr_t)guest_host_ptr(buf), len, flags, &sent);
 #if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
     fprintf(stderr, "[" WC3_PACKET_TAG "] send handle=%08X len=%u -> "
             "%s (%d) last=%d\n",
@@ -2350,7 +2350,7 @@ static void h_recv(CPU *c)
         return;
     }
     uint32_t received = 0;
-    int r = g_net->recv(g_net->ctx, host, (void *)(uintptr_t)buf, len,
+    int r = g_net->recv(g_net->ctx, host, (void *)(uintptr_t)guest_host_ptr(buf), len,
                         flags, &received);
 #if WC3_DEBUG && (WC3_DEBUG_NET || WC3_DEBUG_BATTLE_NET)
     fprintf(stderr, "[" WC3_PACKET_TAG "] recv handle=%08X len=%u -> "
@@ -2361,7 +2361,7 @@ static void h_recv(CPU *c)
     if (r >= 0 && received) {
         if (received > len) received = len;
         debug_dump_packet("recv", wc3_legacy_arg32(c, 0),
-                          (const void *)(uintptr_t)buf, received);
+                          (const void *)(uintptr_t)guest_host_ptr(buf), received);
     }
 #endif
     c->eax = r < 0 ? fail_net(r) : received;
@@ -2387,8 +2387,8 @@ static void h_sendto(CPU *c)
         return;
     }
     uint32_t sent = 0;
-    int r = g_net->sendto(g_net->ctx, host, (const void *)(uintptr_t)buf,
-                          len, flags, (const void *)(uintptr_t)addr,
+    int r = g_net->sendto(g_net->ctx, host, (const void *)(uintptr_t)guest_host_ptr(buf),
+                          len, flags, (const void *)(uintptr_t)guest_host_ptr(addr),
                           addr_len, &sent);
 #if WC3_DEBUG && WC3_DEBUG_NET
     uint32_t ip = 0;
@@ -2436,8 +2436,8 @@ static void h_recvfrom(CPU *c)
         addr_capacity = addr_len;
     }
     uint32_t received = 0;
-    int r = g_net->recvfrom(g_net->ctx, host, (void *)(uintptr_t)buf, len,
-                            flags, addr ? (void *)(uintptr_t)addr : NULL,
+    int r = g_net->recvfrom(g_net->ctx, host, (void *)(uintptr_t)guest_host_ptr(buf), len,
+                            flags, addr ? (void *)(uintptr_t)guest_host_ptr(addr) : NULL,
                             addr_len_ptr ? &addr_len : NULL, &received);
 #if WC3_DEBUG && WC3_DEBUG_NET
     uint32_t ip = 0;
@@ -2547,7 +2547,7 @@ static void h_setsockopt(CPU *c)
         return;
     }
     uint8_t linger[4] = { 0, 0, 0, 0 };
-    const void *data = (const void *)(uintptr_t)value;
+    const void *data = (const void *)(uintptr_t)guest_host_ptr(value);
     uint32_t data_len = length;
     if (dont_linger) {
         /* SO_DONTLINGER is the inverse of SO_LINGER: a nonzero BOOL disables
@@ -2607,7 +2607,7 @@ static void h_getsockopt(CPU *c)
         }
     } else {
         r = g_net->getsockopt(g_net->ctx, host, mapped,
-                              (void *)(uintptr_t)value, &length);
+                              (void *)(uintptr_t)guest_host_ptr(value), &length);
     }
     if (r < 0) { c->eax = fail_net(r); return; }
     if (length > capacity) length = capacity;
@@ -3113,7 +3113,7 @@ static void h_wsarecvex(CPU *c)
         return;
     }
     uint32_t received = 0;
-    int r = g_net->recv(g_net->ctx, host, (void *)(uintptr_t)buf, len,
+    int r = g_net->recv(g_net->ctx, host, (void *)(uintptr_t)guest_host_ptr(buf), len,
                         flags, &received);
     if (r < 0) { c->eax = fail_net(r); return; }
     if (flags_ptr) {
@@ -3873,7 +3873,7 @@ static void h_get_module_file_name_a(CPU *c)
         c->eax = 0;
         return;
     }
-    if (copy) memcpy((void *)(uintptr_t)buffer, name, copy);
+    if (copy) memcpy((void *)(uintptr_t)guest_host_ptr(buffer), name, copy);
     wc3_legacy_wr8g(buffer + copy, 0);
     c->eax = copy;
 }

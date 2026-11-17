@@ -25,6 +25,7 @@ if (hostJniLibsRelease == null && hostJniLibsDebug == null) {
 // is configured the build remains a local release-hygiene artifact, explicitly
 // not a distribution artifact.
 val releaseStoreFile = providers.gradleProperty("wc3ReleaseStoreFile").orNull
+val userDebugBuild = providers.gradleProperty("wc3UserDebug").orNull == "true"
 
 android {
     namespace = "wc3.recomp"
@@ -36,8 +37,9 @@ android {
         applicationId = "wc3.recomp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.1.1"
+        resValue("bool", "userdebug_build", userDebugBuild.toString())
     }
 
     buildFeatures {
