@@ -236,6 +236,13 @@ def run_distcc(compiler, args, local_only=False):
         except OSError:
             pass
     child_env = os.environ.copy()
+    # distcc 3.4 appends "-target <build host>" (aarch64-unknown-linux-android)
+    # whenever it sees a clang command without a literal "-target".  That
+    # replaces the API level in --target=aarch64-linux-android26, so API-gated
+    # libc++ declarations such as pthread_cond_clockwait disappear.  The
+    # wrapper already supplies the exact NDK compiler and target; disable all
+    # of distcc's cross-compilation rewrites.
+    child_env["DISTCC_NO_REWRITE_CROSS"] = "1"
     if local_only:
         try:
             slots = int(env("WC3_DIST_LOCAL_SLOTS", str(os.cpu_count() or 4)))
