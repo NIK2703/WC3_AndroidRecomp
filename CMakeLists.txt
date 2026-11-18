@@ -723,6 +723,7 @@ set(WC3_INCLUDES
 
 add_library(wc3_platform STATIC
     "${WC3_ROOT}/runtime/cpu/guest_host.c"
+    "${WC3_ROOT}/runtime/diag/wc3_crash.c"
     "${WC3_ROOT}/runtime/platform/platform.c"
     "${WC3_ROOT}/runtime/platform/android/asset_snapshot.c"
     "${WC3_ROOT}/runtime/platform/android/guest_window_android.c"

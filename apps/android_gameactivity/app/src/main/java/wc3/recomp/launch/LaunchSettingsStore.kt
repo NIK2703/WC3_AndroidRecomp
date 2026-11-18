@@ -108,6 +108,21 @@ class LaunchSettingsStore(context: Context) {
                     KEY_GRID_CYCLE_SECONDS,
                     LaunchContract.DEFAULT_GRID_CYCLE_SECONDS
                 )
+            ),
+            /* An absent, unknown or stale mode falls back to FIFO.  The
+             * native pass repeats the supported-mode check on the device. */
+            presentMode = prefs.getString(
+                KEY_PRESENT_MODE, LaunchContract.DEFAULT_PRESENT_MODE
+            ).orEmpty().trim().let {
+                if (it in LaunchContract.PRESENT_MODES) it
+                else LaunchContract.DEFAULT_PRESENT_MODE
+            },
+            presentBuffers = prefs.getInt(
+                KEY_PRESENT_BUFFERS,
+                LaunchContract.DEFAULT_PRESENT_BUFFERS
+            ).coerceIn(
+                LaunchContract.MIN_PRESENT_BUFFERS,
+                LaunchContract.MAX_PRESENT_BUFFERS
             )
         )
     }
@@ -167,6 +182,20 @@ class LaunchSettingsStore(context: Context) {
                     LaunchContract.MAX_GRID_CYCLE_SECONDS
                 )
             )
+            .putString(
+                KEY_PRESENT_MODE,
+                if (settings.presentMode in LaunchContract.PRESENT_MODES)
+                    settings.presentMode
+                else
+                    LaunchContract.DEFAULT_PRESENT_MODE
+            )
+            .putInt(
+                KEY_PRESENT_BUFFERS,
+                settings.presentBuffers.coerceIn(
+                    LaunchContract.MIN_PRESENT_BUFFERS,
+                    LaunchContract.MAX_PRESENT_BUFFERS
+                )
+            )
             .putInt(
                 KEY_OVERLAY_OPACITY_PERCENT,
                 settings.overlayOpacityPercent.coerceIn(
@@ -197,5 +226,7 @@ class LaunchSettingsStore(context: Context) {
         const val KEY_GRID_ENABLED = "grid_enabled"
         const val KEY_GRID_DARKEN_PERCENT = "grid_darken_percent"
         const val KEY_GRID_CYCLE_SECONDS = "grid_cycle_seconds"
+        const val KEY_PRESENT_MODE = "present_mode"
+        const val KEY_PRESENT_BUFFERS = "present_buffers"
     }
 }

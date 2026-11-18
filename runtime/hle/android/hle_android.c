@@ -46,6 +46,7 @@
 #include "hle_input_state.h"
 #include "hle_registry.h"
 #include "dyn_x86.h"
+#include "wc3_crash.h"
 #include "wc3_trace.h"
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
@@ -536,6 +537,27 @@ static const char *gstr(uint32_t a)
 {
     if (!a || !guest_ok(a, 1)) return "";
     return (const char *)(uintptr_t)guest_host_ptr(a);
+}
+
+static void copy_guest_text(uint32_t a, char *out, size_t capacity)
+{
+    size_t i = 0;
+
+    if (!out || !capacity)
+        return;
+    out[0] = '\0';
+    if (!a || !guest_ok(a, 1))
+        return;
+    while (i + 1u < capacity) {
+        if (a > UINT32_MAX - (uint32_t)i)
+            break;
+        if (!guest_ok(a + (uint32_t)i, 1))
+            break;
+        out[i] = (char)rd8g(a + (uint32_t)i);
+        if (!out[i++])
+            return;
+    }
+    out[i] = '\0';
 }
 
 /* ------------------------------------------------------------------ */
@@ -4150,8 +4172,13 @@ static void h_unhandled_filter(CPU *c) { c->eax = 1; }
 static void h_set_unhandled_filter(CPU *c) { c->eax = 0; }
 static void h_terminate_process(CPU *c)
 {
-    fprintf(stderr, "[hle] TerminateProcess(code=%u)\n", arg32(c, 1));
+    const uint32_t code = arg32(c, 1);
+
+    fprintf(stderr, "[hle] TerminateProcess(code=%u)\n", code);
+    fflush(NULL);
     hle_android_report();
+    fflush(NULL);
+    wc3_crash_emit("TerminateProcess", code, NULL, 0);
     _exit(3);
 }
 static void h_terminate_thread(CPU *c) { (void)c; c->eax = 1; }
@@ -7174,17 +7201,27 @@ static void h_wsa_startup(CPU *c)
 
 static void u_message_box(CPU *c)
 {
+    const uint32_t text_ptr = arg32(c, 1);
+    const uint32_t caption_ptr = arg32(c, 2);
+    const uint32_t type = arg32(c, 3);
+    char message[1024];
+    char caption[256];
+
+    copy_guest_text(text_ptr, message, sizeof message);
+    copy_guest_text(caption_ptr, caption, sizeof caption);
+    wc3_crash_note_message_box(message, caption, type,
+                               guest_ok(c->esp, 4) ? rd32g(c->esp) : 0);
 #if WC3_DEBUG
-    uint32_t text = arg32(c, 1), caption = arg32(c, 2);
     fprintf(stderr, "[ui] MessageBoxA(hwnd=%08X, text=%08X \"%s\", caption=%08X \"%s\", type=%u) ra=%08X\n",
-            arg32(c, 0), text, gstr(text), caption, gstr(caption), arg32(c, 3), rd32g(c->esp));
+            arg32(c, 0), text_ptr, gstr(text_ptr), caption_ptr, gstr(caption_ptr),
+            type, rd32g(c->esp));
     /* A pointer that is valid but whose first byte is 0 usually means the
      * producer wrote nothing; dump the head so an empty message can be told
      * apart from a message built somewhere else. */
-    if (text && guest_ok(text, 32)) {
+    if (text_ptr && guest_ok(text_ptr, 32)) {
         fprintf(stderr, "[ui]   text bytes:");
         for (int i = 0; i < 32; i++)
-            fprintf(stderr, " %02X", rd8g(text + (uint32_t)i));
+            fprintf(stderr, " %02X", rd8g(text_ptr + (uint32_t)i));
         fprintf(stderr, "\n");
     }
     /* The caller chain is the only way to tell which check failed: the text
@@ -10189,10 +10226,15 @@ static void h_rtl_unwind(CPU *c)
 
 static void h_exit_process(CPU *c)
 {
-    fprintf(stderr, "[hle] ExitProcess(%u)\n", arg32(c, 0));
+    const uint32_t code = arg32(c, 0);
+
+    fprintf(stderr, "[hle] ExitProcess(%u)\n", code);
+    fflush(NULL);
     hle_android_report();
     fflush(NULL);
-    _exit((int)arg32(c, 0));
+    if (code)
+        wc3_crash_emit("ExitProcess", code, NULL, 0);
+    _exit((int)code);
 }
 
 /* ------------------------------------------------------------------ */
@@ -11521,6 +11563,8 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
     }
 
     hle_android_report();
+    fflush(NULL);
+    wc3_crash_emit("signal", 139, NULL, 1);
     _exit(139);
 }
 

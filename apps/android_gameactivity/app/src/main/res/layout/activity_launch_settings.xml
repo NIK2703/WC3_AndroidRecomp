@@ -361,6 +361,81 @@
                     android:text="@string/launch_grid_hint" />
             </LinearLayout>
 
+            <TextView
+                style="@style/Wc3RowLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="@string/launch_presentation_label" />
+
+            <TextView
+                style="@style/Wc3RowLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/launch_present_mode_label" />
+
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:minHeight="48dp">
+
+                <Spinner
+                    android:id="@+id/present_mode_spinner"
+                    style="@style/Wc3Spinner"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:contentDescription="@string/launch_present_mode_label"
+                    android:minHeight="48dp"
+                    android:saveEnabled="false" />
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:layout_gravity="end|center_vertical"
+                    android:layout_marginEnd="12dp"
+                    android:clickable="false"
+                    android:focusable="false"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_expand_more"
+                    android:tint="@color/launch_gold_light" />
+            </FrameLayout>
+
+            <TextView
+                style="@style/Wc3RowLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/launch_present_buffers_label" />
+
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:minHeight="48dp">
+
+                <Spinner
+                    android:id="@+id/present_buffers_spinner"
+                    style="@style/Wc3Spinner"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:contentDescription="@string/launch_present_buffers_label"
+                    android:minHeight="48dp"
+                    android:saveEnabled="false" />
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:layout_gravity="end|center_vertical"
+                    android:layout_marginEnd="12dp"
+                    android:clickable="false"
+                    android:focusable="false"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_expand_more"
+                    android:tint="@color/launch_gold_light" />
+            </FrameLayout>
+
             <LinearLayout
                 android:id="@+id/parallel_execution_row"
                 android:layout_width="match_parent"

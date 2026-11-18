@@ -1244,15 +1244,17 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     jint long_press_timeout_ms, jint tap_click_delay_ms,
     jboolean selection24, jboolean hide_cursor, jboolean parallel_execution,
     jint overlay_opacity_percent, jboolean grid_enabled,
-    jint grid_darken_percent, jint grid_cycle_seconds, jstring present_scale)
+    jint grid_darken_percent, jint grid_cycle_seconds, jstring present_scale,
+    jstring present_mode, jint present_buffers)
 {
     /* JNI has no type checking between two jstring parameters.  Keep this
      * order identical to Wc3GameActivity.nativeApplyLaunchSettings: id before
      * root, DXVK version and config path, then the gesture flag and timers,
      * the SIMPLE tap delay, the selection24 toggle, the hideCursor toggle,
      * the parallelExecution toggle, the overlay opacity percent, then the
-     * grid toggle, darken percent and cycle seconds, and the presentation
-     * scale string last, or values are copied into the wrong slot. */
+     * grid toggle, darken percent and cycle seconds, the presentation scale
+     * string, and the screen present mode string plus buffering count last, or
+     * values are copied into the wrong slot. */
     (void)clazz;
     wc3_legacy_set_grid_disabled_callback(on_grid_runtime_disabled);
     grid_android_configure(grid_enabled ? 1 : 0, (int)grid_darken_percent,
@@ -1284,6 +1286,7 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     const char *dxvk = NULL;
     const char *dxvk_config = NULL;
     const char *present = NULL;
+    const char *present_mode_value = NULL;
     int dxvk_forced = 0;
 
     if (game_dir)
@@ -1302,6 +1305,8 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
         dxvk_config = (*env)->GetStringUTFChars(env, dxvk_config_path, NULL);
     if (present_scale)
         present = (*env)->GetStringUTFChars(env, present_scale, NULL);
+    if (present_mode)
+        present_mode_value = (*env)->GetStringUTFChars(env, present_mode, NULL);
 
     GPU_LOG("apply launch driver id='%s' root='%s' hooks='%s' dxvk='%s' "
             "config='%s'",
@@ -1404,11 +1409,32 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
         setenv("WC3_PRESENT_SCALE", present, 1);
     else
         unsetenv("WC3_PRESENT_SCALE");
-    SCALE_LOG("launch: grid=%d present_scale='%s' env='%s' saved=%dx%d",
+    const int known_screen_mode =
+        present_mode_value &&
+        (strcmp(present_mode_value, "fifo") == 0 ||
+         strcmp(present_mode_value, "fifo_relaxed") == 0 ||
+         strcmp(present_mode_value, "mailbox") == 0 ||
+         strcmp(present_mode_value, "immediate") == 0);
+    const char *screen_mode = known_screen_mode ? present_mode_value : "fifo";
+    int screen_buffers = (int)present_buffers;
+    if (screen_buffers < 0) screen_buffers = 0;
+    if (screen_buffers > 2) screen_buffers = 2;
+    setenv("WC3_PRESENT_MODE", screen_mode, 1);
+    char screen_buffers_value[8];
+    snprintf(screen_buffers_value, sizeof screen_buffers_value, "%d",
+             screen_buffers);
+    setenv("WC3_PRESENT_BUFFERS", screen_buffers_value, 1);
+    /* The swap-chain wrapper applies these to DXVK's final real-window swap
+     * chain when the pass is dormant.  Do not force a 1:1 presentation pass:
+     * that would add a full-frame copy just to configure the mode. */
+    unsetenv("WC3_PRESENT_FORCE_TARGET");
+
+    SCALE_LOG("launch: grid=%d present_scale='%s' env='%s' saved=%dx%d "
+              "screen_mode='%s' screen_buffers=%d",
               grid_enabled ? 1 : 0, present ? present : "(null)",
               getenv("WC3_PRESENT_SCALE") ? getenv("WC3_PRESENT_SCALE")
                                           : "(unset)",
-              (int)width, (int)height);
+              (int)width, (int)height, screen_mode, screen_buffers);
 
     if (wc3_android_vulkan_driver_configure(g_vulkan_driver_root,
                                             g_vulkan_driver_id,
@@ -1434,6 +1460,8 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
         (*env)->ReleaseStringUTFChars(env, dxvk_config_path, dxvk_config);
     if (present)
         (*env)->ReleaseStringUTFChars(env, present_scale, present);
+    if (present_mode_value)
+        (*env)->ReleaseStringUTFChars(env, present_mode, present_mode_value);
 }
 
 static void canvas_attach_provider(struct android_app *app)

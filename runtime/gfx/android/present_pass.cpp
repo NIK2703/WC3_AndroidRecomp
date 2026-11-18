@@ -43,7 +43,9 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #if WC3_DEBUG && WC3_DEBUG_GRAPHICS
@@ -55,10 +57,9 @@
 
 namespace {
 
-/* Frames the pass keeps in flight.  DXVK serialises the guest timeline with
- * its own per-frame semaphores, so two slots are enough and keep the
- * semaphore bookkeeping small. */
-constexpr uint32_t kFrames = 2;
+/* Three slots cover CPU submit time while the previous screen present is in
+ * the presentation engine. */
+constexpr uint32_t kFrames = 3;
 
 /* DXVK passes exactly one wait semaphore today; anything larger is forwarded
  * untouched to the guest present instead of being copied. */
@@ -69,6 +70,8 @@ struct SurfaceFns {
     PFN_vkDestroySurfaceKHR destroySurface = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR getCaps = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceFormatsKHR getFormats = nullptr;
+    /* Optional: without it the screen swap chain stays on FIFO. */
+    PFN_vkGetPhysicalDeviceSurfacePresentModesKHR getPresentModes = nullptr;
 };
 
 struct DeviceFns {
@@ -91,6 +94,10 @@ struct DeviceFns {
     PFN_vkCmdCopyImage cmdCopyImage = nullptr;
     PFN_vkCreateSemaphore createSemaphore = nullptr;
     PFN_vkDestroySemaphore destroySemaphore = nullptr;
+    PFN_vkCreateFence createFence = nullptr;
+    PFN_vkDestroyFence destroyFence = nullptr;
+    PFN_vkWaitForFences waitForFences = nullptr;
+    PFN_vkResetFences resetFences = nullptr;
 };
 
 PFN_vkGetInstanceProcAddr g_realGipa;
@@ -129,9 +136,17 @@ std::vector<VkImage> g_screenImages;
 
 VkCommandPool g_pool;
 VkCommandBuffer g_cmd[kFrames];
+VkFence g_frameFence[kFrames];
+bool g_frameSubmitted[kFrames];
 VkSemaphore g_imageReady[kFrames];
-VkSemaphore g_blitDoneGuest[kFrames];
-VkSemaphore g_blitDoneScreen[kFrames];
+/* Per-image binary semaphores: a screen/guest image is reused only after its
+ * previous present has completed, so its semaphore wait has been consumed. */
+std::vector<VkSemaphore> g_screenImageDone;
+std::vector<VkSemaphore> g_guestImageDone;
+/* Semaphores from a replaced swap chain are retired instead of destroyed:
+ * vkDestroySwapchainKHR does not promise that the presentation engine has
+ * consumed the last wait.  Device destruction waits idle and frees them. */
+std::vector<VkSemaphore> g_retiredSemaphores;
 uint32_t g_frame;
 
 #if WC3_DEBUG && WC3_DEBUG_GRAPHICS
@@ -187,6 +202,9 @@ bool load_surface_fns()
     g_surface.getFormats =
         reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>(
             instance_fn("vkGetPhysicalDeviceSurfaceFormatsKHR"));
+    g_surface.getPresentModes =
+        reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(
+            instance_fn("vkGetPhysicalDeviceSurfacePresentModesKHR"));
 
     return g_surface.createSurface && g_surface.destroySurface &&
            g_surface.getCaps && g_surface.getFormats;
@@ -240,6 +258,14 @@ bool load_device_fns()
         g_realGdpa(g_device, "vkCreateSemaphore"));
     g_dev.destroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(
         g_realGdpa(g_device, "vkDestroySemaphore"));
+    g_dev.createFence = reinterpret_cast<PFN_vkCreateFence>(
+        g_realGdpa(g_device, "vkCreateFence"));
+    g_dev.destroyFence = reinterpret_cast<PFN_vkDestroyFence>(
+        g_realGdpa(g_device, "vkDestroyFence"));
+    g_dev.waitForFences = reinterpret_cast<PFN_vkWaitForFences>(
+        g_realGdpa(g_device, "vkWaitForFences"));
+    g_dev.resetFences = reinterpret_cast<PFN_vkResetFences>(
+        g_realGdpa(g_device, "vkResetFences"));
 
     return g_dev.queuePresent && g_dev.queueSubmit && g_dev.queueWaitIdle &&
            g_dev.deviceWaitIdle && g_dev.createSwapchain &&
@@ -249,7 +275,8 @@ bool load_device_fns()
            g_dev.beginCommandBuffer && g_dev.endCommandBuffer &&
            g_dev.cmdPipelineBarrier && g_dev.cmdBlitImage &&
            g_dev.cmdCopyImage && g_dev.createSemaphore &&
-           g_dev.destroySemaphore;
+           g_dev.destroySemaphore && g_dev.createFence && g_dev.destroyFence &&
+           g_dev.waitForFences && g_dev.resetFences;
 }
 
 /* ------------------------------------------------------------ probing ---- */
@@ -340,6 +367,31 @@ bool probe_surface(ANativeWindow *window, uint32_t guestW, uint32_t guestH,
 
 void destroy_screen();
 
+/* Move semaphores belonging to a replaced swap chain to the deletion list.
+ * They must not be destroyed before the presentation engine has consumed
+ * their last wait; vkDestroySwapchainKHR alone does not provide that
+ * guarantee.  Device destruction waits idle and frees every retired object. */
+void retire_semaphores(std::vector<VkSemaphore> &semaphores)
+{
+    for (size_t i = 0; i < semaphores.size(); ++i) {
+        if (semaphores[i]) g_retiredSemaphores.push_back(semaphores[i]);
+    }
+    semaphores.clear();
+}
+
+void destroy_semaphores_now(std::vector<VkSemaphore> &semaphores)
+{
+    if (!g_dev.destroySemaphore || !g_device) {
+        semaphores.clear();
+        return;
+    }
+    for (size_t i = 0; i < semaphores.size(); ++i) {
+        if (semaphores[i])
+            g_dev.destroySemaphore(g_device, semaphores[i], nullptr);
+    }
+    semaphores.clear();
+}
+
 /* Create the command pool, per-frame semaphores and command buffers. */
 bool create_device_objects()
 {
@@ -371,14 +423,17 @@ bool create_device_objects()
     std::memset(&semInfo, 0, sizeof semInfo);
     semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
+    VkFenceCreateInfo fenceInfo;
+    std::memset(&fenceInfo, 0, sizeof fenceInfo);
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
     for (uint32_t i = 0; i < kFrames; ++i) {
+        g_frameSubmitted[i] = false;
         if (g_dev.createSemaphore(g_device, &semInfo, nullptr,
                                   &g_imageReady[i]) != VK_SUCCESS ||
-            g_dev.createSemaphore(g_device, &semInfo, nullptr,
-                                  &g_blitDoneGuest[i]) != VK_SUCCESS ||
-            g_dev.createSemaphore(g_device, &semInfo, nullptr,
-                                  &g_blitDoneScreen[i]) != VK_SUCCESS) {
-            PP_LOG("device: semaphores failed at frame %u", i);
+            g_dev.createFence(g_device, &fenceInfo, nullptr,
+                              &g_frameFence[i]) != VK_SUCCESS) {
+            PP_LOG("device: frame objects failed at slot %u", i);
             return false;
         }
     }
@@ -391,6 +446,7 @@ void destroy_screen()
 {
     const Wc3Platform *platform = platform_or_null();
 
+    retire_semaphores(g_screenImageDone);
     g_screenImages.clear();
 
     if (g_screenSwapchain && g_dev.destroySwapchain)
@@ -419,6 +475,119 @@ VkCompositeAlphaFlagBitsKHR pick_composite_alpha(VkCompositeAlphaFlagsKHR flags)
         return VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
     return VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
 }
+
+/* Product launch settings for the screen swap chain.  Unknown or absent
+ * values keep the old FIFO behaviour.  The host writes both variables before
+ * android_main; create_screen reads them on every screen recreation. */
+VkPresentModeKHR requested_present_mode()
+{
+    const char *value = std::getenv("WC3_PRESENT_MODE");
+    if (!value || !*value || std::strcmp(value, "fifo") == 0)
+        return VK_PRESENT_MODE_FIFO_KHR;
+    if (std::strcmp(value, "fifo_relaxed") == 0)
+        return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+    if (std::strcmp(value, "mailbox") == 0)
+        return VK_PRESENT_MODE_MAILBOX_KHR;
+    if (std::strcmp(value, "immediate") == 0)
+        return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+uint32_t requested_extra_images()
+{
+    const char *value = std::getenv("WC3_PRESENT_BUFFERS");
+    if (!value || !*value) return 0;
+    char *end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || parsed < 0) return 0;
+    if (parsed > 2) return 2;
+    return static_cast<uint32_t>(parsed);
+}
+
+/* When the present pass is dormant, DXVK's own swap chain on the real window
+ * is the final swap chain.  Apply the product present mode and buffering to it
+ * here instead of forcing a 1:1 pass just to reach create_screen(). */
+#if WC3_DEBUG && WC3_DEBUG_GRAPHICS
+const char *present_mode_name(VkPresentModeKHR mode);
+#endif
+bool apply_direct_screen_settings(const VkSwapchainCreateInfoKHR *info,
+                                  VkSwapchainCreateInfoKHR *out)
+{
+    if (!info || !out || !info->surface || !g_phys || !g_instance ||
+        !g_surface.getCaps)
+        return false;
+
+    VkSurfaceCapabilitiesKHR caps;
+    if (g_surface.getCaps(g_phys, info->surface, &caps) != VK_SUCCESS)
+        return false;
+
+    const VkPresentModeKHR requested = requested_present_mode();
+    bool supported = requested == VK_PRESENT_MODE_FIFO_KHR;
+    if (requested != VK_PRESENT_MODE_FIFO_KHR && g_surface.getPresentModes) {
+        uint32_t modeCount = 0;
+        VkResult status = g_surface.getPresentModes(g_phys, info->surface,
+                                                    &modeCount, nullptr);
+        if (status == VK_SUCCESS && modeCount) {
+            std::vector<VkPresentModeKHR> modes(modeCount);
+            status = g_surface.getPresentModes(g_phys, info->surface,
+                                               &modeCount, modes.data());
+            if (status == VK_SUCCESS || status == VK_INCOMPLETE) {
+                modes.resize(modeCount);
+                for (size_t i = 0; i < modes.size(); ++i) {
+                    if (modes[i] == requested) {
+                        supported = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    const VkPresentModeKHR mode =
+        supported ? requested : VK_PRESENT_MODE_FIFO_KHR;
+    const uint32_t extra = requested_extra_images();
+    uint32_t imageCount = info->minImageCount;
+    if (extra) {
+        const uint64_t desired = static_cast<uint64_t>(imageCount) +
+                                 static_cast<uint64_t>(extra);
+        imageCount = desired > 0xFFFFFFFFu
+                         ? 0xFFFFFFFFu
+                         : static_cast<uint32_t>(desired);
+    }
+    if (caps.minImageCount && imageCount < caps.minImageCount)
+        imageCount = caps.minImageCount;
+    if (caps.maxImageCount && imageCount > caps.maxImageCount)
+        imageCount = caps.maxImageCount;
+    if (!imageCount) imageCount = 1;
+
+    *out = *info;
+    out->presentMode = mode;
+    out->minImageCount = imageCount;
+
+#if WC3_DEBUG && WC3_DEBUG_GRAPHICS
+    if (!supported && requested != VK_PRESENT_MODE_FIFO_KHR) {
+        PP_LOG("direct: present mode %s unsupported, using fifo",
+               present_mode_name(requested));
+    }
+    PP_LOG("direct: final swapchain mode=%s images=%u (requested=%s extra=%u)",
+           present_mode_name(mode), imageCount, present_mode_name(requested),
+           extra);
+#endif
+    return true;
+}
+
+#if WC3_DEBUG && WC3_DEBUG_GRAPHICS
+const char *present_mode_name(VkPresentModeKHR mode)
+{
+    switch (mode) {
+    case VK_PRESENT_MODE_FIFO_KHR: return "fifo";
+    case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "fifo_relaxed";
+    case VK_PRESENT_MODE_MAILBOX_KHR: return "mailbox";
+    case VK_PRESENT_MODE_IMMEDIATE_KHR: return "immediate";
+    default: return "unknown";
+    }
+}
+#endif
 
 bool create_screen(VkQueue queue, uintptr_t window, uint32_t wantW, uint32_t wantH)
 {
@@ -540,9 +709,62 @@ bool create_screen(VkQueue queue, uintptr_t window, uint32_t wantW, uint32_t wan
         return false;
     }
 
+    /* Ask for the requested mode, but never create an unsupported one.  FIFO
+     * is mandatory for every surface, so it is both the default and the
+     * fallback. */
+    const VkPresentModeKHR requestedMode = requested_present_mode();
+    VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    bool modeSupported = requestedMode == VK_PRESENT_MODE_FIFO_KHR;
+    std::vector<VkPresentModeKHR> presentModes;
+    if (g_surface.getPresentModes) {
+        uint32_t modeCount = 0;
+        VkResult status = g_surface.getPresentModes(
+            g_phys, g_screenSurface, &modeCount, nullptr);
+        if (status == VK_SUCCESS && modeCount) {
+            presentModes.resize(modeCount);
+            status = g_surface.getPresentModes(g_phys, g_screenSurface,
+                                               &modeCount,
+                                               presentModes.data());
+            if (status == VK_SUCCESS || status == VK_INCOMPLETE) {
+                presentModes.resize(modeCount);
+                for (size_t i = 0; i < presentModes.size(); ++i) {
+                    if (presentModes[i] == requestedMode) {
+                        modeSupported = true;
+                        break;
+                    }
+                }
+            } else {
+                presentModes.clear();
+            }
+        }
+    }
+    if (modeSupported) {
+        presentMode = requestedMode;
+    } else if (requestedMode != VK_PRESENT_MODE_FIFO_KHR) {
+        PP_LOG("screen: present mode %s unsupported, using fifo",
+               present_mode_name(requestedMode));
+    }
+#if WC3_DEBUG && WC3_DEBUG_GRAPHICS
+    for (size_t i = 0; i < presentModes.size(); ++i) {
+        PP_LOG("screen: present mode[%u]=%s", (unsigned)i,
+               present_mode_name(presentModes[i]));
+    }
+#endif
+
+    /* Buffering adds images above the surface minimum.  The cap is applied
+     * after the addition; a maxImageCount of 0 means "no limit". */
+    const uint32_t extraImages = requested_extra_images();
     uint32_t imageCount = caps.minImageCount ? caps.minImageCount : 2;
+    if (extraImages) {
+        const uint64_t desired = static_cast<uint64_t>(imageCount) +
+                                 static_cast<uint64_t>(extraImages);
+        imageCount = desired > 0xFFFFFFFFu
+                        ? 0xFFFFFFFFu
+                        : static_cast<uint32_t>(desired);
+    }
     if (caps.maxImageCount && imageCount > caps.maxImageCount)
         imageCount = caps.maxImageCount;
+    if (!imageCount) imageCount = 1;
 
     VkSwapchainCreateInfoKHR swapInfo;
     std::memset(&swapInfo, 0, sizeof swapInfo);
@@ -572,12 +794,29 @@ bool create_screen(VkQueue queue, uintptr_t window, uint32_t wantW, uint32_t wan
             ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
             : caps.currentTransform;
     swapInfo.compositeAlpha = pick_composite_alpha(caps.supportedCompositeAlpha);
-    swapInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    swapInfo.presentMode = presentMode;
     swapInfo.clipped = VK_TRUE;
     swapInfo.oldSwapchain = VK_NULL_HANDLE;
 
-    if (g_dev.createSwapchain(g_device, &swapInfo, nullptr, &g_screenSwapchain) !=
-        VK_SUCCESS) {
+    /* The handle is undefined after a failed create; clearing it keeps the
+     * FIFO retry and destroy_screen() from acting on a stale value. */
+    g_screenSwapchain = VK_NULL_HANDLE;
+    VkResult createStatus =
+        g_dev.createSwapchain(g_device, &swapInfo, nullptr, &g_screenSwapchain);
+    if (createStatus != VK_SUCCESS && presentMode != VK_PRESENT_MODE_FIFO_KHR) {
+        /* The query said the mode was supported, but the driver can still
+         * reject it.  A FIFO retry keeps the game visible instead of retiring
+         * the whole pass. */
+        PP_LOG("screen: swapchain create failed in mode %s, retrying fifo",
+               present_mode_name(presentMode));
+        g_screenSwapchain = VK_NULL_HANDLE;
+        swapInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        createStatus =
+            g_dev.createSwapchain(g_device, &swapInfo, nullptr,
+                                  &g_screenSwapchain);
+    }
+    if (createStatus != VK_SUCCESS) {
         PP_LOG("screen: swapchain create failed %ux%u format=%d", extent.width,
                extent.height, (int)chosen.format);
         destroy_screen();
@@ -598,24 +837,73 @@ bool create_screen(VkQueue queue, uintptr_t window, uint32_t wantW, uint32_t wan
         return false;
     }
 
+    std::vector<VkSemaphore> screenDone(g_screenImages.size(), VK_NULL_HANDLE);
+    VkSemaphoreCreateInfo semInfo;
+    std::memset(&semInfo, 0, sizeof semInfo);
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    for (size_t i = 0; i < screenDone.size(); ++i) {
+        if (g_dev.createSemaphore(g_device, &semInfo, nullptr,
+                                  &screenDone[i]) != VK_SUCCESS) {
+            PP_LOG("screen: semaphore create failed at image %u",
+                   (unsigned)i);
+            for (size_t j = 0; j < screenDone.size(); ++j) {
+                if (screenDone[j])
+                    g_dev.destroySemaphore(g_device, screenDone[j], nullptr);
+            }
+            destroy_screen();
+            return false;
+        }
+    }
+    g_screenImageDone = std::move(screenDone);
+
     g_screenWindow = window;
     g_screenExtent = extent;
     g_screenFormat = chosen.format;
 
-    PP_LOG("screen: created %ux%u format=%d images=%u (wanted %ux%u)", extent.width,
-           extent.height, (int)chosen.format, (unsigned)g_screenImages.size(),
-           wantW, wantH);
+    PP_LOG("screen: created %ux%u format=%d images=%u (wanted %ux%u mode=%s)",
+           extent.width, extent.height, (int)chosen.format,
+           (unsigned)g_screenImages.size(), wantW, wantH,
+           present_mode_name(presentMode));
 #if WC3_DEBUG && WC3_DEBUG_GRAPHICS
     PP_LOG("screen: create params usage=0x%x preTransform=0x%x composite=0x%x "
-           "minImages=%u extent=%ux%u fmt=%d mode=%d capsTransform=0x%x "
-           "supportedTransforms=0x%x alphaSupport=0x%x",
+           "minImages=%u extra=%u requested=%s actual=%s extent=%ux%u fmt=%d "
+           "capsTransform=0x%x supportedTransforms=0x%x alphaSupport=0x%x",
            (unsigned)swapInfo.imageUsage, (unsigned)swapInfo.preTransform,
            (unsigned)swapInfo.compositeAlpha, (unsigned)imageCount,
-           extent.width, extent.height, (int)chosen.format,
-           (int)swapInfo.presentMode, (unsigned)caps.currentTransform,
+           (unsigned)extraImages, present_mode_name(requestedMode),
+           present_mode_name(swapInfo.presentMode), extent.width, extent.height,
+           (int)chosen.format, (unsigned)caps.currentTransform,
            (unsigned)caps.supportedTransforms,
            (unsigned)caps.supportedCompositeAlpha);
 #endif
+    return true;
+}
+
+/* One semaphore per guest swap-chain image.  The submit signals the one whose
+ * image DXVK is presenting; that present waits on it.  Reusing the same image
+ * implies its previous present completed, so the wait was consumed. */
+bool ensure_guest_semaphores()
+{
+    if (g_guestImages.empty()) return false;
+    if (g_guestImageDone.size() >= g_guestImages.size()) return true;
+
+    std::vector<VkSemaphore> done(g_guestImages.size(), VK_NULL_HANDLE);
+    VkSemaphoreCreateInfo semInfo;
+    std::memset(&semInfo, 0, sizeof semInfo);
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    for (size_t i = 0; i < done.size(); ++i) {
+        if (g_dev.createSemaphore(g_device, &semInfo, nullptr, &done[i]) !=
+            VK_SUCCESS) {
+            PP_LOG("guest: semaphore create failed at image %u", (unsigned)i);
+            for (size_t j = 0; j < done.size(); ++j) {
+                if (done[j])
+                    g_dev.destroySemaphore(g_device, done[j], nullptr);
+            }
+            return false;
+        }
+    }
+    retire_semaphores(g_guestImageDone);
+    g_guestImageDone = std::move(done);
     return true;
 }
 
@@ -696,8 +984,6 @@ VKAPI_ATTR VkResult VKAPI_CALL pp_vkQueuePresentKHR(VkQueue queue,
 #endif
         return real(queue, info);
     }
-
-    wc3_present_target_drain();
 
     uint32_t guestW = 0;
     uint32_t guestH = 0;
@@ -821,6 +1107,43 @@ VKAPI_ATTR VkResult VKAPI_CALL pp_vkQueuePresentKHR(VkQueue queue,
     const uint32_t frame = g_frame;
     g_frame = (frame + 1) % kFrames;
 
+    /* The command buffer, the acquire semaphore and the screen image of this
+     * slot are reusable only after the submit that used them has completed.
+     * commandBuffer/semaphore reuse without this wait was undefined. */
+    if (g_frameSubmitted[frame]) {
+        const VkResult fenceResult =
+            g_dev.waitForFences(g_device, 1, &g_frameFence[frame], VK_TRUE,
+                                UINT64_MAX);
+        if (fenceResult != VK_SUCCESS) {
+            PP_LOG("present: fence wait failed %d, recreating pass",
+                   (int)fenceResult);
+            if (g_dev.queueWaitIdle) g_dev.queueWaitIdle(queue);
+            if (g_dev.resetFences)
+                g_dev.resetFences(g_device, 1, &g_frameFence[frame]);
+            g_frameSubmitted[frame] = false;
+            destroy_screen();
+            surface_release(platform, window);
+            g_ready.store(0, std::memory_order_release);
+            wc3_present_target_retire();
+            return real(queue, info);
+        }
+        if (g_dev.resetFences)
+            g_dev.resetFences(g_device, 1, &g_frameFence[frame]);
+        g_frameSubmitted[frame] = false;
+    }
+
+    /* Resolve the guest image and its present semaphore before touching the
+     * screen swap chain.  A retry after a guest present failure has already
+     * retired the old semaphores. */
+    const uint32_t guestIndex = info->pImageIndices[0];
+    if (g_guestImages.empty() || guestIndex >= g_guestImages.size() ||
+        !ensure_guest_semaphores() ||
+        guestIndex >= g_guestImageDone.size()) {
+        PP_LOG("present: guest image %u has no present semaphore", guestIndex);
+        surface_release(platform, window);
+        return real(queue, info);
+    }
+
     uint32_t screenIndex = 0;
     VkResult acquire = g_dev.acquireNextImage(
         g_device, g_screenSwapchain, UINT64_MAX, g_imageReady[frame],
@@ -831,14 +1154,32 @@ VKAPI_ATTR VkResult VKAPI_CALL pp_vkQueuePresentKHR(VkQueue queue,
         surface_release(platform, window);
         return real(queue, info);
     }
-    if (screenIndex >= g_screenImages.size() || g_guestImages.empty() ||
-        info->pImageIndices[0] >= g_guestImages.size()) {
+    if (screenIndex >= g_screenImages.size() ||
+        screenIndex >= g_screenImageDone.size()) {
+        PP_LOG("present: acquired screen image %u has no semaphore",
+               screenIndex);
+        if (g_dev.queueWaitIdle) g_dev.queueWaitIdle(queue);
+        destroy_screen();
         surface_release(platform, window);
+        g_ready.store(0, std::memory_order_release);
+        wc3_present_target_retire();
         return real(queue, info);
     }
 
-    VkImage guestImage = g_guestImages[info->pImageIndices[0]];
+    VkImage guestImage = g_guestImages[guestIndex];
     VkImage screenImage = g_screenImages[screenIndex];
+    VkSemaphore guestDone = g_guestImageDone[guestIndex];
+    VkSemaphore screenDone = g_screenImageDone[screenIndex];
+    if (!guestDone || !screenDone) {
+        PP_LOG("present: null image semaphore guest=%p screen=%p",
+               (void *)guestDone, (void *)screenDone);
+        if (g_dev.queueWaitIdle) g_dev.queueWaitIdle(queue);
+        destroy_screen();
+        surface_release(platform, window);
+        g_ready.store(0, std::memory_order_release);
+        wc3_present_target_retire();
+        return real(queue, info);
+    }
 
     VkCommandBuffer cmd = g_cmd[frame];
     g_dev.resetCommandBuffer(cmd, 0);
@@ -892,10 +1233,15 @@ VKAPI_ATTR VkResult VKAPI_CALL pp_vkQueuePresentKHR(VkQueue queue,
         region.srcSubresource.layerCount = 1;
         region.srcOffsets[1].x = (int32_t)plan.src_w;
         region.srcOffsets[1].y = (int32_t)plan.src_h;
+        /* A 2D VkImageBlit still requires z == 1 at the far corner.  A zero
+         * depth makes the region empty and the driver drops the blit, which
+         * is why Turnip left the destination black. */
+        region.srcOffsets[1].z = 1;
         region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         region.dstSubresource.layerCount = 1;
         region.dstOffsets[1].x = (int32_t)plan.target_w;
         region.dstOffsets[1].y = (int32_t)plan.target_h;
+        region.dstOffsets[1].z = 1;
         g_dev.cmdBlitImage(cmd, guestImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            screenImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                            &region, VK_FILTER_NEAREST);
@@ -932,11 +1278,10 @@ VKAPI_ATTR VkResult VKAPI_CALL pp_vkQueuePresentKHR(VkQueue queue,
 
     g_dev.endCommandBuffer(cmd);
 
-    /* No fence here.  The screen image is reused only after this submission's
-     * transfer completes, and g_blitDoneScreen / g_blitDoneGuest carry that
-     * ordering to the two presents below.  A per-image fence that is never
-     * waited on orders nothing; the guest swap chain's WSI acquire and release
-     * already supply the guest-side serialisation. */
+    /* The command slot is fenced: before it is reused, vkWaitForFences above
+     * proves the previous submit finished.  The presents below wait on
+     * per-image semaphores, so a semaphore is not re-signalled while the
+     * presentation engine may still be waiting on it. */
 
     /* The screen image was just acquired with g_imageReady[frame], so that
      * image is not readable by the presentation engine yet.  Waiting for the
@@ -959,7 +1304,7 @@ VKAPI_ATTR VkResult VKAPI_CALL pp_vkQueuePresentKHR(VkQueue queue,
     waitStages[waitCount] = VK_PIPELINE_STAGE_TRANSFER_BIT;
     ++waitCount;
 
-    VkSemaphore signals[2] = {g_blitDoneGuest[frame], g_blitDoneScreen[frame]};
+    VkSemaphore signals[2] = {guestDone, screenDone};
 
     VkSubmitInfo submit;
     std::memset(&submit, 0, sizeof submit);
@@ -973,29 +1318,43 @@ VKAPI_ATTR VkResult VKAPI_CALL pp_vkQueuePresentKHR(VkQueue queue,
     submit.pSignalSemaphores = signals;
 
     const VkResult submitResult =
-        g_dev.queueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
+        g_dev.queueSubmit(queue, 1, &submit, g_frameFence[frame]);
     if (submitResult != VK_SUCCESS) {
         /* The guest's wait semaphores were not consumed, so the ordinary
          * present still owns them; the acquired screen image is dropped with
-         * the swap chain and rebuilt on the next frame. */
+         * the swap chain and rebuilt on the next frame.  The failed submit
+         * leaves the acquire semaphore in an unknown state, so replace it
+         * before this slot is used again. */
         PP_LOG("present: submit failed %d", (int)submitResult);
-        g_dev.queueWaitIdle(queue);
+        if (g_dev.queueWaitIdle) g_dev.queueWaitIdle(queue);
+        if (g_dev.destroySemaphore && g_imageReady[frame]) {
+            g_dev.destroySemaphore(g_device, g_imageReady[frame], nullptr);
+            g_imageReady[frame] = VK_NULL_HANDLE;
+        }
+        VkSemaphoreCreateInfo semInfo;
+        std::memset(&semInfo, 0, sizeof semInfo);
+        semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        if (g_dev.createSemaphore(g_device, &semInfo, nullptr,
+                                  &g_imageReady[frame]) != VK_SUCCESS) {
+            g_ready.store(0, std::memory_order_release);
+            wc3_present_target_retire();
+        }
         destroy_screen();
         surface_release(platform, window);
         return real(queue, info);
     }
+    g_frameSubmitted[frame] = true;
 
-    VkPresentInfoKHR guestInfo = *info;
-    guestInfo.waitSemaphoreCount = 1;
-    guestInfo.pWaitSemaphores = &g_blitDoneGuest[frame];
-    VkResult guestResult = real(queue, &guestInfo);
-    if (info->pResults) info->pResults[0] = guestResult;
-
+    /* Present the visible screen first.  The guest present only releases
+     * DXVK's swap-chain image into its AImageReader sink; issuing it after the
+     * screen present lets the visible image reach the compositor without
+     * waiting for that bookkeeping.  Both presents wait on semaphores from the
+     * submit above, so their relative order does not change what is rendered. */
     VkPresentInfoKHR screenInfo;
     std::memset(&screenInfo, 0, sizeof screenInfo);
     screenInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     screenInfo.waitSemaphoreCount = 1;
-    screenInfo.pWaitSemaphores = &g_blitDoneScreen[frame];
+    screenInfo.pWaitSemaphores = &screenDone;
     screenInfo.swapchainCount = 1;
     screenInfo.pSwapchains = &g_screenSwapchain;
     screenInfo.pImageIndices = &screenIndex;
@@ -1005,6 +1364,26 @@ VKAPI_ATTR VkResult VKAPI_CALL pp_vkQueuePresentKHR(VkQueue queue,
         g_dev.queueWaitIdle(queue);
         destroy_screen();
     }
+
+    VkPresentInfoKHR guestInfo = *info;
+    guestInfo.waitSemaphoreCount = 1;
+    guestInfo.pWaitSemaphores = &guestDone;
+    VkResult guestResult = real(queue, &guestInfo);
+    if (info->pResults) info->pResults[0] = guestResult;
+    if (guestResult != VK_SUCCESS && guestResult != VK_SUBOPTIMAL_KHR) {
+        /* The guest present did not consume its wait.  Wait for the queue,
+         * then retire every guest-image semaphore; the next frame creates a
+         * fresh set instead of re-signalling a binary semaphore that may still
+         * be in the signalled state. */
+        PP_LOG("present: guest present failed %d", (int)guestResult);
+        if (g_dev.queueWaitIdle) g_dev.queueWaitIdle(queue);
+        retire_semaphores(g_guestImageDone);
+    }
+
+    /* Drain the reader after the guest present.  It only has to make room for
+     * the next producer hand-off, so it must not sit between the visible
+     * screen present and DXVK's m_presentStatus bookkeeping. */
+    wc3_present_target_drain();
 #if WC3_DEBUG && WC3_DEBUG_GRAPHICS
     {
         static VkResult lastGuestResult = VK_SUCCESS;
@@ -1073,6 +1452,27 @@ pp_vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *info,
             PP_LOG("target inactive: destroy screen swap chain");
             destroy_screen();
         }
+        /* The pass is dormant: this is the final swap chain.  Apply the
+         * product present mode and buffering here rather than forcing a 1:1
+         * pass.  Unsupported modes become FIFO; a driver rejection of a
+         * queried mode gets one FIFO retry. */
+        if (load_surface_fns()) {
+            VkSwapchainCreateInfoKHR direct;
+            if (apply_direct_screen_settings(info, &direct)) {
+                VkResult directResult =
+                    real(device, &direct, alloc, swapchain);
+                if (directResult != VK_SUCCESS &&
+                    direct.presentMode != VK_PRESENT_MODE_FIFO_KHR) {
+                    PP_LOG("direct: swapchain create failed %d in mode %s, "
+                           "retrying fifo",
+                           (int)directResult, present_mode_name(
+                                                  direct.presentMode));
+                    direct.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+                    directResult = real(device, &direct, alloc, swapchain);
+                }
+                return directResult;
+            }
+        }
         return real(device, info, alloc, swapchain);
     }
 
@@ -1131,6 +1531,16 @@ pp_vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *info,
         }
     }
 
+    /* The old guest images are gone.  Their semaphores may still be waited on
+     * by a present that was queued before this swap-chain recreation, so park
+     * them and create a fresh set for the new image indices. */
+    retire_semaphores(g_guestImageDone);
+    if (!ensure_guest_semaphores()) {
+        PP_LOG("guest: present semaphores unavailable");
+        g_ready.store(0, std::memory_order_release);
+        wc3_present_target_retire();
+    }
+
     PP_LOG("guest swapchain %ux%u format=%d images=%u usage=0x%x",
            create.imageExtent.width, create.imageExtent.height,
            (int)create.imageFormat, (unsigned)g_guestImages.size(),
@@ -1154,6 +1564,7 @@ pp_vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain,
     if (swapchain && swapchain == g_guestSwapchain) {
         g_guestSwapchain = VK_NULL_HANDLE;
         g_guestImages.clear();
+        retire_semaphores(g_guestImageDone);
     }
     if (real) real(device, swapchain, alloc);
 
@@ -1186,21 +1597,22 @@ pp_vkDestroyDevice(VkDevice device, const VkAllocationCallbacks *alloc)
             g_dev.destroyCommandPool(device, g_pool, nullptr);
         g_pool = VK_NULL_HANDLE;
 
+        /* The device is idle, so every retired per-image semaphore is safe to
+         * free now.  Current guest semaphores join the same list. */
+        retire_semaphores(g_guestImageDone);
+        retire_semaphores(g_screenImageDone);
+        destroy_semaphores_now(g_retiredSemaphores);
+
         for (uint32_t i = 0; i < kFrames; ++i) {
-            if (g_dev.destroySemaphore) {
-                if (g_imageReady[i]) {
-                    g_dev.destroySemaphore(device, g_imageReady[i], nullptr);
-                    g_imageReady[i] = VK_NULL_HANDLE;
-                }
-                if (g_blitDoneGuest[i]) {
-                    g_dev.destroySemaphore(device, g_blitDoneGuest[i], nullptr);
-                    g_blitDoneGuest[i] = VK_NULL_HANDLE;
-                }
-                if (g_blitDoneScreen[i]) {
-                    g_dev.destroySemaphore(device, g_blitDoneScreen[i], nullptr);
-                    g_blitDoneScreen[i] = VK_NULL_HANDLE;
-                }
+            if (g_dev.destroySemaphore && g_imageReady[i]) {
+                g_dev.destroySemaphore(device, g_imageReady[i], nullptr);
+                g_imageReady[i] = VK_NULL_HANDLE;
             }
+            if (g_dev.destroyFence && g_frameFence[i]) {
+                g_dev.destroyFence(device, g_frameFence[i], nullptr);
+                g_frameFence[i] = VK_NULL_HANDLE;
+            }
+            g_frameSubmitted[i] = false;
             g_cmd[i] = VK_NULL_HANDLE;
         }
 

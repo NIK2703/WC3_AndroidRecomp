@@ -73,9 +73,10 @@ public class Wc3GameActivity extends GameActivity {
      * order (driver id before driver root, DXVK version and config path, then
      * the gesture flag and timers, the SIMPLE tap delay, the selection24
      * toggle, the hideCursor toggle, the parallelExecution toggle, the overlay
-     * opacity percent, the grid toggle, darken percent and cycle seconds, and
-     * the presentation scale string last).  These values are strings, so a swap
-     * compiles and fails only at runtime. */
+     * opacity percent, the grid toggle, darken percent and cycle seconds, the
+     * presentation scale string, and finally the screen present mode string
+     * and buffering count).  These values are strings, so a swap compiles and
+     * fails only at runtime. */
     private static native void nativeApplyLaunchSettings(
             String gameDir, int width, int height, boolean sound,
             String extraArgs, String driverId, String driverRoot,
@@ -84,7 +85,8 @@ public class Wc3GameActivity extends GameActivity {
             int longPressTimeoutMs, int tapClickDelayMs,
             boolean selection24, boolean hideCursor, boolean parallelExecution,
             int overlayOpacityPercent, boolean gridEnabled,
-            int gridDarkenPercent, int gridCycleSeconds, String presentScale);
+            int gridDarkenPercent, int gridCycleSeconds, String presentScale,
+            String presentMode, int presentBuffers);
 
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
@@ -341,6 +343,19 @@ public class Wc3GameActivity extends GameActivity {
         final String presentScale = gridEnabled
                 ? LaunchContract.PRESENT_SCALE_HALF
                 : LaunchContract.PRESENT_SCALE_SYSTEM;
+        String presentMode = settings.getString(
+                LaunchContract.KEY_PRESENT_MODE,
+                LaunchContract.DEFAULT_PRESENT_MODE);
+        if (presentMode == null || presentMode.isEmpty()) {
+            presentMode = LaunchContract.DEFAULT_PRESENT_MODE;
+        }
+        final int presentBuffers = Math.max(
+                LaunchContract.MIN_PRESENT_BUFFERS,
+                Math.min(
+                        LaunchContract.MAX_PRESENT_BUFFERS,
+                        settings.getInt(
+                                LaunchContract.KEY_PRESENT_BUFFERS,
+                                LaunchContract.DEFAULT_PRESENT_BUFFERS)));
         nativeApplyLaunchSettings(
                 settings.getString(LaunchContract.KEY_GAME_DIR),
                 settings.getInt(LaunchContract.KEY_WIDTH, 0),
@@ -376,7 +391,9 @@ public class Wc3GameActivity extends GameActivity {
                         LaunchContract.KEY_GRID_DARKEN_PERCENT,
                         LaunchContract.DEFAULT_GRID_DARKEN_PERCENT),
                 gridCycleSeconds,
-                presentScale);
+                presentScale,
+                presentMode,
+                presentBuffers);
     }
 
     /**

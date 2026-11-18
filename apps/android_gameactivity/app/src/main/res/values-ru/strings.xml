@@ -39,6 +39,16 @@
     <string name="launch_grid_cycle_value">%1$d с</string>
     <string name="launch_grid_cycle_off">Выкл.</string>
     <string name="launch_grid_hint">Один пиксель каждой ячейки 2×2 остаётся ярким, остальные затемняются. Сдвиг периода перемещает яркий пиксель, чтобы распределить износ OLED. При включении игра стартует ровно в половине разрешения экрана с 2× целочисленным масштабированием; смена разрешения в настройках игры выключает сетку и половинное масштабирование и возвращает обычное сглаженное отображение.</string>
+    <string name="launch_presentation_label">Отображение</string>
+    <string name="launch_present_mode_label">Режим синхронизации</string>
+    <string name="launch_present_mode_fifo">FIFO</string>
+    <string name="launch_present_mode_fifo_relaxed">FIFO relaxed</string>
+    <string name="launch_present_mode_mailbox">Mailbox</string>
+    <string name="launch_present_mode_immediate">Immediate</string>
+    <string name="launch_present_buffers_label">Буферизация</string>
+    <string name="launch_present_buffers_min">0</string>
+    <string name="launch_present_buffers_plus_one">1</string>
+    <string name="launch_present_buffers_plus_two">2</string>
     <string name="launch_driver_label">Драйвер Vulkan</string>
     <string name="launch_driver_system">Системный драйвер Vulkan (рекомендуется)</string>
     <string name="launch_driver_import">Установить ZIP</string>

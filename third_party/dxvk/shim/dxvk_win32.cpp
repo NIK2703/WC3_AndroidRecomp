@@ -131,6 +131,10 @@ static uint32_t g_androidWindowHeight = 0;
 static ANativeWindow* g_presentWindow = nullptr;
 static uint32_t g_presentWidth  = 0;
 static uint32_t g_presentHeight = 0;
+/* Direct real-window presentation for grid off below native: the presenter is
+ * the real window, but GetClientRect and the surface geometry are the guest
+ * extent.  The compositor scales the layer. */
+static bool g_directPresent = false;
 
 /* The generation DXVK compares against.  It must be one monotonic counter for
  * the *effective* window: switching the present target on or off, and replacing
@@ -170,19 +174,31 @@ extern "C" void wc3_android_set_window(ANativeWindow* window,
 extern "C" int wc3_android_set_surface_size(uint32_t width, uint32_t height) {
     if (!width || !height) return -EINVAL;
     std::lock_guard<std::mutex> lock(g_androidWindowMutex);
+    /* The real window's buffer geometry is the layer the compositor scans
+     * out.  On the grid/pass path that is the surface size; on the direct
+     * grid-off path the presenter is the real window but the image and the
+     * layer stay at the guest extent, so the compositor does the scaling. */
+    uint32_t geometryW = width;
+    uint32_t geometryH = height;
+    if (g_directPresent && g_presentWidth && g_presentHeight) {
+        geometryW = g_presentWidth;
+        geometryH = g_presentHeight;
+    }
     int rc = 0;
     if (g_androidWindow) {
         rc = ANativeWindow_setBuffersGeometry(g_androidWindow,
-                                              (int32_t)width,
-                                              (int32_t)height,
+                                              (int32_t)geometryW,
+                                              (int32_t)geometryH,
                                               WINDOW_FORMAT_RGBA_8888);
     }
     /* Publish even when the geometry call failed: the caller logs the error
      * and DXVK should still see the requested extent instead of the stale one. */
     g_androidWindowWidth = width;
     g_androidWindowHeight = height;
-    DXVK_SHIM_TRACE("set_surface_size request=%ux%u window=%p rc=%d",
-                    width, height, (void*)g_androidWindow, rc);
+    DXVK_SHIM_TRACE("set_surface_size request=%ux%u geometry=%ux%u window=%p "
+                    "rc=%d direct=%d",
+                    width, height, geometryW, geometryH, (void*)g_androidWindow,
+                    rc, g_directPresent ? 1 : 0);
     return rc;
 }
 
@@ -229,15 +245,58 @@ extern "C" void wc3_android_set_present_target(ANativeWindow* window,
                                                uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> lock(g_androidWindowMutex);
     ANativeWindow* previous = presenterWindowLocked();
+    const bool wasDirect = g_directPresent;
+    const uint32_t previousWidth = g_presentWidth;
+    const uint32_t previousHeight = g_presentHeight;
     g_presentWindow = window;
+    g_directPresent = false;
     g_presentWidth = window ? width : 0;
     g_presentHeight = window ? height : 0;
     ANativeWindow* current = presenterWindowLocked();
-    if (current != previous)
+    const bool extentChanged =
+        wasDirect != g_directPresent || previousWidth != g_presentWidth ||
+        previousHeight != g_presentHeight;
+    if (current && (current != previous || extentChanged))
         g_presenterGeneration++;
+    /* Leaving direct mode restores the real window's surface geometry.  The
+     * pass will set its own target geometry when it creates the screen swap
+     * chain; native bypass needs the full surface. */
+    if (wasDirect && g_androidWindow && g_androidWindowWidth &&
+        g_androidWindowHeight) {
+        ANativeWindow_setBuffersGeometry(g_androidWindow,
+                                         (int32_t)g_androidWindowWidth,
+                                         (int32_t)g_androidWindowHeight,
+                                         WINDOW_FORMAT_RGBA_8888);
+    }
     DXVK_SHIM_TRACE("present_target window=%p %ux%u presenter=%p generation=%u",
                     (void*)window, g_presentWidth, g_presentHeight,
                     (void*)current, g_presenterGeneration);
+}
+
+/* Grid off below native: the real window is both the presenter and the final
+ * layer, but its extent is the guest mode.  No reader is involved.  Replacing
+ * the direct extent must invalidate DXVK's presenter even though the window
+ * pointer is unchanged; otherwise its swap chain keeps the old surface. */
+extern "C" void wc3_android_set_direct_present(uint32_t width, uint32_t height) {
+    if (!width || !height) return;
+    std::lock_guard<std::mutex> lock(g_androidWindowMutex);
+    ANativeWindow* previous = presenterWindowLocked();
+    const bool extentChanged =
+        !g_directPresent || g_presentWidth != width || g_presentHeight != height;
+    g_presentWindow = nullptr;
+    g_directPresent = true;
+    g_presentWidth = width;
+    g_presentHeight = height;
+    ANativeWindow* current = presenterWindowLocked();
+    if (current && (current != previous || extentChanged))
+        g_presenterGeneration++;
+    if (g_androidWindow) {
+        ANativeWindow_setBuffersGeometry(g_androidWindow, (int32_t)width,
+                                         (int32_t)height,
+                                         WINDOW_FORMAT_RGBA_8888);
+    }
+    DXVK_SHIM_TRACE("direct_present %ux%u presenter=%p generation=%u",
+                    width, height, (void*)current, g_presenterGeneration);
 }
 
 /* Physical surface size: the real SurfaceView window, i.e. what the display
@@ -267,7 +326,7 @@ void surfaceSize(uint32_t& w, uint32_t& h) {
  * which is the behaviour of a build without the present pass. */
 static void presentExtent(uint32_t& w, uint32_t& h) {
     std::lock_guard<std::mutex> lock(g_androidWindowMutex);
-    if (g_presentWindow && g_presentWidth && g_presentHeight) {
+    if ((g_presentWindow || g_directPresent) && g_presentWidth && g_presentHeight) {
         w = g_presentWidth;
         h = g_presentHeight;
         return;

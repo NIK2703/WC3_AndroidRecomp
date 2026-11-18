@@ -49,6 +49,16 @@
     <string name="launch_grid_cycle_value">%1$d s</string>
     <string name="launch_grid_cycle_off">Off</string>
     <string name="launch_grid_hint">One pixel of each 2×2 cell stays untouched; the other three are dimmed. The cycle moves the bright pixel to spread OLED wear. Turning this on starts the game at exactly half the screen resolution with 2× nearest scaling; changing the resolution in the game\'s Video options turns the grid and half scaling off and returns to normal smoothed display.</string>
+    <string name="launch_presentation_label">Presentation</string>
+    <string name="launch_present_mode_label">Present mode</string>
+    <string name="launch_present_mode_fifo">FIFO</string>
+    <string name="launch_present_mode_fifo_relaxed">FIFO relaxed</string>
+    <string name="launch_present_mode_mailbox">Mailbox</string>
+    <string name="launch_present_mode_immediate">Immediate</string>
+    <string name="launch_present_buffers_label">Buffering</string>
+    <string name="launch_present_buffers_min">0</string>
+    <string name="launch_present_buffers_plus_one">1</string>
+    <string name="launch_present_buffers_plus_two">2</string>
     <string name="launch_driver_label">Vulkan driver</string>
     <string name="launch_driver_system">System Vulkan driver (recommended)</string>
     <string name="launch_driver_import">Install ZIP</string>

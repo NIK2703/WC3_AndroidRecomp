@@ -62,6 +62,13 @@ data class LaunchSettings(
     val gridEnabled: Boolean = LaunchContract.DEFAULT_GRID_ENABLED,
     val gridDarkenPercent: Int = LaunchContract.DEFAULT_GRID_DARKEN_PERCENT,
     val gridCycleSeconds: Int = LaunchContract.DEFAULT_GRID_CYCLE_SECONDS,
+    /* The final screen swap chain.  FIFO is the product default; the swap-chain
+     * wrapper applies these values to the final real-window swap chain,
+     * including the native direct path, and falls back to FIFO when a mode is
+     * unsupported.  Buffering is the number of extra images above the surface
+     * minimum (0..2). */
+    val presentMode: String = LaunchContract.DEFAULT_PRESENT_MODE,
+    val presentBuffers: Int = LaunchContract.DEFAULT_PRESENT_BUFFERS,
     /* Presentation scaling is not a setting.  The grid needs the exact-2x
      * half-surface path; every other case stays on the compositor. */
 ) {
@@ -85,6 +92,8 @@ data class LaunchSettings(
         putBoolean(LaunchContract.KEY_GRID_ENABLED, gridEnabled)
         putInt(LaunchContract.KEY_GRID_DARKEN_PERCENT, gridDarkenPercent)
         putInt(LaunchContract.KEY_GRID_CYCLE_SECONDS, gridCycleSeconds)
+        putString(LaunchContract.KEY_PRESENT_MODE, presentMode)
+        putInt(LaunchContract.KEY_PRESENT_BUFFERS, presentBuffers)
         putString(
             LaunchContract.KEY_PRESENT_SCALE,
             if (gridEnabled) {

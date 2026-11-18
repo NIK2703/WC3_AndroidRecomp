@@ -37,6 +37,10 @@
 /* Published to the DXVK Win32 shim (third_party/dxvk/shim/dxvk_win32.cpp). */
 extern void wc3_android_set_present_target(ANativeWindow *window,
                                            uint32_t width, uint32_t height);
+/* Grid off at a guest extent below the surface: DXVK presents directly into
+ * the real window, whose buffer geometry is the guest extent.  The compositor
+ * scales the layer to the view; no reader and no screen swap chain exist. */
+extern void wc3_android_set_direct_present(uint32_t width, uint32_t height);
 
 /* Readers that were unpublished while DXVK might still own a swap chain on
  * their window.  They are destroyed only by reap(), after that swap chain is
@@ -59,6 +63,11 @@ static _Atomic uint32_t g_surface_width;
 static _Atomic uint32_t g_surface_height;
 static _Atomic int g_active;
 static _Atomic int g_half_grid;
+/* Grid off below native: DXVK owns the real window and the compositor scales
+ * its guest-sized buffers. No reader is involved. */
+static _Atomic int g_direct;
+static _Atomic uint32_t g_direct_width;
+static _Atomic uint32_t g_direct_height;
 
 /* Queue-buffer geometry.  Best effort on purpose: the reader was already
  * created at the guest extent and the swap chain extent comes from the surface
@@ -79,6 +88,9 @@ static void pt_publish(uint32_t width, uint32_t height)
 {
     atomic_store_explicit(&g_width, width, memory_order_relaxed);
     atomic_store_explicit(&g_height, height, memory_order_relaxed);
+    atomic_store_explicit(&g_direct, 0, memory_order_release);
+    atomic_store_explicit(&g_direct_width, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_direct_height, 0, memory_order_relaxed);
     wc3_android_set_present_target(g_window, width, height);
     PT_LOG("publish guest=%ux%u window=%p", width, height, (void *)g_window);
 }
@@ -130,19 +142,33 @@ static void pt_park_locked(AImageReader *reader, ANativeWindow *window)
 }
 
 /* Caller holds g_lock.  The reader and window move to the retired list; they
- * are not destroyed here. */
+ * are not destroyed here.  A direct real-window target is unpublished too. */
 static void pt_retire_locked(void)
 {
-    if (!g_reader) return;
+    int published = 0;
 
-    pt_park_locked(g_reader, g_window);
-    g_reader = NULL;
-    g_window = NULL;
+    if (g_reader) {
+        pt_park_locked(g_reader, g_window);
+        g_reader = NULL;
+        g_window = NULL;
+        published = 1;
+    }
+    if (atomic_load_explicit(&g_direct, memory_order_relaxed)) {
+        atomic_store_explicit(&g_direct, 0, memory_order_release);
+        atomic_store_explicit(&g_direct_width, 0, memory_order_relaxed);
+        atomic_store_explicit(&g_direct_height, 0, memory_order_relaxed);
+        published = 1;
+    }
+    if (!published) return;
+
     atomic_store_explicit(&g_active, 0, memory_order_release);
+    /* Clears the producer and the direct mode in one step and restores the
+     * real window's geometry to the surface extent.  DXVK sees the generation
+     * change and rebuilds its presenter on the real window. */
     wc3_android_set_present_target(NULL, 0, 0);
     atomic_store_explicit(&g_width, 0, memory_order_relaxed);
     atomic_store_explicit(&g_height, 0, memory_order_relaxed);
-    PT_LOG("retire: producer unpublished, reader parked");
+    PT_LOG("retire: target unpublished");
 }
 
 int wc3_present_target_start(uint32_t width, uint32_t height)
@@ -221,6 +247,37 @@ int wc3_present_target_start(uint32_t width, uint32_t height)
     return 0;
 }
 
+/* Grid off below native: DXVK presents into the real window at the guest
+ * geometry; active() stays false, so the present hook forwards unchanged. */
+static int pt_start_direct(uint32_t width, uint32_t height)
+{
+    if (!width || !height) return -EINVAL;
+
+    pthread_mutex_lock(&g_lock);
+    if (atomic_load_explicit(&g_direct, memory_order_relaxed) &&
+        atomic_load_explicit(&g_direct_width, memory_order_relaxed) == width &&
+        atomic_load_explicit(&g_direct_height, memory_order_relaxed) == height) {
+        wc3_android_set_direct_present(width, height);
+        pthread_mutex_unlock(&g_lock);
+        PT_LOG("direct %ux%u (already started)", width, height);
+        return 0;
+    }
+
+    /* Unpublish a reader or an older direct extent before publishing the new
+     * one.  The reader is parked, not deleted: DXVK may still own a swap chain
+     * on its window. */
+    pt_retire_locked();
+
+    atomic_store_explicit(&g_direct_width, width, memory_order_relaxed);
+    atomic_store_explicit(&g_direct_height, height, memory_order_relaxed);
+    atomic_store_explicit(&g_direct, 1, memory_order_release);
+    wc3_android_set_direct_present(width, height);
+    pthread_mutex_unlock(&g_lock);
+
+    PT_LOG("direct started %ux%u (real window)", width, height);
+    return 0;
+}
+
 void wc3_present_target_drain(void)
 {
     if (!atomic_load_explicit(&g_active, memory_order_acquire)) return;
@@ -233,6 +290,8 @@ void wc3_present_target_drain(void)
 int wc3_present_target_set_extent(uint32_t width, uint32_t height)
 {
     if (!width || !height) return -EINVAL;
+    if (atomic_load_explicit(&g_direct, memory_order_acquire))
+        return pt_start_direct(width, height);
     if (!wc3_present_target_active()) return 0;
 
     /* The reader cannot be resized in place: replace it and park the old one
@@ -255,27 +314,40 @@ int wc3_present_target_ensure(uint32_t guest_w, uint32_t guest_h,
 
     int needed =
         wc3_present_pass_needed(guest_w, guest_h, surface_w, surface_h);
-
-    PT_LOG("ensure guest=%ux%u surface=%ux%u needed=%d active=%d half=%d",
-           guest_w, guest_h, surface_w, surface_h, needed,
-           wc3_present_target_active(), wc3_present_target_half_grid());
+    const int halfGrid = wc3_present_target_half_grid();
+    int forcePass = 0;
 #if WC3_DEBUG && WC3_DEBUG_GRAPHICS
     /* A/B and regression lever: force the pass even when it is a 1:1 copy, so
      * the old always-on behaviour can be reproduced on a device. */
     const char *force = getenv("WC3_PRESENT_FORCE");
     if (force && *force && strcmp(force, "0") != 0) {
-        needed = 1;
+        forcePass = 1;
         PT_LOG("force pass for %ux%u on %ux%u", guest_w, guest_h, surface_w,
                surface_h);
     }
 #endif
 
+    /* Grid off at a lower mode has no work for the pass: the real window's
+     * buffer geometry is the guest extent and the compositor scales it.
+     * Half-grid keeps the reader and screen pass for the exact 2x nearest
+     * image the grid masks.  Screen present settings apply to DXVK's final
+     * real-window swap chain, not to a forced 1:1 pass. */
+    const int direct = needed && !halfGrid && !forcePass;
+
+    PT_LOG("ensure guest=%ux%u surface=%ux%u needed=%d direct=%d active=%d "
+           "half=%d",
+           guest_w, guest_h, surface_w, surface_h, needed, direct,
+           wc3_present_target_active(), halfGrid);
+
+    if (direct) return pt_start_direct(guest_w, guest_h);
     if (needed) return wc3_present_target_start(guest_w, guest_h);
 
-    if (wc3_present_target_active()) {
-        /* The mode is back at the surface extent: the pass would only copy 1:1.
-         * Unpublish it now, but leave the reader to reap() so a swap chain that
-         * is still in flight cannot outlive its buffers. */
+    if (wc3_present_target_active() ||
+        atomic_load_explicit(&g_direct, memory_order_acquire)) {
+        /* The mode is back at the surface extent: the pass would only copy 1:1
+         * and the direct window would only be a guest-sized layer under a
+         * composition that no longer needs it.  Unpublish now; readers stay
+         * parked for reap() because a swap chain may still be in flight. */
         pthread_mutex_lock(&g_lock);
         pt_retire_locked();
         pthread_mutex_unlock(&g_lock);
@@ -318,6 +390,9 @@ void wc3_present_target_stop(void)
     g_reader = NULL;
     g_window = NULL;
     atomic_store_explicit(&g_active, 0, memory_order_release);
+    atomic_store_explicit(&g_direct, 0, memory_order_release);
+    atomic_store_explicit(&g_direct_width, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_direct_height, 0, memory_order_relaxed);
     wc3_android_set_present_target(NULL, 0, 0);
     atomic_store_explicit(&g_width, 0, memory_order_relaxed);
     atomic_store_explicit(&g_height, 0, memory_order_relaxed);
@@ -341,6 +416,11 @@ void wc3_present_target_stop(void)
 int wc3_present_target_active(void)
 {
     return atomic_load_explicit(&g_active, memory_order_acquire) ? 1 : 0;
+}
+
+int wc3_present_target_direct(void)
+{
+    return atomic_load_explicit(&g_direct, memory_order_acquire) ? 1 : 0;
 }
 
 int wc3_present_target_extent(uint32_t *width, uint32_t *height)

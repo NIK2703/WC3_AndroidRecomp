@@ -24,6 +24,7 @@
 #include "init_array_probe.h"
 #include "hle_bridge.h"
 #include "present_target.h"
+#include "wc3_crash.h"
 #include "wc3_debug.h"
 #include "wc3_trace.h"
 
@@ -59,6 +60,7 @@ int wc3_boot_probe_main(int argc, char **argv);
 /* Implemented by the DXVK Win32 shim (dxvk_win32.cpp). */
 void wc3_android_set_window(ANativeWindow *window, uint32_t width,
                             uint32_t height);
+int wc3_android_set_surface_size(uint32_t width, uint32_t height);
 
 static void set_default(const char *name, const char *value)
 {
@@ -70,7 +72,7 @@ static void set_default(const char *name, const char *value)
  * start before MANAGE_EXTERNAL_STORAGE is granted, and some devices expose a
  * read-only Download through FUSE, so probe first and fall back to the
  * app-private state dir instead of losing stdout/stderr entirely. */
-#define WC3_DOWNLOAD_LOG "/storage/emulated/0/Download/wc3_log.txt"
+#define WC3_DOWNLOAD_LOG WC3_CRASH_DOWNLOAD_LOG
 
 static int open_log(const char *path)
 {
@@ -82,6 +84,7 @@ static int open_log(const char *path)
     if (!f)
         return -1;
     setvbuf(stderr, NULL, _IOLBF, 0);
+    wc3_crash_set_log_path(path);
     LOGI("boot log %s", path);
     return 0;
 }
@@ -303,39 +306,36 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
         guest_h = applied_h;
     }
 
-    /* The present pass needs a producer surface before DXVK creates its device
-     * (wc3_dxvk_prepare installs the pass, and DXVK asks the Win32 shim for the
-     * window once).  Publishing it here also makes GetClientRect report the
-     * guest extent, so DXVK's own blitter copies the back buffer instead of
-     * rescaling it.
-     *
-     * At native resolution the pass would only copy the image 1:1, so ensure()
-     * leaves the target unpublished and DXVK presents straight into the real
-     * window.  A failure is not fatal: the shim then keeps the real window and
-     * the ordinary stretched path stays available. */
+    /* Publish the real window before ensure(): the direct grid-off path sets
+     * its geometry on this window, and the half-grid path publishes its reader
+     * against it.  ensure() then selects pass, direct, or native. */
+    WC3_TRACE_BEGIN("wc3.window.publish");
+    wc3_android_set_window(window, width, height);
+    if (wc3_android_set_surface_size(width, height) != 0)
+        LOGE("setBuffersGeometry(%ux%u) failed", width, height);
+    WC3_TRACE_END();
+
+    /* Half-grid needs the reader and exact 2x pass.  Grid off below native lets
+     * DXVK present into the real window and the compositor scale.  Native
+     * retires both.  Failure falls back to DXVK's ordinary stretched path. */
     if (wc3_present_target_ensure(guest_w, guest_h, width, height) != 0) {
         LOGE("present target unavailable for %ux%u; DXVK will scale into the "
              "window", guest_w, guest_h);
     }
 
-    /* Keep the native buffer at the physical surface size; DXVK scales the
-     * selected back buffer to it.  Publishing the window before the guest
-     * creates its device is what makes DXVK's Android WSI create a surface. */
-    WC3_TRACE_BEGIN("wc3.window.publish");
-    if (ANativeWindow_setBuffersGeometry(window, (int32_t)width,
-                                         (int32_t)height,
-                                         WINDOW_FORMAT_RGBA_8888) != 0)
-        LOGE("setBuffersGeometry(%ux%u) failed", width, height);
-    wc3_android_set_window(window, width, height);
-    WC3_TRACE_END();
     SCALE_LOG("boot: window=%ux%u present_scale=%s half=%d guest=%ux%u "
-              "applied=%ux%u target=%s halfGrid=%d",
+              "applied=%ux%u path=%s halfGrid=%d",
               width, height, present_scale ? present_scale : "(unset)",
               half_resolution, guest_w, guest_h, applied_w, applied_h,
-              wc3_present_target_active() ? "target" : "direct",
+              wc3_present_target_active() ? "pass"
+                                          : (wc3_present_target_direct()
+                                                 ? "direct"
+                                                 : "native"),
               wc3_present_target_half_grid());
     LOGI("window %ux%u guest %ux%u present=%s", width, height, guest_w, guest_h,
-         wc3_present_target_active() ? "target" : "direct");
+         wc3_present_target_active() ? "target"
+                                     : (wc3_present_target_direct() ? "direct"
+                                                                    : "native"));
 
     char exe[1024];
     int n = snprintf(exe, sizeof exe, "%s/war3.exe", data_dir);

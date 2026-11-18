@@ -83,6 +83,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var gridDarkenValue: TextView
     private lateinit var gridCycleSlider: SeekBar
     private lateinit var gridCycleValue: TextView
+    private lateinit var presentModeSpinner: Spinner
+    private lateinit var presentBuffersSpinner: Spinner
 
     /* DXVK's config parser accepts only these key characters and has no escape
      * for a double quote inside a value.  Filtering at input time keeps the
@@ -107,6 +109,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private var gestureModeOptions: List<GestureModeOption> = emptyList()
     private var driverOptions: List<DriverOption> = emptyList()
     private var dxvkOptions: List<ValueOption> = emptyList()
+    private var presentModeOptions: List<ValueOption> = emptyList()
+    private var presentBufferOptions: List<ValueOption> = emptyList()
     private var drivers: List<VulkanDriverStore.DriverInfo> = emptyList()
     private var binding = false
     private var storageRequested = false
@@ -147,7 +151,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
             ValueOption(DXVK_VERSION_1_10, getString(R.string.launch_dxvk_110)),
             ValueOption(DXVK_VERSION_3_1_1, getString(R.string.launch_dxvk_311)),
             ValueOption(
-                DXVK_VERSION_LOW_LATENCY,
+                LaunchContract.DXVK_VERSION_LOW_LATENCY,
                 getString(R.string.launch_dxvk_lowlatency)
             )
         )
@@ -161,6 +165,38 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 doubleTap = false,
                 label = getString(R.string.launch_gesture_mode_single),
                 hint = getString(R.string.launch_gesture_hint_single)
+            )
+        )
+        presentModeOptions = listOf(
+            ValueOption(
+                LaunchContract.PRESENT_MODE_FIFO,
+                getString(R.string.launch_present_mode_fifo)
+            ),
+            ValueOption(
+                LaunchContract.PRESENT_MODE_FIFO_RELAXED,
+                getString(R.string.launch_present_mode_fifo_relaxed)
+            ),
+            ValueOption(
+                LaunchContract.PRESENT_MODE_MAILBOX,
+                getString(R.string.launch_present_mode_mailbox)
+            ),
+            ValueOption(
+                LaunchContract.PRESENT_MODE_IMMEDIATE,
+                getString(R.string.launch_present_mode_immediate)
+            )
+        )
+        presentBufferOptions = listOf(
+            ValueOption(
+                LaunchContract.MIN_PRESENT_BUFFERS.toString(),
+                getString(R.string.launch_present_buffers_min)
+            ),
+            ValueOption(
+                (LaunchContract.MIN_PRESENT_BUFFERS + 1).toString(),
+                getString(R.string.launch_present_buffers_plus_one)
+            ),
+            ValueOption(
+                (LaunchContract.MIN_PRESENT_BUFFERS + 2).toString(),
+                getString(R.string.launch_present_buffers_plus_two)
             )
         )
         val settings = store.load(mode)
@@ -238,6 +274,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         gridDarkenValue = findViewById(R.id.grid_darken_value)
         gridCycleSlider = findViewById(R.id.grid_cycle_slider)
         gridCycleValue = findViewById(R.id.grid_cycle_value)
+        presentModeSpinner = findViewById(R.id.present_mode_spinner)
+        presentBuffersSpinner = findViewById(R.id.present_buffers_spinner)
 
         if (!resources.getBoolean(R.bool.experimental_gameplay_options_supported)) {
             findViewById<View>(R.id.selection24_row).visibility = View.GONE
@@ -296,6 +334,21 @@ class LaunchSettingsActivity : AppCompatActivity() {
             setDropDownViewResource(R.layout.item_resolution_dropdown)
         }
 
+        presentModeSpinner.adapter = ArrayAdapter(
+            this,
+            R.layout.item_resolution,
+            presentModeOptions.map { it.label }
+        ).apply {
+            setDropDownViewResource(R.layout.item_resolution_dropdown)
+        }
+
+        presentBuffersSpinner.adapter = ArrayAdapter(
+            this,
+            R.layout.item_resolution,
+            presentBufferOptions.map { it.label }
+        ).apply {
+            setDropDownViewResource(R.layout.item_resolution_dropdown)
+        }
     }
 
     private fun bindSettings(settings: LaunchSettings) {
@@ -350,6 +403,22 @@ class LaunchSettingsActivity : AppCompatActivity() {
             if (dxvkIndex >= 0) dxvkIndex else defaultDxvkIndex.coerceAtLeast(0),
             false
         )
+
+        val presentModeIndex = presentModeOptions.indexOfFirst {
+            it.value == settings.presentMode
+        }
+        presentModeSpinner.setSelection(
+            if (presentModeIndex >= 0) presentModeIndex else 0,
+            false
+        )
+        val presentBuffersIndex = presentBufferOptions.indexOfFirst {
+            it.value == settings.presentBuffers.toString()
+        }
+        presentBuffersSpinner.setSelection(
+            if (presentBuffersIndex >= 0) presentBuffersIndex else 0,
+            false
+        )
+
         setDxvkConfig(settings.dxvkConfig)
         binding = false
         updateGestureModeHint()
@@ -429,6 +498,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         wireOverlayOpacitySlider()
         wireGridDarkenSlider()
         wireGridCycleSlider()
+        wireSettingsSpinner(presentModeSpinner)
+        wireSettingsSpinner(presentBuffersSpinner)
 
         resolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -491,6 +562,26 @@ class LaunchSettingsActivity : AppCompatActivity() {
         findViewById<Button>(R.id.find_folder_button).setOnClickListener { findFolder() }
         grantButton.setOnClickListener { requestStoragePermission() }
         playButton.setOnClickListener { play() }
+    }
+
+    /* Plain value spinners only persist; unlike the gesture mode they do not
+     * change the visibility of another row. */
+    private fun wireSettingsSpinner(spinner: Spinner) {
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) {
+                if (!binding) {
+                    refreshValidation()
+                    saveIfValid()
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
     }
 
     private fun buildResolutionOptions(settings: LaunchSettings): List<ResolutionOption> {
@@ -1264,7 +1355,14 @@ class LaunchSettingsActivity : AppCompatActivity() {
                     0,
                     LaunchContract.MAX_GRID_CYCLE_SECONDS -
                     LaunchContract.MIN_GRID_CYCLE_SECONDS
-                )
+                ),
+            presentMode = presentModeOptions.getOrNull(
+                presentModeSpinner.selectedItemPosition
+            )?.value ?: LaunchContract.DEFAULT_PRESENT_MODE,
+            presentBuffers = presentBufferOptions.getOrNull(
+                presentBuffersSpinner.selectedItemPosition
+            )?.value?.toIntOrNull()
+                ?: LaunchContract.DEFAULT_PRESENT_BUFFERS
         )
     }
 
@@ -1650,9 +1748,5 @@ class LaunchSettingsActivity : AppCompatActivity() {
         const val MAX_DXVK_CONFIG_FILE_CHARS = 256 * 1024
         const val DXVK_VERSION_1_10 = "1"
         const val DXVK_VERSION_3_1_1 = "3"
-        /* Low-latency framepacing fork, based on DXVK 3.1.1.  The native
-         * selector parses the first character, so "ll" is distinct from both
-         * the 1.10.3 and 3.1.1 choices. */
-        const val DXVK_VERSION_LOW_LATENCY = "ll"
     }
 }

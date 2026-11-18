@@ -86,7 +86,6 @@
             android:exported="false"
             android:label="@string/launch_title"
             android:launchMode="singleTask"
-            android:screenOrientation="userLandscape"
             android:taskAffinity="${applicationId}.settings"
             android:theme="@style/Wc3LaunchTheme"
             android:windowSoftInputMode="adjustResize" />

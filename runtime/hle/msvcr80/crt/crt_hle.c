@@ -33,6 +33,7 @@
 
 #include "cpu.h"
 #include "hle_bridge.h"
+#include "wc3_crash.h"
 #include "wc3_debug.h"
 
 static void h_vacopy(CPU *c)
@@ -68,8 +69,7 @@ static int read_c_string(uint32_t address, char *buffer, size_t capacity)
     return 1;
 }
 
-#if WC3_DEBUG && WC3_DEBUG_HLE
-static void copy_wide_debug(uint32_t address, char *buffer, size_t capacity)
+static void copy_wide_text(uint32_t address, char *buffer, size_t capacity)
 {
     size_t i = 0;
 
@@ -87,7 +87,6 @@ static void copy_wide_debug(uint32_t address, char *buffer, size_t capacity)
     }
     buffer[i] = '\0';
 }
-#endif
 
 /* MSVCR120 abort() terminates through _exit(3) in the default configuration.
  * The guest cannot unwind further, so neither can the host. */
@@ -98,25 +97,28 @@ static void h_abort(CPU *c)
     fprintf(stderr, "[hle] abort()\n");
     fflush(stderr);
 #endif
+    wc3_crash_emit("abort", 3, NULL, 0);
     _Exit(3);
 }
 
 /* _wassert reports the failed expression, source file and line before the CRT
- * terminates.  The release artifact keeps the fatal outcome; the report text
- * is diagnostic-only and therefore lives behind the HLE tag. */
+ * terminates.  Release keeps the text in the fatal crash report; the HLE tag
+ * only controls the immediate stderr copy. */
 static void h_wassert(CPU *c)
 {
-    (void)c;
-#if WC3_DEBUG && WC3_DEBUG_HLE
     char expression[128];
     char file[128];
+    const unsigned line = wc3_legacy_arg32(c, 2u);
 
-    copy_wide_debug(wc3_legacy_arg32(c, 0u), expression, sizeof expression);
-    copy_wide_debug(wc3_legacy_arg32(c, 1u), file, sizeof file);
+    copy_wide_text(wc3_legacy_arg32(c, 0u), expression, sizeof expression);
+    copy_wide_text(wc3_legacy_arg32(c, 1u), file, sizeof file);
+    wc3_crash_note_assert(expression, file, line);
+#if WC3_DEBUG && WC3_DEBUG_HLE
     fprintf(stderr, "[hle] assertion failed: %s, file %s, line %u\n",
-            expression, file, wc3_legacy_arg32(c, 2u));
+            expression, file, line);
     fflush(stderr);
 #endif
+    wc3_crash_emit("assertion", 3, NULL, 0);
     _Exit(3);
 }
 

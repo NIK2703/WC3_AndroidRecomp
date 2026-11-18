@@ -19,12 +19,13 @@ extern "C" {
  * extent.  The real SurfaceView window stays the monitor and the consumer of
  * the final, upscaled image.
  *
- * The target exists only when the pass would change something: when the guest
- * extent differs from the surface extent.  At native resolution the pass is a
- * pure 1:1 copy, so ensure() leaves DXVK on the real window instead.  A mode
- * change starts or retires the target at runtime; retirement unpublishes it
- * immediately but keeps the reader alive until DXVK has destroyed the swap
- * chain that references it (see wc3_present_target_reap).
+ * The target exists only when presentation needs it.  A half-resolution grid
+ * run needs the reader and screen pass for its exact 2x nearest image.  A
+ * lower guest mode outside the grid uses the real window with guest-sized
+ * buffer geometry and lets the compositor scale.  Native retires both paths.
+ * Screen present mode and buffering apply to DXVK's real-window swap chain,
+ * not to a forced 1:1 pass.  Retirement unpublishes immediately but keeps the
+ * reader until DXVK destroys the swap chain that references it.
  *
  * What this module guarantees, and what it does not.
  *
@@ -68,9 +69,10 @@ extern "C" {
  * different extent parks the old reader and publishes a new one. */
 int wc3_present_target_start(uint32_t width, uint32_t height);
 
-/* Follow the display mode.  The target is started (or resized) only when the
- * guest extent differs from the surface extent; at native size it is retired,
- * because the pass would otherwise copy the image 1:1 for nothing.  Returns 0
+/* Follow the display mode.  A half-resolution grid target is started (or
+ * resized) when the guest extent differs from the surface extent; grid off
+ * below native publishes a direct real-window extent instead of a reader.
+ * Native size retires both, because the 1:1 pass changes nothing.  Returns 0
  * on success (including "not needed"), -errno on failure. */
 int wc3_present_target_ensure(uint32_t guest_w, uint32_t guest_h,
                               uint32_t surface_w, uint32_t surface_h);
@@ -90,6 +92,10 @@ void wc3_present_target_reap(void);
 
 /* 1 when a producer is published and frames are expected to arrive. */
 int wc3_present_target_active(void);
+
+/* 1 when grid off below native is presenting directly into the real window.
+ * Not a producer: no reader and no screen swap chain exist on this path. */
+int wc3_present_target_direct(void);
 
 /* Current guest extent.  Returns 0 and leaves the outputs untouched when the
  * target is not active. */

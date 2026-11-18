@@ -30,6 +30,8 @@ object LaunchContract {
     const val KEY_GRID_DARKEN_PERCENT = "grid_darken_percent"
     const val KEY_GRID_CYCLE_SECONDS = "grid_cycle_seconds"
     const val KEY_PRESENT_SCALE = "present_scale"
+    const val KEY_PRESENT_MODE = "present_mode"
+    const val KEY_PRESENT_BUFFERS = "present_buffers"
 
     /* The authored .icp profile uses 120 ms for both gesture timers.  The
      * settings screen exposes only the product range 100..200 ms, step 10. */
@@ -85,6 +87,33 @@ object LaunchContract {
     const val PRESENT_SCALE_SYSTEM = "system"
     const val PRESENT_SCALE_HALF = "half"
 
+    /* The final screen swap chain, not DXVK's guest swap chain.  FIFO is the
+     * default and the safe fallback.  The native pass checks the surface's
+     * supported modes before creating the swap chain and substitutes FIFO for
+     * an unsupported choice.  These are the four modes an ordinary Android
+     * SurfaceView can use; shared-present modes are extension-only and are not
+     * offered here. */
+    const val PRESENT_MODE_FIFO = "fifo"
+    const val PRESENT_MODE_FIFO_RELAXED = "fifo_relaxed"
+    const val PRESENT_MODE_MAILBOX = "mailbox"
+    const val PRESENT_MODE_IMMEDIATE = "immediate"
+    val PRESENT_MODES = listOf(
+        PRESENT_MODE_FIFO,
+        PRESENT_MODE_FIFO_RELAXED,
+        PRESENT_MODE_MAILBOX,
+        PRESENT_MODE_IMMEDIATE
+    )
+    const val DEFAULT_PRESENT_MODE = PRESENT_MODE_FIFO
+
+    /* Extra screen swap-chain images above the surface's reported
+     * minImageCount.  0 keeps the previous behaviour (the minimum) and is the
+     * product default; 1 and 2 add one or two images, clamped by
+     * maxImageCount in the native pass.  This is not a request to force the
+     * presentation engine to queue that many frames. */
+    const val DEFAULT_PRESENT_BUFFERS = 0
+    const val MIN_PRESENT_BUFFERS = 0
+    const val MAX_PRESENT_BUFFERS = 2
+
     /* Parallel guest gameplay loops are opt-in.  The default keeps the
      * original sequential functions (WC3_PARALLEL_GAMEPLAY=0) for every
      * build; the switch enables the deterministic multi-core paths for the
@@ -92,8 +121,10 @@ object LaunchContract {
     const val DEFAULT_PARALLEL_EXECUTION = false
 
     /* The product default is DXVK 1.10.3 ("1").  An empty version is the
-     * explicit "Auto" choice and keeps the driver-based compatibility gate. */
+     * explicit "Auto" choice and keeps the driver-based compatibility gate.
+     * The low-latency 3.1.1 build ("ll") is opt-in. */
     const val DEFAULT_DXVK_VERSION = "1"
+    const val DXVK_VERSION_LOW_LATENCY = "ll"
 
     /* DXVK defaults to an uncapped D3D9 swapchain.  The product starts with a
      * 60 FPS cap so the first launch is not a battery/thermal stress test; the
