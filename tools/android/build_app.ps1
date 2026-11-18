@@ -588,15 +588,29 @@ if ($isOptimized -and $Pgo -eq 'use' -and $PgoProfile) {
         $distPgoProfile = (Resolve-Path -LiteralPath $profileCandidate).Path
     }
 }
+if ($env:WC3_DIST_AUTO -eq '0') {
+    Clear-Wc3DistEnv
+}
 Invoke-Wc3AutoDistributedBuild -ScriptPath $PSCommandPath `
     -Parameters $PSBoundParameters -Root $root -Variant $Variant `
     -PgoProfile $distPgoProfile
+if ($env:WC3_DIST_ACTIVE -ne '1' -and $env:WC3_DIST -ne '1') {
+    # The parent already probed the workers.  Keep nested targets (DXVK,
+    # adrenotools) from repeating the same timeout when none was reachable,
+    # and drop a stale transport from an earlier shell.
+    $env:WC3_DIST_AUTO = '0'
+    Clear-Wc3DistEnv
+}
 
 # DXVK is a target product now: both archives are built from
 # third_party/dxvk by the target script, not consumed from the legacy tree.
+# Pass the effective job count explicitly so a standalone build_dxvk.ps1
+# cannot fall back to a fixed local number after auto-distribution has already
+# measured every worker.
 $dxvkScript = Join-Path $PSScriptRoot 'build_dxvk.ps1'
 $dxvkVariant = if ($isDebug) { 'debug' } else { 'release' }
-& $dxvkScript -Variant $dxvkVariant -Api 26 -Ndk $ndk.Root
+$dxvkJobs = Get-Wc3BuildJobCount
+& $dxvkScript -Variant $dxvkVariant -Api 26 -Ndk $ndk.Root -Jobs $dxvkJobs
 
 if (-not $GamesActivityAar -and $env:WC3_GAMEACTIVITY_AAR) {
     $GamesActivityAar = $env:WC3_GAMEACTIVITY_AAR

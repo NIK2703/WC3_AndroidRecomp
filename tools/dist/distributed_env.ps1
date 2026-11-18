@@ -45,6 +45,23 @@ function Get-Wc3DistPython {
     return $null
 }
 
+function Get-Wc3BuildJobCount {
+    # Every target that does not pass an explicit job count uses the full
+    # machine: the auto-distribution trampoline puts the local-plus-worker
+    # total in CMAKE_BUILD_PARALLEL_LEVEL, otherwise ProcessorCount is the
+    # local total.  WC3_DIST_JOBS remains the explicit override.
+    param([int]$Explicit = 0)
+    if ($Explicit -gt 0) { return $Explicit }
+    foreach ($name in @('WC3_DIST_JOBS', 'CMAKE_BUILD_PARALLEL_LEVEL')) {
+        $raw = [Environment]::GetEnvironmentVariable($name, 'Process')
+        $value = 0
+        if ($raw -and [int]::TryParse($raw, [ref]$value) -and $value -gt 0) {
+            return $value
+        }
+    }
+    return [Math]::Max(1, [Environment]::ProcessorCount)
+}
+
 function Set-Wc3DistEnv {
     param(
         [hashtable]$Previous,
@@ -68,6 +85,24 @@ function Restore-Wc3DistEnv {
         Remove-Item -LiteralPath "Env:\$Name" -ErrorAction SilentlyContinue
     } else {
         [Environment]::SetEnvironmentVariable($Name, $value, 'Process')
+    }
+}
+
+function Clear-Wc3DistEnv {
+    # WC3_DIST_AUTO=0 or --no-dist must also discard a transport exported by a
+    # parent build.  Keep WC3_DIST_JOBS and a custom CCACHE_PREFIX; remove only
+    # the process settings owned by this project.
+    $prefix = [Environment]::GetEnvironmentVariable('CCACHE_PREFIX', 'Process')
+    if ($prefix -and $prefix -like '*wc3_dist_cc.py*') {
+        Remove-Item -LiteralPath 'Env:\CCACHE_PREFIX' -ErrorAction SilentlyContinue
+    }
+    foreach ($name in @('DISTCC_HOSTS', 'DISTCC_DIR', 'WC3_DIST',
+            'WC3_DIST_ACTIVE', 'WC3_DIST_TRANSPORT', 'WC3_DIST_JOBS_EFFECTIVE',
+            'WC3_DISTCC_EXE', 'WC3_DIST_REMOTE_BASENAME',
+            'WC3_DIST_REMOTE_NDK', 'WC3_DIST_ALLOW_LTO',
+            'WC3_DIST_ALLOW_PGO', 'WC3_DIST_PGO_PROFILE_READY',
+            'CMAKE_BUILD_PARALLEL_LEVEL')) {
+        Remove-Item -LiteralPath "Env:\$name" -ErrorAction SilentlyContinue
     }
 }
 

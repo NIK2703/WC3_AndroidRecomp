@@ -168,6 +168,24 @@ tools/android/build_app.sh
 tools/android/build_apk.sh --install --launch
 ```
 
+On Termux these launchers can also distribute clang to the desktop PC, using
+the PC as a distcc worker over an SSH tunnel. The PC is found by MAC on every
+start, so no IPv4 address is stored. One-time setup is needed before the first
+distributed build:
+
+```sh
+tools/dist/pc_tunnel.sh setup-key
+```
+
+After that every native POSIX target (`build_app.sh`, `build_apk.sh`,
+`build_dxvk.sh`, and `build_adrenotools.sh`) starts the worker automatically
+when it is reachable and falls back to a local build otherwise. A nested target
+inherits the parent's tunnel instead of opening a second one. By default each
+machine contributes all of its available cores: every local CPU on the phone
+plus every PC core. Pass `--no-dist` to force one local invocation and keep
+nested targets local too. See `tools/dist/README.md` for the PC prerequisites,
+slot overrides and state files.
+
 On Termux/Linux/macOS they discover the SDK, NDK, JDK, Gradle, CMake, Ninja,
 and ccache from the host layout, build missing lift tools, DXVK archives, and
 adrenotools inputs automatically, and use all available CPU cores by default.

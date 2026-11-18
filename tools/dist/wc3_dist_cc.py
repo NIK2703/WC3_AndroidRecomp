@@ -30,6 +30,8 @@ a build.
 import atexit
 import json
 import os
+import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -37,6 +39,8 @@ import tempfile
 import time
 import zlib
 from pathlib import Path
+
+IS_WINDOWS = os.name == "nt"
 
 SOURCE_EXTS = {".c", ".cc", ".cpp", ".cxx", ".c++", ".cp"}
 CPP_EXTS = {".cc", ".cpp", ".cxx", ".c++", ".cp"}
@@ -60,11 +64,22 @@ def env(name, default=None):
     return value if value not in (None, "") else default
 
 
+def state_base():
+    """Return the per-user state directory on Windows and POSIX."""
+    explicit = env("WC3_DIST_STATE_DIR")
+    if explicit:
+        return Path(explicit)
+    if IS_WINDOWS:
+        return Path(env("LOCALAPPDATA", tempfile.gettempdir())) / "wc3-dist"
+    base = env("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+    return Path(base) / "wc3-dist"
+
+
 def log(message):
     if env("WC3_DIST_DEBUG") != "1":
         return
     try:
-        base = Path(env("LOCALAPPDATA", tempfile.gettempdir())) / "wc3-dist"
+        base = state_base()
         base.mkdir(parents=True, exist_ok=True)
         with open(base / "client.log", "a", encoding="utf-8") as handle:
             handle.write("%s pid=%d %s\n" %
@@ -88,7 +103,7 @@ def acquire_local_slot():
         count = os.cpu_count() or 4
     count = max(1, count)
     try:
-        slots = Path(env("LOCALAPPDATA", tempfile.gettempdir())) / "wc3-dist" / "local-slots"
+        slots = state_base() / "local-slots"
         slots.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + float(env("WC3_DIST_LOCAL_WAIT", "1800"))
         announced = False
@@ -139,6 +154,52 @@ def run_local(compiler, args):
         release_local_slot()
 
 
+def ensure_local_shims(compiler, child_env):
+    """Make the remote compiler basename executable on this host.
+
+    distcc hands the remote distccd the compiler name exactly as it was given
+    on the command line.  On POSIX the wrapper passes ``clang``/``clang++`` so
+    the Windows worker resolves its own NDK through PATH.  distcc also needs
+    that name locally for preprocessing and for a local fallback, so a tiny
+    shim in the state directory forwards to the real local NDK compiler.
+    """
+    base = os.path.basename(compiler)
+    if base.endswith(".exe"):
+        base = base[:-4]
+    if base not in ("clang", "clang++"):
+        return
+    target = compiler
+    if not os.path.isabs(target):
+        target = shutil.which(target) or target
+    target = os.path.abspath(target)
+    directory = Path(env("WC3_DIST_SHIM_DIR", str(state_base() / "shims")))
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log("shim directory error: %s" % exc)
+        return
+
+    names = [(base, target)]
+    sibling = os.path.join(os.path.dirname(target),
+                           "clang++" if base == "clang" else "clang")
+    if os.path.isfile(sibling):
+        names.append((os.path.basename(sibling), sibling))
+    for name, path in names:
+        shim = directory / name
+        content = "#!/bin/sh\nexec %s \"$@\"\n" % shlex.quote(path)
+        try:
+            if shim.is_file() and shim.read_text(encoding="utf-8") == content:
+                os.chmod(shim, 0o755)
+                continue
+            temporary = shim.with_name("%s.%d.tmp" % (name, os.getpid()))
+            temporary.write_text(content, encoding="utf-8")
+            os.chmod(temporary, 0o755)
+            os.replace(temporary, shim)
+        except OSError as exc:
+            log("shim write failed for %s: %s" % (shim, exc))
+    child_env["PATH"] = str(directory) + os.pathsep + child_env.get("PATH", "")
+
+
 def run_distcc(compiler, args, local_only=False):
     """Hand a command to distcc.
 
@@ -147,12 +208,27 @@ def run_distcc(compiler, args, local_only=False):
     machine use a localhost-only host list, which makes distcc take one of the
     local compiler slots; this keeps the local concurrency capped even when
     debug info, LTO or another unsupported flag is present.
+
+    On POSIX the compiler is passed by basename.  The Windows worker finds its
+    own NDK through PATH, while the local shims answer distcc's preprocessing
+    and local retry.  The local command line keeps its original sysroot: a
+    nonexistent sysroot is harmless for preprocessed input, and preserving it
+    means a failed remote job can retry locally without a rewritten path.
     """
-    distcc = env("WC3_DISTCC_EXE", r"C:\msys64\usr\bin\distcc.exe")
-    if not os.path.isfile(distcc):
-        log("distcc not found: %s" % distcc)
-        return run_local(compiler, args)
+    if IS_WINDOWS:
+        distcc = env("WC3_DISTCC_EXE", r"C:\msys64\usr\bin\distcc.exe")
+        if not os.path.isfile(distcc):
+            log("distcc not found: %s" % distcc)
+            return run_local(compiler, args)
+    else:
+        distcc = env("WC3_DISTCC_EXE") or shutil.which("distcc") or ""
+        if not distcc or not (os.path.isfile(distcc) or shutil.which(distcc)):
+            log("distcc not found: %s" % distcc)
+            return run_local(compiler, args)
     os.environ.setdefault("TMPDIR", tempfile.gettempdir())
+    tmpdir = env("TMPDIR")
+    if tmpdir and not os.path.isdir(tmpdir):
+        os.environ["TMPDIR"] = tempfile.gettempdir()
     state = env("DISTCC_DIR")
     if state:
         try:
@@ -168,14 +244,27 @@ def run_distcc(compiler, args, local_only=False):
         slots = max(1, slots)
         child_env["DISTCC_HOSTS"] = (
             "localhost/{0} --localslots={0} --localslots_cpp={0}".format(slots))
-    # CMake stores the NDK compiler with forward slashes.  The phone shims are
-    # named with the Windows backslash form and found through PATH; a compiler
-    # argument containing "/" would instead be treated as a path relative to
-    # distccd's working directory.  Windows accepts either separator, so hand
-    # distcc the backslash form.
-    distcc_compiler = compiler.replace("/", "\\")
+    # CMake stores the NDK compiler with forward slashes.  On Windows the
+    # phone shims are named with the Windows backslash form and found through
+    # PATH.  On POSIX the basename lets the Windows distccd resolve its own
+    # NDK instead of looking for the Termux path.
+    basename_mode = env("WC3_DIST_REMOTE_BASENAME",
+                        "0" if IS_WINDOWS else "1") == "1"
+    if basename_mode:
+        distcc_compiler = os.path.basename(compiler)
+        if distcc_compiler.endswith(".exe"):
+            distcc_compiler = distcc_compiler[:-4]
+        ensure_local_shims(compiler, child_env)
+    elif IS_WINDOWS:
+        distcc_compiler = compiler.replace("/", "\\")
+    else:
+        distcc_compiler = compiler
     log("distcc%s: %s" % (" local" if local_only else "", distcc_compiler))
-    return subprocess.call([distcc, distcc_compiler] + args, env=child_env)
+    try:
+        return subprocess.call([distcc, distcc_compiler] + args, env=child_env)
+    except OSError as exc:
+        log("distcc launch failed: %s" % exc)
+        return run_local(compiler, args)
 
 
 def find_output(args):
@@ -275,7 +364,13 @@ def eligible(compiler, args):
     base = os.path.basename(compiler).lower()
     if base not in ("clang", "clang.exe", "clang++", "clang++.exe"):
         return False
-    if "/ndk/" not in compiler.replace("\\", "/").lower():
+    norm = compiler.replace("\\", "/").lower()
+    ndk_root = env("WC3_DIST_NDK_ROOT")
+    is_ndk = "/ndk/" in norm or "/android-ndk" in norm
+    if ndk_root:
+        prefix = ndk_root.replace("\\", "/").lower().rstrip("/") + "/"
+        is_ndk = is_ndk or norm.startswith(prefix)
+    if not is_ndk:
         return False
     if "-c" not in args:
         return False
@@ -320,16 +415,35 @@ def eligible(compiler, args):
     return True
 
 
+def slot_limit():
+    """Return the SSH-transport remote slot cap without a fixed default.
+
+    ``WC3_DIST_SLOTS`` is the precise worker count when the caller knows it
+    (build_dist.ps1 sets it from the remote CPU probe).  Otherwise use the
+    build's total concurrency, then every local CPU; a direct invocation must
+    not silently cap a 12-core worker at an old eight-slot constant.
+    """
+    for name in ("WC3_DIST_SLOTS", "WC3_DIST_JOBS",
+                 "CMAKE_BUILD_PARALLEL_LEVEL"):
+        raw = env(name)
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+    return max(1, os.cpu_count() or 1)
+
+
 def acquire_slot():
     global _slot
-    try:
-        count = int(env("WC3_DIST_SLOTS", "8"))
-    except ValueError:
-        count = 8
+    count = slot_limit()
     if count <= 0:
         return None
     try:
-        slots = Path(env("LOCALAPPDATA", tempfile.gettempdir())) / "wc3-dist" / "slots"
+        slots = state_base() / "slots"
         slots.mkdir(parents=True, exist_ok=True)
         for index in range(count):
             path = slots / ("slot%d" % index)
@@ -468,8 +582,12 @@ def remote_args(args, original_source, language):
 
 
 def ssh_command(host):
-    ssh = env("WC3_DIST_SSH", r"C:\Program Files\Git\usr\bin\ssh.exe")
-    key = env("WC3_DIST_KEY", str(Path.home() / ".ssh" / "id_ideapad"))
+    if IS_WINDOWS:
+        ssh = env("WC3_DIST_SSH", r"C:\Program Files\Git\usr\bin\ssh.exe")
+        key = env("WC3_DIST_KEY", str(Path.home() / ".ssh" / "id_ideapad"))
+    else:
+        ssh = env("WC3_DIST_SSH", shutil.which("ssh") or "ssh")
+        key = env("WC3_DIST_KEY", str(Path.home() / ".ssh" / "id_wc3_pc"))
     python = env("WC3_DIST_REMOTE_PYTHON", "C:/msys64/ucrt64/bin/python.exe")
     script = env("WC3_DIST_REMOTE_SCRIPT", "E:/wc3-dist/compile_one.py")
     user = env("WC3_DIST_USER", "nikita")
@@ -582,13 +700,20 @@ def main():
     compiler = argv[0]
     args = argv[1:]
 
-    transport = env("WC3_DIST_TRANSPORT", "ssh")
+    transport = env("WC3_DIST_TRANSPORT", "ssh" if IS_WINDOWS else "distcc")
     if transport not in ("ssh", "distcc"):
         log("unknown transport %r" % transport)
         return run_local(compiler, args)
     if transport == "distcc":
         if not eligible(compiler, args):
-            return run_distcc(compiler, args, local_only=True)
+            # Host compiles and commands distcc cannot distribute stay local.
+            # Do not route them through distcc's localhost slots: the compiler
+            # may itself be a ccache wrapper (build_tools.sh uses
+            # ~/bin/clang), and distcc's recursion marker then leaks into the
+            # nested ccache invocation and aborts the compile.  run_local()
+            # already takes a counted local slot, so the concurrency cap is
+            # unchanged.
+            return run_local(compiler, args)
         return run_distcc(compiler, args)
 
     if not eligible(compiler, args):

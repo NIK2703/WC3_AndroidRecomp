@@ -23,7 +23,7 @@ param(
     [ValidateSet('release', 'debug')]
     [string]$Variant = 'release',
     [int]$Api = 26,
-    [int]$Jobs = 12,
+    [int]$Jobs = 0,
     [switch]$Full,
     [string]$Ndk = ''
 )
@@ -32,6 +32,22 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 . (Join-Path $root 'tools\ccache.ps1')
 . (Join-Path $root 'tools\build_warnings.ps1')
+. (Join-Path $root 'tools\dist\distributed_env.ps1')
+
+# A standalone DXVK target uses every reachable worker exactly like the app
+# build.  If build_app.ps1 already owns the transport this returns without
+# opening a second tunnel.  The job count is resolved after the trampoline so
+# it can include both local and remote slots.
+if ($env:WC3_DIST_AUTO -eq '0') {
+    Clear-Wc3DistEnv
+}
+Invoke-Wc3AutoDistributedBuild -ScriptPath $PSCommandPath `
+    -Parameters $PSBoundParameters -Root $root -Variant $Variant
+if ($env:WC3_DIST_ACTIVE -ne '1' -and $env:WC3_DIST -ne '1') {
+    $env:WC3_DIST_AUTO = '0'
+    Clear-Wc3DistEnv
+}
+if ($Jobs -le 0) { $Jobs = Get-Wc3BuildJobCount }
 
 # Native tools write progress to stderr.  Windows PowerShell turns that into a
 # NativeCommandError under ErrorActionPreference Stop even when the tool exits

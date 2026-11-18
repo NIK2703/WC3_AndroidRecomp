@@ -11,6 +11,7 @@
 #   $t = .\tools\dist\distcc_tunnel.ps1 -Action start -NoPhone
 #   ...
 #   .\tools\dist\distcc_tunnel.ps1 -Action stop
+#   .\tools\dist\distcc_tunnel.ps1 -Action slots   # IDEAPAD CPU count only
 #
 # The start action prints one JSON object with Port, RemoteSlots, LocalSlots,
 # PhonePort, PhoneSlots and Pid.  A worker that is unavailable has zero slots
@@ -19,7 +20,7 @@
 # %LOCALAPPDATA%\wc3-dist\distcc-tunnel.json.
 [CmdletBinding()]
 param(
-    [ValidateSet('start', 'stop', 'status')]
+    [ValidateSet('start', 'stop', 'status', 'slots')]
     [string]$Action = 'start',
     [string]$HostName = '',
     [int]$LocalSlots = 0,
@@ -121,13 +122,17 @@ function Invoke-Remote([string]$Config, [string]$Command) {
 }
 
 function Get-RemoteSlots([string]$Config) {
+    # Avoid a cmd-only variable expansion: the SSH login shell may be
+    # PowerShell.  ProcessorCount is the same logical CPU count that the
+    # local side uses, so the default remains all available cores.
     $value = & $ssh -F $Config -o BatchMode=yes -o ConnectTimeout=8 `
-        $sshAlias 'echo %NUMBER_OF_PROCESSORS%' 2>$null
+        $sshAlias 'cmd /c powershell -NoProfile -Command "[Environment]::ProcessorCount"' 2>$null
+    $line = $value | Select-Object -Last 1
     $parsed = 0
-    if ([int]::TryParse((($value | Select-Object -Last 1).Trim()), [ref]$parsed) -and $parsed -gt 0) {
+    if ($line -and [int]::TryParse(([string]$line).Trim(), [ref]$parsed) -and $parsed -gt 0) {
         return $parsed
     }
-    throw 'could not read NUMBER_OF_PROCESSORS from IDEAPAD; pass -RemoteSlots'
+    throw 'could not read the IDEAPAD CPU count; pass -RemoteSlots'
 }
 
 function Get-FreeLoopbackPort {
@@ -180,6 +185,27 @@ if ($Action -eq 'status') {
     $state = Get-State
     if ($state) { $state | ConvertTo-Json -Compress } else { '{}' }
     exit 0
+}
+
+if ($Action -eq 'slots') {
+    # Report the worker's own logical CPU count without starting a tunnel.
+    # build_dist.ps1 uses this for the legacy SSH transport so its default is
+    # all of IDEAPAD's cores instead of a fixed eight.
+    try {
+        $target = Resolve-Ideapad
+        $config = New-SshConfig $target
+        try {
+            Get-RemoteSlots $config
+        } finally {
+            Remove-Item -LiteralPath $config -Force -ErrorAction SilentlyContinue
+        }
+        exit 0
+    } catch {
+        if ($env:WC3_DIST_DEBUG -eq '1') {
+            Write-Warning "[dist] IDEAPAD slot probe failed: $($_.Exception.Message)"
+        }
+        exit 3
+    }
 }
 
 if ($Action -eq 'stop') {

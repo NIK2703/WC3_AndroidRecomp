@@ -12,7 +12,7 @@
 #
 # Usage:
 #   tools/android/build_dxvk.sh --variant debug [--api 26] [--jobs N] [--full]
-#                               [--no-deps]
+#                               [--no-deps] [--no-dist]
 #
 # Exit codes: 0 built, 1 failure, 2 unavailable (SDK/NDK/ccache missing).
 set -euo pipefail
@@ -23,8 +23,10 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 variant=release
 api=26
 jobs=""
+jobs_explicit=0
 full=0
 no_deps=0
+no_dist=0
 ndk_arg=""
 
 while [ $# -gt 0 ]; do
@@ -33,10 +35,11 @@ while [ $# -gt 0 ]; do
         --variant=*) variant=${1#*=}; shift ;;
         --api) api=${2:-}; shift 2 ;;
         --api=*) api=${1#*=}; shift ;;
-        --jobs) jobs=${2:-}; shift 2 ;;
-        --jobs=*) jobs=${1#*=}; shift ;;
+        --jobs) jobs=${2:-}; jobs_explicit=1; shift 2 ;;
+        --jobs=*) jobs=${1#*=}; jobs_explicit=1; shift ;;
         --full) full=1; shift ;;
         --no-deps) no_deps=1; shift ;;
+        --no-dist) no_dist=1; shift ;;
         --ndk) ndk_arg=${2:-}; shift 2 ;;
         --ndk=*) ndk_arg=${1#*=}; shift ;;
         -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
@@ -44,7 +47,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 case "$variant" in release|debug) ;; *) echo "build_dxvk.sh: bad variant: $variant" >&2; exit 1 ;; esac
-[ -n "$jobs" ] || jobs=$(wc3_cpu_count)
+if [ "$no_dist" = 1 ]; then
+    export WC3_DIST_AUTO=0
+fi
+. "$root/tools/dist/distcc_env.sh"
+if [ "$no_dist" = 1 ] || [ "${WC3_DIST_AUTO:-1}" = 0 ]; then
+    wc3_dist_clear_env
+fi
 
 if [ "$WC3_IS_WINDOWS" = 1 ]; then
     if [ "$no_deps" = 0 ] &&
@@ -52,7 +61,8 @@ if [ "$WC3_IS_WINDOWS" = 1 ]; then
          wc3_lift_tools_stale; }; then
         "$root/tools/lift/build_tools.sh"
     fi
-    ps_args=(-Variant "$variant" -Api "$api" -Jobs "$jobs")
+    ps_args=(-Variant "$variant" -Api "$api")
+    [ "$jobs_explicit" = 1 ] && ps_args+=(-Jobs "$jobs")
     [ "$full" = 1 ] && ps_args+=(-Full)
     [ -n "$ndk_arg" ] && ps_args+=(-Ndk "$(wc3_win_arg_path "$(wc3_abs "$ndk_arg")")")
     wc3_delegate_ps1 tools/android/build_dxvk.ps1 "${ps_args[@]}"
@@ -69,6 +79,28 @@ ccache=$(wc3_find_ccache || true)
 if [ -z "$ccache" ]; then
     echo '[dxvk] unavailable: ccache not found (BP-12 requires it)' >&2
     exit 2
+fi
+
+# A standalone DXVK target uses the same desktop-PC worker as build_app.sh.
+# When build_app.sh already owns the transport this call only inherits its
+# environment; it never opens a second tunnel.  Without --jobs the worker's
+# slots are added to every local core.
+if [ "$no_dist" = 0 ]; then
+    WC3_DIST_NDK_ROOT=${WC3_DIST_NDK_ROOT:-$ndk}
+    export WC3_DIST_NDK_ROOT
+    if wc3_dist_enable "$variant"; then
+        trap 'wc3_dist_cleanup' EXIT
+        if [ "$jobs_explicit" = 0 ] && [ "${WC3_DIST_JOBS_EFFECTIVE:-0}" -gt 0 ] 2>/dev/null; then
+            jobs=$WC3_DIST_JOBS_EFFECTIVE
+        fi
+    fi
+fi
+if [ -z "$jobs" ] || ! [ "$jobs" -gt 0 ] 2>/dev/null; then
+    if [ -n "${WC3_DIST_JOBS:-}" ] && [ "$WC3_DIST_JOBS" -gt 0 ] 2>/dev/null; then
+        jobs=$WC3_DIST_JOBS
+    else
+        jobs=$(wc3_cpu_count)
+    fi
 fi
 
 dxvk_root=$root/third_party/dxvk

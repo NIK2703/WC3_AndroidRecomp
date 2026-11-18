@@ -96,7 +96,7 @@ rm -f "$SLOTS_FILE" "$BASE/shim.err"
 # Capacity: Android gives background apps a small cpuset (usually 0-2).  With
 # root, move distccd to the top-app cpuset to reach the big cores.  Without
 # root, stay on nproc and keep --jobs honest.
-BASE_JOBS=$(nproc 2>/dev/null || echo 1)
+BASE_JOBS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
 BASE_JOBS=${BASE_JOBS:-1}
 TOP_CPUS=""
 TOP_JOBS=0

@@ -11,7 +11,7 @@
 #   tools/android/build_apk.sh [--variant debug] [--jobs N] [--install]
 #                              [--launch] [--offline] [--skip-native]
 #                              [--aar <file>] [--ndk <dir>]
-#                              [--serial <adb-serial>]
+#                              [--serial <adb-serial>] [--no-dist]
 #
 # Exit codes: 0 built, 1 failure, 2 unavailable (SDK/JDK/Gradle/AAR).
 set -euo pipefail
@@ -24,7 +24,9 @@ install=0
 launch=0
 offline=0
 skip_native=0
+no_dist=0
 jobs=""
+jobs_explicit=0
 serial=""
 aar_arg=""
 ndk_arg=""
@@ -36,8 +38,9 @@ while [ $# -gt 0 ]; do
         --launch) launch=1; shift ;;
         --offline) offline=1; shift ;;
         --skip-native) skip_native=1; shift ;;
-        --jobs) jobs=${2:-}; shift 2 ;;
-        --jobs=*) jobs=${1#*=}; shift ;;
+        --no-dist) no_dist=1; shift ;;
+        --jobs) jobs=${2:-}; jobs_explicit=1; shift 2 ;;
+        --jobs=*) jobs=${1#*=}; jobs_explicit=1; shift ;;
         --serial) serial=${2:-}; shift 2 ;;
         --serial=*) serial=${1#*=}; shift ;;
         --aar) aar_arg=${2:-}; shift 2 ;;
@@ -51,7 +54,13 @@ done
 case "$variant" in release|debug) ;;
     *) echo "build_apk.sh: bad variant: $variant" >&2; exit 1 ;;
 esac
-[ -n "$jobs" ] || jobs=$(wc3_cpu_count)
+if [ "$no_dist" = 1 ]; then
+    export WC3_DIST_AUTO=0
+fi
+. "$root/tools/dist/distcc_env.sh"
+if [ "$no_dist" = 1 ] || [ "${WC3_DIST_AUTO:-1}" = 0 ]; then
+    wc3_dist_clear_env
+fi
 is_debug=0; [ "$variant" = debug ] && is_debug=1
 gradle_variant=$variant
 gradle_task=assembleDebug
@@ -104,7 +113,10 @@ if [ "$WC3_IS_WINDOWS" = 1 ]; then
     [ -n "$serial" ] && ps_args+=(-Serial "$serial")
     [ -n "$aar_arg" ] &&
         ps_args+=(-GamesActivityAar "$(wc3_win_arg_path "$(wc3_abs "$aar_arg")")")
-    ps_args+=(-NativeBuildArgs "-j $jobs")
+    # Leave the native job count unset by default.  build_app.ps1 then uses
+    # CMAKE_BUILD_PARALLEL_LEVEL from its auto-distribution helper, which
+    # includes every reachable worker; a fixed local -j would cap it.
+    [ "$jobs_explicit" = 1 ] && ps_args+=(-NativeBuildArgs "-j $jobs")
     wc3_delegate_ps1 tools/android/build_apk.ps1 "${ps_args[@]}"
     exit $?
 fi
@@ -135,7 +147,9 @@ mkdir -p "$jni_dir"
 so_src=$out/cmake/libwc3gameactivity.so
 
 if [ "$skip_native" = 0 ]; then
-    app_args=(--variant "$variant" --jobs "$jobs")
+    app_args=(--variant "$variant")
+    [ -n "$jobs" ] && app_args+=(--jobs "$jobs")
+    [ "$no_dist" = 1 ] && app_args+=(--no-dist)
     [ -n "$ndk_arg" ] && app_args+=(--ndk "$ndk_arg")
     [ -n "$aar_arg" ] && app_args+=(--aar "$aar_arg")
     "$root/tools/android/build_app.sh" "${app_args[@]}" || exit 1

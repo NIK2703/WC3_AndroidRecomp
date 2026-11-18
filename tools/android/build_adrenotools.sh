@@ -10,7 +10,7 @@
 #
 # Usage:
 #   tools/android/build_adrenotools.sh [--hooks <dir>] [--from-apk <apk>]
-#                                      [--jobs N] [--ndk <dir>]
+#                                      [--jobs N] [--ndk <dir>] [--no-dist]
 #
 # Output: build/android-shared/adrenotools/{libadrenotools.a,
 #         liblinkernsbypass.a,source-build.json}
@@ -27,6 +27,8 @@ hooks=""
 apk=""
 ndk_arg=""
 jobs=""
+jobs_explicit=0
+no_dist=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -34,15 +36,18 @@ while [ $# -gt 0 ]; do
         --hooks=*) hooks=${1#*=}; shift ;;
         --from-apk) apk=${2:-}; shift 2 ;;
         --from-apk=*) apk=${1#*=}; shift ;;
-        --jobs) jobs=${2:-}; shift 2 ;;
-        --jobs=*) jobs=${1#*=}; shift ;;
+        --jobs) jobs=${2:-}; jobs_explicit=1; shift 2 ;;
+        --jobs=*) jobs=${1#*=}; jobs_explicit=1; shift ;;
         --ndk) ndk_arg=${2:-}; shift 2 ;;
         --ndk=*) ndk_arg=${1#*=}; shift ;;
+        --no-dist) no_dist=1; shift ;;
         -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
         *) echo "build_adrenotools.sh: unknown argument: $1" >&2; exit 1 ;;
     esac
 done
-jobs=${jobs:-$(wc3_cpu_count)}
+if [ "$no_dist" = 1 ]; then
+    export WC3_DIST_AUTO=0
+fi
 python=$(wc3_find_python) || { echo 'unavailable: python3' >&2; exit 2; }
 
 [ -f "$pin" ] || { echo "missing vendor pin: $pin" >&2; exit 1; }
@@ -65,6 +70,32 @@ if [ -z "$ccache_bin" ]; then
         echo 'unavailable: ccache (BP-12)' >&2; exit 2
     fi
     echo 'warning: ccache not found; compiling without it' >&2
+fi
+
+. "$root/tools/dist/distcc_env.sh"
+if [ "$no_dist" = 1 ] || [ "${WC3_DIST_AUTO:-1}" = 0 ]; then
+    wc3_dist_clear_env
+fi
+
+# Standalone adrenotools compiles use the same desktop-PC worker as the app.
+# The Windows host is local to distccd here, so it keeps its own cores; the
+# build_app.sh parent already owns the transport when this is a nested call.
+if [ "$WC3_IS_WINDOWS" = 0 ] && [ "$no_dist" = 0 ]; then
+    WC3_DIST_NDK_ROOT=${WC3_DIST_NDK_ROOT:-$ndk}
+    export WC3_DIST_NDK_ROOT
+    if wc3_dist_enable release; then
+        trap 'wc3_dist_cleanup' EXIT
+        if [ "$jobs_explicit" = 0 ] && [ "${WC3_DIST_JOBS_EFFECTIVE:-0}" -gt 0 ] 2>/dev/null; then
+            jobs=$WC3_DIST_JOBS_EFFECTIVE
+        fi
+    fi
+fi
+if [ -z "$jobs" ] || ! [ "$jobs" -gt 0 ] 2>/dev/null; then
+    if [ -n "${WC3_DIST_JOBS:-}" ] && [ "$WC3_DIST_JOBS" -gt 0 ] 2>/dev/null; then
+        jobs=$WC3_DIST_JOBS
+    else
+        jobs=$(wc3_cpu_count)
+    fi
 fi
 
 mkdir -p "$out" "$root/build/vendor"

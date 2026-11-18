@@ -7,7 +7,7 @@
 #
 # Capacity model (distcc transport):
 #   * the local machine contributes ProcessorCount compiler slots;
-#   * IDEAPAD contributes its own NUMBER_OF_PROCESSORS slots;
+#   * IDEAPAD contributes its own logical CPU count as slots;
 #   * the hotspot phone contributes its boosted top-app CPU count, or nproc
 #     when Termux cannot use root to reach the big cores;
 #   * Ninja starts local plus every available worker, distcc fills the
@@ -97,6 +97,7 @@ if ($Variant -in @('release_optimized', 'release_optimized_pgo') -and
 
 $tunnel = $null
 $distccState = $null
+$tunnelScript = Join-Path $PSScriptRoot 'distcc_tunnel.ps1'
 $phoneSlots = 0
 $phonePort = 0
 $phoneTarget = ''
@@ -104,7 +105,6 @@ $started = Get-Date
 
 try {
     if ($Transport -eq 'distcc') {
-        $tunnelScript = Join-Path $PSScriptRoot 'distcc_tunnel.ps1'
         $tunnelJson = & $tunnelScript -Action start -LocalSlots $LocalSlots `
             -RemoteSlots $RemoteSlots -RemotePort $RemotePort `
             -PgoProfile $PgoProfile -NoIdeapad:(-not $useIdeapad) `
@@ -171,7 +171,17 @@ try {
             if ($Jobs -le 0) { $Jobs = $LocalSlots }
             Write-Warning '[dist] the SSH transport needs IDEAPAD; building locally'
         } else {
-            if ($RemoteSlots -le 0) { $RemoteSlots = 8 }
+            if ($RemoteSlots -le 0) {
+                $slotText = & $tunnelScript -Action slots 2>$null
+                $slotLine = $slotText | Select-Object -Last 1
+                $parsedSlots = 0
+                if ($slotLine -and [int]::TryParse(([string]$slotLine).Trim(), [ref]$parsedSlots) -and $parsedSlots -gt 0) {
+                    $RemoteSlots = $parsedSlots
+                } else {
+                    throw ('could not read IDEAPAD slot count; ' +
+                        'pass -RemoteSlots or -Slots')
+                }
+            }
             if ($Jobs -le 0) {
                 $Jobs = $LocalSlots + $RemoteSlots
             }
