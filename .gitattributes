@@ -13,3 +13,5 @@
 *.py text
 *.json text
 *.tsv text
+# POSIX launchers run under bash on Termux, Linux and MSYS2.
+*.sh text eol=lf

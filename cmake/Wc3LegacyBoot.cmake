@@ -507,30 +507,75 @@ if(WC3_PRODUCT_COMPILE_OPTIONS)
 endif()
 
 # --- libadrenotools / liblinkernsbypass ------------------------------------
-# Pinned legacy build inputs for ADR-036.  They are BSD-2-Clause vendor
-# binaries, not build scripts; third_party/VENDOR_MANIFEST.md records the
-# licence and source evidence.  A source vendor replaces these archives
-# without changing the C interface in vulkan_driver_android.c.
+# BSD-2-Clause vendor inputs for ADR-036.  Two provenances are accepted:
+# the historical pinned legacy build and a source build from the commits in
+# third_party/libadrenotools/VENDOR_COMMIT (tools/android/build_adrenotools.sh).
+# The second set is what a Termux/Linux host uses; the first keeps an existing
+# pinned legacy tree valid without silently changing its bytes.
+# third_party/VENDOR_MANIFEST.md records the licence and source evidence.
 set(WC3_ADRENOTOOLS_DIR
-    "${WC3_LEGACY_ROOT}/build/android-shared/adrenotools")
+    "${WC3_LEGACY_ROOT}/build/android-shared/adrenotools"
+    CACHE PATH "Directory with libadrenotools.a / liblinkernsbypass.a")
 set(WC3_ADRENOTOOLS_ARCHIVE "${WC3_ADRENOTOOLS_DIR}/libadrenotools.a")
 set(WC3_LINKERNSBYPASS_ARCHIVE
     "${WC3_ADRENOTOOLS_DIR}/liblinkernsbypass.a")
 set(WC3_ADRENOTOOLS_HASHES
-    "libadrenotools.a=22d71eb19343af4a0a524c860b7caf258a7b92fdb1cd71c2eb44d49a91a69f1d"
-    "liblinkernsbypass.a=91a5893282ce4839e887e35e8726c2e5c6436c9e8192031039339abd968222fc")
+    "libadrenotools.a=22d71eb19343af4a0a524c860b7caf258a7b92fdb1cd71c2eb44d49a91a69f1d,45e4cc2d2cf6ef29f1e96b9565983ca47c4afcec1a16c0ad782bd63cf91be73e"
+    "liblinkernsbypass.a=91a5893282ce4839e887e35e8726c2e5c6436c9e8192031039339abd968222fc,36c16f6a23c97d7aa33010ece92d6b5eda1a8b6f43782c0c7206a9153882622e")
+# A source build can produce host-dependent archive bytes.  build_adrenotools.sh
+# records the two source commits and the produced hashes in source-build.json;
+# this opt-in trusts that manifest only after rechecking the commits against
+# VENDOR_COMMIT.  Legacy pinned archives stay on the fixed list above.
+option(WC3_ADRENOTOOLS_TRUST_MANIFEST
+    "Accept archive hashes from the source-build.json generated from VENDOR_COMMIT"
+    OFF)
+if(WC3_ADRENOTOOLS_TRUST_MANIFEST)
+    set(_manifest "${WC3_ADRENOTOOLS_DIR}/source-build.json")
+    if(NOT EXISTS "${_manifest}")
+        message(FATAL_ERROR "adrenotools manifest missing: ${_manifest}")
+    endif()
+    file(READ "${_manifest}" _manifest_text)
+    string(JSON _manifest_schema GET "${_manifest_text}" schema)
+    if(NOT _manifest_schema EQUAL 1)
+        message(FATAL_ERROR "unsupported adrenotools manifest schema: ${_manifest_schema}")
+    endif()
+    file(STRINGS "${WC3_ROOT}/third_party/libadrenotools/VENDOR_COMMIT" _pin_lines)
+    set(_pin_adrenotools "")
+    set(_pin_linker "")
+    foreach(_line IN LISTS _pin_lines)
+        if(_line MATCHES "^libadrenotools +[^ ]+ +([0-9a-f]+)$")
+            set(_pin_adrenotools "${CMAKE_MATCH_1}")
+        elseif(_line MATCHES "^liblinkernsbypass +[^ ]+ +([0-9a-f]+)$")
+            set(_pin_linker "${CMAKE_MATCH_1}")
+        endif()
+    endforeach()
+    string(JSON _adrenotools_commit GET "${_manifest_text}" libadrenotools_commit)
+    string(JSON _linker_commit GET "${_manifest_text}" liblinkernsbypass_commit)
+    if(NOT _adrenotools_commit STREQUAL _pin_adrenotools OR
+       NOT _linker_commit STREQUAL _pin_linker)
+        message(FATAL_ERROR
+            "source-build.json commits do not match VENDOR_COMMIT")
+    endif()
+    string(JSON _main_hash GET "${_manifest_text}" archives "libadrenotools.a")
+    string(JSON _linker_hash GET "${_manifest_text}" archives "liblinkernsbypass.a")
+    set(WC3_ADRENOTOOLS_HASHES
+        "libadrenotools.a=${_main_hash}"
+        "liblinkernsbypass.a=${_linker_hash}")
+endif()
 foreach(_entry IN LISTS WC3_ADRENOTOOLS_HASHES)
     string(REPLACE "=" ";" _pair "${_entry}")
     list(GET _pair 0 _name)
-    list(GET _pair 1 _expected)
+    list(GET _pair 1 _spec)
+    string(REPLACE "," ";" _expected "${_spec}")
     set(_path "${WC3_ADRENOTOOLS_DIR}/${_name}")
     if(NOT EXISTS "${_path}")
-        message(FATAL_ERROR "legacy adrenotools input missing: ${_path}")
+        message(FATAL_ERROR "adrenotools input missing: ${_path}")
     endif()
     file(SHA256 "${_path}" _actual)
-    if(NOT _actual STREQUAL _expected)
+    if(NOT _actual IN_LIST _expected)
         message(FATAL_ERROR
-            "adrenotools input ${_name} sha256 ${_actual} != ${_expected}")
+            "adrenotools input ${_name} sha256 ${_actual} is not an accepted "
+            "pinned/source-built hash (${_spec})")
     endif()
 endforeach()
 

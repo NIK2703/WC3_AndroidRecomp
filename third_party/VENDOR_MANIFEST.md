@@ -16,8 +16,8 @@
 | AndroidX Media3 **1.7.1** + Media3Avi **2.7.1** | **да**, `third_party/media3/` | `github.com/androidx/media` tag `1.7.1`, commit `5d42f5b5527c3e8d1a3e6ec155fc7c263bab3dd9`; `github.com/dburckh/Media3Avi` tag `2.7.1`, commit `23936fefaf7bd32976d93f42079ca915a2078f2c` | **Apache-2.0** (Media3, Guava, AndroidX) и **MIT** (Media3Avi, Copyright (c) 2022 Dustin) | `third_party/media3/LICENSE-APACHE-2.0.txt`, `third_party/media3/LICENSE-MIT-Media3Avi.txt` | только Java/Kotlin host-библиотеки, не native runtime; Media3Avi даёт AVI-демуксер и display-order PTS для MPEG-4 Part 2 B-кадров; файлы вендорены как offline local Maven `third_party/media3/repo/`, без локальных патчей; версии и SHA-256 — `third_party/media3/VENDOR_COMMIT`, состав — `third_party/media3/README.md` |
 | `winlator-input` (touch engine) | **нет** (`runtime/android/controls/vendor/winlator-input/` старого дерева) | `E:\projects\winlator-enhanced-inpu-controls-2`, commit `208371f89e2e2d218263308f26ee02bbf149a70e` | **MIT**, Copyright (c) 2023 BrunoSX | `LICENSE` в vendor-каталоге | профиль `Warcraft 3.icp` в upstream untracked; копировать по SHA-256 `349B6113…E04`, а не «похожий» профиль |
 | `dxvk_win32` shim | **да**, `third_party/dxvk/shim/` | собственный код проекта; перенесён из `runtime/android/dxvk_win32.cpp` + `runtime/android/dxvk_shim/` | проектное право | — | vendor-boundary, не guest runtime; компилируется в 1.10.3 archive и остаётся unprefixed при symbol isolation |
-| `libadrenotools` | **частично**: `third_party/libadrenotools/` (LICENSE/README), архивы `22d71e…`/`91a589…` линкуются из pinned legacy build, hooks `libmain_hook.so`/`libhook_impl.so` упакованы в `jniLibs` | `github.com/bylaws/libadrenotools`, README: Android 9+ / arm64 | **BSD-2-Clause**, Copyright (c) 2021 Billy Laws | `third_party/libadrenotools/LICENSE` | загрузка пользовательского Vulkan HAL без root; `hookLibDir` = extracted hooks, `customDriverDir` только app-private. `VENDOR_COMMIT` всё ещё открыт: до него архивы — переходный pinned build input, не source vendor |
-| `liblinkernsbypass` | **частично**: `liblinkernsbypass.a` (`91a589…`) линкуется из pinned legacy build | `github.com/bylaws/liblinkernsbypass`, submodule libadrenotools | **BSD-2-Clause** (тот же текст, что у libadrenotools) | `third_party/libadrenotools/LICENSE` | private linker namespace для Android 9+; вендорится одним пин-коммитом с libadrenotools. Хэши и список файлов — `third_party/libadrenotools/README.md` |
+| `libadrenotools` | **да** (source pin): `third_party/libadrenotools/` (LICENSE/README/`VENDOR_COMMIT`); архивы собираются `tools/android/build_adrenotools.sh` из commit `8fae8ce254dfc1344527e05301e43f37dea2df80`, hooks `libmain_hook.so`/`libhook_impl.so` — pinned transitional DSO в `jniLibs` | `github.com/bylaws/libadrenotools`, README: Android 9+ / arm64 | **BSD-2-Clause**, Copyright (c) 2021 Billy Laws | `third_party/libadrenotools/LICENSE` | загрузка пользовательского Vulkan HAL без root; `hookLibDir` = extracted hooks, `customDriverDir` только app-private. CMake принимает и старый pinned legacy архив (`22d71e…`), и source-built (`45e4cc…`); сборка — `tools/android/build_adrenotools.sh` |
+| `liblinkernsbypass` | **да** (source pin): `liblinkernsbypass.a` собирается `tools/android/build_adrenotools.sh` из commit `aa3975893d83ef1bc84c321ec60c65fbf1287887` (submodule libadrenotools) | `github.com/bylaws/liblinkernsbypass`, submodule libadrenotools | **BSD-2-Clause** (тот же текст, что у libadrenotools) | `third_party/libadrenotools/LICENSE` | private linker namespace для Android 9+; CMake принимает старый pinned legacy архив (`91a589…`) и source-built (`36c16f…`). Хэши и список файлов — `third_party/libadrenotools/README.md` |
 | Capstone **5.x** (headers + `capstone.dll`) | **да**, `third_party/capstone/` | `E:\projects\warcraft3_recomp\tools\wc3skill\src\capstone\` и `bin\capstone.dll`, upstream rev `791bdbaf3135` (пин в `config/build_upstream.json`) | **НЕ ПОДТВЕРЖДЕНО локально** (upstream заявляет BSD-3-Clause) | — | только host-side инструменты, в APK не входит. `*.h` и DLL копируются побайтно, sha256 пинится; перед публикацией дерева обязательно положить LICENSE из upstream. Исключение R3 для `bin/capstone.dll` зафиксировано в `.gitignore` |
 | FFmpeg **7.1.1** | **да**, `third_party/ffmpeg/` | `https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz`, SHA-256 `733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1` | **LGPL-2.1-or-later** | `third_party/ffmpeg/COPYING.LGPLv2.1`, `third_party/ffmpeg/LICENSE.md` | статические arm64-библиотеки для ASP-видео кампании; включены только AVI demuxer, MPEG-4 Part 2 decoder/parser, file protocol и swscale, без GPL/nonfree и без MP3; сборка и конфигурация — `third_party/ffmpeg/README.md`, SHA-256 архивов — `VENDOR_COMMIT` |
 
@@ -51,13 +51,13 @@
    не сгенерированный C. Локальных патчей нет, состав и SHA-256 —
    `third_party/media3/VENDOR_COMMIT`, причина выбора и offline-layout —
    `third_party/media3/README.md`.
-9. `libadrenotools.a`, `liblinkernsbypass.a` и hooks `libmain_hook.so` /
-   `libhook_impl.so` — **переходные** Android product inputs (ADR-036). Их
-   sha256 проверяет `cmake/Wc3LegacyBoot.cmake` (архивы) и фиксирует
-   `third_party/libadrenotools/README.md` (все четыре файла). Это не source
-   vendor: замена на исходники обязана добавить `VENDOR_COMMIT` и LICENSE
-   рядом с исходниками. Hooks лежат только в APK `jniLibs`, не в
-   сгенерированном C и не в guest ABI.
+9. `libadrenotools.a` / `liblinkernsbypass.a` собираются из source pin
+   `third_party/libadrenotools/VENDOR_COMMIT` скриптом
+   `tools/android/build_adrenotools.sh`; CMake принимает два набора хэшей —
+   старый pinned legacy build и source-built. Hooks `libmain_hook.so` /
+   `libhook_impl.so` остаются pinned transitional DSO и лежат только в APK
+   `jniLibs`, не в сгенерированном C и не в guest ABI. Хэши — в
+   `third_party/libadrenotools/README.md`.
 
 ## Что осталось открытым
 
@@ -65,9 +65,10 @@
   (`docs/FILE_LAYOUT.md`), по одному компоненту за коммит.
 * Лицензия adrenotools **установлена** (2026-11-10): `libadrenotools` и
   `liblinkernsbypass` — BSD-2-Clause, Copyright (c) 2021 Billy Laws; текст
-  прочитан в upstream `LICENSE` (git blob `a8f664a7…`). Компонент ещё не
-  вендорен: нужны `VENDOR_COMMIT`, LICENSE рядом с исходниками и attribution
-  в NOTICE APK. Проект использования — `docs/DRIVER_PACKAGES.md` (ADR-036
+  прочитан в upstream `LICENSE` (git blob `a8f664a7…`). Source pin добавлен
+  в `third_party/libadrenotools/VENDOR_COMMIT`, архивы собираются
+  `tools/android/build_adrenotools.sh`; остаётся attribution в NOTICE APK.
+  Проект использования — `docs/DRIVER_PACKAGES.md` (ADR-036
   `proposed`).
 * DXVK 1.10.3/3.1.1/low-latency и `dxvk_win32` перенесены 2026-11-10
   (low-latency — 2026-11-15); патчи и ревизии —

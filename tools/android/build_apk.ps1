@@ -64,13 +64,15 @@ param(
     [int]$W3LLatency = 100,
     [string]$Serial = '',
     [string]$GamesActivityAar = '',
+    [string]$AdrenotoolsDir = '',
     # Product builds use the relifted corpus by default.  Pass -CorpusRoot ''
     # together with -W3LCompat off for the legacy exact-baseline build.
     [string]$CorpusRoot = 'build/corpus-full',
     # Extra CMake configure arguments forwarded to build_app.ps1, e.g.
     # -DWC3_PARALLEL_RAYCAST=ON for a performance-test APK.  Kept as a string
     # so callers can pass several -D options without changing this script.
-    [string]$CMakeArgs = ''
+    [string]$CMakeArgs = '',
+    [string]$NativeBuildArgs = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -133,30 +135,64 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 . (Join-Path $root 'tools\build_warnings.ps1')
 $projectDir = Join-Path $root 'apps\android_gameactivity'
 $outDir = Join-Path $root 'build\android_app'
+if (-not $GamesActivityAar -and $env:WC3_GAMEACTIVITY_AAR) {
+    $GamesActivityAar = $env:WC3_GAMEACTIVITY_AAR
+}
+if ($GamesActivityAar -and -not [IO.Path]::IsPathRooted($GamesActivityAar)) {
+    $GamesActivityAar = Join-Path $root $GamesActivityAar
+}
 
 function Get-AndroidSdk {
     $candidates = @()
+    if ($env:WC3_SDK)          { $candidates += $env:WC3_SDK }
     if ($env:ANDROID_SDK_ROOT) { $candidates += $env:ANDROID_SDK_ROOT }
     if ($env:ANDROID_HOME)     { $candidates += $env:ANDROID_HOME }
     if ($env:LOCALAPPDATA)     { $candidates += (Join-Path $env:LOCALAPPDATA 'Android\Sdk') }
+    if ($env:USERPROFILE)      { $candidates += (Join-Path $env:USERPROFILE 'Android\Sdk') }
+    if ($env:ProgramFiles)     { $candidates += (Join-Path $env:ProgramFiles 'Android\Sdk') }
+    $candidates += 'C:\Android\Sdk'
     $candidates += 'E:\Android\Sdk'
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path (Join-Path $c 'platform-tools\adb.exe'))) {
+    foreach ($c in ($candidates | Select-Object -Unique)) {
+        if (-not $c -or -not (Test-Path $c)) { continue }
+        if (Test-Path (Join-Path $c 'platform-tools\adb.exe')) {
             return (Resolve-Path $c).Path
         }
+        $bt = Get-ChildItem (Join-Path $c 'build-tools') -Directory `
+            -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName 'aapt2.exe') } |
+            Select-Object -First 1
+        if ($bt) { return (Resolve-Path $c).Path }
     }
     return $null
 }
 
 function Get-Jdk {
     $candidates = @()
-    if ($env:JAVA_HOME) { $candidates += $env:JAVA_HOME }
-    if ($env:USERPROFILE) { $candidates += (Join-Path $env:USERPROFILE 'tools') }
+    if ($env:WC3_JAVA_HOME) { $candidates += $env:WC3_JAVA_HOME }
+    if ($env:JAVA_HOME)     { $candidates += $env:JAVA_HOME }
+    if ($env:LOCALAPPDATA) {
+        $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\Android Studio\jbr')
+    }
+    if ($env:ProgramFiles) {
+        $candidates += (Join-Path $env:ProgramFiles 'Android\Android Studio\jbr')
+        $candidates += (Join-Path $env:ProgramFiles 'Java')
+        $candidates += (Join-Path $env:ProgramFiles 'Eclipse Adoptium')
+    }
+    if ($env:USERPROFILE) {
+        $candidates += (Join-Path $env:USERPROFILE 'tools')
+        $candidates += (Join-Path $env:USERPROFILE '.jdks')
+    }
     foreach ($c in $candidates) {
         if (-not $c -or -not (Test-Path $c)) { continue }
-        if (Test-Path (Join-Path $c 'bin\java.exe')) { return (Resolve-Path $c).Path }
+        if ((Test-Path (Join-Path $c 'bin\java.exe')) -and
+            (Test-Path (Join-Path $c 'bin\javac.exe'))) {
+            return (Resolve-Path $c).Path
+        }
         $child = Get-ChildItem $c -Directory -ErrorAction SilentlyContinue |
-            Where-Object { Test-Path (Join-Path $_.FullName 'bin\java.exe') } |
+            Where-Object {
+                (Test-Path (Join-Path $_.FullName 'bin\java.exe')) -and
+                (Test-Path (Join-Path $_.FullName 'bin\javac.exe'))
+            } |
             Sort-Object Name -Descending | Select-Object -First 1
         if ($child) { return $child.FullName }
     }
@@ -164,16 +200,39 @@ function Get-Jdk {
 }
 
 function Get-Gradle {
-    $roots = @(
-        (Join-Path $env:USERPROFILE '.gradle\wrapper\dists\gradle-8.10.2-all'),
-        (Join-Path $env:USERPROFILE 'tools\gradle-8.10.2')
-    )
-    foreach ($r in $roots) {
+    if ($env:WC3_GRADLE) {
+        $cmd = Get-Command $env:WC3_GRADLE -ErrorAction SilentlyContinue
+        if ($cmd) { return $cmd.Source }
+        if (Test-Path $env:WC3_GRADLE) {
+            $p = (Resolve-Path $env:WC3_GRADLE).Path
+            if (Test-Path $p -PathType Container) {
+                $bat = Get-ChildItem $p -Recurse -File -Filter 'gradle.bat' `
+                    -ErrorAction SilentlyContinue |
+                    Select-Object -First 1 -ExpandProperty FullName
+                if ($bat) { return $bat }
+            } else {
+                return $p
+            }
+        }
+    }
+    $roots = @()
+    if ($env:GRADLE_USER_HOME) {
+        $roots += (Join-Path $env:GRADLE_USER_HOME 'wrapper\dists')
+    }
+    if ($env:USERPROFILE) {
+        $roots += (Join-Path $env:USERPROFILE '.gradle\wrapper\dists')
+        $roots += (Join-Path $env:USERPROFILE 'tools\gradle-8.10.2')
+    }
+    foreach ($r in ($roots | Select-Object -Unique)) {
         if (-not (Test-Path $r)) { continue }
-        $bat = Get-ChildItem $r -Recurse -File -Filter 'gradle.bat' -ErrorAction SilentlyContinue |
+        $bat = Get-ChildItem $r -Recurse -File -Filter 'gradle.bat' `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'gradle-8\.10\.2' } |
             Select-Object -First 1 -ExpandProperty FullName
         if ($bat) { return $bat }
     }
+    $cmd = Get-Command gradle.bat -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
     return $null
 }
 
@@ -182,7 +241,10 @@ function Get-BuildTools {
     $dirs = Get-ChildItem (Join-Path $Sdk 'build-tools') -Directory -ErrorAction SilentlyContinue |
         Sort-Object Name -Descending
     foreach ($d in $dirs) {
-        if (Test-Path (Join-Path $d.FullName 'aapt2.exe')) { return $d.FullName }
+        if ((Test-Path (Join-Path $d.FullName 'aapt2.exe')) -and
+            (Test-Path (Join-Path $d.FullName 'zipalign.exe'))) {
+            return $d.FullName
+        }
     }
     return $null
 }
@@ -190,15 +252,33 @@ function Get-BuildTools {
 function Get-NdkRoot {
     param([string]$Sdk)
     $roots = @()
+    if ($env:WC3_NDK)          { $roots += $env:WC3_NDK }
     if ($env:ANDROID_NDK_HOME) { $roots += $env:ANDROID_NDK_HOME }
     if ($env:ANDROID_NDK_ROOT) { $roots += $env:ANDROID_NDK_ROOT }
-    $parent = Join-Path $Sdk 'ndk'
-    if (Test-Path $parent) {
-        $roots += @(Get-ChildItem $parent -Directory |
-            Sort-Object Name -Descending |
-            ForEach-Object { $_.FullName })
+    if ($env:ANDROID_NDK)      { $roots += $env:ANDROID_NDK }
+    if ($env:USERPROFILE) {
+        $roots += (Join-Path $env:USERPROFILE 'tools\android-ndk-r29')
+        $roots += (Join-Path $env:USERPROFILE 'android-ndk-r29')
     }
+    if ($Sdk) {
+        $parent = Join-Path $Sdk 'ndk'
+        if (Test-Path $parent) {
+            $roots += @(Get-ChildItem $parent -Directory |
+                Sort-Object Name -Descending |
+                ForEach-Object { $_.FullName })
+        }
+    }
+    $scan = @()
     foreach ($r in ($roots | Select-Object -Unique)) {
+        if (-not $r -or -not (Test-Path $r)) { continue }
+        $scan += $r
+        if (-not (Test-Path (Join-Path $r 'source.properties'))) {
+            $scan += @(Get-ChildItem $r -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                ForEach-Object { $_.FullName })
+        }
+    }
+    foreach ($r in ($scan | Select-Object -Unique)) {
         if (Test-Path (Join-Path $r 'toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe')) {
             return (Resolve-Path $r).Path
         }
@@ -213,7 +293,10 @@ if (-not $jdk) { Write-Host '[apk] unavailable: JDK not found'; exit 2 }
 $gradle = Get-Gradle
 if (-not $gradle) { Write-Host '[apk] unavailable: Gradle 8.10.2 not found'; exit 2 }
 $buildTools = Get-BuildTools -Sdk $sdk
-if (-not $buildTools) { Write-Host '[apk] unavailable: aapt2 not found'; exit 2 }
+if (-not $buildTools) {
+    Write-Host '[apk] unavailable: Android build-tools (aapt2/zipalign) not found'
+    exit 2
+}
 
 New-Item -ItemType Directory -Force $outDir | Out-Null
 
@@ -221,7 +304,9 @@ New-Item -ItemType Directory -Force $outDir | Out-Null
 $nativeScript = Join-Path $PSScriptRoot 'build_app.ps1'
 $nativeParams = @{ Variant = $variant }
 if ($CMakeArgs) { $nativeParams['CMakeArgs'] = $CMakeArgs }
+if ($NativeBuildArgs) { $nativeParams['NativeBuildArgs'] = $NativeBuildArgs }
 if ($GamesActivityAar) { $nativeParams['GamesActivityAar'] = $GamesActivityAar }
+if ($AdrenotoolsDir) { $nativeParams['AdrenotoolsDir'] = $AdrenotoolsDir }
 # Always forward the value, including an explicit empty string: the empty
 # value is the legacy exact-baseline escape hatch and must override the
 # build_app default.
@@ -315,15 +400,67 @@ Copy-Item $nativeSo $jniSo -Force
 # ADR-036/DRV-20: libadrenotools hooks stay pinned transitional binaries until
 # the upstream sources are vendored.  Copy them next to the product .so and
 # verify the exact bytes instead of trusting a stale manual jniLibs copy.
-$adrenotoolsDir = $env:WC3_ADRENOTOOLS_DIR
+$adrenotoolsDir = $AdrenotoolsDir
 if (-not $adrenotoolsDir) {
-    $upstream = Get-Content (Join-Path $root 'config\build_upstream.json') -Raw |
-        ConvertFrom-Json
-    $adrenotoolsDir = Join-Path $upstream.upstream.path 'build/android-shared/adrenotools'
+    $adrenotoolsDir = $env:WC3_ADRENOTOOLS_DIR
+}
+if ($adrenotoolsDir -and -not [IO.Path]::IsPathRooted($adrenotoolsDir)) {
+    $adrenotoolsDir = Join-Path $root $adrenotoolsDir
+}
+if (-not $adrenotoolsDir) {
+    $sourceBuilt = Join-Path $root 'build\android-shared\adrenotools'
+    if ((Test-Path (Join-Path $sourceBuilt 'libmain_hook.so')) -and
+        (Test-Path (Join-Path $sourceBuilt 'libhook_impl.so'))) {
+        $adrenotoolsDir = $sourceBuilt
+    } else {
+        $upstream = Get-Content (Join-Path $root 'config\build_upstream.json') -Raw |
+            ConvertFrom-Json
+        $adrenotoolsDir = Join-Path $upstream.upstream.path 'build/android-shared/adrenotools'
+    }
 }
 $hookHashes = [ordered]@{
     'libmain_hook.so' = 'be1cbb5774d76d1a06be0e2f67d4c11d681f9af9cb8959d5e2a6c0fa285bc103'
     'libhook_impl.so' = 'f95475bd98254c9172c9efa29ced69dc3404631fff96fbb589b4c919e6e9d855'
+}
+$hooksPresent = $true
+foreach ($hook in $hookHashes.Keys) {
+    if (-not (Test-Path (Join-Path $adrenotoolsDir $hook))) {
+        $hooksPresent = $false
+    }
+}
+if (-not $hooksPresent) {
+    $sourceBuilt = Join-Path $root 'build\android-shared\adrenotools'
+    if ((Test-Path (Join-Path $sourceBuilt 'libmain_hook.so')) -and
+        (Test-Path (Join-Path $sourceBuilt 'libhook_impl.so'))) {
+        $adrenotoolsDir = $sourceBuilt
+        $hooksPresent = $true
+    }
+}
+if (-not $hooksPresent) {
+    # Never write into the read-only legacy tree.  Seed the new vendor output
+    # from the previous APK, matching build_apk.sh.
+    $oldApk = Join-Path $outDir "wc3-$variant.apk"
+    if (-not (Test-Path $oldApk)) {
+        $oldApk = Join-Path $outDir 'wc3-debug.apk'
+    }
+    if (Test-Path $oldApk) {
+        $seedDir = Join-Path $root 'build\android-shared\adrenotools'
+        New-Item -ItemType Directory -Force $seedDir | Out-Null
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($oldApk)
+        try {
+            foreach ($hook in $hookHashes.Keys) {
+                $entry = $zip.GetEntry("lib/arm64-v8a/$hook")
+                if ($entry) {
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile(
+                        $entry, (Join-Path $seedDir $hook), $true)
+                }
+            }
+        } finally {
+            $zip.Dispose()
+        }
+        $adrenotoolsDir = $seedDir
+    }
 }
 foreach ($hook in $hookHashes.Keys) {
     $source = Join-Path $adrenotoolsDir $hook
@@ -461,13 +598,91 @@ if ($jniSoInfo.Length -le 0) { Write-Host '[apk] native library is empty'; exit 
 # network cache descriptor.  games-activity has no POM dependencies, so this
 # is the only artifact Gradle needs for the app module.
 $localMaven = Join-Path $outDir 'local-maven'
-$cache = Join-Path $env:USERPROFILE '.gradle\caches\modules-2\files-2.1\androidx.games\games-activity\4.4.2'
-if (-not (Test-Path $cache)) { Write-Host '[apk] unavailable: games-activity cache missing'; exit 2 }
 $dest = Join-Path $localMaven 'androidx\games\games-activity\4.4.2'
 New-Item -ItemType Directory -Force $dest | Out-Null
-Get-ChildItem $cache -Recurse -File | Where-Object {
-    $_.Extension -in '.aar', '.pom', '.jar', '.module'
-} | ForEach-Object { Copy-Item $_.FullName (Join-Path $dest $_.Name) -Force }
+
+# An explicit -GamesActivityAar must not depend on a populated Gradle cache.
+$cache = ''
+$aarSource = $GamesActivityAar
+if (-not $aarSource -or -not (Test-Path $aarSource)) {
+    $caches = @(
+        (Join-Path $outDir "$variant\games-activity-4.4.2.aar")
+    )
+    if ($env:GRADLE_USER_HOME) {
+        $caches += Join-Path $env:GRADLE_USER_HOME `
+            'caches\modules-2\files-2.1\androidx.games\games-activity\4.4.2'
+    }
+    if ($env:USERPROFILE) {
+        $caches += Join-Path $env:USERPROFILE `
+            '.gradle\caches\modules-2\files-2.1\androidx.games\games-activity\4.4.2'
+        $caches += Join-Path $env:USERPROFILE `
+            '.m2\repository\androidx\games\games-activity\4.4.2\games-activity-4.4.2.aar'
+    }
+    foreach ($candidate in $caches) {
+        if (-not (Test-Path $candidate)) { continue }
+        if (Test-Path $candidate -PathType Leaf) {
+            $cache = ''
+            $aarSource = $candidate
+        } else {
+            $cache = $candidate
+            $aarSource = Get-ChildItem $candidate -Recurse -File `
+                -Filter 'games-activity-4.4.2.aar' -ErrorAction SilentlyContinue |
+                Select-Object -First 1 -ExpandProperty FullName
+        }
+        if ($aarSource) { break }
+    }
+}
+if (-not $aarSource -or -not (Test-Path $aarSource)) {
+    Write-Host '[apk] unavailable: games-activity-4.4.2.aar not found'
+    exit 2
+}
+$aarSource = (Resolve-Path $aarSource).Path
+Copy-Item $aarSource (Join-Path $dest 'games-activity-4.4.2.aar') -Force
+
+# The AAR is metadata-light; prefer the published POM, then the repository
+# fallback shipped next to the app module.
+$pomSource = @()
+if ($env:WC3_GAMEACTIVITY_POM) {
+    $pom = $env:WC3_GAMEACTIVITY_POM
+    if (-not [IO.Path]::IsPathRooted($pom)) {
+        $pom = Join-Path $root $pom
+    }
+    $pomSource += $pom
+}
+if ($GamesActivityAar) {
+    $pomSource += [IO.Path]::ChangeExtension($GamesActivityAar, '.pom')
+}
+$pomSource += Join-Path $root 'apps\android_gameactivity\app\libs\games-activity-4.4.2.pom'
+if ($cache -and (Test-Path $cache)) {
+    $pomSource += Get-ChildItem $cache -Recurse -File -Filter '*.pom' `
+        -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if ($env:USERPROFILE) {
+    $pomSource += Join-Path $env:USERPROFILE `
+        '.m2\repository\androidx\games\games-activity\4.4.2\games-activity-4.4.2.pom'
+}
+$pomCopied = $false
+foreach ($pom in $pomSource) {
+    if ($pom -and (Test-Path $pom)) {
+        Copy-Item $pom (Join-Path $dest 'games-activity-4.4.2.pom') -Force
+        $pomCopied = $true
+        break
+    }
+}
+if (-not $pomCopied) {
+    $pomText = @'
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>androidx.games</groupId>
+  <artifactId>games-activity</artifactId>
+  <version>4.4.2</version>
+  <packaging>aar</packaging>
+</project>
+'@
+    Set-Content -LiteralPath (Join-Path $dest 'games-activity-4.4.2.pom') `
+        -Value $pomText -Encoding UTF8
+}
 
 $env:JAVA_HOME = $jdk
 $env:ANDROID_HOME = $sdk

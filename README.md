@@ -160,9 +160,37 @@ tools\android\build_apk.ps1                 # debug, wc3.recomp.debug
 tools\android\build_apk.ps1 -Release        # release, wc3.recomp
 ```
 
-Both commands default to the relifted `build/corpus-full` corpus and the
-`rubattle` W3L profile. Pass `-W3LCompat off` for the exact baseline, or
-`-CorpusRoot '' -W3LCompat off` for the legacy corpus.
+The same entry points are available as POSIX shell launchers on Termux,
+Linux, and macOS:
+
+```sh
+tools/android/build_app.sh
+tools/android/build_apk.sh --install --launch
+```
+
+On Termux/Linux/macOS they discover the SDK, NDK, JDK, Gradle, CMake, Ninja,
+and ccache from the host layout, build missing lift tools, DXVK archives, and
+adrenotools inputs automatically, and use all available CPU cores by default.
+On Windows/MSYS2 the shell launchers delegate to the canonical PowerShell
+scripts above and build the lift tools first; native dependencies come from an
+existing source-built or pinned legacy vendor directory. `build_adrenotools.sh`
+can produce the source-built directory from MSYS2 when the legacy tree is not
+available.
+The NDK linker stays the default; Termux automatically selects its native
+`ld.lld`, and `WC3_LD_PATH` overrides the linker on another host when the NDK
+LLD fails during `--gc-sections`/`--icf`.
+
+Discovery can be overridden with `WC3_SDK`, `WC3_NDK`, `WC3_JAVA_HOME`,
+`WC3_GRADLE`, `WC3_CMAKE`, `WC3_NINJA`, `WC3_CCACHE`, `WC3_PYTHON`,
+`WC3_ADRENOTOOLS_DIR`, and `WC3_GAMEACTIVITY_AAR`/`WC3_GAMEACTIVITY_POM`.
+The GameActivity AAR is taken from the variant output,
+`GRADLE_USER_HOME/caches` (default `~/.gradle`), `~/.m2`, or an explicit
+`--aar`. A repository-local POM keeps the offline Maven repository usable
+when the Gradle cache has an AAR but no POM.
+
+Both command families default to the relifted `build/corpus-full` corpus and
+the `rubattle` W3L profile. On PowerShell, pass `-W3LCompat off` for the exact
+baseline, or `-CorpusRoot '' -W3LCompat off` for the legacy corpus.
 
 Run host-side T0 checks with:
 

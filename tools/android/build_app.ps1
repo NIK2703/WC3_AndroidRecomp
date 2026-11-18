@@ -34,6 +34,7 @@ param(
                  'release_optimized', 'release_optimized_pgo')]
     [string]$Variant = 'release',
     [string]$GamesActivityAar = '',
+    [string]$AdrenotoolsDir = '',
     # release_optimized is release plus ThinLTO and a two-stage PGO profile.
     # release_optimized_pgo is the on-device training build: profile generation
     # only, with no LTO.  The final release_optimized build consumes the merged
@@ -407,22 +408,40 @@ if ($selection24Value -eq 'ON' -and -not $CorpusRoot) {
 
 function Get-AndroidSdk {
     $candidates = @()
+    if ($env:WC3_SDK)          { $candidates += $env:WC3_SDK }
     if ($env:ANDROID_SDK_ROOT) { $candidates += $env:ANDROID_SDK_ROOT }
     if ($env:ANDROID_HOME)     { $candidates += $env:ANDROID_HOME }
     if ($env:LOCALAPPDATA)     { $candidates += (Join-Path $env:LOCALAPPDATA 'Android\Sdk') }
+    if ($env:USERPROFILE)      { $candidates += (Join-Path $env:USERPROFILE 'Android\Sdk') }
+    if ($env:ProgramFiles)     { $candidates += (Join-Path $env:ProgramFiles 'Android\Sdk') }
+    $candidates += 'C:\Android\Sdk'
     $candidates += 'E:\Android\Sdk'
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path (Join-Path $c 'platform-tools\adb.exe'))) {
+    foreach ($c in ($candidates | Select-Object -Unique)) {
+        if (-not $c -or -not (Test-Path $c)) { continue }
+        # The native build needs build-tools; platform-tools/adb is only
+        # required later by build_apk.ps1.
+        if (Test-Path (Join-Path $c 'platform-tools\adb.exe')) {
             return (Resolve-Path $c).Path
         }
+        $bt = Get-ChildItem (Join-Path $c 'build-tools') -Directory `
+            -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName 'aapt2.exe') } |
+            Select-Object -First 1
+        if ($bt) { return (Resolve-Path $c).Path }
     }
     return $null
 }
 
 function Get-AndroidNdk {
     $roots = @()
+    if ($env:WC3_NDK)          { $roots += $env:WC3_NDK }
     if ($env:ANDROID_NDK_HOME) { $roots += $env:ANDROID_NDK_HOME }
     if ($env:ANDROID_NDK_ROOT) { $roots += $env:ANDROID_NDK_ROOT }
+    if ($env:ANDROID_NDK)      { $roots += $env:ANDROID_NDK }
+    if ($env:USERPROFILE) {
+        $roots += (Join-Path $env:USERPROFILE 'tools\android-ndk-r29')
+        $roots += (Join-Path $env:USERPROFILE 'android-ndk-r29')
+    }
     $sdk = Get-AndroidSdk
     if ($sdk) {
         $parent = Join-Path $sdk 'ndk'
@@ -432,7 +451,18 @@ function Get-AndroidNdk {
                 ForEach-Object { $_.FullName })
         }
     }
+    $scan = @()
     foreach ($r in ($roots | Select-Object -Unique)) {
+        if (-not $r -or -not (Test-Path $r)) { continue }
+        $scan += $r
+        # Accept <sdk>\ndk or any other parent that contains version folders.
+        if (-not (Test-Path (Join-Path $r 'source.properties'))) {
+            $scan += @(Get-ChildItem $r -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                ForEach-Object { $_.FullName })
+        }
+    }
+    foreach ($r in ($scan | Select-Object -Unique)) {
         $clang = Join-Path $r 'toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe'
         if (Test-Path $clang) {
             $profdata = Join-Path $r 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-profdata.exe'
@@ -475,20 +505,68 @@ function Get-PgoProfileKind {
 
 $sdk = Get-AndroidSdk
 if (-not $sdk) {
-    Write-Host '[app] unavailable: Android SDK not found'
-    exit 2
+    Write-Host '[app] note: Android SDK not found; using explicit NDK/CMake/Ninja'
 }
 $ndk = Get-AndroidNdk
 if (-not $ndk) {
     Write-Host '[app] unavailable: Android NDK with clang.exe not found'
     exit 2
 }
-$cmake = Join-Path $sdk 'cmake\3.22.1\bin\cmake.exe'
-$ninja = Join-Path $sdk 'cmake\3.22.1\bin\ninja.exe'
+$cmake = ''
+$ninja = ''
+if ($env:WC3_CMAKE) {
+    if (Test-Path $env:WC3_CMAKE -PathType Container) {
+        $candidate = Join-Path $env:WC3_CMAKE 'cmake.exe'
+        if (Test-Path $candidate) { $cmake = $candidate }
+    } elseif (Test-Path $env:WC3_CMAKE -PathType Leaf) {
+        $cmake = (Resolve-Path $env:WC3_CMAKE).Path
+    } else {
+        $cmd = Get-Command $env:WC3_CMAKE -ErrorAction SilentlyContinue
+        if ($cmd) { $cmake = $cmd.Source }
+    }
+}
+if ($env:WC3_NINJA) {
+    if (Test-Path $env:WC3_NINJA -PathType Container) {
+        $candidate = Join-Path $env:WC3_NINJA 'ninja.exe'
+        if (Test-Path $candidate) { $ninja = $candidate }
+    } elseif (Test-Path $env:WC3_NINJA -PathType Leaf) {
+        $ninja = (Resolve-Path $env:WC3_NINJA).Path
+    } else {
+        $cmd = Get-Command $env:WC3_NINJA -ErrorAction SilentlyContinue
+        if ($cmd) { $ninja = $cmd.Source }
+    }
+}
+$cmakeBins = @()
+if ($sdk) {
+    $cmakeBins += Join-Path $sdk 'cmake\3.22.1\bin'
+    if (Test-Path (Join-Path $sdk 'cmake')) {
+        $cmakeBins += @(Get-ChildItem (Join-Path $sdk 'cmake') -Directory `
+            -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName 'bin' })
+    }
+}
+foreach ($bin in $cmakeBins) {
+    if (-not $cmake -and (Test-Path (Join-Path $bin 'cmake.exe'))) {
+        $cmake = Join-Path $bin 'cmake.exe'
+    }
+    if (-not $ninja -and (Test-Path (Join-Path $bin 'ninja.exe'))) {
+        $ninja = Join-Path $bin 'ninja.exe'
+    }
+}
+if (-not $cmake) {
+    $cmd = Get-Command cmake.exe -ErrorAction SilentlyContinue
+    if ($cmd) { $cmake = $cmd.Source }
+}
+if (-not $ninja) {
+    $cmd = Get-Command ninja.exe -ErrorAction SilentlyContinue
+    if ($cmd) { $ninja = $cmd.Source }
+}
 $toolchain = Join-Path $ndk.Root 'build\cmake\android.toolchain.cmake'
 if (-not (Test-Path $cmake) -or -not (Test-Path $ninja) -or
     -not (Test-Path $toolchain)) {
-    Write-Host '[app] unavailable: CMake 3.22.1 or NDK toolchain missing'
+    Write-Host '[app] unavailable: CMake, Ninja or the NDK toolchain is missing'
+    Write-Host "[app] cmake='$cmake' ninja='$ninja' toolchain='$toolchain'"
     exit 2
 }
 
@@ -520,13 +598,35 @@ $dxvkScript = Join-Path $PSScriptRoot 'build_dxvk.ps1'
 $dxvkVariant = if ($isDebug) { 'debug' } else { 'release' }
 & $dxvkScript -Variant $dxvkVariant -Api 26 -Ndk $ndk.Root
 
+if (-not $GamesActivityAar -and $env:WC3_GAMEACTIVITY_AAR) {
+    $GamesActivityAar = $env:WC3_GAMEACTIVITY_AAR
+}
+if ($GamesActivityAar -and -not [IO.Path]::IsPathRooted($GamesActivityAar)) {
+    $GamesActivityAar = Join-Path $root $GamesActivityAar
+}
 if (-not $GamesActivityAar) {
-    $cache = Join-Path $env:USERPROFILE `
-        '.gradle\caches\modules-2\files-2.1\androidx.games\games-activity\4.4.2'
-    if (Test-Path $cache) {
-        $GamesActivityAar = Get-ChildItem $cache -Recurse `
-            -Filter 'games-activity-4.4.2.aar' |
-            Select-Object -First 1 -ExpandProperty FullName
+    $previous = Join-Path $root "build\android_app\$Variant\games-activity-4.4.2.aar"
+    $candidates = @($previous)
+    if ($env:GRADLE_USER_HOME) {
+        $candidates += Join-Path $env:GRADLE_USER_HOME `
+            'caches\modules-2\files-2.1\androidx.games\games-activity\4.4.2'
+    }
+    if ($env:USERPROFILE) {
+        $candidates += Join-Path $env:USERPROFILE `
+            '.gradle\caches\modules-2\files-2.1\androidx.games\games-activity\4.4.2'
+        $candidates += Join-Path $env:USERPROFILE `
+            '.m2\repository\androidx\games\games-activity\4.4.2\games-activity-4.4.2.aar'
+    }
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path $candidate)) { continue }
+        if (Test-Path $candidate -PathType Leaf) {
+            $GamesActivityAar = $candidate
+        } else {
+            $GamesActivityAar = Get-ChildItem $candidate -Recurse `
+                -Filter 'games-activity-4.4.2.aar' -ErrorAction SilentlyContinue |
+                Select-Object -First 1 -ExpandProperty FullName
+        }
+        if ($GamesActivityAar) { break }
     }
 }
 if (-not $GamesActivityAar -or -not (Test-Path $GamesActivityAar)) {
@@ -539,6 +639,10 @@ $GamesActivityAar = (Resolve-Path $GamesActivityAar).Path
 $out = Join-Path $root "build\android_app\$Variant"
 $ga = Join-Path $out 'gameactivity-aar'
 New-Item -ItemType Directory -Force $out | Out-Null
+$outAar = Join-Path $out 'games-activity-4.4.2.aar'
+if ($GamesActivityAar -ne $outAar) {
+    Copy-Item -LiteralPath $GamesActivityAar -Destination $outAar -Force
+}
 Remove-Item $ga -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $ga | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -566,6 +670,41 @@ $configure = @(
     '-DWC3_BUILD_APP=ON',
     "-DGAMEACTIVITY_ROOT=$ga"
 )
+
+# Prefer the source-built vendor archives when they exist.  Windows otherwise
+# falls back to the pinned legacy tree through CMake's default, so an existing
+# PC pipeline keeps working unchanged.
+$adrenotools = $AdrenotoolsDir
+if (-not $adrenotools -and $env:WC3_ADRENOTOOLS_DIR) {
+    $adrenotools = $env:WC3_ADRENOTOOLS_DIR
+}
+if (-not $adrenotools) {
+    $candidate = Join-Path $root 'build\android-shared\adrenotools'
+    if ((Test-Path (Join-Path $candidate 'libadrenotools.a')) -and
+        (Test-Path (Join-Path $candidate 'liblinkernsbypass.a'))) {
+        $adrenotools = $candidate
+    }
+}
+if ($adrenotools) {
+    if (-not [IO.Path]::IsPathRooted($adrenotools)) {
+        $adrenotools = Join-Path $root $adrenotools
+    }
+    if (-not (Test-Path $adrenotools)) {
+        Write-Host "[app] unavailable: adrenotools directory $adrenotools"
+        exit 2
+    }
+    $adrenotools = (Resolve-Path $adrenotools).Path
+    $configure += "-DWC3_ADRENOTOOLS_DIR=$adrenotools"
+    $trust = if (Test-Path (Join-Path $adrenotools 'source-build.json')) {
+        'ON'
+    } else {
+        'OFF'
+    }
+    $configure += "-DWC3_ADRENOTOOLS_TRUST_MANIFEST=$trust"
+} else {
+    # Clear a cached ON from an earlier source-built configure.
+    $configure += '-DWC3_ADRENOTOOLS_TRUST_MANIFEST=OFF'
+}
 if (-not $CorpusRoot) {
     throw 'SoftFloat was removed; a corpus-less legacy product build is not supported. Pass -CorpusRoot build/corpus-full.'
 }

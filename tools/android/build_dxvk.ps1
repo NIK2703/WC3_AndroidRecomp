@@ -54,14 +54,24 @@ function Invoke-Native {
 
 function Get-AndroidSdk {
     $candidates = @()
+    if ($env:WC3_SDK)          { $candidates += $env:WC3_SDK }
     if ($env:ANDROID_SDK_ROOT) { $candidates += $env:ANDROID_SDK_ROOT }
     if ($env:ANDROID_HOME)     { $candidates += $env:ANDROID_HOME }
     if ($env:LOCALAPPDATA)     { $candidates += (Join-Path $env:LOCALAPPDATA 'Android\Sdk') }
+    if ($env:USERPROFILE)      { $candidates += (Join-Path $env:USERPROFILE 'Android\Sdk') }
+    if ($env:ProgramFiles)     { $candidates += (Join-Path $env:ProgramFiles 'Android\Sdk') }
+    $candidates += 'C:\Android\Sdk'
     $candidates += 'E:\Android\Sdk'
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path (Join-Path $c 'platform-tools\adb.exe'))) {
+    foreach ($c in ($candidates | Select-Object -Unique)) {
+        if (-not $c -or -not (Test-Path $c)) { continue }
+        if (Test-Path (Join-Path $c 'platform-tools\adb.exe')) {
             return (Resolve-Path $c).Path
         }
+        $bt = Get-ChildItem (Join-Path $c 'build-tools') -Directory `
+            -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName 'aapt2.exe') } |
+            Select-Object -First 1
+        if ($bt) { return (Resolve-Path $c).Path }
     }
     return $null
 }
@@ -70,8 +80,14 @@ function Get-AndroidNdk {
     param([string]$Explicit)
     $roots = @()
     if ($Explicit) { $roots += $Explicit }
+    if (-not $Explicit -and $env:WC3_NDK) { $roots += $env:WC3_NDK }
     if ($env:ANDROID_NDK_HOME) { $roots += $env:ANDROID_NDK_HOME }
     if ($env:ANDROID_NDK_ROOT) { $roots += $env:ANDROID_NDK_ROOT }
+    if ($env:ANDROID_NDK)      { $roots += $env:ANDROID_NDK }
+    if ($env:USERPROFILE) {
+        $roots += (Join-Path $env:USERPROFILE 'tools\android-ndk-r29')
+        $roots += (Join-Path $env:USERPROFILE 'android-ndk-r29')
+    }
     $sdk = Get-AndroidSdk
     if ($sdk) {
         $parent = Join-Path $sdk 'ndk'
@@ -81,7 +97,17 @@ function Get-AndroidNdk {
                 ForEach-Object { $_.FullName })
         }
     }
+    $scan = @()
     foreach ($r in ($roots | Select-Object -Unique)) {
+        if (-not $r -or -not (Test-Path $r)) { continue }
+        $scan += $r
+        if (-not (Test-Path (Join-Path $r 'source.properties'))) {
+            $scan += @(Get-ChildItem $r -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                ForEach-Object { $_.FullName })
+        }
+    }
+    foreach ($r in ($scan | Select-Object -Unique)) {
         $clang = Join-Path $r 'toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe'
         if (Test-Path $clang) {
             return [pscustomobject]@{
@@ -98,8 +124,7 @@ function Get-AndroidNdk {
 
 $sdk = Get-AndroidSdk
 if (-not $sdk) {
-    Write-Host '[dxvk] unavailable: Android SDK not found'
-    throw 'DXVK build unavailable (SDK/NDK/ccache)'
+    Write-Host '[dxvk] note: Android SDK not found; using the explicit NDK'
 }
 $ndkInfo = Get-AndroidNdk -Explicit $Ndk
 if (-not $ndkInfo) {

@@ -99,20 +99,48 @@ typedef struct {
 #define _snprintf snprintf
 #define _getcwd getcwd
 
+/* The pinned tools build some paths with Win32 separators even when the
+ * corpus root came in as a POSIX path (closure_pipeline/corpusclosure pass
+ * "a/b" and the callee appends "\\*").  POSIX treats the backslash literally,
+ * so every path that reaches a syscall is normalised here. */
+static inline size_t shim_norm_path(const char *path, char *out, size_t cap)
+{
+    size_t i;
+    if (!path) path = "";
+    for (i = 0; path[i] && i + 1 < cap; i++)
+        out[i] = (path[i] == '\\') ? '/' : path[i];
+    out[i] = 0;
+    return i;
+}
+
+/* The pinned tools append "\\seed.c" to a directory argument that may itself
+ * be POSIX-style, then call fopen().  Route every fopen through the same
+ * normalisation; this is the POSIX host only, the Windows build never sees
+ * this header. */
+static inline FILE *shim_fopen(const char *path, const char *mode)
+{
+    char norm[MAX_PATH * 2];
+    shim_norm_path(path, norm, sizeof norm);
+    return fopen(norm, mode);
+}
+#define fopen(path, mode) shim_fopen((path), (mode))
+
 /* --- directory enumeration ---------------------------------------------- */
 /* Every pinned caller uses a trailing backslash-star (or slash-star), so
  * readdir is an exact equivalent.  A different pattern is not guessed. */
 static inline size_t shim_pattern_dir(const char *pattern, char *out, size_t cap)
 {
+    char norm[MAX_PATH * 2];
     const char *slash = NULL, *p;
     size_t n;
-    for (p = pattern; *p; p++)
-        if (*p == '\\' || *p == '/') slash = p;
-    if (slash && (slash[1] == '*' || slash[1] == 0)) n = (size_t)(slash - pattern);
-    else n = strlen(pattern);
+    shim_norm_path(pattern, norm, sizeof norm);
+    for (p = norm; *p; p++)
+        if (*p == '/') slash = p;
+    if (slash && (slash[1] == '*' || slash[1] == 0)) n = (size_t)(slash - norm);
+    else n = strlen(norm);
     if (n == 0) { if (cap > 1) { out[0] = '.'; out[1] = 0; } return 1; }
     if (n >= cap) n = cap - 1;
-    memcpy(out, pattern, n);
+    memcpy(out, norm, n);
     out[n] = 0;
     return n;
 }
@@ -204,9 +232,18 @@ static inline HMODULE LoadLibraryA(const char *path)
         base = base ? base + 1 : norm;
         h = dlopen(base, RTLD_NOW | RTLD_LOCAL);
     }
-    /* capstone.dll on Windows, libcapstone.so on POSIX. */
-    if (!h && strstr(norm, "capstone"))
-        h = dlopen("libcapstone.so", RTLD_NOW | RTLD_LOCAL);
+    /* capstone.dll on Windows, libcapstone.so on POSIX.  Try the sibling
+     * libcapstone.so first so build/lift-tools works without LD_LIBRARY_PATH. */
+    if (!h && strstr(norm, "capstone")) {
+        char alt[MAX_PATH];
+        if (base && base > norm) {
+            snprintf(alt, sizeof alt, "%.*slibcapstone.so",
+                     (int)(base - norm), norm);
+            h = dlopen(alt, RTLD_NOW | RTLD_LOCAL);
+        }
+        if (!h)
+            h = dlopen("libcapstone.so", RTLD_NOW | RTLD_LOCAL);
+    }
     return (HMODULE)h;
 }
 

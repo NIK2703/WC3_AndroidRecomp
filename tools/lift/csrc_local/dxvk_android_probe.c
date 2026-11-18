@@ -19,6 +19,27 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+/* The NDK ships one host prebuilt.  Derive its name from the compiler that
+ * builds this tool; the Windows spelling is kept for the canonical pipeline
+ * and every POSIX host uses its native prebuilt without a symlink farm. */
+#if defined(_WIN32)
+#define WC3_NDK_PREBUILT "windows-x86_64"
+#define WC3_NDK_CLANGXX "clang++.exe"
+#elif defined(__APPLE__)
+#  if defined(__aarch64__) || defined(__arm64__)
+#    define WC3_NDK_PREBUILT "darwin-arm64"
+#  else
+#    define WC3_NDK_PREBUILT "darwin-x86_64"
+#  endif
+#  define WC3_NDK_CLANGXX "clang++"
+#elif defined(__aarch64__) || defined(__arm64__)
+#define WC3_NDK_PREBUILT "linux-aarch64"
+#define WC3_NDK_CLANGXX "clang++"
+#else
+#define WC3_NDK_PREBUILT "linux-x86_64"
+#define WC3_NDK_CLANGXX "clang++"
+#endif
+
 #if defined(_WIN32) && !defined(WC3_FORCE_POSIX)
 #  include <direct.h>
 #  include <process.h>
@@ -807,7 +828,7 @@ static void build_command_argv(const char *clang, const char *sysroot,
     if (ccache) {
         strvec prefixed = {0};
         size_t i;
-        sv_push_copy(&prefixed, ccache_wrapper);
+        if (ccache_wrapper) sv_push_copy(&prefixed, ccache_wrapper);
         sv_push_copy(&prefixed, ccache);
         for (i = 0; i < cmd->n; i++) sv_push_copy(&prefixed, cmd->v[i]);
         sv_free(cmd);
@@ -1388,12 +1409,25 @@ int main(int argc, char **argv)
     if (ccache_wrapper && *ccache_wrapper) {
         ccache_wrapper = xstrdup(ccache_wrapper);
     } else {
-        ccache_wrapper = path_join(root, "build/lift-tools/ccache_wrapper.exe");
+#if defined(_WIN32)
+        ccache_wrapper = path_join(root,
+                                   "build/lift-tools/ccache_wrapper.exe");
+#else
+        /* POSIX ccache takes the compiler path as-is; the wrapper only
+         * exists to translate Windows separators for MSYS2. */
+        ccache_wrapper = NULL;
+#endif
     }
-    clang = path_join(ndk,
-        "toolchains/llvm/prebuilt/windows-x86_64/bin/clang++.exe");
-    sysroot = path_join(ndk,
-        "toolchains/llvm/prebuilt/windows-x86_64/sysroot");
+    {
+        char rel[256];
+        snprintf(rel, sizeof(rel),
+                 "toolchains/llvm/prebuilt/%s/bin/%s",
+                 WC3_NDK_PREBUILT, WC3_NDK_CLANGXX);
+        clang = path_join(ndk, rel);
+        snprintf(rel, sizeof(rel), "toolchains/llvm/prebuilt/%s/sysroot",
+                 WC3_NDK_PREBUILT);
+        sysroot = path_join(ndk, rel);
+    }
     if (!is_file(clang)) {
         fprintf(stderr, "dxvk_android_probe: NDK clang not found: %s\n", clang);
         goto cleanup_paths;
@@ -1404,7 +1438,7 @@ int main(int argc, char **argv)
                     ccache);
             goto cleanup_paths;
         }
-        if (!is_file(ccache_wrapper)) {
+        if (ccache_wrapper && !is_file(ccache_wrapper)) {
             fprintf(stderr, "dxvk_android_probe: ccache wrapper not found: %s\n",
                     ccache_wrapper);
             goto cleanup_paths;

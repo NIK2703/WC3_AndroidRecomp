@@ -238,6 +238,20 @@ if(WC3_ICF)
         "O-64 ICF is enabled (${WC3_ICF_MODE}); record "
         "--print-icf-sections and RELACOUNT with the artifact.")
 endif()
+# Host-toolchain escape hatch.  NDK r29-aarch64 ships LLD 21.0.0, which
+# segfaults while building the --gc-sections/--icf graph of the full product;
+# a newer native LLD links the same objects with the canonical flags.  Keep
+# the default empty so the NDK toolchain stays the reproducible default; the
+# POSIX build script opts in only when its host LLD is known to work.
+set(WC3_LD_PATH "" CACHE FILEPATH
+    "Optional host linker executable passed to clang with --ld-path")
+if(WC3_LD_PATH)
+    if(NOT EXISTS "${WC3_LD_PATH}")
+        message(FATAL_ERROR "WC3_LD_PATH does not exist: ${WC3_LD_PATH}")
+    endif()
+    add_link_options("--ld-path=${WC3_LD_PATH}")
+    message(STATUS "linker: ${WC3_LD_PATH} (--ld-path)")
+endif()
 if(WC3_DEBUG)
     set(WC3_DEBUG_DEFINE 1)
 else()
