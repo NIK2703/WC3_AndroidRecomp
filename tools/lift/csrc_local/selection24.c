@@ -55,36 +55,21 @@ typedef enum {
     K_TRACE_LOOKUP,
     K_CAP_GROUP_STORE,
     K_CAP_ADD_MERGE,
-    K_GUARD_NULL,
-    K_GUARD_A60,
-    K_GUARD_ABE0,
     K_TRACE_ORDER_UNIT_B,
     K_TRACE_ORDER_UNIT_C,
     K_TRACE_ORDER_LOOP_B,
     K_TRACE_ORDER_LOOP_C,
-    K_GUARD_620,
     K_TRACE_ORDER_APPLY,
-    K_GUARD_1F20,
     K_TRACE_ORDER_EXEC,
-    K_GUARD_SEND_NULL,
-    K_GUARD_FDD0,
-    K_GUARD_E60,
     K_TRACE_REMOVE,
     K_TRACE_EVBIRTH,
-    K_GUARD_E60B,
     K_TRACE_APPLY,
-    K_GUARD_TAG,
     K_CAP_SLOT,
-    K_GUARD_SLOT,
-    K_GUARD_EVENT,
-    K_GUARD_FC0,
-    K_GUARD_E60_ENTRY,
     K_TRACE_TASKNULL,
     K_TRACE_EVINIT,
     K_TRACE_ORDERDROP,
     K_ORDER_OBJ_CONTAINER,
     K_TRACE_ORDER_SLOTS,
-    K_FREELIST_HEAD,
     K_ORDER_GROUP_FULL,
     K_TRACE_EVRELEASE,
     K_SLOT_UNLINK,
@@ -120,36 +105,21 @@ static const char *const kind_name[K_COUNT] = {
     "trace_lookup",
     "cap_group_store",
     "cap_add_merge",
-    "guard_null",
-    "guard_a60",
-    "guard_abe0",
     "trace_order_unit_b",
     "trace_order_unit_c",
     "trace_order_loop_b",
     "trace_order_loop_c",
-    "guard_620",
     "trace_order_apply",
-    "guard_1f20",
     "trace_order_exec",
-    "guard_send_null",
-    "guard_fdd0",
-    "guard_e60",
     "trace_remove",
     "trace_evbirth",
-    "guard_e60b",
     "trace_apply",
-    "guard_tag",
     "cap_slot",
-    "guard_slot",
-    "guard_event",
-    "guard_fc0",
-    "guard_e60_entry",
     "trace_tasknull",
     "trace_evinit",
     "trace_orderdrop",
     "order_obj_container",
     "trace_order_slots",
-    "freelist_head",
     "order_group_full",
     "trace_evrelease",
     "slot_unlink",
@@ -159,81 +129,152 @@ static const char *const kind_name[K_COUNT] = {
 
 /* Fixed union totals for the whole relifted game corpus. */
 static const unsigned expected_total[K_COUNT] = {
-    1, /* group_alloc   */
-    2, /* init_group    */
-    2, /* select        */
-    2, /* cap_outer     */
-    2, /* cap_inner     */
-    2, /* fill_block    */
-    1, /* fill_grid     */
-    1, /* note_selection*/
-    1, /* hide_all      */
-    1, /* addunit_cap   */
-    5, /* cap_local_list*/
+    1, /* group_alloc */
+    2, /* init_group */
+    2, /* select */
+    2, /* cap_outer */
+    2, /* cap_inner */
+    2, /* fill_block */
+    1, /* fill_grid */
+    1, /* note_selection */
+    1, /* hide_all */
+    1, /* addunit_cap */
+    5, /* cap_local_list */
     3, /* cap_copy_list */
-    1, /* cap_sync_add  */
-    1, /* cap_net_recv  */
+    1, /* cap_sync_add */
+    1, /* cap_net_recv */
     5, /* cap_net_apply */
-    2, /* cap_net_send  */
-    1, /* cap_select_all*/
-    2, /* order_frame   */
-    4, /* order_sort    */
-    4, /* order_loop    */
-    8, /* order_callback*/
+    2, /* cap_net_send */
+    1, /* cap_select_all */
+    2, /* order_frame */
+    4, /* order_sort */
+    4, /* order_loop */
+    8, /* order_callback */
     4, /* order_callback_b */
-    1, /* trace_evt2    */
-    2, /* trace_lookup  */
+    1, /* trace_evt2 */
+    2, /* trace_lookup */
     3, /* cap_group_store */
     3, /* cap_add_merge */
-    1, /* guard_null    */
-    1, /* guard_a60     */
-    1, /* guard_abe0    */
     1, /* trace_order_unit_b */
     1, /* trace_order_unit_c */
     2, /* trace_order_loop_b */
     2, /* trace_order_loop_c */
-    1, /* guard_620        */
     2, /* trace_order_apply */
-    4, /* guard_1f20       */
-    2, /* trace_order_exec  */
-    3, /* guard_send_null   */
-    2, /* guard_fdd0        */
-    1, /* guard_e60         */
-    4, /* trace_remove      */
-    1, /* trace_evbirth     */
-    1, /* guard_e60b        */
-    2, /* trace_apply       */
-    2, /* guard_tag         */
-    10, /* cap_slot          */
-    3, /* guard_slot        */
-    1, /* guard_event       */
-    1, /* guard_fc0         */
-    1, /* guard_e60_entry   */
-    1, /* trace_tasknull    */
-    1, /* trace_evinit      */
-    1, /* trace_orderdrop   */
+    2, /* trace_order_exec */
+    4, /* trace_remove */
+    1, /* trace_evbirth */
+    2, /* trace_apply */
+    10, /* cap_slot */
+    1, /* trace_tasknull */
+    1, /* trace_evinit */
+    1, /* trace_orderdrop */
     35, /* order_obj_container */
     3, /* trace_order_slots */
-    1, /* freelist_head */
     2, /* order_group_full */
     1, /* trace_evrelease */
     1, /* slot_unlink */
-    206, /* group24 */
-    9 /* trace_formation */
+    204, /* group24 */
+    9, /* trace_formation */
 };
 /* Whole-file expectations.  seed.c carries both order prologues. */
 static const unsigned expected_seed[K_COUNT] = {
-    0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 2, 1, 2, 0, 0, 0,
-    1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    4, 3, 0, 0, 0, 0, 44, 2
+    0, /* group_alloc */
+    0, /* init_group */
+    1, /* select */
+    1, /* cap_outer */
+    1, /* cap_inner */
+    0, /* fill_block */
+    0, /* fill_grid */
+    1, /* note_selection */
+    1, /* hide_all */
+    0, /* addunit_cap */
+    0, /* cap_local_list */
+    0, /* cap_copy_list */
+    0, /* cap_sync_add */
+    1, /* cap_net_recv */
+    0, /* cap_net_apply */
+    0, /* cap_net_send */
+    0, /* cap_select_all */
+    2, /* order_frame */
+    0, /* order_sort */
+    0, /* order_loop */
+    0, /* order_callback */
+    0, /* order_callback_b */
+    0, /* trace_evt2 */
+    2, /* trace_lookup */
+    1, /* cap_group_store */
+    2, /* cap_add_merge */
+    1, /* trace_order_unit_b */
+    1, /* trace_order_unit_c */
+    0, /* trace_order_loop_b */
+    0, /* trace_order_loop_c */
+    0, /* trace_order_apply */
+    0, /* trace_order_exec */
+    0, /* trace_remove */
+    0, /* trace_evbirth */
+    0, /* trace_apply */
+    0, /* cap_slot */
+    0, /* trace_tasknull */
+    0, /* trace_evinit */
+    0, /* trace_orderdrop */
+    4, /* order_obj_container */
+    3, /* trace_order_slots */
+    0, /* order_group_full */
+    0, /* trace_evrelease */
+    0, /* slot_unlink */
+    44, /* group24 */
+    2, /* trace_formation */
 };
 /* seed: builders B/C.  closed: listadd x2, cluster try/insert, formation. */
 
 /* closed.c carries the split fragments and the UI allocation/fill code. */
 static const unsigned expected_closed[K_COUNT] = {
-    1, 2, 1, 1, 1, 2, 1, 0, 0, 1, 5, 3, 1, 0, 5, 2, 1, 0, 4, 4, 8, 4, 1, 0, 2, 1, 1, 1, 1,
-    0, 0, 2, 2, 1, 2, 4, 2, 3, 2, 1, 4, 1, 1, 2, 2, 10, 3, 1, 1, 1, 1, 1, 1,
-    31, 0, 1, 2, 1, 1, 162, 7
+    1, /* group_alloc */
+    2, /* init_group */
+    1, /* select */
+    1, /* cap_outer */
+    1, /* cap_inner */
+    2, /* fill_block */
+    1, /* fill_grid */
+    0, /* note_selection */
+    0, /* hide_all */
+    1, /* addunit_cap */
+    5, /* cap_local_list */
+    3, /* cap_copy_list */
+    1, /* cap_sync_add */
+    0, /* cap_net_recv */
+    5, /* cap_net_apply */
+    2, /* cap_net_send */
+    1, /* cap_select_all */
+    0, /* order_frame */
+    4, /* order_sort */
+    4, /* order_loop */
+    8, /* order_callback */
+    4, /* order_callback_b */
+    1, /* trace_evt2 */
+    0, /* trace_lookup */
+    2, /* cap_group_store */
+    1, /* cap_add_merge */
+    0, /* trace_order_unit_b */
+    0, /* trace_order_unit_c */
+    2, /* trace_order_loop_b */
+    2, /* trace_order_loop_c */
+    2, /* trace_order_apply */
+    2, /* trace_order_exec */
+    4, /* trace_remove */
+    1, /* trace_evbirth */
+    2, /* trace_apply */
+    10, /* cap_slot */
+    1, /* trace_tasknull */
+    1, /* trace_evinit */
+    1, /* trace_orderdrop */
+    31, /* order_obj_container */
+    0, /* trace_order_slots */
+    2, /* order_group_full */
+    1, /* trace_evrelease */
+    1, /* slot_unlink */
+    160, /* group24 */
+    7, /* trace_formation */
 };
 
 typedef struct {
@@ -538,7 +579,7 @@ static void sites_add(Sites *s, Kind k, uint32_t va, const char *action,
 /* Ctrl+digit (message type 0x17) entry L_6F6B90D0.  Before the slot is
  * written it compares the request's unit count with 12 and jumps straight to
  * the cleanup block when the selection is larger.  The store loop below was
- * already widened, but this caller-side guard skipped the whole store, so a
+ * already widened, but this caller-side check skipped the whole store, so a
  * 24-unit selection was never bound at all and the previous contents of the
  * slot stayed in place. */
 #define VA_CAP_GROUP_STORE_C 0x6F6B915Au
@@ -649,19 +690,10 @@ static void sites_add(Sites *s, Kind k, uint32_t va, const char *action,
  * The traces below record that pair, the event argument and which lookup
  * check failed.  They are debug-only: release compiles them out.
  *
- * The trace of the reproduced crash shows an out-of-range handle on the
- * order path (handle 0x8308, serial 0xE15F, table count 32020); the lookup
- * returns zero and 0x6F04D9C0 still calls 0x6F057C30 with ecx=0.  The
- * original 0x6F057C30 has no null check because the pair is expected to be
- * live.  Guard the callee once: a null object means there is no field to
- * update, and 0x6F04D9C0 continues with its existing null-safe cleanup.
  */
 #define VA_TRACE_EVT2        0x6F146D33u
 #define VA_TRACE_LOOKUP_ARG  0x6F04D9E7u
 #define VA_TRACE_LOOKUP_RES  0x6F04D9F3u
-#define VA_GUARD_NULL        0x6F057C31u
-#define VA_GUARD_A60         0x6F689A61u
-#define VA_GUARD_ABE0        0x6F67ABE1u
 
 static const char *const INSERT_TRACE_EVT2[] = {
     "    /* selection24 evt2 trace */",
@@ -682,61 +714,6 @@ static const char *const INSERT_TRACE_LOOKUP_RES[] = {
     "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
     "    wc3_sel24_trace_lookup(c, 1u, c->edi, 0u);",
     "#endif"
-};
-
-/* 0x6F057C30(ecx=object, arg=value) clears object+0x54 when value is zero;
- * with a failed lookup ecx is also zero.  Returning before the field access
- * keeps the original epilogue (ret 4) and does nothing for a null object. */
-static const char *const INSERT_GUARD_NULL[] = {
-    "    /* selection24 null-object guard */",
-    "    if (c->ecx == 0u) {",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "        wc3_sel24_trace_guard(c, rd32((c->ebp + 0x00000008u)));",
-    "#endif",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 8;",
-    "        return;",
-    "    }"
-};
-
-/* 0x6F689A60(ecx=object, 8 stack arguments) is the synchronous event
- * consumer reached from 0x6F69BD80.  The caller tests the result of
- * 0x6F154B60 for [result+0x54]; when that field is zero it still calls this
- * function with esi/ecx=0, and 0x6F689820 writes [ecx+0x24].  The callee has
- * no null path, so return before it builds its frame.  The original tail
- * 0x6F689AB2 ends with `ret 0x20`, so drop the saved ebp, return address and
- * eight arguments (4 + 0x20 bytes).  The caller already has a null-safe
- * cleanup at 0x6F69BE4D and returns eax=esi (zero). */
-static const char *const INSERT_GUARD_A60[] = {
-    "    /* selection24 event null-object guard */",
-    "    if (c->ecx == 0u) {",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "        wc3_sel24_trace_guard(c, rd32((c->ebp + 0x00000008u)));",
-    "#endif",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 36;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
-};
-
-/* 0x6F67ABE0(ecx=this, [ebp+8]=object) is the generic frame method reached
- * from 0x6F693597 when 0x6F69BD80 returns a null event object.  The null is
- * consumed by 0x6F6BA48A -> 0x6F6B93A0 -> 0x6F6B951E -> 0x6F680320 ->
- * 0x6F693490, and 0x6F67ABE0 then writes [edi+0x20] with edi=0.  The callee
- * has no null path, so return before it builds its frame.  The original tail
- * 0x6F67ACE2 ends with `ret 8`, so drop the saved ebp and two arguments. */
-static const char *const INSERT_GUARD_ABE0[] = {
-    "    /* selection24 event null-object guard */",
-    "    if (rd32((c->ebp + 0x00000008u)) == 0u) {",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "        wc3_sel24_trace_guard(c, rd32((c->ebp + 0x00000008u)));",
-    "#endif",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 8;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
 };
 
 /*
@@ -823,190 +800,6 @@ static const char *const INSERT_TRACE_SLOTS_C[] = {
 };
 
 /*
- * 0x6F056620(ecx=this, [ebp+8]=object) resolves two {handle, serial} pairs
- * that live at +0x0C/+0x10 of the two interface objects.  It is the fourth
- * consumer of the event target that 0x6F154B60 returns at +0x54, and it has
- * no null path: the first instruction after the prologue reads [ecx+0x10].
- * 0x6F691F20 calls it with esi=0 when the event target is null (0x6F691FB0),
- * which faults at address 0x10.  The callee has no null path, so return
- * before it builds its frame.  The original tail 0x6F05666F ends with
- * `ret 4`, so drop the saved ebp, the return address and the one argument
- * (4 + 4 bytes).  The caller overwrites eax right after the call, so the
- * zero return value is not observable.
- */
-#define VA_GUARD_620 0x6F056621u
-
-static const char *const INSERT_GUARD_620[] = {
-    "    /* selection24 lookup null-object guard */",
-    "    if (c->ecx == 0u) {",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "        wc3_sel24_trace_guard(c, rd32((c->ebp + 0x00000008u)));",
-    "#endif",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 8;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
-};
-
-/*
- * 0x6F691F20 delivers an event to the target object it finds at +0x54 of the
- * event source.  The prologue zeroes esi and only the success path assigns
- * esi = edi, so a missing target reaches the delivery block with esi == 0 and
- * the original code writes [esi+0x28] / [esi+0x24] / [esi+0x30] and then calls
- * 0x6F691E60(0); the `test esi, esi` two instructions later is too late.  The
- * callee guard at 0x6F056620 covers the lookup call but not the writes, so the
- * block is skipped as a whole.  The skipped call is 0x6F056620(ebx), pushed at
- * 0x6F691FAF, and the callee ends with `ret 4`, i.e. it pops its own argument.
- * Leaving the frame without that call therefore has to drop the pushed dword
- * explicitly: the epilogue pops ecx/edi/esi/ebx *before* `mov esp, ebp`, so a
- * stray push shifts all four register saves by one slot (run18: ebx/esi/edi
- * came back as the pushed ebx / saved eax / saved edi and the caller crashed on
- * `[ebx+0x178]`).  The return value is unused at every call site.
- */
-#define VA_GUARD_1F20 0x6F691FB0u
-#define VA_GUARD_2120 0x6F6921C8u
-#define VA_GUARD_2380 0x6F69240Fu
-#define VA_GUARD_3FE0 0x6F6740A0u
-
-static const char *const INSERT_GUARD_1F20[] = {
-    "    /* selection24 null-target guard */",
-    "    if (c->esi == 0u) { c->esp += 4; goto L_6F691FEB; }"
-};
-
-static const char *const INSERT_GUARD_2120[] = {
-    "    /* selection24 null-target guard 2 */",
-    "    if (c->esi == 0u) goto L_6F692244;"
-};
-
-static const char *const INSERT_GUARD_2380[] = {
-    "    /* selection24 null-target guard 3 */",
-    "    if (c->esi == 0u) goto L_6F692451;"
-};
-
-/*
- * 0x6F673FE0 is the caller side of the same defect: it takes the event target
- * at 0x6F674079, jumps into the send block when it is null, calls the helper
- * 0x6F689C40 with ecx = esi and then reads [esi+0x30].  The helper guard
- * protects the call but not the read, so the block is left through the same
- * exit the `edi == 0` path uses.  The two arguments pushed for the skipped
- * call are dropped first; `edi` is already zero here, which is exactly the
- * state that exit expects.
- */
-static const char *const INSERT_GUARD_3FE0[] = {
-    "    /* selection24 null-target guard 4 */",
-    "    if (c->esi == 0u) { c->esp += 8; WC3_DIRECT_TAIL(L_6F67413D, c);",
-    "        return; }"
-};
-
-/*
- * The three send helpers 0x6F689C40 / 0x6F689D40 / 0x6F689F10 take the target
- * object in ecx, store it in esi and then write [esi+0x28].  A null argument
- * faults there in exactly the same way, so they get the same treatment as the
- * delivery block: return before the frame is built.  Each keeps its own stack
- * contract (ret 8 / ret 0x20 / ret 8).
- */
-#define VA_SEND_NULL_C40 0x6F689C41u
-#define VA_SEND_NULL_D40 0x6F689D41u
-#define VA_SEND_NULL_F10 0x6F689F11u
-
-static const char *const INSERT_SEND_NULL_C40[] = {
-    "    /* selection24 send null-object guard */",
-    "    if (c->ecx == 0u) {",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 12;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
-};
-
-static const char *const INSERT_SEND_NULL_D40[] = {
-    "    /* selection24 send null-object guard */",
-    "    if (c->ecx == 0u) {",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 36;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
-};
-
-static const char *const INSERT_SEND_NULL_F10[] = {
-    "    /* selection24 send null-object guard */",
-    "    if (c->ecx == 0u) {",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 12;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
-};
-
-/*
- * 0x6F66FDD0 is called from 48 places with the object in ecx.  It reads the
- * vtable out of that object and calls through it, so a null object faults at
- * address 0x0 and an object with a cleared vtable faults at 0xEC.  The crash
- * in the order path was 0x6F5FD4DA calling it with ecx = ebx = 0, which is a
- * dead object that the caller did not check.
- *
- * Both guards return zero, which is the failure value of the function: 47 of
- * the 48 call sites test eax and take their failure branch when it is zero,
- * and the remaining one only uses the value.  The stack contract of the
- * function is three arguments plus the return address (its own epilogue skips
- * 0x10 bytes), so the guards drop exactly the same bytes and restore the
- * callee-saved registers the prologue had already pushed.
- */
-#define VA_GUARD_FDD0_OBJ 0x6F66FDD1u
-#define VA_GUARD_FDD0_VTBL 0x6F66FDE7u
-
-static const char *const INSERT_GUARD_FDD0_OBJ[] = {
-    "    /* selection24 dead-object guard */",
-    "    if (c->ecx == 0u) {",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 16;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
-};
-
-static const char *const INSERT_GUARD_FDD0_VTBL[] = {
-    "    /* selection24 dead-vtable guard */",
-    "    if (c->eax == 0u) {",
-    "        c->esi = (uint32_t)(pop32(c));",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 16;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
-};
-
-/*
- * 0x6F691E60 resolves the target of an event: it reads [this+0x178] and
- * [this+0x174] and then writes the resolved {handle, serial} pair through the
- * second argument.  The caller at 0x6F69283D passes the object it got from
- * 0x6F686010, which returns zero when the event source has no target
- * ([this+0x54] == 0, the same dead-object case as the other delivery
- * helpers), so the function is entered with a null object and faults at
- * address 0x178.
- *
- * The guard is placed after the prologue, before the saved esi/edi are pushed,
- * so the stack is unwound exactly like the epilogue does: the saved ebp is
- * popped and the return address plus the one argument are skipped.  The
- * result is zero, which is the honest answer for "no target" - the delivery
- * then reports that nobody received the event instead of dereferencing a
- * dead object.
- */
-#define VA_GUARD_E60 0x6F691E61u
-
-static const char *const INSERT_GUARD_E60[] = {
-    "    /* selection24 dead-target guard */",
-    "    if (c->ecx == 0u) {",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 8;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
-};
-
-/*
  * 0x6F28EEF0 removes one unit from the selection group: it walks the group's
  * unit list and, when the entry is found, decrements the counter at +0x1F8
  * and unlinks the entry.  A unit that dies but is never removed stays in the
@@ -1071,21 +864,6 @@ static const char *const INSERT_TRACE_EVINIT[] = {
 };
 
 /*
- * 0x6F691E60 resolves the target pair of an event object.  Its first path
- * (the object's +0x174/+0x178 pair is still -1) checks the out-parameter and
- * jumps to the failure path when that parameter is null.  The continuation
- * chunk L_6F691EC3 is taken when the object already holds a resolved pair;
- * it writes the new pair into the out-parameter at +0x24/+0x28 before the
- * null check runs, so a null out-parameter faults at address 0x24.
- *
- * The caller L_6F692120 passes its reference structure as the out-parameter
- * and treats a null structure as a valid case (it checks it right after the
- * call), so the guard skips the two writes and returns what the failure path
- * returns (eax = esi = 0) through the same epilogue.
- */
-#define VA_GUARD_E60B 0x6F691ECAu
-
-/*
  * 0x6F04CDD0 applies the order to one unit and returns 0 when the unit did
  * not take the order.  L_6F69BD80 then keeps esi = 0, so the order record
  * for that unit carries no event and the delivery dereferences a null
@@ -1115,53 +893,6 @@ static const char *const INSERT_TRACE_ORDEREV_RET[] = {
     "#endif"
 };
 
-static const char *const INSERT_GUARD_E60B[] = {
-    "    /* selection24 null-reference guard */",
-    "    if (c->esi == 0u) {",
-    "        c->edi = (uint32_t)(pop32(c));",
-    "        c->esi = (uint32_t)(pop32(c));",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 8;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
-};
-
-/*
- * 0x6F48CC03 is the selection object's handler for the message 0x41777270.
- * It resolves the object's weak (handle, serial) pair and hands the result to
- * the order/UI path, which reads [target+0x34] and calls through the target's
- * vtable (fault inside L_6F48CC56 when the slot was recycled).
- *
- * The pair resolves successfully - handle and serial still match a live table
- * entry - but the entry's +0x54 no longer names the class the caller expects.
- * The engine's own object invariant is checked here before the pointer is used:
- * a game object carries its vtable in the first dword, inside the image range.
- * A pointer that fails the test is replaced with zero, and the existing null
- * branch at 0x6F48CC2B (flags_logicz on edi) then takes the "no target" exit.
- */
-#define VA_GUARD_TAG 0x6F48CC29u
-
-static const char *const INSERT_GUARD_TAG[] = {
-    "    /* selection24 weak-pair target check */",
-    "    {",
-    "        uint32_t _sel24_vt = 0u;",
-    "        uint32_t _sel24_ok = 0u;",
-    "        if (c->edi >= 0x40000000u && c->edi < 0x70000000u) {",
-    "            _sel24_vt = rd32((c->edi));",
-    "            _sel24_ok = 1u;",
-    "        }",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "        wc3_sel24_trace_stale(c, 1u, c->edi, _sel24_vt, _sel24_ok);",
-    "        if (_sel24_ok != 0u)",
-    "            wc3_sel24_trace_stale(c, 4u, rd32((c->edi + 0x00000034u)), rd32((c->edi + 0x00000020u)), rd32((c->edi + 0x00000018u)));",
-    "#endif",
-    "        if (c->edi < 0x40000000u || c->edi >= 0x70000000u ||",
-    "            _sel24_vt < 0x6F000000u || _sel24_vt >= 0x71000000u)",
-    "            c->edi = 0u;",
-    "    }"
-};
-
 /*
  * The remaining twelve-slots constants.  These loops walk either the bit mask
  * of selected panel slots (`inc counter; rol bitmask,1; cmp counter, 0xc`) or
@@ -1179,56 +910,6 @@ static const char *const INSERT_GUARD_TAG[] = {
 #define VA_CAP_SLOT_PANEL_A 0x6F68C0CBu
 #define VA_CAP_SLOT_PANEL_B 0x6F3C2E33u
 #define VA_CAP_SLOT_FREE 0x6F39737Bu
-
-/*
- * 0x6F05458B and 0x6F05457D are the two tails of the handle lookup: each reads
- * the slot object `[array + index*8 + 4]` and immediately compares its serial at
- * +0x18.  A slot whose object was released keeps the live tag in [slot] while
- * [slot+4] is zero, so the compare faults at address 0x18; a later call through
- * the same stale reference jumps into unmapped memory.  The guard returns the
- * function's own "not found" answer - eax = 0 through the same epilogue.
- */
-#define VA_GUARD_SLOT_A 0x6F054590u
-#define VA_GUARD_SLOT_B 0x6F05457Du
-
-static const char *const INSERT_GUARD_SLOT[] = {
-    "    /* selection24 released-slot guard */",
-    "    if (c->ecx == 0u) {",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "        wc3_sel24_trace_stale(c, 2u, c->eax, c->ebx, c->ecx);",
-    "#endif",
-    "        c->ebx = (uint32_t)(pop32(c));",
-    "        c->eax = 0u;",
-    "        c->esp += 4;",
-    "        return;",
-    "    }"
-};
-
-/*
- * 0x6F6857E0 delivers an order event to a unit.  It reads its argument
- * straight away (`mov eax, [ecx]`), so a missing event faults at address 0x0.
- * The event is missing when the order builder could not create one for that
- * unit - which happens exactly for the units past the engine's own limit.
- * The guard returns the function's failure answer (eax = 0) through the same
- * epilogue; the caller checks for zero and skips the unit.
- */
-#define VA_GUARD_EVENT 0x6F6857E9u
-
-static const char *const INSERT_GUARD_EVENT[] = {
-    "    /* selection24 missing order event guard */",
-    "    if (c->ecx == 0u) {",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "        wc3_sel24_trace_stale(c, 3u, c->ecx, c->eax, c->edi);",
-    "#endif",
-    "        c->eax = 0u;",
-    "        c->edi = (uint32_t)(pop32(c));",
-    "        c->esi = (uint32_t)(pop32(c));",
-    "        c->ebx = (uint32_t)(pop32(c));",
-    "        c->esp = c->ebp;",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 8; return;",
-    "    }"
-};
 
 /*
  * 0x6F6B93A0 hands the order event to the unit through a virtual call on the
@@ -1278,7 +959,7 @@ static const char *const INSERT_TRACE_ORDER_EXEC_2[] = {
 #define VA_TRACE_ORDER_BEGIN_C 0x6F6B9F9Eu
 #define VA_TRACE_LISTADD       0x6F16966Du
 #define VA_TRACE_FORMATION     0x6F16B306u
-#define VA_TRACE_CLUSTER_TRY   0x6F16C077u
+#define VA_CLUSTER_PREPARE   0x6F16C077u
 #define VA_TRACE_CLUSTER_INS   0x6F16B7EDu
 #define VA_TRACE_A5B9          0x6F16A5B9u
 #define VA_TRACE_CF94_BASE     0x6F16D00Fu
@@ -1313,7 +994,7 @@ static const char *const INSERT_TRACE_FORMATION[] = {
     "#endif"
 };
 
-static const char *const INSERT_TRACE_CLUSTER_TRY[] = {
+static const char *const INSERT_CLUSTER_PREPARE[] = {
     "    /* selection24 cluster growth prepare */",
     "    wc3_sel24_cluster_prepare(c->esi);",
     "    /* selection24 cluster capacity trace */",
@@ -1384,72 +1065,6 @@ static const char *const TRACE_ORDER_APPLY_ELIDED =
     "c->esp -= 4; WC3_DIRECT_CALL(L_6F04CDD0, c);";
 
 /*
- * 0x6F689FC0 is the event-target filler called by 0x6F6926B0 with the target
- * that the task factory returned at [result+0x54].  When that field is zero
- * the caller still calls this function with ecx = 0, and the first write is
- * [ecx+0x28] - the "signal 11 at 0x28" of the 24-unit order path.  The
- * function has no null path: every consumer of the target assumes it exists.
- * Return through the original epilogue (`ret 0x14` plus the return address)
- * so the caller continues with its own null-safe cleanup.
- */
-#define VA_GUARD_FC0 0x6F689FC1u
-
-static const char *const INSERT_GUARD_FC0[] = {
-    "    /* selection24 null-event guard */",
-    "    if (c->ecx == 0u) {",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "        wc3_sel24_trace_guard(c, rd32((c->ebp + 0x00000008u)));",
-    "#endif",
-    "        c->ebp = (uint32_t)(pop32(c));",
-    "        c->esp += 24;",
-    "        c->eax = 0u;",
-    "        return;",
-    "    }"
-};
-
-/*
- * 0x6F691E60(manager, target) is the next consumer of the same target.  It
- * loads [ebp+8] and writes [target+0x28]/[target+0x24] before its own
- * `test esi, esi`; the null branch it reaches two instructions later (the
- * shared exit 0x6F691EFE) is the path the engine wants.  Jump there directly
- * when the target is null, so the guard only diverts the crashing case.
- */
-#define VA_GUARD_E60_ENTRY 0x6F691E7Cu
-
-static const char *const INSERT_GUARD_E60_ENTRY[] = {
-    "    /* selection24 null-task guard */",
-    "    if (c->esi == 0u) {",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "        wc3_sel24_trace_guard(c, 0u);",
-    "#endif",
-    "        WC3_DIRECT_TAIL(L_6F691EFE, c);",
-    "        return;",
-    "    }"
-};
-
-/*
- * 0x6F1CBF40 is the handle-table slot allocator.  Its free-list head is -1
- * when the list is empty and a slot index otherwise; a slot that is in use
- * carries the reserved marker 0xFFFFFFFE ("no link").  When the head points
- * at such a slot the pop leaves 0xFFFFFFFE in the head, and the next
- * allocation computes base + (-2)*8 -- an out-of-bounds write sixteen bytes
- * before the slot array -- and returns 0xFFFFFFFE as the handle itself.
- * The order event stored that value in [event+0x14]; the handle lookup then
- * left [event+0x54] null and the order path faulted on the null payload.
- * The marker is not a valid index, so treat any negative head as an empty
- * list and let the append path hand out a fresh slot.
- */
-#define VA_FREELIST_HEAD 0x6F1CBF4Du
-
-static const char *const INSERT_FREELIST_HEAD[] = {
-    "    /* selection24 freelist head normalize */",
-    "    if (c->esi != 0xFFFFFFFFu && (c->esi & 0x80000000u) != 0u) {",
-    "        c->esi = 0xFFFFFFFFu;",
-    "        flags_sub(c, c->esi, 0xFFFFFFFFu, 4);",
-    "    }"
-};
-
-/*
  * 0x6F67DDF1 asks the selection group for its unit count and turns
  * `count >= 0xC` into a boolean that 0x6F680630 forwards to 0x6F528110,
  * which uses it to pick the group handling branch.  With a 24-unit
@@ -1460,7 +1075,7 @@ static const char *const INSERT_FREELIST_HEAD[] = {
 #define VA_ORDER_GROUP_FULL 0x6F67DDF1u
 
 static const char *const INSERT_ORDER_GROUP_FULL[] = {
-    "    flags_sub(c, c->eax, 0x18u, 4); /* selection24 group-full threshold */"
+    "    flags_sub(c, c->eax, wc3_sel24_cap(), 4); /* selection24 group-full threshold */"
 };
 
 /*
@@ -2174,10 +1789,6 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16A638u, "0xFFFFF5BCu", "0xFFFFECBCu" },
     { 0x6F16A644u, "0xFFFFF5B8u", "0xFFFFECB8u" },
     { 0x6F16A64Au, "0xFFFFF5BCu", "0xFFFFECBCu" },
-    /* Rev 62: dump the sixteen counts at the sort-loop entry. */
-    { 0x6F16A650u,
-      "c->ebx = 0x10u;",
-      "wc3_sel24_trace_counts(c->edi); c->ebx = 0x10u;" },
     { 0x6F16A65Au, "0xFFFFF5B0u", "0xFFFFECB0u" },
     { 0x6F16A662u, "0xFFFFF5B4u", "0xFFFFECB4u" },
     /* 6F16A672 reloads the same selection object after L_6F16A6E0.  It was
@@ -2268,10 +1879,6 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16C8F3u, "0x000000ACu", "0x0000013Cu" },
     /* Selection-group fill L_6F16CB80 and tail writer L_6F16D270. */
     { 0x6F16CBC2u, "0x000000A4u", "0x00000134u" },
-    /* Rev 62: dump the sixteen counts right after the fill's zero loop. */
-    { 0x6F16CBCBu,
-      "wr32((c->ebp + 0xFFFFFFFCu), c->ebx);",
-      "wc3_sel24_trace_counts(c->edx); wr32((c->ebp + 0xFFFFFFFCu), c->ebx);" },
     { 0x6F16CBFBu, "0xA4u", "0x134u" },
     { 0x6F16CC8Cu, "0x29u", "0x4Du" },
     { 0x6F16CCCAu, "0x00000034u", "0x00000064u" },
@@ -2958,50 +2565,6 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
-            case VA_GUARD_NULL:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ebp = c->esp;",
-                                  NULL,
-                                  "selection24 null-object guard",
-                                  INSERT_GUARD_NULL, 9,
-                                  K_GUARD_NULL, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_A60:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ebp = c->esp;",
-                                  NULL,
-                                  "selection24 event null-object guard",
-                                  INSERT_GUARD_A60, 10,
-                                  K_GUARD_A60, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_ABE0:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ebp = c->esp;",
-                                  NULL,
-                                  "selection24 event null-object guard",
-                                  INSERT_GUARD_ABE0, 10,
-                                  K_GUARD_ABE0, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_620:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ebp = c->esp;",
-                                  NULL,
-                                  "selection24 lookup null-object guard",
-                                  INSERT_GUARD_620, 10,
-                                  K_GUARD_620, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
             case VA_TRACE_ORDER_APPLY:
                 next = p;
                 if (handle_insert(out, &next, end,
@@ -3024,104 +2587,6 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   INSERT_TRACE_ORDER_APPLY_2, 5,
                                   K_TRACE_ORDER_APPLY, va, line, counts,
                                   sites, &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_1F20:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ecx = c->esi;",
-                                  NULL,
-                                  "selection24 null-target guard",
-                                  INSERT_GUARD_1F20, 2,
-                                  K_GUARD_1F20, va, line, counts,
-                                  sites, &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_2120:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ecx = c->esi;",
-                                  NULL,
-                                  "selection24 null-target guard 2",
-                                  INSERT_GUARD_2120, 2,
-                                  K_GUARD_1F20, va, line, counts,
-                                  sites, &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_2380:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ecx = c->esi;",
-                                  NULL,
-                                  "selection24 null-target guard 3",
-                                  INSERT_GUARD_2380, 2,
-                                  K_GUARD_1F20, va, line, counts,
-                                  sites, &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_3FE0:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ecx = c->esi;",
-                                  NULL,
-                                  "selection24 null-target guard 4",
-                                  INSERT_GUARD_3FE0, 3,
-                                  K_GUARD_1F20, va, line, counts,
-                                  sites, &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_SEND_NULL_C40:
-            case VA_SEND_NULL_D40:
-            case VA_SEND_NULL_F10: {
-                static const char *const *const INS[3] = {
-                    INSERT_SEND_NULL_C40, INSERT_SEND_NULL_D40,
-                    INSERT_SEND_NULL_F10
-                };
-                static const int INS_COUNT[3] = { 7, 7, 7 };
-                int pick = (va == VA_SEND_NULL_C40) ? 0
-                           : (va == VA_SEND_NULL_D40) ? 1 : 2;
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ebp = c->esp;",
-                                  NULL,
-                                  "selection24 send null-object guard",
-                                  INS[pick], INS_COUNT[pick],
-                                  K_GUARD_SEND_NULL, va, line, counts,
-                                  sites, &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            }
-            case VA_GUARD_FDD0_OBJ:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ebp = c->esp;",
-                                  NULL,
-                                  "selection24 dead-object guard",
-                                  INSERT_GUARD_FDD0_OBJ, 7,
-                                  K_GUARD_FDD0, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_FDD0_VTBL:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->eax = rd32((c->ecx));",
-                                  NULL,
-                                  "selection24 dead-vtable guard",
-                                  INSERT_GUARD_FDD0_VTBL, 8,
-                                  K_GUARD_FDD0, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_E60:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ebp = c->esp;",
-                                  NULL,
-                                  "selection24 dead-target guard",
-                                  INSERT_GUARD_E60, 7,
-                                  K_GUARD_E60, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
                     return -1;
                 break;
             case VA_TRACE_REMOVE_ENTRY:
@@ -3191,28 +2656,6 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
-            case VA_GUARD_E60B:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->esi = rd32((c->ebp + 0x00000008u));",
-                                  NULL,
-                                  "selection24 null-reference guard",
-                                  INSERT_GUARD_E60B, 9,
-                                  K_GUARD_E60B, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_TAG:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->edi = c->eax;",
-                                  NULL,
-                                  "selection24 weak-pair target check",
-                                  INSERT_GUARD_TAG, 17,
-                                  K_GUARD_TAG, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
             case VA_CAP_SLOT_MASK_A:
             case VA_CAP_SLOT_MASK_B:
             case VA_CAP_SLOT_MASK_C:
@@ -3227,51 +2670,6 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                  NULL, NULL,
                                  K_CAP_SLOT, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_SLOT_A:
-            case VA_GUARD_SLOT_B:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ecx = rd32((c->eax + c->ecx*8 + 0x00000004u));",
-                                  NULL,
-                                  "selection24 released-slot guard",
-                                  INSERT_GUARD_SLOT, 10,
-                                  K_GUARD_SLOT, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_EVENT:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ecx = rd32((c->ebp + 0x00000008u));",
-                                  NULL,
-                                  "selection24 missing order event guard",
-                                  INSERT_GUARD_EVENT, 13,
-                                  K_GUARD_EVENT, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_FC0:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ebp = c->esp;",
-                                  NULL,
-                                  "selection24 null-event guard",
-                                  INSERT_GUARD_FC0, 10,
-                                  K_GUARD_FC0, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_GUARD_E60_ENTRY:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->esi = rd32((c->ebp + 0x00000008u));",
-                                  NULL,
-                                  "selection24 null-task guard",
-                                  INSERT_GUARD_E60_ENTRY, 8,
-                                  K_GUARD_E60_ENTRY, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
                     return -1;
                 break;
             case VA_TRACE_TASKNULL:
@@ -3362,13 +2760,13 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
-            case VA_TRACE_CLUSTER_TRY:
+            case VA_CLUSTER_PREPARE:
                 next = p;
                 if (handle_insert(out, &next, end,
                                   "c->ecx = rd32((c->esi + 0x0000001Cu));",
                                   NULL,
                                   "selection24 cluster growth prepare",
-                                  INSERT_TRACE_CLUSTER_TRY, 6,
+                                  INSERT_CLUSTER_PREPARE, 6,
                                   K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
                     return -1;
@@ -3485,17 +2883,6 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   "selection24 order slots trace C",
                                   INSERT_TRACE_SLOTS_C, 4,
                                   K_TRACE_ORDER_SLOTS, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_FREELIST_HEAD:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "flags_sub(c, c->esi, 0xFFFFFFFFu, 4);",
-                                  NULL,
-                                  "selection24 freelist head normalize",
-                                  INSERT_FREELIST_HEAD, 5,
-                                  K_FREELIST_HEAD, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
@@ -4176,9 +3563,6 @@ static const char SELF_FIXTURE[] =
 "    c->esi = (uint32_t)((c->edi + c->eax*4));                    /* 6F6BAA00: lea esi, [edi + eax*4] */\n"
 "    wr32((c->edi + c->ecx*4 + 0x00000048u), c->eax);             /* 6F6BAA73: mov dword ptr [edi + ecx*4 + 0x48], eax */\n"
 "    wr32((c->edi + c->ecx*4 + 0x00000048u), c->eax);             /* 6F6BAA73: mov dword ptr [edi + ecx*4 + 0x48], eax */\n"
-"    c->ebp = c->esp;                                             /* 6F057C31: mov ebp, esp */\n"
-"    c->ebp = c->esp;                                             /* 6F689A61: mov ebp, esp */\n"
-"    c->ebp = c->esp;                                             /* 6F67ABE1: mov ebp, esp */\n"
 "    c->esp = flags_sub(c, c->esp, 0xCu, 4);                      /* 6F146D33: sub esp, 0xc */\n"
 "    c->ecx = rd32((c->eax));                                     /* 6F04D9E7: mov ecx, dword ptr [eax] */\n"
 "    c->edi = c->eax;                                             /* 6F04D9F3: mov edi, eax */\n"
@@ -4197,39 +3581,21 @@ static const char SELF_FIXTURE[] =
 "    wr32((c->edi + 0x00000050u), c->eax);                        /* 6F6BB731: mov dword ptr [edi + 0x50], eax */\n"
 "    wr32((c->edi + 0x00000050u), c->eax);                        /* 6F6BB90C: mov dword ptr [edi + 0x50], eax */\n"
 "    wr32((c->esi + 0x0000002Cu), c->eax);                        /* 6F6BBFCC: mov dword ptr [esi + 0x2c], eax */\n"
-"    flags_sub(c, c->esi, 0xFFFFFFFFu, 4);                        /* 6F1CBF4D: cmp esi, -1 */\n"
 "    flags_sub(c, c->eax, 0xCu, 4);                               /* 6F67DDF1: cmp eax, 0xc */\n"
 "    c->edx = rd32((c->ebp + 0x00000008u));                       /* 6F1CBFB3: mov edx, dword ptr [ebp + 8] */\n"
 "    c->edi = (uint32_t)(pop32(c));                               /* 6F1CBE99: pop edi */\n"
-"    c->ebp = c->esp;                                             /* 6F056621: mov ebp, esp */\n"
 "    push32(c, 0x6F6B93F3u); WC3_DIRECT_CALL(L_6F04CDD0, c);      /* 6F6B93EE: call 0x6f04cdd0 */\n"
 "    push32(c, 0x6F6B942Bu); WC3_DIRECT_CALL(L_6F04CDD0, c);      /* 6F6B9426: call 0x6f04cdd0 */\n"
-"    c->ecx = c->esi;                                             /* 6F691FB0: mov ecx, esi */\n"
-"    c->ecx = c->esi;                                             /* 6F6921C8: mov ecx, esi */\n"
-"    c->ecx = c->esi;                                             /* 6F69240F: mov ecx, esi */\n"
-"    c->ecx = c->esi;                                             /* 6F6740A0: mov ecx, esi */\n"
-"L_6F691FEB:\n"
-"L_6F692244:\n"
-"L_6F692451:\n"
-"    c->ebp = c->esp;                                             /* 6F689C41: mov ebp, esp */\n"
-"    c->ebp = c->esp;                                             /* 6F689D41: mov ebp, esp */\n"
-"    c->ebp = c->esp;                                             /* 6F689F11: mov ebp, esp */\n"
-"    c->ebp = c->esp;                                             /* 6F66FDD1: mov ebp, esp */\n"
-"    c->eax = rd32((c->ecx));                                     /* 6F66FDE7: mov eax, dword ptr [ecx] */\n"
-"    c->ebp = c->esp;                                             /* 6F691E61: mov ebp, esp */\n"
 "    c->ebx = c->ecx;                                             /* 6F28EF18: mov ebx, ecx */\n"
 "    wr32((c->eax + 0x000001F8u), dec32(rd32((c->eax + 0x000001F8u)), 4)); /* 6F28EFBB: dec dword ptr [eax + 0x1f8] */\n"
 "    wr32((c->eax + 0x000001F8u), dec32(rd32((c->eax + 0x000001F8u)), 4)); /* 6F28EFBB: dec dword ptr [eax + 0x1f8] */\n"
 "    wr32((c->eax + 0x000001F8u), dec32(rd32((c->eax + 0x000001F8u)), 4)); /* 6F28EFBB: dec dword ptr [eax + 0x1f8] */\n"
 "    c->edi = c->eax;                                             /* 6F154B76: mov edi, eax */\n"
 "    c->eax = c->edi;                                             /* 6F154B92: mov eax, edi */\n"
-"    c->esi = rd32((c->ebp + 0x00000008u));                       /* 6F691ECA: mov esi, dword ptr [ebp + 8] */\n"
 "    flags_logicz(c, c->eax & c->eax, 4);                         /* 6F69BE1B: test eax, eax */\n"
 "    c->eax = c->esi;                                             /* 6F69BE5C: mov eax, esi */\n"
 "    c->esi = c->eax;                                             /* 6F6B93E5: mov esi, eax */\n"
 "    c->edx = c->esi;                                             /* 6F6B93EA: mov edx, esi */\n"
-"    c->edi = c->eax;                                             /* 6F48CC29: mov edi, eax */\n"
-"    c->edi = c->eax;                                             /* 6F48CC29: mov edi, eax */\n"
 "    flags_sub(c, c->edi, 0xCu, 4);                               /* 6F26B522: cmp edi, 0xc */\n"
 "    flags_sub(c, c->edi, 0xCu, 4);                               /* 6F3DEBEE: cmp edi, 0xc */\n"
 "    flags_sub(c, c->edi, 0xCu, 4);                               /* 6F66BEFA: cmp edi, 0xc */\n"
@@ -4240,12 +3606,6 @@ static const char SELF_FIXTURE[] =
 "    flags_sub(c, c->esi, 0xCu, 4);                               /* 6F68C0CB: cmp esi, 0xc */\n"
 "    flags_sub(c, c->esi, 0xCu, 4);                               /* 6F3C2E33: cmp esi, 0xc */\n"
 "    c->eax = 0xCu;                                               /* 6F39737B: mov eax, 0xc */\n"
-"    c->ecx = rd32((c->eax + c->ecx*8 + 0x00000004u));           /* 6F054590: mov ecx, dword ptr [eax + ecx*8 + 4] */\n"
-"    c->ecx = rd32((c->eax + c->ecx*8 + 0x00000004u));           /* 6F05457D: mov ecx, dword ptr [eax + ecx*8 + 4] */\n"
-"    c->ecx = rd32((c->eax + c->ecx*8 + 0x00000004u));           /* 6F05457D: mov ecx, dword ptr [eax + ecx*8 + 4] */\n"
-"    c->ecx = rd32((c->ebp + 0x00000008u));                      /* 6F6857E9: mov ecx, dword ptr [ebp + 8] */\n"
-"    c->ebp = c->esp;                                             /* 6F689FC1: mov ebp, esp */\n"
-"    c->esi = rd32((c->ebp + 0x00000008u));                       /* 6F691E7C: mov esi, dword ptr [ebp + 8] */\n"
 "    if (c->zf) goto L_6F69274B;                                  /* 6F69272C: je 0x6f69274b */\n"
 "    c->edi = rd32((c->eax + 0x00000054u));                        /* 6F692727: mov edi, dword ptr [eax + 0x54] */\n"
 "    flags_logicz(c, c->eax & c->eax, 4);                         /* 6F69273F: test eax, eax */\n"
@@ -4323,7 +3683,7 @@ static int self_test(char *err, size_t errsz)
         count_occurrences(out1.p, out1.n, "wc3_sel24_fill") != 2 ||
         count_occurrences(out1.p, out1.n, "0x144u") != 1 ||
         count_occurrences(out1.p, out1.n, "0x00000138u") != 1 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel24_cap()") != 41 ||
+        count_occurrences(out1.p, out1.n, "wc3_sel24_cap()") != 42 ||
         count_occurrences(out1.p, out1.n, "0x9A0u") != 1 ||
         count_occurrences(out1.p, out1.n, "0x9A8u") != 1 ||
         count_occurrences(out1.p, out1.n, "0xFFFFF6A0u") != 4 ||
@@ -4340,37 +3700,11 @@ static int self_test(char *err, size_t errsz)
         count_occurrences(out1.p, out1.n,
                           "wc3_sel24_trace_lookup") != 2 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_guard") != 6 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 null-object guard") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 event null-object guard") != 2 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 lookup null-object guard") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 null-target guard") != 4 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 send null-object guard") != 3 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 dead-object guard") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 dead-vtable guard") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 dead-target guard") != 1 ||
-        count_occurrences(out1.p, out1.n,
                           "selection24 remove entry trace") != 1 ||
         count_occurrences(out1.p, out1.n,
                           "selection24 remove unit trace") != 3 ||
         count_occurrences(out1.p, out1.n,
                           "selection24 event birth trace") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 null-reference guard") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 weak-pair target check") != 2 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 released-slot guard") != 3 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 missing order event guard") != 1 ||
         count_occurrences(out1.p, out1.n,
                           "selection24 orderev result trace") != 1 ||
         count_occurrences(out1.p, out1.n,
@@ -4385,10 +3719,6 @@ static int self_test(char *err, size_t errsz)
                           "wc3_sel24_trace_order_apply") != 2 ||
         count_occurrences(out1.p, out1.n,
                           "wc3_sel24_trace_order_exec") != 2 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 null-event guard") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection24 null-task guard") != 1 ||
         count_occurrences(out1.p, out1.n,
                           "wc3_sel24_trace_tasknull") != 1 ||
         count_occurrences(out1.p, out1.n,
@@ -4530,31 +3860,23 @@ static int self_test(char *err, size_t errsz)
     }
 
     {
-        /* Mirrors a current report: PASS_REV 45 (369 sites). */
+        /* Mirrors a current report: PASS_REV 45 (349 sites). */
         const char json[] =
-            "{\"pass\":\"" PASS "\",\"pass_rev\":45,\"counts\":{"
-            "\"group_alloc\":1,\"init_group\":2,\"select\":2,"
-            "\"cap_outer\":2,\"cap_inner\":2,\"fill_block\":2,"
-            "\"fill_grid\":1,\"note_selection\":1,\"hide_all\":1,"
-            "\"addunit_cap\":1,\"cap_local_list\":5,\"cap_copy_list\":3,"
-            "\"cap_sync_add\":1,\"cap_net_recv\":1,\"cap_net_apply\":5,"
-            "\"cap_net_send\":2,\"cap_select_all\":1,"
-            "\"order_frame\":2,\"order_sort\":4,\"order_loop\":4,"
-            "\"order_callback\":8,\"order_callback_b\":4,"
-            "\"trace_evt2\":1,\"trace_lookup\":2,"
-            "\"cap_group_store\":3,\"cap_add_merge\":3,\"guard_null\":1,"
-            "\"guard_a60\":1,\"guard_abe0\":1,"
-            "\"trace_order_unit_b\":1,\"trace_order_unit_c\":1,"
-            "\"trace_order_loop_b\":2,\"trace_order_loop_c\":2,"
-            "\"guard_620\":1,\"trace_order_apply\":2,\"guard_1f20\":4,"
-            "\"trace_order_exec\":2,\"guard_send_null\":3,\"guard_fdd0\":2,"
-            "\"guard_e60\":1,\"trace_remove\":4,\"trace_evbirth\":1,"
-            "\"guard_e60b\":1,\"trace_apply\":2,\"guard_tag\":2,\"cap_slot\":10,"
-            "\"guard_slot\":3,\"guard_event\":1,"
-            "\"guard_fc0\":1,\"guard_e60_entry\":1,\"trace_tasknull\":1,"
-            "\"trace_evinit\":1,\"trace_orderdrop\":1,"
-            "\"order_obj_container\":35,\"trace_order_slots\":3,\"freelist_head\":1,\"order_group_full\":2,\"trace_evrelease\":1,\"slot_unlink\":1,\"group24\":206,\"trace_formation\":9},"
-            "\"total\":375}";
+            "{\"pass\":\"" PASS "\","
+            "\"pass_rev\":45,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
+            "\"cap_outer\":2,\"cap_inner\":2,\"fill_block\":2,\"fill_grid\":1,"
+            "\"note_selection\":1,\"hide_all\":1,\"addunit_cap\":1,\"cap_local_list\":5,"
+            "\"cap_copy_list\":3,\"cap_sync_add\":1,\"cap_net_recv\":1,\"cap_net_apply\":5,"
+            "\"cap_net_send\":2,\"cap_select_all\":1,\"order_frame\":2,\"order_sort\":4,"
+            "\"order_loop\":4,\"order_callback\":8,\"order_callback_b\":4,\"trace_evt2\":1,"
+            "\"trace_lookup\":2,\"cap_group_store\":3,\"cap_add_merge\":3,"
+            "\"trace_order_unit_b\":1,\"trace_order_unit_c\":1,\"trace_order_loop_b\":2,"
+            "\"trace_order_loop_c\":2,\"trace_order_apply\":2,\"trace_order_exec\":2,"
+            "\"trace_remove\":4,\"trace_evbirth\":1,\"trace_apply\":2,\"cap_slot\":10,"
+            "\"trace_tasknull\":1,\"trace_evinit\":1,\"trace_orderdrop\":1,"
+            "\"order_obj_container\":35,\"trace_order_slots\":3,\"order_group_full\":2,"
+            "\"trace_evrelease\":1,\"slot_unlink\":1,\"group24\":204,\"trace_formation\":9},"
+            "\"total\":349};";
         Counts c3;
 
         if (json_counts_parse(json, &c3, err2, sizeof(err2)) != 0 ||

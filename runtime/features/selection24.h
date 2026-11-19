@@ -86,12 +86,6 @@ void wc3_sel24_group_init(uint32_t pair_base);
 void wc3_sel24_group_sort(uint32_t group);
 
 /*
- * Rev 62 diagnostic: dump the sixteen group counts (stride 0x134) at a
- * synchronization point.  Compiled out unless WC3_DEBUG && WC3_DEBUG_SELECT24.
- */
-void wc3_sel24_trace_counts(uint32_t base);
-
-/*
  * Formation row length returned by the table read in L_6F16D270 / L_6F16D286
  * / L_6F16D2D3.  index is the guest eax (13 * flag + count), count is the
  * group size and pair selects the table pair (0 = A/B at 0x6FA91D20,
@@ -106,11 +100,6 @@ void wc3_sel24_trace_counts(uint32_t base);
  */
 uint32_t wc3_sel24_formation_columns(uint32_t index, uint32_t count,
                                      uint32_t pair);
-
-/* Reports an object reference that did not resolve: kind 1 = the selection
- * object's weak pair target, kind 2 = a handle slot with a released object. */
-void wc3_sel24_trace_stale(CPU *c, uint32_t kind, uint32_t a, uint32_t b,
-                           uint32_t d);
 
 /*
  * Called from the CInfoPanelGroup constructor after the original 6x2 grid and
@@ -196,20 +185,13 @@ void wc3_sel24_trace_addunit(CPU *c, uint32_t group, uint32_t unit,
  * wc3_sel24_trace_lookup is called around that lookup in 0x6F04D9C0:
  * stage 0 passes {handle, serial}, stage 1 the lookup result.  Only rejected
  * pairs and zero results are printed.
- *
- * wc3_sel24_trace_guard is called from the null-object early returns in
- * 0x6F057C30, 0x6F689A60 and 0x6F67ABE0.  It records the guard hit and
- * reuses the stack walk so a new build can prove the guard, not a different
- * path, handled the failed lookup or the event whose target interface has no
- * +0x54 object.
  */
 void wc3_sel24_trace_evt2(CPU *c, uint32_t self, uint32_t arg);
 void wc3_sel24_trace_lookup(CPU *c, uint32_t stage, uint32_t a, uint32_t b);
-void wc3_sel24_trace_guard(CPU *c, uint32_t arg);
 
 /*
  * wc3_sel24_trace_tasknull is called right after 0x6F6926B0 reads the task
- * payload at [factory+0x54].  The two guards it feeds - 0x6F689FC0 and
+ * payload at [factory+0x54].  The two consumers it feeds - 0x6F689FC0 and
  * 0x6F691E60 - only see the null target; this trace records every task
  * creation, with `null=` marking the ones the engine drops: the wrapper, the
  * payload (vtable, class tag, handle/serial, +0x50/+0x54), the descriptor at
@@ -368,8 +350,6 @@ void wc3_sel24_trace_evrelease(CPU *c, uint32_t table, uint32_t handle);
  * a null event and crashes the delivery, so the trace shows which branch
  * rejected the unit.
  */
-int wc3_sel24_heap_ptr(uint32_t p);
-
 void wc3_sel24_trace_apply(CPU *c, uint32_t phase, uint32_t a, uint32_t b);
 
 #ifdef __cplusplus

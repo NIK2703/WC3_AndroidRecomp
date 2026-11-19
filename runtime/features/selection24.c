@@ -68,6 +68,7 @@ static FILE *sel24_log(void)
 #endif
 #endif /* WC3_DEBUG && WC3_DEBUG_SELECT24 */
 
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
 /*
  * The event-birth/event-release, per-unit order and sort-workspace traces are
  * opt-in.  They describe paths that are already ruled out for the 12-unit
@@ -79,7 +80,6 @@ static FILE *sel24_log(void)
  */
 static int sel24_verbose_trace(void)
 {
-#if WC3_DEBUG && WC3_DEBUG_SELECT24
     static int enabled = -1;
 
     if (enabled < 0) {
@@ -88,10 +88,8 @@ static int sel24_verbose_trace(void)
         enabled = (value && value[0] == '1' && value[1] == '\0') ? 1 : 0;
     }
     return enabled;
-#else
-    return 0;
-#endif
 }
+#endif
 
 /* One definition in the helper library: the product build links this module
  * whenever WC3_SELECTION_24 is ON, so the marker is present exactly once. */
@@ -1003,34 +1001,8 @@ void wc3_sel24_trace_evt2(CPU *c, uint32_t self, uint32_t arg)
 }
 
 /*
- * Inserted inside the null-object early returns of 0x6F057C30, 0x6F689A60
- * and 0x6F67ABE0.  All three guards are product behaviour: they prevent a
- * write to a null object ([0+0x54], [0+0x24] and [0+0x20] respectively).
- * This trace is only compiled into the debug build and records that the guard
- * actually took the null path, the caller return address and the producer
- * context that led to the lookup/event.
- */
-void wc3_sel24_trace_guard(CPU *c, uint32_t arg)
-{
-    if (!sel24_verbose_trace())
-        return;
-    Sel24CpuState saved;
-    uint32_t ra = 0u;
-
-    sel24_save_state(c, &saved);
-    if (sel24_stack_word(c->ebp))
-        ra = rd32(c->ebp + 4u);
-    fprintf(SEL24_OUT,
-            "[select24] guard ecx=0 arg=%08X eip=%08X esp=%08X ebp=%08X "
-            "ra=%08X\n",
-            arg, c->eip, c->esp, c->ebp, ra);
-    sel24_trace_event_context(c, 0u, arg, 0);
-    sel24_restore_state(c, &saved);
-}
-
-/*
  * 0x6F6926B0 reads the task payload at [factory+0x54] and silently drops the
- * order for that unit when the field is zero; the two guards at 0x6F689FC0
+ * order for that unit when the field is zero; the two consumers at 0x6F689FC0
  * and 0x6F691E60 then only see the resulting null.  This trace records every
  * task creation, null payload or not: the wrapper, the payload (with its
  * vtable, class tag and lifetime fields), the descriptor at [ebp-0x3C] that
@@ -1127,25 +1099,6 @@ void wc3_sel24_trace_orderdrop(CPU *c, uint32_t wrapper, uint32_t tag,
             sel24_rd(wrapper, 0x14u), sel24_rd(wrapper, 0x18u),
             sel24_rd(wrapper, 0x50u), sel24_rd(wrapper, 0x54u));
     sel24_restore_state(c, &saved);
-}
-
-/* Identity traces of the weak-pair check print one line per resolved object
- * (tens of thousands per session) and drown the selection events.  They stay
- * available behind WC3_SEL24_IDENT=1, read once per process. */
-static pthread_once_t g_sel24_ident_once = PTHREAD_ONCE_INIT;
-static int g_sel24_ident;
-
-static void sel24_read_ident(void)
-{
-    const char *value = getenv("WC3_SEL24_IDENT");
-
-    g_sel24_ident = (value && value[0] == '1' && value[1] == '\0') ? 1 : 0;
-}
-
-static int sel24_ident_trace(void)
-{
-    pthread_once(&g_sel24_ident_once, sel24_read_ident);
-    return g_sel24_ident;
 }
 
 /*
@@ -1678,21 +1631,6 @@ void wc3_sel24_trace_order_apply(CPU *c, uint32_t unit, uint32_t event,
     sel24_restore_state(c, &saved);
 }
 
-void wc3_sel24_trace_stale(CPU *c, uint32_t kind, uint32_t a, uint32_t b,
-                           uint32_t d)
-{
-    if (!sel24_verbose_trace())
-        return;
-    Sel24CpuState saved;
-
-    if ((kind == 1u || kind == 4u) && !sel24_ident_trace())
-        return;
-    sel24_save_state(c, &saved);
-    fprintf(SEL24_OUT,
-            "[select24] stale kind=%u a=%08X b=%08X c=%08X\n", kind, a, b, d);
-    sel24_restore_state(c, &saved);
-}
-
 /*
  * Inserted in 0x6F6B93A0 around the virtual call that hands the order event
  * to the unit.  Stage 0 prints the unit, the event object, its vtable and the
@@ -1794,10 +1732,6 @@ void wc3_sel24_trace_remove(CPU *c, uint32_t phase, uint32_t group,
  * game checks), phase 1 prints the object the apply returned and its +0x78
  * field, which has to point back at the order object for success.
  */
-int wc3_sel24_heap_ptr(uint32_t p)
-{
-    return p >= 0x10000u && p < 0x7F000000u;
-}
 void wc3_sel24_trace_apply(CPU *c, uint32_t phase, uint32_t a, uint32_t b)
 {
     Sel24CpuState saved;
@@ -2560,34 +2494,6 @@ void wc3_sel24_group_init(uint32_t pair_base)
     if (pair_base >= 0x64u)
         wr32(pair_base - 0x64u, 0u);
 }
-
-/*
- * Rev 62 diagnostic.  The fill (L_6F16CB80) zeroes all sixteen counts and
- * increments them per unit, yet the sort loop observes a garbage count in an
- * empty group.  Dump the whole count row at a synchronization point (fill
- * return, sort-loop entry) so the writer that runs between them is visible.
- * Compiled out unless WC3_DEBUG && WC3_DEBUG_SELECT24.
- */
-#if WC3_DEBUG && WC3_DEBUG_SELECT24
-void wc3_sel24_trace_counts(uint32_t base)
-{
-    uint32_t i;
-
-    if (!sel24_readable(base))
-        return;
-    for (i = 0u; i < 16u; ++i) {
-        fprintf(SEL24_OUT,
-                "[select24] counts base=%08X i=%u count=%u\n",
-                base, i, sel24_rd(base, i * 0x134u));
-    }
-    fputc('\n', SEL24_OUT);
-}
-#else
-void wc3_sel24_trace_counts(uint32_t base)
-{
-    (void)base;
-}
-#endif
 
 /*
  * Formation row length for the selection-group order path.
