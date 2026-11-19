@@ -1,4 +1,7 @@
-# Final debug package: boot log and crash breadcrumbs only.
-# Read by tools/android/build_app.ps1 at build start.
+# Final debug package: boot log, crash breadcrumbs, the 24-unit
+# point-order/formation trace and the vertex-dispatch/perf counters.  Read by
+# tools/android/build_app.ps1 at build start.
 BOOT
 CRASH
+SELECT24
+PERF

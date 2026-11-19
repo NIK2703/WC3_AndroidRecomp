@@ -1801,8 +1801,8 @@ def test_pass4_build() -> int:
     """T0: PASS4 build inputs without linking the product.
 
     The real lld smoke is deliberately outside the default gate: it needs the
-    Android NDK.  This check keeps the O-42 version-script surface and CMake
-    wiring, the O-43 deterministic pack-relocation switches, the O-44
+    Android NDK.  This check keeps the retired O-42 hide policy out of the
+    product, the O-43 deterministic pack-relocation switches, the O-44
     constructor counter, the O-45 asset snapshot fallbacks, and the O-46
     release dispatch path from silently drifting.
     """
@@ -1812,28 +1812,11 @@ def test_pass4_build() -> int:
         if not condition:
             failures.append(message)
 
-    map_path = ROOT / "cmake" / "wc3_exports.map"
-    if not map_path.is_file():
-        print(f"FAIL missing {map_path}", file=sys.stderr)
-        return 1
-    version_script = map_path.read_text(encoding="utf-8")
-    global_match = re.search(r"global:(.*?)(?:local:|$)", version_script, re.S)
-    check(global_match is not None, "version script has no global block")
-    if global_match:
-        exported = {item.rstrip(";") for item in global_match.group(1).split()}
-        for symbol in ("JNI_OnLoad", "android_main", "Java_*"):
-            check(symbol in exported, f"version script missing {symbol}")
-    local_match = re.search(r"local:(.*?)(?:};|$)", version_script, re.S)
-    check(local_match is not None, "version script has no local block")
-    if local_match:
-        locals_ = {item.rstrip(";") for item in local_match.group(1).split()}
-        check("*" in locals_, "version script does not localize the rest")
-
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
-    check("option(WC3_HIDE_DYNSYM" in cmake, "O-42 option missing")
-    check("--version-script=${WC3_ROOT}/cmake/wc3_exports.map" in cmake,
-          "O-42 version script not linked")
-    check("LINK_DEPENDS" in cmake, "O-42 map is not a link dependency")
+    check("WC3_HIDE_DYNSYM" not in cmake,
+          "O-42 hide option is still present; release crash logs need .dynsym")
+    check("wc3_exports.map" not in cmake,
+          "O-42 version script is still linked")
     check("--pack-dyn-relocs=${WC3_PACK_DYN_RELOCS_MODE}" in cmake,
           "O-43 pack mode not wired")
 
@@ -1844,16 +1827,16 @@ def test_pass4_build() -> int:
     check(re.search(r'"-DWC3_PACK_DYN_RELOCS=\$packDynRelocsValue"',
                     build_app) is not None,
           "O-43 pack option is not deterministic")
-    check("WC3_HIDE_DYNSYM=ON" in build_app and "WC3_HIDE_DYNSYM=OFF" in build_app,
-          "O-42 hide option is not explicit per variant")
-    check("$hideDynsym = ($Variant -eq 'release') -and (-not $KeepDynsym)" in build_app,
-          "O-42 hide policy is not release-only with a KeepDynsym escape")
+    check("WC3_HIDE_DYNSYM" not in build_app and
+          "KeepDynsym" not in build_app,
+          "release still wires the O-42 hide policy")
 
     build_apk = (ROOT / "tools" / "android" / "build_apk.ps1").read_text(
         encoding="utf-8")
-    check("$KeepDynsym" in build_apk, "O-42 KeepDynsym escape hatch missing")
-    check("L_[0-9A-Fa-f]{8}" in build_apk, "O-42 L_* leak check missing")
-    check(r"\bwc3_" in build_apk, "O-42 wc3_* leak check missing")
+    check("L_[0-9A-Fa-f]{8}" in build_apk,
+          "release L_* crash-symbol check missing")
+    check(r"\bwc3_" in build_apk,
+          "release wc3_* crash-symbol check missing")
 
     snapshot = (ROOT / "runtime" / "platform" / "android" /
                 "asset_snapshot.c").read_text(encoding="utf-8")

@@ -26,7 +26,7 @@ void wc3_profile_apply_gesture_mode(ProfileData *profile,
 /*
  * Apply product gesture timers after the .icp profile has been parsed.
  * A value <= 0 keeps the authored timer.  Positive values are clamped to
- * 100..200 ms, the range exposed by the launch settings.
+ * 50..200 ms, the range exposed by the launch settings.
  */
 void wc3_profile_apply_gesture_timings(ProfileData *profile,
                                        int double_tap_timeout_ms,

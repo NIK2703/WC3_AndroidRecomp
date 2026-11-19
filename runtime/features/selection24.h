@@ -35,19 +35,77 @@ extern "C" {
 uint32_t wc3_sel24_cap(void);
 
 /*
+ * Called at the entry of the CPrCluster member-vector insertion 0x6F16C077.
+ * The member vector is normally a fixed 12-slot vector (growth chunk zero), so
+ * the 13th insertion fails and the caller silently drops the unit.  In the
+ * 24-unit profile this gives the vector the game's own growth chunk (12), which
+ * lets the existing grow path 0x6F16C0B3 reallocate to 24 slots when needed.
+ * It does nothing for the baseline 12-unit profile and for any vector that is
+ * not the CPrCluster member vector at cluster+0x1C.
+ */
+void wc3_sel24_cluster_prepare(uint32_t vector);
+
+/*
+ * Diagnostic trace inserted at the ground-order base read 0x6F16D012 and at
+ * the group builder entry 0x6F16A5B3.  sel is the selection/cluster object,
+ * group the temporary group, cursor the batch cursor value and idx the loop
+ * index.  It prints the live [sel+0x28] unit-record base, the embedded member
+ * vector fields and the group index, so a 12-entry base reused after the
+ * member-vector grow is visible in sel24_trace.txt.  Compiled out unless
+ * WC3_DEBUG && WC3_DEBUG_SELECT24.
+ */
+void wc3_sel24_trace_order_base(CPU *c, uint32_t sel, uint32_t group,
+                                uint32_t cursor, uint32_t idx);
+
+/*
  * 24-entry ground-order formation workspace.
  *
  * The lifted solver 0x6F16B2F0 keeps a local count, a 24-entry index array and
  * a 24-entry pair array at count+0, count+4 and count+0x64.  The original
  * helper 0x6F169300 zeroes only twelve pairs because it hard-codes
  * eax=count+0x34 and edx=2; the original sort 0x6F16DFD0 reads the pair array
- * at count+0x34/count+0x38 and is still used by the 12-entry caller
- * 0x6F16A6E0.  These two helpers contain the same memory operations for the
- * 24-entry layout; the pass calls them only from 0x6F16B2F0.  pair_base is the
- * guest address count+0x64.
+ * at count+0x34/count+0x38 and is left in place for reference.  Both live
+ * callers now use the 24-entry helpers: the pass routes the solver through
+ * init24/sort24 and the selection group through init_group/sort_group.
+ * pair_base is the guest address count+0x64.
  */
 void wc3_sel24_init24(uint32_t pair_base);
 void wc3_sel24_sort24(uint32_t count_ptr);
+
+/*
+ * Selection-group workspace wrappers used by the 16-element array in
+ * L_6F16A5F8 / L_6F16A6E0.  One group entry is 0x134 bytes: count +0,
+ * index[24] +4, pair[24] +0x64 (key/value dwords) and tail +0x124..+0x130.
+ * The wrappers do not modify the guest CPU state; under
+ * WC3_DEBUG && WC3_DEBUG_SELECT24 they snapshot the entry around zeroing and
+ * around the sort so a tail overwrite by the old 12-entry pair stride is
+ * visible in sel24_trace.txt.  The names differ from the panel-group helper
+ * wc3_sel24_init_group(CPU *, uint32_t), which creates the CInfoPanelGroup.
+ */
+void wc3_sel24_group_init(uint32_t pair_base);
+void wc3_sel24_group_sort(uint32_t group);
+
+/*
+ * Rev 62 diagnostic: dump the sixteen group counts (stride 0x134) at a
+ * synchronization point.  Compiled out unless WC3_DEBUG && WC3_DEBUG_SELECT24.
+ */
+void wc3_sel24_trace_counts(uint32_t base);
+
+/*
+ * Formation row length returned by the table read in L_6F16D270 / L_6F16D286
+ * / L_6F16D2D3.  index is the guest eax (13 * flag + count), count is the
+ * group size and pair selects the table pair (0 = A/B at 0x6FA91D20,
+ * 1 = C/D at 0x6FA91D88).  For count <= 12 the original table value is
+ * returned unchanged, so the 12-unit profile and the exact 1.27 behaviour
+ * stay bit-identical.  The table only has 13 entries per block and is
+ * followed by a vtable, so the 13..24 columns are defined here: the compact
+ * mode continues its constant 3, the grid mode continues the three-row shape
+ * with ceil(count / 3) (13..15 -> 5, 16..18 -> 6, 19..21 -> 7, 22..24 -> 8).
+ * The value is a row length: the order loop clamps it to the units left, so
+ * every value >= 1 advances the loop.
+ */
+uint32_t wc3_sel24_formation_columns(uint32_t index, uint32_t count,
+                                     uint32_t pair);
 
 /* Reports an object reference that did not resolve: kind 1 = the selection
  * object's weak pair target, kind 2 = a handle slot with a released object. */
@@ -233,6 +291,44 @@ void wc3_sel24_trace_order_apply(CPU *c, uint32_t unit, uint32_t event,
 void wc3_sel24_trace_order_exec(CPU *c, uint32_t stage, uint32_t unit,
                                 uint32_t event, uint32_t vtbl,
                                 uint32_t handler, uint32_t result);
+
+/*
+ * Point-order / formation tracing added for the >12-unit ground-order defect.
+ *
+ * order_begin is inserted in both point-order handlers (0x6F6B991E for
+ * message 0x12 and 0x6F6B9F9E for message 0x13) after the request is saved in
+ * ebx.  It prints the full request, including the target pair at +0x30/+0x34
+ * and the ground point at +0x28/+0x2C, so a unit-target order can be told
+ * apart from a territory order.  source is 0 for the 0x12 handler and 1 for
+ * the 0x13 handler.
+ *
+ * listadd is inserted on the 0x6F16966D `cmovne eax, esi` line, immediately
+ * before the PrClGen pointer write at 0x6F169670.  It records the slot index,
+ * the runtime cap, the pending pointer and the number of occupied slots,
+ * catching a path that still stops at twelve.
+ *
+ * formation_begin is inserted after 0x6F16B306 at the entry of the ground
+ * solver 0x6F16B2F0.  It prints the CPrCluster capacity, count and every
+ * member unit before the index/pair workspace is touched.
+ *
+ * cluster_try is inserted at the entry of the member-vector insertion
+ * 0x6F16C077.  It prints the vector base, grow flag, capacity and count plus
+ * the caller's add count.  `over` is the exact 0x6F16C083 branch condition,
+ * so a zero grow flag with `over=1` is the rejected 13th..24th member.
+ *
+ * cluster_insert is inserted after the member-vector insertion call at
+ * 0x6F16B7ED.  Its eax result is the value the original code ignores before
+ * it unlinks the unit from PrClGen; the line shows the result, the cluster
+ * count and the slot pair.
+ */
+void wc3_sel24_trace_order_begin(CPU *c, uint32_t request, uint32_t source);
+void wc3_sel24_trace_listadd(CPU *c, uint32_t list, uint32_t index,
+                             uint32_t value, uint32_t unit, uint32_t store);
+void wc3_sel24_trace_formation_begin(CPU *c, uint32_t cluster);
+void wc3_sel24_trace_cluster_try(CPU *c, uint32_t vector, uint32_t add);
+void wc3_sel24_trace_cluster_insert(CPU *c, uint32_t cluster, uint32_t unit,
+                                    uint32_t list, uint32_t slot,
+                                    uint32_t result);
 
 /*
  * Inserted in 0x6F28EEF0, the function that removes one unit from the

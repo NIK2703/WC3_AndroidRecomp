@@ -674,6 +674,286 @@ static void perf_note_kind(unsigned kind, uint32_t total, unsigned chunks,
 }
 #endif
 
+#if WC3_DEBUG && WC3_DEBUG_PERF
+/* Guard-reason counter for the generic vertex path.
+ *
+ * L_6F141680 sends every flags==0 batch through the stream setup to
+ * L_6F1419D4 (mode 0) or L_6F1417F0 (mode 1).  Both entries call
+ * wc3_parallel_vertex_try(); with many candidate batches in a real match and
+ * a 1024-call perf print cadence, a missing [perf] vertex line means no
+ * meaningful number of them reached perf_note_kind, not that the loops were
+ * never reached.
+ * This counter names the rejecting check without changing CPU state, guest
+ * memory or the validation policy.  It is compiled only into a PERF build;
+ * release has no counter and no call. */
+enum {
+    VG_LOW = 0,
+    VG_HIGH,
+    VG_BYPASS,
+    VG_DISABLED,
+    VG_BAD_KIND,
+    VG_INIT_ACTIVE,
+    VG_READY,
+    VG_SLOW_DISABLED,
+    VG_FRAME,
+    VG_OBJ,
+    VG_MODE,
+    VG_SLOT,
+    VG_SRC0,
+    VG_SRC1,
+    VG_SRC2,
+    VG_SRC3,
+    VG_SRC4,
+    VG_PM,
+    VG_DUMMY_FRAME,
+    VG_DUMMY_ALIAS,
+    VG_OUT_SPAN,
+    VG_OUT_FRAME,
+    VG_OVERLAP,
+    VG_CHUNKS,
+    VG_CHUNKS_ONE,
+    VG_RUN,
+    VG_COUNT
+};
+static unsigned long long g_vertex_guard[VG_COUNT];
+static unsigned long long g_vertex_guard_calls;
+static unsigned long long g_vertex_guard_last_print;
+static unsigned g_vertex_guard_every = 65536u;
+static int g_vertex_guard_print = 1;
+static int g_vertex_guard_env_ready;
+
+static void vertex_guard_note(unsigned reason)
+{
+    if (!g_vertex_guard_env_ready) {
+        g_vertex_guard_env_ready = 1;
+        const char *s = getenv("WC3_VERTEX_STATS");
+        g_vertex_guard_print = (s && *s) ? env_on("WC3_VERTEX_STATS") : 1;
+        g_vertex_guard_every =
+            env_u("WC3_VERTEX_STATS_EVERY", 65536u, UINT_MAX);
+        if (!g_vertex_guard_every) g_vertex_guard_every = 65536u;
+    }
+    if (reason >= VG_COUNT) return;
+    g_vertex_guard_calls++;
+    g_vertex_guard[reason]++;
+    if (!g_vertex_guard_print) return;
+    if (g_vertex_guard_calls - g_vertex_guard_last_print <
+        g_vertex_guard_every)
+        return;
+    g_vertex_guard_last_print = g_vertex_guard_calls;
+    fprintf(stderr,
+            "[vertex-guard] calls=%llu thr=%u minc=%u low=%llu high=%llu "
+            "bypass=%llu disabled=%llu kind=%llu init=%llu ready=%llu "
+            "slow_disabled=%llu frame=%llu obj=%llu mode=%llu slot=%llu "
+            "src0=%llu src1=%llu src2=%llu src3=%llu src4=%llu pm=%llu "
+            "dummy=%llu alias=%llu span=%llu out_frame=%llu overlap=%llu "
+            "chunks=%llu chunks_one=%llu run=%llu\n",
+            g_vertex_guard_calls,
+            g_vertex_threshold, g_vertex_min_chunk,
+            g_vertex_guard[VG_LOW], g_vertex_guard[VG_HIGH],
+            g_vertex_guard[VG_BYPASS], g_vertex_guard[VG_DISABLED],
+            g_vertex_guard[VG_BAD_KIND], g_vertex_guard[VG_INIT_ACTIVE],
+            g_vertex_guard[VG_READY], g_vertex_guard[VG_SLOW_DISABLED],
+            g_vertex_guard[VG_FRAME], g_vertex_guard[VG_OBJ],
+            g_vertex_guard[VG_MODE], g_vertex_guard[VG_SLOT],
+            g_vertex_guard[VG_SRC0], g_vertex_guard[VG_SRC1],
+            g_vertex_guard[VG_SRC2], g_vertex_guard[VG_SRC3],
+            g_vertex_guard[VG_SRC4], g_vertex_guard[VG_PM],
+            g_vertex_guard[VG_DUMMY_FRAME], g_vertex_guard[VG_DUMMY_ALIAS],
+            g_vertex_guard[VG_OUT_SPAN], g_vertex_guard[VG_OUT_FRAME],
+            g_vertex_guard[VG_OVERLAP], g_vertex_guard[VG_CHUNKS],
+            g_vertex_guard[VG_CHUNKS_ONE], g_vertex_guard[VG_RUN]);
+}
+static int vertex_guard_fail(unsigned reason)
+{
+    vertex_guard_note(reason);
+    return 0;
+}
+# define WC3_VERTEX_GUARD_FAIL(reason) \
+    do { return vertex_guard_fail(reason); } while (0)
+# define WC3_VERTEX_GUARD_NOTE(reason) vertex_guard_note(reason)
+#else
+# define WC3_VERTEX_GUARD_FAIL(reason) do { return 0; } while (0)
+# define WC3_VERTEX_GUARD_NOTE(reason) ((void)0)
+#endif
+
+#if WC3_DEBUG && WC3_DEBUG_PERF
+/* Dispatch-decision counter for L_6F141680, the vertex batch setup.
+ *
+ * The post-lift pass inserts one call after `this` and `dest` are loaded and
+ * before the first format test.  The counter only reads the incoming object
+ * and the vertex block; it does not change the CPU or guest memory.  The
+ * reason order matches the generated branch order exactly, so the reason
+ * buckets sum to the number of setup calls.
+ *
+ * WC3_VERTEX_STATS=0 disables the periodic line; WC3_VERTEX_STATS_EVERY sets
+ * the cadence.  A PERF build defaults the line on: the counter exists to
+ * answer whether the format-2 fast loops run in an active match, and asking
+ * for a profiled build and then forgetting the env is not useful.
+ *
+ * The per-branch count histograms answer the threshold question directly:
+ * a CF0/BD0/AD0 branch that is selected only for tiny batches cannot pay for
+ * a chunk split.  All state is caller-thread-only, like the raycast and kind
+ * counters above. */
+enum {
+    VERTEX_DISPATCH_CF0 = 0,
+    VERTEX_DISPATCH_BD0,
+    VERTEX_DISPATCH_AD0,
+    VERTEX_DISPATCH_GEN_FLAGS,
+    VERTEX_DISPATCH_GEN_STREAM,
+    VERTEX_DISPATCH_GEN_STRIDES,
+    VERTEX_DISPATCH_GEN_ALIGN,
+    VERTEX_DISPATCH_GEN_MODE,
+    VERTEX_DISPATCH_GEN_MODE1,
+    VERTEX_DISPATCH_REASON_COUNT
+};
+
+static unsigned long long g_dispatch_calls;
+static unsigned long long g_dispatch_reason[VERTEX_DISPATCH_REASON_COUNT];
+static unsigned long long g_dispatch_mode[3];
+static unsigned long long g_dispatch_bit2;
+static unsigned long long g_dispatch_stream2;
+static unsigned long long g_dispatch_strides_ok;
+static unsigned long long g_dispatch_align_ok;
+static unsigned long long g_dispatch_index1;
+/* Four work-kind rows: CF0, BD0, AD0, generic.  The eight columns are the
+ * count buckets below. */
+static unsigned long long g_dispatch_branch_count[4][8];
+static unsigned long long g_dispatch_last_print;
+static int g_dispatch_env_ready;
+static int g_dispatch_print;
+static unsigned g_dispatch_every = RAY_STATS_DEFAULT;
+
+static unsigned dispatch_count_bucket(uint32_t n)
+{
+    if (n == 0u) return 0;
+    if (n < 4u) return 1;
+    if (n < 16u) return 2;
+    if (n < 64u) return 3;
+    if (n < 256u) return 4;
+    if (n < 512u) return 5;
+    if (n < 1024u) return 6;
+    return 7;
+}
+
+static void dispatch_load_env(void)
+{
+    if (g_dispatch_env_ready) return;
+    g_dispatch_env_ready = 1;
+    const char *s = getenv("WC3_VERTEX_STATS");
+    g_dispatch_print = (s && *s) ? env_on("WC3_VERTEX_STATS") : 1;
+    unsigned every = env_u("WC3_VERTEX_STATS_EVERY", RAY_STATS_DEFAULT,
+                           RAY_STATS_EVERY_MAX);
+    if (!every) every = RAY_STATS_DEFAULT;
+    g_dispatch_every = every;
+}
+
+void wc3_vertex_dispatch_note(const CPU *c)
+{
+    unsigned reason;
+    uint32_t obj, flags, mode, stream, count, dest;
+    uint32_t stride0, stride1, stride3, index_stride;
+    unsigned bucket;
+
+    if (!c) return;
+    dispatch_load_env();
+
+    if (!hle_android_guest_ok(c->ebp - 4u, 4u)) return;
+    obj = rd32(c->ebp - 4u);
+    if (!obj || !hle_android_guest_ok(obj, 0x22Cu)) return;
+
+    flags = rd32(obj + 0x90u);
+    mode = rd32(obj + 0x224u);
+    stream = rd32(obj + 0x228u);
+    dest = c->ebx;
+    count = rd32(GVA(WC3_VERTEX_GLOBAL_FIRST));
+    stride0 = rd32(GVA(0x6FD53940u));
+    stride1 = rd32(GVA(0x6FD53948u));
+    stride3 = rd32(GVA(0x6FD53964u));
+    index_stride = rd32(GVA(0x6FD53958u));
+
+    if (!(flags & 6u)) reason = VERTEX_DISPATCH_GEN_FLAGS;
+    else if (stream != 2u) reason = VERTEX_DISPATCH_GEN_STREAM;
+    else if (stride0 != 12u || stride1 != 12u || stride3 != 8u)
+        reason = VERTEX_DISPATCH_GEN_STRIDES;
+    else if (dest & 0xFu) reason = VERTEX_DISPATCH_GEN_ALIGN;
+    else if (mode == 0u)
+        reason = (flags & 4u) ? VERTEX_DISPATCH_BD0 : VERTEX_DISPATCH_AD0;
+    else if (mode == 1u)
+        reason = (flags & 4u) ? VERTEX_DISPATCH_CF0
+                              : VERTEX_DISPATCH_GEN_MODE1;
+    else
+        reason = VERTEX_DISPATCH_GEN_MODE;
+
+    bucket = dispatch_count_bucket(count);
+    g_dispatch_calls++;
+    g_dispatch_reason[reason]++;
+    g_dispatch_mode[mode < 2u ? mode : 2u]++;
+    g_dispatch_bit2 += (flags & 4u) != 0u;
+    g_dispatch_stream2 += stream == 2u;
+    g_dispatch_strides_ok += stride0 == 12u && stride1 == 12u &&
+                             stride3 == 8u;
+    g_dispatch_align_ok += (dest & 0xFu) == 0u;
+    g_dispatch_index1 += index_stride == 1u;
+    g_dispatch_branch_count[reason <= VERTEX_DISPATCH_AD0 ? reason : 3u]
+                           [bucket]++;
+
+    if (!g_dispatch_print) return;
+    if (g_dispatch_calls - g_dispatch_last_print < g_dispatch_every) return;
+    g_dispatch_last_print = g_dispatch_calls;
+    fprintf(stderr,
+            "[vertex-dispatch] total=%llu cf0=%llu bd0=%llu ad0=%llu "
+            "gen_flags=%llu gen_stream=%llu gen_strides=%llu "
+            "gen_align=%llu gen_mode=%llu gen_mode1=%llu "
+            "mode0=%llu mode1=%llu modeX=%llu bit2=%llu stream2=%llu "
+            "strides_ok=%llu align_ok=%llu index1=%llu "
+            "cf0_n=[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu] "
+            "bd0_n=[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu] "
+            "ad0_n=[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu] "
+            "gen_n=[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]\n",
+            g_dispatch_calls,
+            g_dispatch_reason[VERTEX_DISPATCH_CF0],
+            g_dispatch_reason[VERTEX_DISPATCH_BD0],
+            g_dispatch_reason[VERTEX_DISPATCH_AD0],
+            g_dispatch_reason[VERTEX_DISPATCH_GEN_FLAGS],
+            g_dispatch_reason[VERTEX_DISPATCH_GEN_STREAM],
+            g_dispatch_reason[VERTEX_DISPATCH_GEN_STRIDES],
+            g_dispatch_reason[VERTEX_DISPATCH_GEN_ALIGN],
+            g_dispatch_reason[VERTEX_DISPATCH_GEN_MODE],
+            g_dispatch_reason[VERTEX_DISPATCH_GEN_MODE1],
+            g_dispatch_mode[0], g_dispatch_mode[1], g_dispatch_mode[2],
+            g_dispatch_bit2, g_dispatch_stream2,
+            g_dispatch_strides_ok, g_dispatch_align_ok, g_dispatch_index1,
+            g_dispatch_branch_count[VERTEX_DISPATCH_CF0][0],
+            g_dispatch_branch_count[VERTEX_DISPATCH_CF0][1],
+            g_dispatch_branch_count[VERTEX_DISPATCH_CF0][2],
+            g_dispatch_branch_count[VERTEX_DISPATCH_CF0][3],
+            g_dispatch_branch_count[VERTEX_DISPATCH_CF0][4],
+            g_dispatch_branch_count[VERTEX_DISPATCH_CF0][5],
+            g_dispatch_branch_count[VERTEX_DISPATCH_CF0][6],
+            g_dispatch_branch_count[VERTEX_DISPATCH_CF0][7],
+            g_dispatch_branch_count[VERTEX_DISPATCH_BD0][0],
+            g_dispatch_branch_count[VERTEX_DISPATCH_BD0][1],
+            g_dispatch_branch_count[VERTEX_DISPATCH_BD0][2],
+            g_dispatch_branch_count[VERTEX_DISPATCH_BD0][3],
+            g_dispatch_branch_count[VERTEX_DISPATCH_BD0][4],
+            g_dispatch_branch_count[VERTEX_DISPATCH_BD0][5],
+            g_dispatch_branch_count[VERTEX_DISPATCH_BD0][6],
+            g_dispatch_branch_count[VERTEX_DISPATCH_BD0][7],
+            g_dispatch_branch_count[VERTEX_DISPATCH_AD0][0],
+            g_dispatch_branch_count[VERTEX_DISPATCH_AD0][1],
+            g_dispatch_branch_count[VERTEX_DISPATCH_AD0][2],
+            g_dispatch_branch_count[VERTEX_DISPATCH_AD0][3],
+            g_dispatch_branch_count[VERTEX_DISPATCH_AD0][4],
+            g_dispatch_branch_count[VERTEX_DISPATCH_AD0][5],
+            g_dispatch_branch_count[VERTEX_DISPATCH_AD0][6],
+            g_dispatch_branch_count[VERTEX_DISPATCH_AD0][7],
+            g_dispatch_branch_count[3][0], g_dispatch_branch_count[3][1],
+            g_dispatch_branch_count[3][2], g_dispatch_branch_count[3][3],
+            g_dispatch_branch_count[3][4], g_dispatch_branch_count[3][5],
+            g_dispatch_branch_count[3][6], g_dispatch_branch_count[3][7]);
+}
+#endif
+
 #if WC3_DEBUG && WC3_DEBUG_HLE
 static int parse_bool(const char *s, int *out)
 {
@@ -2419,13 +2699,14 @@ int wc3_parallel_vertex_try_impl(CPU *c, wc3_lifted_fn fn, unsigned kind)
      * worker's private frame.  Keep this function small: the validation and
      * dispatch body lives in vertex_try_slow so a small batch does not pay a
      * large stack frame, register save or TLS lookup. */
-    if (c->parallel_vertex_bypass) return 0;
-    if (!g_vertex_enabled) return 0;
-    if (kind > WC3_VERTEX_TRANSFORM) return 0;
-    if (g_pool_init_active) return 0;
+    if (c->parallel_vertex_bypass) WC3_VERTEX_GUARD_FAIL(VG_BYPASS);
+    if (!g_vertex_enabled) WC3_VERTEX_GUARD_FAIL(VG_DISABLED);
+    if (kind > WC3_VERTEX_TRANSFORM) WC3_VERTEX_GUARD_FAIL(VG_BAD_KIND);
+    if (g_pool_init_active) WC3_VERTEX_GUARD_FAIL(VG_INIT_ACTIVE);
 
     uint32_t count = rd32(GVA(WC3_VERTEX_GLOBAL_FIRST));
-    if (count < g_vertex_threshold || count > VERTEX_MAX_COUNT) return 0;
+    if (count < g_vertex_threshold) WC3_VERTEX_GUARD_FAIL(VG_LOW);
+    if (count > VERTEX_MAX_COUNT) WC3_VERTEX_GUARD_FAIL(VG_HIGH);
     return vertex_try_slow(c, fn, kind, count);
 }
 
@@ -2443,23 +2724,25 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
 
     /* ready() applies the environment kill switches and sets the final
      * thresholds.  Recheck the values it may have changed before validating. */
-    if (!ready()) return 0;
-    if (!g_vertex_enabled) return 0;
-    if (count < g_vertex_threshold || count > VERTEX_MAX_COUNT) return 0;
+    if (!ready()) WC3_VERTEX_GUARD_FAIL(VG_READY);
+    if (!g_vertex_enabled) WC3_VERTEX_GUARD_FAIL(VG_SLOW_DISABLED);
+    if (count < g_vertex_threshold) WC3_VERTEX_GUARD_FAIL(VG_LOW);
+    if (count > VERTEX_MAX_COUNT) WC3_VERTEX_GUARD_FAIL(VG_HIGH);
 
 #if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
-    if (!vertex_frame_ok(c)) return 0;
+    if (!vertex_frame_ok(c)) WC3_VERTEX_GUARD_FAIL(VG_FRAME);
 
     /* The setup block leaves the object pointer in [ebp-4] and the loop kind
      * in [ctx+0x224].  Check it so a future call-site change fails closed. */
     uint32_t obj = rd32(c->ebp - 4u);
-    if (!obj || !hle_android_guest_ok(obj, 0x228u)) return 0;
+    if (!obj || !hle_android_guest_ok(obj, 0x228u))
+        WC3_VERTEX_GUARD_FAIL(VG_OBJ);
     uint32_t mode = rd32(obj + 0x224u);
     if ((kind == WC3_VERTEX_COPY && mode != 0u) ||
         (kind == WC3_VERTEX_TRANSFORM && mode != 1u))
-        return 0;
+        WC3_VERTEX_GUARD_FAIL(VG_MODE);
     if (kind == WC3_VERTEX_TRANSFORM && rd32(c->ebp - 0x18u) != 0u)
-        return 0;
+        WC3_VERTEX_GUARD_FAIL(VG_SLOT);
 #endif
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
@@ -2515,7 +2798,7 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
     uint32_t src_stride[4] = { vg[4], vg[6], vg[11], vg[12] };
     for (unsigned i = 0; i < 4; i++) {
         if (!vertex_span_ok(src_ptr[i], src_stride[i], count, 8u))
-            return 0;
+            WC3_VERTEX_GUARD_FAIL((unsigned)VG_SRC1 + i);
         src[i + 1].lo = src_ptr[i];
         src[i + 1].hi = (uint64_t)src_ptr[i] +
                         (uint64_t)(count - 1u) * src_stride[i] + 8u;
@@ -2523,9 +2806,11 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
         src[i + 1].size = 8u;
         src[i + 1].used = 1;
     }
-    if (!vertex_span_ok(vg[1], vg[2], count, 12u)) return 0;
+    if (!vertex_span_ok(vg[1], vg[2], count, 12u))
+        WC3_VERTEX_GUARD_FAIL(VG_SRC0);
     if (kind == WC3_VERTEX_TRANSFORM) {
-        if (!vertex_span_ok(vg[7], vg[8], count, 1u)) return 0;
+        if (!vertex_span_ok(vg[7], vg[8], count, 1u))
+            WC3_VERTEX_GUARD_FAIL(VG_PM);
         src[4].lo = vg[7];
         src[4].hi = (uint64_t)vg[7] +
                     (uint64_t)(count - 1u) * vg[8] + 1u;
@@ -2558,25 +2843,25 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
             uint64_t dummy_lo = out_ptr[i];
             uint64_t dummy_hi = dummy_lo + out_size[i];
             if (dummy_lo < frame_lo || dummy_hi > (uint64_t)frame_hi)
-                return 0;
-            if (skip_count >= 4u) return 0;
+                WC3_VERTEX_GUARD_FAIL(VG_DUMMY_FRAME);
+            if (skip_count >= 4u) WC3_VERTEX_GUARD_FAIL(VG_DUMMY_ALIAS);
             /* The sequential run writes the caller's dummy; the parallel run
              * writes only a private copy.  Skip the dummy in the frame
              * comparison, but never let it alias observable merge state or a
              * source range. */
             if (dummy_lo < (uint64_t)c->ebp - 0x18u + 4u &&
                 (uint64_t)c->ebp - 0x18u < dummy_hi)
-                return 0;
+                WC3_VERTEX_GUARD_FAIL(VG_DUMMY_ALIAS);
             if (dummy_lo < (uint64_t)c->ebp - 8u + 4u &&
                 (uint64_t)c->ebp - 8u < dummy_hi)
-                return 0;
+                WC3_VERTEX_GUARD_FAIL(VG_DUMMY_ALIAS);
             if (dummy_lo < (uint64_t)c->ebp + 8u + 4u &&
                 (uint64_t)c->ebp + 8u < dummy_hi)
-                return 0;
+                WC3_VERTEX_GUARD_FAIL(VG_DUMMY_ALIAS);
             for (unsigned j = 0; j < 5u; j++) {
                 if (src[j].used && dummy_lo < src[j].hi &&
                     src[j].lo < dummy_hi)
-                    return 0;
+                    WC3_VERTEX_GUARD_FAIL(VG_DUMMY_ALIAS);
             }
             skip[skip_count].off = (uint32_t)(dummy_lo - frame_lo);
             skip[skip_count].size = out_size[i];
@@ -2584,7 +2869,7 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
             continue;
         }
         if (!vertex_span_ok(out_ptr[i], out_stride[i], count, out_size[i]))
-            return 0;
+            WC3_VERTEX_GUARD_FAIL(VG_OUT_SPAN);
         out[i].lo = out_ptr[i];
         out[i].hi = (uint64_t)out_ptr[i] +
                     (uint64_t)(count - 1u) * out_stride[i] + out_size[i];
@@ -2593,15 +2878,17 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
         out[i].used = 1;
         if ((uint64_t)frame_lo < out[i].hi &&
             out[i].lo < (uint64_t)frame_hi)
-            return 0;
+            WC3_VERTEX_GUARD_FAIL(VG_OUT_FRAME);
     }
     for (unsigned i = 0; i < 4; i++) {
         if (!out[i].used) continue;
         for (unsigned j = i + 1u; j < 4; j++) {
-            if (ranges_overlap(&out[i], &out[j])) return 0;
+            if (ranges_overlap(&out[i], &out[j]))
+                WC3_VERTEX_GUARD_FAIL(VG_OVERLAP);
         }
         for (unsigned j = 0; j < 5; j++) {
-            if (ranges_overlap(&out[i], &src[j])) return 0;
+            if (ranges_overlap(&out[i], &src[j]))
+                WC3_VERTEX_GUARD_FAIL(VG_OVERLAP);
         }
     }
 
@@ -2610,13 +2897,14 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
 #endif
 
     unsigned chunks = vertex_chunk_limit();
-    if (!chunks) return 0;
+    if (!chunks) WC3_VERTEX_GUARD_FAIL(VG_CHUNKS);
     if (chunks > count) chunks = count;
     if (g_vertex_min_chunk) {
         unsigned by_count = count / g_vertex_min_chunk;
         if (chunks > by_count) chunks = by_count;
     }
-    if (chunks < 2u) return 0;
+    if (chunks < 2u) WC3_VERTEX_GUARD_FAIL(VG_CHUNKS_ONE);
+    WC3_VERTEX_GUARD_NOTE(VG_RUN);
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
     {

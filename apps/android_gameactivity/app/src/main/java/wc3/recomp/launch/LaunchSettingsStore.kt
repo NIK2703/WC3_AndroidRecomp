@@ -1,7 +1,6 @@
 package wc3.recomp.launch
 
 import android.content.Context
-import wc3.recomp.R
 
 /**
  * SharedPreferences is owned by the default process.  The RoC host lives in
@@ -12,16 +11,13 @@ class LaunchSettingsStore(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = appContext
         .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val userDebugBuild =
-        appContext.resources.getBoolean(R.bool.userdebug_build)
 
     fun load(mode: GameMode): LaunchSettings {
         /* The grid masks the exact 2x source; a saved "system" value from an
          * older build must not leave the game at native while the mask is on. */
-        val storedGrid = prefs.getBoolean(
+        val gridEnabled = prefs.getBoolean(
             KEY_GRID_ENABLED, LaunchContract.DEFAULT_GRID_ENABLED
         )
-        val gridEnabled = !userDebugBuild && storedGrid
         return LaunchSettings(
             mode = mode,
             gameDir = prefs.getString(KEY_GAME_DIR, "").orEmpty().trim(),
@@ -64,7 +60,7 @@ class LaunchSettingsStore(context: Context) {
             },
             /* An absent preference keeps the original 12-unit cap; the 24-unit
              * profile is opt-in. */
-            selection24 = !userDebugBuild && prefs.getBoolean(
+            selection24 = prefs.getBoolean(
                 KEY_SELECTION_24, LaunchContract.DEFAULT_SELECTION_24
             ),
             hideCursor = prefs.getBoolean(

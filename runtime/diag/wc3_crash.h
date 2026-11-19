@@ -15,7 +15,17 @@
 extern "C" {
 #endif
 
-#define WC3_CRASH_DOWNLOAD_LOG "/storage/emulated/0/Download/wc3_log.txt"
+/* The report name carries the build variant so release, debug, userdebug and
+ * the optimized profiles do not overwrite each other in Download.  CMake
+ * passes WC3_BUILD_VARIANT from WC3_VARIANT; standalone builds behave like
+ * release. */
+#ifndef WC3_BUILD_VARIANT
+#define WC3_BUILD_VARIANT "release"
+#endif
+
+#define WC3_CRASH_LOG_FILE "wc3_log_" WC3_BUILD_VARIANT ".txt"
+#define WC3_CRASH_DOWNLOAD_LOG \
+    "/storage/emulated/0/Download/" WC3_CRASH_LOG_FILE
 
 void wc3_crash_set_log_path(const char *path);
 void wc3_crash_note_message_box(const char *text, const char *caption,

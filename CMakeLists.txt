@@ -96,16 +96,24 @@ if(WC3_VARIANT AND NOT WC3_VARIANT MATCHES
     message(FATAL_ERROR
         "WC3_VARIANT='${WC3_VARIANT}' is not a known build variant")
 endif()
+# The crash report carries the same label so a file pulled from Download
+# identifies the build that produced it.  The check above restricts the value
+# to [a-z_]+, so it is safe inside a C string literal and a file name.
+set(WC3_BUILD_VARIANT "${WC3_VARIANT}")
+if(NOT WC3_BUILD_VARIANT)
+    set(WC3_BUILD_VARIANT "release")
+endif()
 option(WC3_DEBUG "Build with debug-only diagnostics" OFF)
 # The userdebug boot log belongs in the public Download folder so it can be
-# pulled with a normal file manager/adb pull without run-as.  app_boot.c falls
-# back to the app-private state dir when Download is not writable yet.
+# pulled with a normal file manager/adb pull without run-as.  The variant-tagged
+# name keeps release/debug/optimized reports apart.  app_boot.c falls back to
+# the app-private state dir when Download is not writable yet.
 set(_wc3_log_to_downloads_default OFF)
 if(WC3_VARIANT STREQUAL "userdebug")
     set(_wc3_log_to_downloads_default ON)
 endif()
 option(WC3_LOG_TO_DOWNLOADS
-       "Write the boot log to /storage/emulated/0/Download/wc3_log.txt"
+       "Write the boot log to /storage/emulated/0/Download/wc3_log_<variant>.txt"
        ${_wc3_log_to_downloads_default})
 if(WC3_VARIANT STREQUAL "userdebug" AND NOT WC3_DEBUG)
     message(FATAL_ERROR
@@ -203,13 +211,12 @@ set(WC3_PACK_DYN_RELOCS_MODE "android" CACHE STRING
     "Dynamic relocation packing: android, relr, or android+relr")
 set_property(CACHE WC3_PACK_DYN_RELOCS_MODE PROPERTY STRINGS
     android relr android+relr)
-# O-42: release exposes only JNI_OnLoad, android_main and Java_* from the
-# shared object.  Debug keeps the full dynamic symbol table for on-device crash
-# diagnostics.  Release crash triage uses the module base plus the unstripped
-# build .symtab through tools/symbolize_crash.py; the product link is not yet
-# verified.
-option(WC3_HIDE_DYNSYM
-       "Hide every defined dynamic symbol except the JNI surface" OFF)
+# O-42 (retired): canonical release and debug keep the full dynamic symbol
+# table so an on-device crash report resolves L_<va> and wc3_* names through
+# dladdr().  The unstripped .symtab remains the offline fallback.  Hiding the
+# table saved ~12 MB of loaded metadata but made release crash logs unreadable
+# without a matching build artifact.  release_optimized still hides internal
+# names through -fvisibility=hidden.
 # O-64: lld can fold byte-identical function bodies.  Safe mode is the product
 # default: it refuses bodies whose address is significant and is the only mode
 # that may be reached through the guest dispatcher.  ICF changes artifact
@@ -383,11 +390,8 @@ if(WC3_LTO_WHOLE_PROGRAM_VISIBILITY)
         message(FATAL_ERROR
             "WC3_LTO_WHOLE_PROGRAM_VISIBILITY requires WC3_LTO=THIN")
     endif()
-    if(NOT WC3_HIDE_DYNSYM)
-        message(FATAL_ERROR
-            "WC3_LTO_WHOLE_PROGRAM_VISIBILITY requires WC3_HIDE_DYNSYM=ON "
-            "so the JNI surface is the only interposable boundary")
-    endif()
+    # The product always links with -Wl,-Bsymbolic, so local definitions are
+    # not interposable even when .dynsym keeps the full crash-triage names.
 endif()
 if(WC3_THINLTO_CACHE AND NOT _wc3_lto_upper STREQUAL "THIN")
     message(FATAL_ERROR "WC3_THINLTO_CACHE requires WC3_LTO=THIN")
@@ -739,6 +743,8 @@ target_include_directories(wc3_platform PUBLIC
     "${WC3_ROOT}/runtime/platform"
     "${WC3_ROOT}/runtime/platform/android")
 target_compile_definitions(wc3_platform PUBLIC WC3_DEBUG=${WC3_DEBUG_DEFINE})
+target_compile_definitions(wc3_platform PRIVATE
+    "WC3_BUILD_VARIANT=\"${WC3_BUILD_VARIANT}\"")
 if(WC3_PRODUCT_COMPILE_OPTIONS)
     target_compile_options(wc3_platform PRIVATE ${WC3_PRODUCT_COMPILE_OPTIONS})
 endif()
@@ -920,17 +926,6 @@ if(WC3_BUILD_APP)
             target_link_options(wc3gameactivity PRIVATE
                 -Wl,--print-icf-sections)
         endif()
-    endif()
-    if(WC3_HIDE_DYNSYM)
-        if(NOT ANDROID)
-            message(FATAL_ERROR "WC3_HIDE_DYNSYM requires the Android toolchain")
-        endif()
-        target_link_options(wc3gameactivity PRIVATE
-            "-Wl,--version-script=${WC3_ROOT}/cmake/wc3_exports.map")
-        # A version-script edit changes the output but not the linker command
-        # line, so Ninja would otherwise keep a stale .so after the map changes.
-        set_property(TARGET wc3gameactivity APPEND PROPERTY
-            LINK_DEPENDS "${WC3_ROOT}/cmake/wc3_exports.map")
     endif()
     set_target_properties(wc3gameactivity PROPERTIES
         OUTPUT_NAME wc3gameactivity

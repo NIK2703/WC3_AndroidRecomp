@@ -161,8 +161,9 @@ if "$readelf" -d "$jni_so" | grep -q 'NEEDED.*libvulkan\.so'; then
     exit 1
 fi
 
-# Release keeps the historical strip contract; debug keeps full symbols for
-# crash triage.  The native build already checked the unstripped artifact.
+# Release strips only non-PT_LOAD metadata; .dynsym stays in full so on-device
+# crash_sym() resolves L_<va>/wc3_* names.  Debug keeps the unstripped symbols.
+# The native build already checked the unstripped artifact.
 if [ "$is_debug" = 0 ]; then
     "$strip" --strip-all "$jni_so"
     sections=$("$readelf" -S "$jni_so")
@@ -178,11 +179,12 @@ if [ "$is_debug" = 0 ]; then
         echo '[apk] release JNI/android_main surface missing from .dynsym' >&2
         exit 1
     fi
-    if grep -Eq 'L_[0-9A-Fa-f]{8}' <<<"$dynsyms" ||
-       grep -Eq '(^|[[:space:]])wc3_' <<<"$dynsyms"; then
-        echo '[apk] release still exports non-JNI dynamic symbols' >&2
+    if ! grep -Eq 'L_[0-9A-Fa-f]{8}' <<<"$dynsyms" ||
+       ! grep -Eq '(^|[[:space:]])wc3_' <<<"$dynsyms"; then
+        echo '[apk] release .dynsym lost L_*/wc3_* crash symbols' >&2
         exit 1
     fi
+    echo '[apk] release .dynsym retains L_*/wc3_* for crash symbolization'
 fi
 
 # Pinned hooks, copied from the vendor directory.  A previous APK can seed the
@@ -276,7 +278,6 @@ gradle_args=(
     -p "$root/apps/android_gameactivity"
     "-Pwc3GameActivityBuildDir=$gradle_app"
     "-Pwc3JniLibs$([ "$is_debug" = 1 ] && echo Debug || echo Release)=$jni_root"
-    "-Pwc3UserDebug=false"
     "-Pwc3LocalMaven=$local_maven"
     "-Pandroid.aapt2FromMavenOverride=$aapt2"
     ':app:clean' "$gradle_task"

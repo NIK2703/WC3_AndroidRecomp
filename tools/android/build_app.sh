@@ -267,11 +267,18 @@ configure=(
     -DWC3_NATIVE_TLS=ON -DWC3_TLS_MODEL=global-dynamic
     -DWC3_THIN_SKIP_WRITEONLY_COPYIN=ON -DWC3_HOST_HARDENING=ON
     -DWC3_ICF=ON -DWC3_ICF_MODE=safe -DWC3_ICF_PRINT_SECTIONS=ON
-    "-DWC3_HIDE_DYNSYM=$([ "$is_debug" = 1 ] && echo OFF || echo ON)"
     "-DWC3_ADRENOTOOLS_DIR=$adrenotools_dir"
     "-DWC3_ADRENOTOOLS_TRUST_MANIFEST=$([ -f "$adrenotools_dir/source-build.json" ] && echo ON || echo OFF)"
     "-DWC3_LD_PATH=$ld_path"
 )
+# The debug package keeps the post-lift pass enabled so it carries the
+# WC3_DEBUG_PERF vertex dispatch counter.  The existing parallel paths are
+# included by the same pass but remain behind the runtime parallelExecution
+# switch, which defaults off.  Release stays on the exact serial corpus.
+# Appended before the user --cmake-args so an explicit override still wins.
+if [ "$is_debug" = 1 ]; then
+    configure+=(-DWC3_PARALLEL_RAYCAST=ON)
+fi
 [ "${#cmake_args[@]}" -gt 0 ] && configure+=("${cmake_args[@]}")
 
 echo "[app] ndk     $ndk"

@@ -9,6 +9,7 @@
     <string name="launch_folder_find">Найти</string>
 
     <string name="launch_resolution_label">Разрешение</string>
+    <string name="launch_resolution_grid_option">%1$d × %2$d (сетка)</string>
 
     <string name="launch_sound_label">Звук</string>
     <string name="launch_selection24_label">Выделение до 24 юнитов</string>
@@ -31,14 +32,11 @@
     <string name="launch_gesture_delay_value">%1$d мс</string>
     <string name="launch_overlay_opacity_label">Непрозрачность элементов управления</string>
     <string name="launch_overlay_opacity_value">%1$d %%</string>
-    <string name="launch_grid_label">Сетка половинного разрешения</string>
-    <string name="launch_grid_label_resolution">Сетка половинного разрешения (%1$d × %2$d)</string>
     <string name="launch_grid_darken_label">Затемнение сетки</string>
     <string name="launch_grid_darken_value">%1$d %%</string>
     <string name="launch_grid_cycle_label">Период сдвига сетки (OLED)</string>
     <string name="launch_grid_cycle_value">%1$d с</string>
     <string name="launch_grid_cycle_off">Выкл.</string>
-    <string name="launch_grid_hint">Один пиксель каждой ячейки 2×2 остаётся ярким, остальные затемняются. Сдвиг периода перемещает яркий пиксель, чтобы распределить износ OLED. При включении игра стартует ровно в половине разрешения экрана с 2× целочисленным масштабированием; смена разрешения в настройках игры выключает сетку и половинное масштабирование и возвращает обычное сглаженное отображение.</string>
     <string name="launch_presentation_label">Отображение</string>
     <string name="launch_present_mode_label">Режим синхронизации</string>
     <string name="launch_present_mode_fifo">FIFO</string>

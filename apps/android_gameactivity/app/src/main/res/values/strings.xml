@@ -19,6 +19,7 @@
 
     <string name="launch_resolution_label">Resolution</string>
     <string name="launch_resolution_option" translatable="false">%1$d × %2$d</string>
+    <string name="launch_resolution_grid_option">%1$d × %2$d (grid)</string>
 
     <string name="launch_sound_label">Sound</string>
     <string name="launch_selection24_label">24-unit selection</string>
@@ -41,14 +42,11 @@
     <string name="launch_gesture_delay_value">%1$d ms</string>
     <string name="launch_overlay_opacity_label">Control overlay opacity</string>
     <string name="launch_overlay_opacity_value">%1$d %%</string>
-    <string name="launch_grid_label">Half-resolution grid</string>
-    <string name="launch_grid_label_resolution">Half-resolution grid (%1$d × %2$d)</string>
     <string name="launch_grid_darken_label">Grid darken</string>
     <string name="launch_grid_darken_value">%1$d %%</string>
     <string name="launch_grid_cycle_label">Grid cycle interval (OLED)</string>
     <string name="launch_grid_cycle_value">%1$d s</string>
     <string name="launch_grid_cycle_off">Off</string>
-    <string name="launch_grid_hint">One pixel of each 2×2 cell stays untouched; the other three are dimmed. The cycle moves the bright pixel to spread OLED wear. Turning this on starts the game at exactly half the screen resolution with 2× nearest scaling; changing the resolution in the game\'s Video options turns the grid and half scaling off and returns to normal smoothed display.</string>
     <string name="launch_presentation_label">Presentation</string>
     <string name="launch_present_mode_label">Present mode</string>
     <string name="launch_present_mode_fifo">FIFO</string>

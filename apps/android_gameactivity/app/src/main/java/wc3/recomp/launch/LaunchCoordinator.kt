@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import wc3.recomp.LaunchSettingsActivity
-import wc3.recomp.R
 
 object LaunchCoordinator {
     /**
@@ -28,15 +27,10 @@ object LaunchCoordinator {
     fun resolveForHost(context: Context, mode: GameMode): Bundle =
         resolve(context, LaunchSettingsStore(context).load(mode)).toBundle()
 
-    private fun resolve(context: Context, settings: LaunchSettings): LaunchSettings {
-        val resolved = settings.copy(
+    private fun resolve(context: Context, settings: LaunchSettings): LaunchSettings =
+        settings.copy(
             gameDir = LaunchValidator.resolveGameDir(context, settings).absolutePath
         )
-        val experimentalGameplay = context.applicationContext.resources
-            .getBoolean(R.bool.experimental_gameplay_options_supported)
-        if (experimentalGameplay) return resolved
-        return resolved.copy(selection24 = false, parallelExecution = false)
-    }
 
     /**
      * The settings screen has its own task affinity and singleTask launch

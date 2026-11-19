@@ -922,7 +922,7 @@ if(WC3_PARALLEL_RAYCAST)
     set(_wc3_ray_stamp "${_wc3_ray_dir}/.stamp")
     set(_wc3_ray_fingerprint_file "${_wc3_ray_dir}/.inputs")
     string(SHA256 _wc3_ray_fingerprint
-        "${WC3_PARALLEL_RAYCAST_EXE}|${WC3_RELIFTED_SOURCES}")
+        "dispatch-v1|${WC3_PARALLEL_RAYCAST_EXE}|${WC3_RELIFTED_SOURCES}")
     set(_wc3_ray_outputs)
     foreach(_wc3_src IN LISTS WC3_RELIFTED_SOURCES)
         get_filename_component(_wc3_base "${_wc3_src}" NAME)
@@ -988,6 +988,8 @@ if(WC3_PARALLEL_RAYCAST)
                     --expect-vertex-sites 2
                     --triangle
                     --expect-triangle-sites 1
+                    --vertex-counter
+                    --expect-vertex-counter-sites 1
                     --quiet
             RESULT_VARIABLE _wc3_ray_rc
             OUTPUT_VARIABLE _wc3_ray_out

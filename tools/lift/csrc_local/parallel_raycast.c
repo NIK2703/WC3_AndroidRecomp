@@ -21,12 +21,15 @@
  *
  * This pass also rewrites the two vertex loops and the stride-3 triangle loop.
  * Each rewrite adds its own include and entry guard; the generated function
- * body remains the single source of truth.
+ * body remains the single source of truth.  The optional `--vertex-counter`
+ * mode inserts a debug-only dispatch-decision call at the top of the vertex
+ * batch setup; release compiles the call out.
  *
  *   parallel_raycast --inputs FILE --out-dir DIR [--report JSON]
  *                    [--expect-sites N] [--vertex]
  *                    [--expect-vertex-sites N] [--triangle]
- *                    [--expect-triangle-sites N] [--quiet]
+ *                    [--expect-triangle-sites N] [--vertex-counter]
+ *                    [--expect-vertex-counter-sites N] [--quiet]
  *   parallel_raycast --self-test
  */
 #include <ctype.h>
@@ -61,6 +64,17 @@
 #define TRIANGLE_ANCHOR "_wc3_xmm_local[1] = c->xmm[1];"
 #define TRIANGLE_GUARD \
     "\n    if (wc3_parallel_triangle_try(c, L_6F125924)) return;\n"
+
+/* L_6F141680 is the vertex batch setup.  The counter is inserted after `this`
+ * and `dest` are loaded and before the first format test, so it sees the
+ * branch decision without changing the branch or the CPU.  The inserted call
+ * is inside a debug-only preprocessor block; release contains no call. */
+#define DISPATCH_SIG "void L_6F141680(CPU *restrict c)"
+#define DISPATCH_ANCHOR "c->ebx = rd32((c->ebp + 0x00000008u));"
+#define DISPATCH_NOTE \
+    "\n#if WC3_DEBUG && WC3_DEBUG_PERF\n" \
+    "    wc3_vertex_dispatch_note(c);\n" \
+    "#endif\n"
 
 typedef struct {
     char *p;
@@ -546,6 +560,79 @@ static int rewrite_triangle_text(const char *text, size_t n, Buf *out,
     return 1;
 }
 
+/* Insert the debug dispatch counter at the top of L_6F141680.  Files without
+ * the setup are copied unchanged.  A file with more than one setup or with an
+ * existing counter is rejected: a duplicated counter would distort the
+ * profile and a missing one would silently defeat the measurement. */
+static int rewrite_dispatch_text(const char *text, size_t n, Buf *out,
+                                 size_t *sites_out, char *err, size_t errn)
+{
+    char *masked;
+    size_t functions;
+    Buf with_include = {0};
+
+    *sites_out = 0;
+    masked = (char *)xmalloc(n + 1u);
+    mask_code(text, n, masked);
+    functions = count_sub(masked, n, DISPATCH_SIG);
+    if (functions == 0) {
+        free(masked);
+        buf_add(out, text, n);
+        return 1;
+    }
+    if (functions != 1) {
+        snprintf(err, errn, "expected one vertex dispatch setup, found %zu",
+                 functions);
+        free(masked);
+        return 0;
+    }
+    if (count_sub(masked, n, "wc3_vertex_dispatch_note") != 0) {
+        snprintf(err, errn, "vertex dispatch counter already present");
+        free(masked);
+        return 0;
+    }
+    free(masked);
+
+    if (!insert_vertex_include(text, n, &with_include, err, errn))
+        return 0;
+
+    masked = (char *)xmalloc(with_include.n + 1u);
+    mask_code(with_include.p ? with_include.p : "", with_include.n, masked);
+    size_t open = 0, close = 0;
+    if (find_function_body(masked, with_include.n, DISPATCH_SIG, &open,
+                           &close) != 1) {
+        snprintf(err, errn, "cannot delimit the vertex dispatch setup");
+        free(masked);
+        free(with_include.p);
+        return 0;
+    }
+    size_t anchor = find_sub(masked, close, open + 1u, DISPATCH_ANCHOR);
+    if (anchor == (size_t)-1) {
+        snprintf(err, errn, "vertex dispatch anchor missing");
+        free(masked);
+        free(with_include.p);
+        return 0;
+    }
+
+    /* Keep the generated line and its trailing instruction comment intact;
+     * insert on the following line.  If the function is a one-liner, insert
+     * before the closing brace. */
+    size_t at = anchor + strlen(DISPATCH_ANCHOR);
+    while (at < close && masked[at] != '\n') at++;
+    if (at < close) at++;
+
+    Buf final = {0};
+    buf_add(&final, with_include.p, at);
+    buf_str(&final, DISPATCH_NOTE);
+    buf_add(&final, with_include.p + at, with_include.n - at);
+    free(masked);
+    free(with_include.p);
+
+    *out = final;
+    *sites_out = 1;
+    return 1;
+}
+
 /* Build the output text.  Returns 0 and a human-readable reason on failure. */
 static int rewrite_text(const char *text, size_t n, Buf *out,
                         size_t *sites_out, char *err, size_t errn)
@@ -655,7 +742,7 @@ static void read_paths(const char *list, PathVec *paths)
 
 static void write_report(const char *path, size_t inputs, size_t rewritten,
                          size_t sites, size_t expected, size_t vertex_sites,
-                         size_t triangle_sites)
+                         size_t triangle_sites, size_t dispatch_sites)
 {
     FILE *f;
     if (!path) return;
@@ -670,9 +757,11 @@ static void write_report(const char *path, size_t inputs, size_t rewritten,
             "  \"sites_rewritten\": %zu,\n"
             "  \"expected_sites\": %zu,\n"
             "  \"vertex_functions\": %zu,\n"
-            "  \"triangle_functions\": %zu\n"
+            "  \"triangle_functions\": %zu,\n"
+            "  \"vertex_dispatch_notes\": %zu\n"
             "}\n",
-            inputs, rewritten, sites, expected, vertex_sites, triangle_sites);
+            inputs, rewritten, sites, expected, vertex_sites, triangle_sites,
+            dispatch_sites);
     if (fclose(f) != 0) die("cannot close report %s", path);
 }
 
@@ -873,6 +962,72 @@ static int self_test(void)
         free(bad.p);
     }
 
+    {
+        const char *dispatch =
+            "#include \"cpu.h\"\n"
+            "void L_6F141680(CPU *restrict c)\n"
+            "{\n"
+            "    c->edx = rd32((c->ecx + 0x00000090u));\n"
+            "    wr32((c->ebp + 0xFFFFFFFCu), c->ecx);\n"
+            "    push32(c, c->ebx);\n"
+            "    c->ebx = rd32((c->ebp + 0x00000008u)); /* 6F141690 */\n"
+            "    if (c->zf) return;\n"
+            "}\n";
+        Buf dout = {0};
+        size_t dsites = 0;
+        if (!rewrite_dispatch_text(dispatch, strlen(dispatch), &dout,
+                                   &dsites, err, sizeof err)) {
+            fprintf(stderr, "self-test dispatch input failed: %s\n", err);
+            return 1;
+        }
+        if (dsites != 1 || !strstr(dout.p, VERTEX_INCLUDE) ||
+            !strstr(dout.p, "wc3_vertex_dispatch_note(c);")) {
+            fprintf(stderr, "self-test dispatch note missing\n%s\n", dout.p);
+            return 1;
+        }
+        {
+            const char *note =
+                strstr(dout.p, "wc3_vertex_dispatch_note(c);");
+            const char *branch = strstr(dout.p, "if (c->zf)");
+            if (!note || !branch || note > branch) {
+                fprintf(stderr,
+                        "self-test dispatch note is outside the entry\n%s\n",
+                        dout.p);
+                return 1;
+            }
+        }
+        {
+            Buf dup = {0};
+            size_t dsites2 = 0;
+            if (rewrite_dispatch_text(dout.p, dout.n, &dup, &dsites2,
+                                      err, sizeof err)) {
+                fprintf(stderr,
+                        "self-test dispatch duplicate was accepted\n");
+                return 1;
+            }
+            free(dup.p);
+        }
+        free(dout.p);
+    }
+
+    {
+        const char *none = "#include \"cpu.h\"\nvoid f(CPU *c) {}\n";
+        Buf copy = {0};
+        size_t dsites = 99;
+        if (!rewrite_dispatch_text(none, strlen(none), &copy, &dsites,
+                                   err, sizeof err)) {
+            fprintf(stderr, "self-test dispatch no-site rejected: %s\n",
+                    err);
+            return 1;
+        }
+        if (dsites != 0 || copy.n != strlen(none) ||
+            memcmp(copy.p, none, copy.n) != 0) {
+            fprintf(stderr, "self-test dispatch no-site was changed\n");
+            return 1;
+        }
+        free(copy.p);
+    }
+
     printf("parallel_raycast self-test: ok\n");
     return 0;
 }
@@ -885,14 +1040,17 @@ int main(int argc, char **argv)
     size_t expected = 1;
     size_t expected_vertex = 2;
     size_t expected_triangle = 1;
+    size_t expected_dispatch = 1;
     int quiet = 0;
     int vertex = 0;
     int triangle = 0;
+    int vertex_counter = 0;
     PathVec paths = {0};
     size_t files_rewritten = 0;
     size_t sites = 0;
     size_t vertex_sites = 0;
     size_t triangle_sites = 0;
+    size_t dispatch_sites = 0;
     size_t i;
 
     if (argc == 2 && !strcmp(argv[1], "--self-test")) return self_test();
@@ -923,10 +1081,19 @@ int main(int argc, char **argv)
             if (!end || *end) die("bad --expect-triangle-sites value: %s",
                                   argv[i]);
             expected_triangle = (size_t)v;
+        } else if (!strcmp(argv[i], "--expect-vertex-counter-sites") &&
+                   i + 1 < (size_t)argc) {
+            char *end = NULL;
+            unsigned long v = strtoul(argv[++i], &end, 0);
+            if (!end || *end)
+                die("bad --expect-vertex-counter-sites value: %s", argv[i]);
+            expected_dispatch = (size_t)v;
         } else if (!strcmp(argv[i], "--vertex")) {
             vertex = 1;
         } else if (!strcmp(argv[i], "--triangle")) {
             triangle = 1;
+        } else if (!strcmp(argv[i], "--vertex-counter")) {
+            vertex_counter = 1;
         } else if (!strcmp(argv[i], "--quiet")) {
             quiet = 1;
         } else {
@@ -942,6 +1109,7 @@ int main(int argc, char **argv)
         const char *path = paths.p[i];
         size_t n, file_sites = 0, file_vertex_sites = 0;
         size_t file_triangle_sites = 0;
+        size_t file_dispatch_sites = 0;
         char *text = read_file(path, &n);
         Buf ray = {0};
         Buf out = {0};
@@ -969,13 +1137,24 @@ int main(int argc, char **argv)
             out = tout;
         }
 
+        if (vertex_counter) {
+            Buf dout = {0};
+            if (!rewrite_dispatch_text(out.p ? out.p : "", out.n, &dout,
+                                       &file_dispatch_sites, err, sizeof err))
+                die("%s: %s", path, err);
+            free(out.p);
+            out = dout;
+        }
+
         snprintf(out_path, sizeof out_path, "%s/%s", out_dir, path_base(path));
         write_file(out_path, out.p ? out.p : "", out.n);
-        if (file_sites || file_vertex_sites || file_triangle_sites)
+        if (file_sites || file_vertex_sites || file_triangle_sites ||
+            file_dispatch_sites)
             files_rewritten++;
         sites += file_sites;
         vertex_sites += file_vertex_sites;
         triangle_sites += file_triangle_sites;
+        dispatch_sites += file_dispatch_sites;
 
         free(text);
         free(out.p);
@@ -992,15 +1171,21 @@ int main(int argc, char **argv)
         die("rewrote %zu triangle functions, expected %zu",
             triangle_sites, expected_triangle);
     }
+    if (vertex_counter && dispatch_sites != expected_dispatch) {
+        die("inserted %zu dispatch counters, expected %zu",
+            dispatch_sites, expected_dispatch);
+    }
 
     write_report(report, paths.n, files_rewritten, sites, expected,
-                 vertex_sites, triangle_sites);
+                 vertex_sites, triangle_sites, dispatch_sites);
     if (!quiet) {
         printf("parallel_raycast: %zu inputs, %zu files, %zu/%zu sites, "
-               "%zu/%zu vertex functions, %zu/%zu triangle functions\n",
+               "%zu/%zu vertex functions, %zu/%zu triangle functions, "
+               "%zu/%zu dispatch counters\n",
                paths.n, files_rewritten, sites, expected,
                vertex_sites, vertex ? expected_vertex : 0,
-               triangle_sites, triangle ? expected_triangle : 0);
+               triangle_sites, triangle ? expected_triangle : 0,
+               dispatch_sites, vertex_counter ? expected_dispatch : 0);
     }
 
     for (i = 0; i < paths.n; i++) free(paths.p[i]);

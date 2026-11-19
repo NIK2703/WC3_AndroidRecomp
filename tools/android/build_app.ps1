@@ -11,7 +11,7 @@
 #
 # userdebug is a diagnostic profile of the debug package, not a third package:
 # the same applicationId, Gradle debug build type and WC3_DEBUG=1, but only
-# the BOOT/CRASH tags, the boot log in Download/wc3_log.txt and the gameplay
+# the BOOT/CRASH tags, the boot log in Download/wc3_log_<variant>.txt and the gameplay
 # experiments off by default.  It is the target for a black-screen boot report.
 #
 # There is deliberately no -Clean switch; delete build\android_app\<variant>
@@ -70,7 +70,6 @@ param(
     # Product builds require the relifted corpus.  SoftFloat was removed, so
     # the prebuilt legacy corpus is not a linkable product input.
     [string]$CorpusRoot = 'build/corpus-full',
-    [switch]$KeepDynsym,
     # O-52: initial-exec is rejected by bionic for a dlopen'ed app library.
     # Only global-dynamic is accepted; the switch remains so old A/B commands
     # fail loudly instead of silently changing TLS models.
@@ -277,13 +276,6 @@ if ($effectiveSymbolOrderFile) {
         ((Resolve-Path -LiteralPath $orderPath).Path) -replace '\\', '/'
 }
 
-# O-42 is part of the release ABI check; -KeepDynsym is the explicit triage
-# exception.  Whole-program visibility is only valid when that boundary holds.
-$hideDynsym = (-not $isDebug) -and (-not $KeepDynsym)
-if ($effectiveLtoWholeProgramVisibility -and -not $hideDynsym) {
-    throw '-LtoWholeProgramVisibility requires the default hidden dynamic ' +
-          'symbol surface; do not combine it with -KeepDynsym'
-}
 
 # BV-5.3: the debug tag list lives in config/debug_tags.txt, not in this
 # script.  The file is parsed here so a build only needs the variant; there is
@@ -812,14 +804,13 @@ $icfValue = 'ON'
 $configure += "-DWC3_ICF=$icfValue"
 $configure += "-DWC3_ICF_MODE=safe"
 $configure += "-DWC3_ICF_PRINT_SECTIONS=ON"
-# O-42: release ships only the JNI surface.  Debug keeps all dynamic symbols so
-# on-device crash logs retain L_<va> names; -KeepDynsym is the explicit escape
-# hatch for a release triage build.  $hideDynsym is resolved before the
-# optimize flags so whole-program visibility can reject -KeepDynsym early.
-if ($hideDynsym) {
-    $configure += '-DWC3_HIDE_DYNSYM=ON'
-} else {
-    $configure += '-DWC3_HIDE_DYNSYM=OFF'
+# The debug package keeps the post-lift pass enabled so it carries the
+# WC3_DEBUG_PERF vertex dispatch counter.  The existing parallel paths are
+# included by the same pass but remain behind the runtime parallelExecution
+# switch, which defaults off.  Release stays on the exact serial corpus.
+# Appended before -CMakeArgs so an explicit override still wins.
+if ($isDebug) {
+    $configure += '-DWC3_PARALLEL_RAYCAST=ON'
 }
 if ($CMakeArgs) {
     $configure += ($CMakeArgs -split '\s+')
@@ -834,7 +825,6 @@ Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"
 Write-Host "[app] selection24 $selection24Value"
 Write-Host "[app] log_to_downloads $($logToDownloadsValue -eq 'ON')"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
-Write-Host "[app] hide_dynsym $hideDynsym"
 Write-Host "[app] lto   $ltoValue"
 Write-Host "[app] pgo   $Pgo kind $effectivePgoKind"
 Write-Host "[app] opt   $effectiveOptLevel corpus $effectiveCorpusOptLevel mtune '$Mtune'"

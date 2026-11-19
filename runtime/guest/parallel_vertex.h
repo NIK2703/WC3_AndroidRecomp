@@ -87,6 +87,15 @@ static inline int wc3_parallel_vertex_try(CPU *c, wc3_lifted_fn fn,
     return wc3_parallel_vertex_try_impl(c, fn, kind);
 }
 
+/* Diagnostic only.  The post-lift pass inserts one call at the top of
+ * L_6F141680, the vertex batch setup, after `this` and `dest` are loaded and
+ * before the first format test.  It classifies the sibling-loop decision
+ * (CF0/BD0/AD0/generic) without changing the CPU or guest memory.  A release
+ * build compiles the call out together with this declaration. */
+#if WC3_DEBUG && WC3_DEBUG_PERF
+void wc3_vertex_dispatch_note(const CPU *c);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

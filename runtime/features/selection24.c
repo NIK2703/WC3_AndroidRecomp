@@ -68,6 +68,31 @@ static FILE *sel24_log(void)
 #endif
 #endif /* WC3_DEBUG && WC3_DEBUG_SELECT24 */
 
+/*
+ * The event-birth/event-release, per-unit order and sort-workspace traces are
+ * opt-in.  They describe paths that are already ruled out for the 12-unit
+ * cluster failure and cost tens of megabytes during a save load: the first
+ * debug run produced a 164 MB trace and stalled the guest.  The targeted
+ * order/cluster/list/formation records stay enabled.  Set
+ * WC3_SEL24_VERBOSE=1 in the launch environment to bring the detailed
+ * records back for a future investigation.
+ */
+static int sel24_verbose_trace(void)
+{
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = getenv("WC3_SEL24_VERBOSE");
+
+        enabled = (value && value[0] == '1' && value[1] == '\0') ? 1 : 0;
+    }
+    return enabled;
+#else
+    return 0;
+#endif
+}
+
 /* One definition in the helper library: the product build links this module
  * whenever WC3_SELECTION_24 is ON, so the marker is present exactly once. */
 #if defined(__GNUC__)
@@ -92,6 +117,57 @@ uint32_t wc3_sel24_cap(void)
         g_sel24_cap = cap;
     }
     return cap;
+}
+
+/*
+ * CPrCluster member vector at cluster+0x1C:
+ *
+ *   +0x00  vtable 0x6FA90D5C
+ *   +0x0C  data base (element array)
+ *   +0x14  growth chunk in elements (zero means fixed size)
+ *   +0x18  capacity in elements
+ *   +0x1C  count in elements
+ *
+ * The member vector is originally a fixed 12-slot vector: the constructor at
+ * 0x6F14FC40 writes capacity 12 (or the runtime 24 cap) and growth chunk zero.
+ * Live 24-profile runs still see 12-capacity clusters from the pool, so the
+ * insertion at 0x6F16C077 returns zero from 0x6F16C0AA once twelve members are
+ * present.  The caller 0x6F16B7B0 ignores that result and unlinks the unit from
+ * PrClGen, which is the "only the first twelve units obey" failure for a
+ * ground/formation order.  Giving the vector the original 12-element growth
+ * chunk activates the game's own grow path: 0x6F16C077 computes the new size,
+ * 0x6F1C5130 reallocates and frees the old block, and 0x6F16C0B3 installs the
+ * new capacity/count and copies the new members.  A 12-capacity cluster grows
+ * 12 -> 24 on the first overflow; a 24-capacity vector grows by another 12 only
+ * when it already holds members, so a cluster reused across orders can still
+ * accept a full 24-unit selection.
+ *
+ * Only the CPrCluster member vector is touched.  Both its vtable and the vtable
+ * of the owning cluster are checked, because 0x6F16C077 is the generic insert
+ * for this 0x2C-byte element type and other fixed vectors must not become
+ * growable.  The baseline 12-unit profile returns before reading memory.
+ */
+#define SEL24_CLUSTER_VECTOR_AT   0x1Cu
+#define SEL24_CLUSTER_VECTOR_VT   0x6FA90D5Cu
+#define SEL24_CLUSTER_VT          0x6FA90D64u
+#define SEL24_CLUSTER_VT_EMBEDDED 0x6FA91964u
+#define SEL24_VECTOR_GROW         0x14u
+#define SEL24_VECTOR_GROW_CHUNK   12u
+
+void wc3_sel24_cluster_prepare(uint32_t vector)
+{
+    uint32_t owner_vtable;
+
+    if (wc3_sel24_cap() != 24u || vector < SEL24_CLUSTER_VECTOR_AT)
+        return;
+    if (rd32(vector) != GVA(SEL24_CLUSTER_VECTOR_VT))
+        return;
+    owner_vtable = rd32(vector - SEL24_CLUSTER_VECTOR_AT);
+    if (owner_vtable != GVA(SEL24_CLUSTER_VT) &&
+        owner_vtable != GVA(SEL24_CLUSTER_VT_EMBEDDED))
+        return;
+    if (rd32(vector + SEL24_VECTOR_GROW) == 0u)
+        wr32(vector + SEL24_VECTOR_GROW, SEL24_VECTOR_GROW_CHUNK);
 }
 
 /* CInfoPanelGroup fields added by the selection24 profile. */
@@ -226,6 +302,11 @@ static void sel24_restore_state(CPU *c, const Sel24CpuState *s)
 }
 
 #if WC3_DEBUG && WC3_DEBUG_SELECT24
+/* Sequence of the point-order request currently being built.  The Android
+ * game issues group orders on the control thread; the counter only ties the
+ * formation/list/unit records of one request together in the log. */
+static uint32_t g_sel24_order_seq;
+
 /*
  * The LiftPass inserts this call immediately after the original AddUnit cap
  * comparison.  The following `jae` still needs the flags, so the trace saves
@@ -858,6 +939,8 @@ static void sel24_trace_event_context(CPU *c, uint32_t self, uint32_t arg,
  */
 void wc3_sel24_trace_evt2(CPU *c, uint32_t self, uint32_t arg)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
     char probe[160];
     uint32_t handle = 0u;
@@ -929,6 +1012,8 @@ void wc3_sel24_trace_evt2(CPU *c, uint32_t self, uint32_t arg)
  */
 void wc3_sel24_trace_guard(CPU *c, uint32_t arg)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
     uint32_t ra = 0u;
 
@@ -955,6 +1040,8 @@ void wc3_sel24_trace_guard(CPU *c, uint32_t arg)
  */
 void wc3_sel24_trace_tasknull(CPU *c, uint32_t wrapper)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
     uint32_t desc;
     uint32_t payload;
@@ -963,14 +1050,21 @@ void wc3_sel24_trace_tasknull(CPU *c, uint32_t wrapper)
     desc = c->ebp - 0x3Cu;
     payload = sel24_rd(wrapper, 0x54u);
     fprintf(SEL24_OUT,
-            "[select24] task wrapper=%08X payload=%08X null=%u vt=%08X "
-            "class=%08X handle=%08X serial=%u f50=%08X f54=%08X "
+            "[select24] task seq=%u cap=%u wrapper=%08X payload=%08X "
+            "null=%u vt=%08X class=%08X handle=%08X serial=%u "
+            "f50=%08X f54=%08X p24=%08X p28=%08X p2C=%08X p30=%08X "
+            "p34=%08X p38=%08X p3C=%08X "
             "unit=%08X arg=%08X desc=%08X dclass=%08X dfactory=%08X "
             "darg=%08X dpair=%08X/%08X\n",
-            wrapper, payload, payload == 0u ? 1u : 0u,
+            g_sel24_order_seq, wc3_sel24_cap(), wrapper, payload,
+            payload == 0u ? 1u : 0u,
             sel24_rd(payload, 0x00u), sel24_rd(payload, 0x10u),
             sel24_rd(payload, 0x14u), sel24_rd(payload, 0x18u),
             sel24_rd(payload, 0x50u), sel24_rd(payload, 0x54u),
+            sel24_rd(payload, 0x24u), sel24_rd(payload, 0x28u),
+            sel24_rd(payload, 0x2Cu), sel24_rd(payload, 0x30u),
+            sel24_rd(payload, 0x34u), sel24_rd(payload, 0x38u),
+            sel24_rd(payload, 0x3Cu),
             sel24_rd(c->ebp, 0x08u), sel24_rd(c->ebp, 0x0Cu),
             desc, sel24_rd(desc, 0x04u), sel24_rd(desc, 0x0Cu),
             sel24_rd(desc, 0x10u), sel24_rd(desc, 0x14u),
@@ -988,6 +1082,8 @@ void wc3_sel24_trace_tasknull(CPU *c, uint32_t wrapper)
  */
 void wc3_sel24_trace_evinit(CPU *c, uint32_t object, uint32_t desc)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
 
     sel24_save_state(c, &saved);
@@ -1016,18 +1112,20 @@ void wc3_sel24_trace_evinit(CPU *c, uint32_t object, uint32_t desc)
 void wc3_sel24_trace_orderdrop(CPU *c, uint32_t wrapper, uint32_t tag,
                                uint32_t result)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
 
     sel24_save_state(c, &saved);
     fprintf(SEL24_OUT,
-            "[select24] orderdrop wrapper=%08X result=%08X tag=%08X "
-            "unit=%08X arg=%08X vt=%08X class=%08X handle=%08X serial=%u "
-            "f50=%08X f54=%08X\n",
-            wrapper, result, tag, sel24_rd(c->ebp, 0x08u),
-            sel24_rd(c->ebp, 0x0Cu), sel24_rd(wrapper, 0x00u),
-            sel24_rd(wrapper, 0x10u), sel24_rd(wrapper, 0x14u),
-            sel24_rd(wrapper, 0x18u), sel24_rd(wrapper, 0x50u),
-            sel24_rd(wrapper, 0x54u));
+            "[select24] orderdrop seq=%u cap=%u wrapper=%08X result=%08X "
+            "tag=%08X unit=%08X arg=%08X vt=%08X class=%08X handle=%08X "
+            "serial=%u f50=%08X f54=%08X\n",
+            g_sel24_order_seq, wc3_sel24_cap(), wrapper, result, tag,
+            sel24_rd(c->ebp, 0x08u), sel24_rd(c->ebp, 0x0Cu),
+            sel24_rd(wrapper, 0x00u), sel24_rd(wrapper, 0x10u),
+            sel24_rd(wrapper, 0x14u), sel24_rd(wrapper, 0x18u),
+            sel24_rd(wrapper, 0x50u), sel24_rd(wrapper, 0x54u));
     sel24_restore_state(c, &saved);
 }
 
@@ -1058,6 +1156,8 @@ static int sel24_ident_trace(void)
  */
 void wc3_sel24_trace_lookup(CPU *c, uint32_t stage, uint32_t a, uint32_t b)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
     char probe[160];
     int ok;
@@ -1092,42 +1192,343 @@ void wc3_sel24_trace_lookup(CPU *c, uint32_t stage, uint32_t a, uint32_t b)
 #define SEL24_ORDER_INDEX_1C   0xFFFFFE00u /* [ebp-0x200], cursor 0x1C */
 
 /*
+ * Inserted after `mov ebx, ecx` in the two point-order handlers
+ * (0x6F6B991E for message 0x12 and 0x6F6B9F9E for message 0x13).  ecx/ebx is
+ * the request object.  The request layout is:
+ *   +0x15 byte  target/order kind
+ *   +0x18 word  flags
+ *   +0x1C dword command
+ *   +0x20/+0x24 second object handle/serial
+ *   +0x28/+0x2C ground point
+ *   +0x30/+0x34 first object handle/serial
+ * This line is emitted once per issued point order and is the header every
+ * later formation record refers to by seq.
+ */
+void wc3_sel24_trace_order_begin(CPU *c, uint32_t request, uint32_t source)
+{
+    Sel24CpuState saved;
+    uint32_t seq = ++g_sel24_order_seq;
+    uint32_t cap = wc3_sel24_cap();
+
+    sel24_save_state(c, &saved);
+    fprintf(SEL24_OUT,
+            "[select24] orderbegin seq=%u src=%u req=%08X cap=%u "
+            "o00=%08X o04=%08X o08=%08X o0C=%08X o10=%08X o14=%08X "
+            "t15=%02X flags=%04X cmd=%08X "
+            "o20=%08X o24=%08X pt=%08X,%08X o30=%08X o34=%08X "
+            "o38=%08X o3C=%08X\n",
+            seq, source, request, cap,
+            sel24_rd(request, 0x00u), sel24_rd(request, 0x04u),
+            sel24_rd(request, 0x08u), sel24_rd(request, 0x0Cu),
+            sel24_rd(request, 0x10u), sel24_rd(request, 0x14u),
+            (uint32_t)(sel24_rd(request, 0x14u) >> 8) & 0xFFu,
+            sel24_rd(request, 0x18u) & 0xFFFFu,
+            sel24_rd(request, 0x1Cu),
+            sel24_rd(request, 0x20u), sel24_rd(request, 0x24u),
+            sel24_rd(request, 0x28u), sel24_rd(request, 0x2Cu),
+            sel24_rd(request, 0x30u), sel24_rd(request, 0x34u),
+            sel24_rd(request, 0x38u), sel24_rd(request, 0x3Cu));
+    sel24_restore_state(c, &saved);
+}
+
+/*
+ * Inserted on the 0x6F16966D `cmovne eax, esi` line, immediately before the
+ * PrClGen pointer write at 0x6F169670.  The insertion routine 0x6F169620 uses
+ * a slot index (`edx`) that is -1 when both the existing-slot lookup and the
+ * free-slot lookup failed; the original code then writes the pointer array
+ * out of bounds.  `list` is the PrClGen object (edi), `index` is edx, `value`
+ * is the pointer about to be stored in the widened array at +0x13C, `unit`
+ * is the function argument and `store` is the "store pointer" flag.
+ * `slot`/`serial` show the slot's {handle, serial} pair and `used` counts
+ * occupied slots across the runtime cap, so a path that still stops at twelve
+ * is visible even when the batch has 24 records.
+ */
+void wc3_sel24_trace_listadd(CPU *c, uint32_t list, uint32_t index,
+                             uint32_t value, uint32_t unit, uint32_t store)
+{
+    Sel24CpuState saved;
+    uint32_t cap = wc3_sel24_cap();
+    int32_t idx = (int32_t)index;
+    uint32_t ptr = 0u;
+    uint32_t handle = 0u;
+    uint32_t serial = 0u;
+    unsigned used = 0u;
+    unsigned i;
+
+    sel24_save_state(c, &saved);
+    if (idx >= 0 && (uint32_t)idx < cap && sel24_readable(list)) {
+        ptr = sel24_rd(list, 0x13Cu + (uint32_t)idx * 4u);
+        handle = sel24_rd(list, 0x1Cu + (uint32_t)idx * 0xCu);
+        serial = sel24_rd(list, 0x20u + (uint32_t)idx * 0xCu);
+    }
+    if (sel24_readable(list)) {
+        for (i = 0u; i < cap && i < 32u; ++i)
+            if (sel24_rd(list, 0x1Cu + i * 0xCu) != 0xFFFFFFFFu)
+                ++used;
+    }
+    fprintf(SEL24_OUT,
+            "[select24] listadd seq=%u list=%08X cap=%u idx=%d unit=%08X "
+            "value=%08X store=%u used=%u ptr=%08X slot=%08X/%08X "
+            "tgt=%08X/%08X pt=%08X,%08X,%08X flags=%08X\n",
+            g_sel24_order_seq, list, cap, idx, unit, value, store, used, ptr,
+            handle, serial,
+            sel24_rd(list, 0x19Cu), sel24_rd(list, 0x1A0u),
+            sel24_rd(list, 0x1A4u), sel24_rd(list, 0x1A8u),
+            sel24_rd(list, 0x1ACu), sel24_rd(list, 0x1C0u));
+    sel24_restore_state(c, &saved);
+}
+
+/*
+ * Inserted after 0x6F16B306 (`mov edi, ecx`) at the entry of the ground-order
+ * solver 0x6F16B2F0.  ecx/edi is the CPrCluster.  The member vector uses the
+ * widened layout:
+ *   +0x28 base, +0x30 grow flag, +0x34 capacity, +0x38 count
+ * and each member record is 0x2C bytes with the unit pointer at +0x14.  The
+ * trace dumps every member up to the runtime cap before the solver touches
+ * the index/pair workspace.  A cluster that already stops at twelve is
+ * visible here; the same header prints its target point and flags.
+ *
+ * The solver runs for every active cluster on every frame.  The full dump is
+ * kept for groups at or above the ten-member diagnostic floor and only once
+ * per (order, cluster, count); repeated identical frames are what turned the
+ * first debug run into a 164 MB trace.  A count change (12 -> 13 -> 14) is a
+ * new record and is still printed.
+ */
+static int sel24_formation_seen(uint32_t cluster, uint32_t count)
+{
+    static uint32_t keys[128];
+    static unsigned used;
+    uint32_t key = cluster ^ (count * 0x9E3779B1u) ^
+                   (g_sel24_order_seq * 0x85EBCA6Bu);
+    unsigned i;
+
+    for (i = 0u; i < used; ++i)
+        if (keys[i] == key)
+            return 1;
+    if (used < 128u)
+        keys[used++] = key;
+    return 0;
+}
+
+void wc3_sel24_trace_formation_begin(CPU *c, uint32_t cluster)
+{
+    Sel24CpuState saved;
+    uint32_t cap = wc3_sel24_cap();
+    uint32_t vcap = 0u;
+    uint32_t count = 0u;
+    uint32_t base = 0u;
+    uint32_t i;
+
+    sel24_save_state(c, &saved);
+    if (sel24_readable(cluster)) {
+        vcap = sel24_rd(cluster, 0x34u);
+        count = sel24_rd(cluster, 0x38u);
+        base = sel24_rd(cluster, 0x28u);
+    }
+    if (count < 10u || sel24_formation_seen(cluster, count)) {
+        sel24_restore_state(c, &saved);
+        return;
+    }
+    fprintf(SEL24_OUT,
+            "[select24] formation seq=%u cluster=%08X cap=%u vcap=%u count=%u "
+            "grow=%08X base=%08X tgt=%08X/%08X pt=%08X,%08X,%08X "
+            "flags=%08X\n",
+            g_sel24_order_seq, cluster, cap, vcap, count,
+            sel24_rd(cluster, 0x30u), base,
+            sel24_rd(cluster, 0x19Cu), sel24_rd(cluster, 0x1A0u),
+            sel24_rd(cluster, 0x1A4u), sel24_rd(cluster, 0x1A8u),
+            sel24_rd(cluster, 0x1ACu), sel24_rd(cluster, 0x1C0u));
+    if (count > cap)
+        fprintf(SEL24_OUT,
+                "[select24] formation seq=%u OVER count=%u cap=%u vcap=%u\n",
+                g_sel24_order_seq, count, cap, vcap);
+    for (i = 0u; i < count && i < cap && i < 32u; ++i) {
+        uint32_t rec = base + i * 0x2Cu;
+        uint32_t unit;
+
+        if (!sel24_readable(base) || !sel24_readable(rec))
+            break;
+        unit = sel24_rd(rec, 0x14u);
+        fprintf(SEL24_OUT,
+                "[select24] formationrec seq=%u i=%u rec=%08X unit=%08X "
+                "h=%08X s=%08X r28=%08X r2C=%08X\n",
+                g_sel24_order_seq, i, rec, unit,
+                sel24_rd(unit, 0x14u), sel24_rd(unit, 0x18u),
+                sel24_rd(rec, 0x28u), sel24_rd(rec, 0x2Cu));
+    }
+    sel24_restore_state(c, &saved);
+}
+
+/*
+ * Inserted at the entry of the member-vector insertion 0x6F16C077.  `vector`
+ * is esi (the embedded vector at cluster+0x1C), `add` is edi (number of
+ * members the caller wants to append, normally one).  The vector fields are
+ *   +0x0C base, +0x14 grow flag, +0x18 capacity, +0x1C count.
+ * `over` is the exact branch condition of 0x6F16C083: count+add > capacity.
+ * When the grow flag is zero and over is one, the insertion returns zero at
+ * 0x6F16C0AA; the caller 0x6F16B7B0 ignores that result and unlinks the unit
+ * from PrClGen anyway.  Printing the live fields here is what separates a
+ * still-12 cluster from a failure later in the solver.
+ */
+void wc3_sel24_trace_cluster_try(CPU *c, uint32_t vector, uint32_t add)
+{
+    Sel24CpuState saved;
+    uint32_t cap = wc3_sel24_cap();
+    uint32_t vcap = 0u;
+    uint32_t count = 0u;
+    uint32_t grow = 0u;
+    uint32_t base = 0u;
+    uint32_t want = 0u;
+    uint32_t cluster = vector >= 0x1Cu ? vector - 0x1Cu : 0u;
+
+    sel24_save_state(c, &saved);
+    if (sel24_readable(vector)) {
+        vcap = sel24_rd(vector, 0x18u);
+        count = sel24_rd(vector, 0x1Cu);
+        grow = sel24_rd(vector, 0x14u);
+        base = sel24_rd(vector, 0x0Cu);
+    }
+    want = count + add;
+    fprintf(SEL24_OUT,
+            "[select24] clustertry seq=%u vector=%08X cluster=%08X cv=%08X "
+            "cap=%u vcap=%u count=%u add=%u want=%u over=%u grow=%08X "
+            "base=%08X tgt=%08X/%08X pt=%08X,%08X,%08X flags=%08X\n",
+            g_sel24_order_seq, vector, cluster, sel24_rd(cluster, 0u), cap,
+            vcap, count, add, want, want > vcap ? 1u : 0u, grow, base,
+            sel24_rd(cluster, 0x19Cu), sel24_rd(cluster, 0x1A0u),
+            sel24_rd(cluster, 0x1A4u), sel24_rd(cluster, 0x1A8u),
+            sel24_rd(cluster, 0x1ACu), sel24_rd(cluster, 0x1C0u));
+    sel24_restore_state(c, &saved);
+}
+
+/*
+ * Inserted after the 0x6F16C060 member-vector insertion at 0x6F16B7ED.  This
+ * is the call whose zero result is ignored by the original code: the unit is
+ * then unlinked from PrClGen anyway.  `result` is eax immediately after the
+ * call, `unit` is edi (the PrClGen slot pointer), `list` is ebx, `slot` is
+ * esi and `cluster` is the CPrCluster argument.  The cluster count/capacity
+ * after the insertion tells whether the 13th..24th members were accepted.
+ */
+void wc3_sel24_trace_cluster_insert(CPU *c, uint32_t cluster, uint32_t unit,
+                                    uint32_t list, uint32_t slot,
+                                    uint32_t result)
+{
+    Sel24CpuState saved;
+    uint32_t cap = wc3_sel24_cap();
+    int32_t idx = (int32_t)slot;
+    uint32_t handle = 0u;
+    uint32_t serial = 0u;
+    uint32_t count = 0u;
+    uint32_t base = 0u;
+    uint32_t last = 0u;
+
+    sel24_save_state(c, &saved);
+    if (sel24_readable(cluster)) {
+        count = sel24_rd(cluster, 0x38u);
+        base = sel24_rd(cluster, 0x28u);
+    }
+    if (idx >= 0 && (uint32_t)idx < cap && sel24_readable(list)) {
+        handle = sel24_rd(list, 0x1Cu + (uint32_t)idx * 0xCu);
+        serial = sel24_rd(list, 0x20u + (uint32_t)idx * 0xCu);
+    }
+    if (count > 0u && count <= cap)
+        last = sel24_rd(base + (count - 1u) * 0x2Cu, 0x14u);
+    fprintf(SEL24_OUT,
+            "[select24] clusterins seq=%u cluster=%08X cap=%u unit=%08X "
+            "list=%08X slot=%d result=%08X vcap=%u count=%u "
+            "slotpair=%08X/%08X base=%08X last=%08X\n",
+            g_sel24_order_seq, cluster, cap, unit, list, idx, result,
+            sel24_rd(cluster, 0x34u), count, handle, serial, base, last);
+    sel24_restore_state(c, &saved);
+}
+
+/*
+ * Ground-order base trace (diagnostic).  The order loop reads
+ * [selection+0x28] as the unit-record base and indexes it by
+ * group_index * 0x2C.  The member vector at selection+0x1C has the same base
+ * at +0x0C, so printing both separates a stale 12-entry record array from a
+ * member vector that grew to 24.  idx is the absolute group index
+ * (cursor + loop counter); the group index array is at group+4.
+ */
+void wc3_sel24_trace_order_base(CPU *c, uint32_t sel, uint32_t group,
+                                uint32_t cursor, uint32_t idx)
+{
+    Sel24CpuState saved;
+    uint32_t base = 0u;
+    uint32_t vec = 0u;
+    uint32_t vcap = 0u;
+    uint32_t vcnt = 0u;
+    uint32_t vgrow = 0u;
+    uint32_t gidx = 0u;
+
+    sel24_save_state(c, &saved);
+    /* The CPrCluster member vector is embedded at sel+0x1C: its vtable is at
+     * sel+0x1C, the data base at sel+0x28 (= vector+0x0C), the growth chunk at
+     * sel+0x30, capacity at sel+0x34 and count at sel+0x38. */
+    vec = sel + 0x1Cu;
+    if (sel24_readable(sel)) {
+        base = sel24_rd(sel, 0x28u);
+        vcap = sel24_rd(vec, 0x18u);
+        vcnt = sel24_rd(vec, 0x1Cu);
+        vgrow = sel24_rd(vec, 0x14u);
+    }
+    if (sel24_readable(group) && idx < 64u)
+        gidx = sel24_rd(group, 4u + idx * 4u);
+    fprintf(SEL24_OUT,
+            "[select24] orderbase seq=%u sel=%08X base=%08X vec=%08X "
+            "vcap=%u vcnt=%u vgrow=%08X group=%08X cur=%u idx=%u gidx=%08X\n",
+            g_sel24_order_seq, sel, base, vec, vcap, vcnt, vgrow,
+            group, cursor, idx, gidx);
+    sel24_restore_state(c, &saved);
+}
+
+/*
  * Inserted at the entry of the two batch writers 0x6F6BA590 and 0x6F6BA800
  * after `mov esi, [edi]`.  `object` is the object the writer fills, `self` the
  * handler object it was called with, `pair_off` the offset of the handle/serial
  * pair the writer later pushes: 0x38 for the 0x6F6BA590 site, 0x30 for the
  * 0x6F6BA800 site.  Both pairs are printed, so a writer that reads a stale
- * pair is visible even if the offset assumption is wrong.
+ * pair is visible even if the offset assumption is wrong.  The first line also
+ * prints the full request fields, including the target pair at +0x30/+0x34
+ * and the ground point at +0x28/+0x2C, so a unit-target order is
+ * distinguishable from a point order before any per-unit record is emitted.
  */
 void wc3_sel24_trace_order_unit(CPU *c, uint32_t pair_off, uint32_t object,
                                 uint32_t self)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
     uint32_t first = 0u;
-    uint32_t o15 = 0u;
-    uint32_t o18 = 0u;
+    uint32_t cap = wc3_sel24_cap();
 
     sel24_save_state(c, &saved);
-    if (sel24_readable(object)) {
+    if (sel24_readable(object))
         first = rd32(object);
-        o15 = (uint32_t)rd8(object + 0x15u);
-        o18 = (uint32_t)rd16(object + 0x18u);
-    }
     fprintf(SEL24_OUT,
-            "[select24] orderunit pair=%02X self=%08X object=%08X first=%08X "
-            "o14=%08X o15=%02X o18=%04X o1C=%08X "
-            "o2C=%08X o30=%08X o34=%08X o38=%08X o3C=%08X\n",
-            pair_off, self, object, first,
-            sel24_rd(object, 0x14u), o15, o18, sel24_rd(object, 0x1Cu),
-            sel24_rd(object, 0x2Cu), sel24_rd(object, 0x30u),
-            sel24_rd(object, 0x34u), sel24_rd(object, 0x38u),
-            sel24_rd(object, 0x3Cu));
+            "[select24] orderunit seq=%u cap=%u pair=%02X self=%08X "
+            "object=%08X first=%08X "
+            "o00=%08X o04=%08X o08=%08X o0C=%08X o10=%08X o14=%08X "
+            "t15=%02X flags=%04X cmd=%08X "
+            "o20=%08X o24=%08X pt=%08X,%08X o30=%08X o34=%08X "
+            "o38=%08X o3C=%08X\n",
+            g_sel24_order_seq, cap, pair_off, self, object, first,
+            sel24_rd(object, 0x00u), sel24_rd(object, 0x04u),
+            sel24_rd(object, 0x08u), sel24_rd(object, 0x0Cu),
+            sel24_rd(object, 0x10u), sel24_rd(object, 0x14u),
+            (uint32_t)(sel24_rd(object, 0x14u) >> 8) & 0xFFu,
+            sel24_rd(object, 0x18u) & 0xFFFFu,
+            sel24_rd(object, 0x1Cu),
+            sel24_rd(object, 0x20u), sel24_rd(object, 0x24u),
+            sel24_rd(object, 0x28u), sel24_rd(object, 0x2Cu),
+            sel24_rd(object, 0x30u), sel24_rd(object, 0x34u),
+            sel24_rd(object, 0x38u), sel24_rd(object, 0x3Cu));
     if (sel24_readable(first))
         fprintf(SEL24_OUT,
-                "[select24] orderunit pair=%02X first14=%08X first18=%08X "
-                "first1C=%08X\n",
-                pair_off, rd32(first + 0x14u), rd32(first + 0x18u),
-                rd32(first + 0x1Cu));
+                "[select24] orderunit seq=%u pair=%02X first14=%08X "
+                "first18=%08X first1C=%08X\n",
+                g_sel24_order_seq, pair_off, rd32(first + 0x14u),
+                rd32(first + 0x18u), rd32(first + 0x1Cu));
     sel24_restore_state(c, &saved);
 }
 
@@ -1142,6 +1543,8 @@ void wc3_sel24_trace_order_unit(CPU *c, uint32_t pair_off, uint32_t object,
 void wc3_sel24_trace_order_loop(CPU *c, uint32_t cursor_off, uint32_t cursor,
                                 uint32_t unit, uint32_t event)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
     uint32_t record = cursor - cursor_off;
     uint32_t index_slot = (cursor_off == SEL24_ORDER_CURSOR_18)
@@ -1161,11 +1564,27 @@ void wc3_sel24_trace_order_loop(CPU *c, uint32_t cursor_off, uint32_t cursor,
         o18 = (uint32_t)rd16(object + 0x18u);
     }
     fprintf(SEL24_OUT,
-            "[select24] orderloop cu=%02X idx=%u count=%u rec=%08X "
-            "unit=%08X event=%08X object=%08X o14=%08X o15=%02X o18=%04X "
-            "o1C=%08X\n",
-            cursor_off, index, count, record, unit, event, object,
-            sel24_rd(object, 0x14u), o15, o18, sel24_rd(object, 0x1Cu));
+            "[select24] orderloop seq=%u cap=%u cu=%02X idx=%u count=%u "
+            "rec=%08X unit=%08X event=%08X object=%08X o14=%08X o15=%02X "
+            "o18=%04X o1C=%08X\n",
+            g_sel24_order_seq, wc3_sel24_cap(), cursor_off, index, count,
+            record, unit, event, object, sel24_rd(object, 0x14u), o15, o18,
+            sel24_rd(object, 0x1Cu));
+    fprintf(SEL24_OUT,
+            "[select24] orderloopev seq=%u event=%08X "
+            "e00=%08X e04=%08X e08=%08X e0C=%08X e10=%08X e14=%08X "
+            "e18=%08X e1C=%08X e20=%08X e24=%08X e28=%08X e2C=%08X "
+            "e30=%08X e34=%08X e38=%08X e3C=%08X e54=%08X\n",
+            g_sel24_order_seq, event,
+            sel24_rd(event, 0x00u), sel24_rd(event, 0x04u),
+            sel24_rd(event, 0x08u), sel24_rd(event, 0x0Cu),
+            sel24_rd(event, 0x10u), sel24_rd(event, 0x14u),
+            sel24_rd(event, 0x18u), sel24_rd(event, 0x1Cu),
+            sel24_rd(event, 0x20u), sel24_rd(event, 0x24u),
+            sel24_rd(event, 0x28u), sel24_rd(event, 0x2Cu),
+            sel24_rd(event, 0x30u), sel24_rd(event, 0x34u),
+            sel24_rd(event, 0x38u), sel24_rd(event, 0x3Cu),
+            sel24_rd(event, 0x54u));
     if (sel24_stack_word(record) &&
         record + SEL24_ORDER_RECORD_STRIDE <= SEL24_GUEST_STACK_HI)
         sel24_trace_order_record("orderrec", index, record);
@@ -1206,6 +1625,8 @@ void wc3_sel24_trace_order_loop(CPU *c, uint32_t cursor_off, uint32_t cursor,
 void wc3_sel24_trace_order_slots(CPU *c, uint32_t tag, uint32_t list,
                                  uint32_t element)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
     uint32_t base = (tag == 3u) ? 0x2Cu : 0x50u;
     uint32_t index = 0u;
@@ -1242,16 +1663,26 @@ void wc3_sel24_trace_order_apply(CPU *c, uint32_t unit, uint32_t event,
 
     sel24_save_state(c, &saved);
     fprintf(SEL24_OUT,
-            "[select24] apply phase=%u unit=%08X event=%08X result=%08X "
-            "unit14=%08X unit18=%08X\n",
-            phase, unit, event, result, sel24_rd(unit, 0x14u),
-            sel24_rd(unit, 0x18u));
+            "[select24] apply seq=%u cap=%u phase=%u unit=%08X event=%08X "
+            "result=%08X unit14=%08X unit18=%08X uD8=%08X u1FC=%08X "
+            "u200=%08X e14=%08X e18=%08X e24=%08X e28=%08X e2C=%08X "
+            "e30=%08X e34=%08X e54=%08X\n",
+            g_sel24_order_seq, wc3_sel24_cap(), phase, unit, event, result,
+            sel24_rd(unit, 0x14u), sel24_rd(unit, 0x18u),
+            sel24_rd(unit, 0xD8u), sel24_rd(unit, 0x1FCu),
+            sel24_rd(unit, 0x200u),
+            sel24_rd(event, 0x14u), sel24_rd(event, 0x18u),
+            sel24_rd(event, 0x24u), sel24_rd(event, 0x28u),
+            sel24_rd(event, 0x2Cu), sel24_rd(event, 0x30u),
+            sel24_rd(event, 0x34u), sel24_rd(event, 0x54u));
     sel24_restore_state(c, &saved);
 }
 
 void wc3_sel24_trace_stale(CPU *c, uint32_t kind, uint32_t a, uint32_t b,
                            uint32_t d)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
 
     if ((kind == 1u || kind == 4u) && !sel24_ident_trace())
@@ -1279,13 +1710,33 @@ void wc3_sel24_trace_order_exec(CPU *c, uint32_t stage, uint32_t unit,
     sel24_save_state(c, &saved);
     if (stage == 0u) {
         fprintf(SEL24_OUT,
-                "[select24] exec unit=%08X event=%08X vtbl=%08X "
-                "handler=%08X\n",
-                unit, event, vtbl, handler);
+                "[select24] exec seq=%u cap=%u unit=%08X event=%08X "
+                "vtbl=%08X handler=%08X unit14=%08X unit18=%08X "
+                "uD8=%08X u1FC=%08X u200=%08X "
+                "e14=%08X e18=%08X e24=%08X e28=%08X e2C=%08X "
+                "e30=%08X e34=%08X e54=%08X\n",
+                g_sel24_order_seq, wc3_sel24_cap(), unit, event, vtbl,
+                handler, sel24_rd(unit, 0x14u), sel24_rd(unit, 0x18u),
+                sel24_rd(unit, 0xD8u), sel24_rd(unit, 0x1FCu),
+                sel24_rd(unit, 0x200u),
+                sel24_rd(event, 0x14u), sel24_rd(event, 0x18u),
+                sel24_rd(event, 0x24u), sel24_rd(event, 0x28u),
+                sel24_rd(event, 0x2Cu), sel24_rd(event, 0x30u),
+                sel24_rd(event, 0x34u), sel24_rd(event, 0x54u));
     } else {
         fprintf(SEL24_OUT,
-                "[select24] exec unit=%08X event=%08X result=%08X\n",
-                unit, event, result);
+                "[select24] exec seq=%u result unit=%08X event=%08X "
+                "result=%08X unit14=%08X unit18=%08X uD8=%08X u1FC=%08X "
+                "u200=%08X e14=%08X e18=%08X e24=%08X e28=%08X e2C=%08X "
+                "e30=%08X e34=%08X e54=%08X\n",
+                g_sel24_order_seq, unit, event, result,
+                sel24_rd(unit, 0x14u), sel24_rd(unit, 0x18u),
+                sel24_rd(unit, 0xD8u), sel24_rd(unit, 0x1FCu),
+                sel24_rd(unit, 0x200u),
+                sel24_rd(event, 0x14u), sel24_rd(event, 0x18u),
+                sel24_rd(event, 0x24u), sel24_rd(event, 0x28u),
+                sel24_rd(event, 0x2Cu), sel24_rd(event, 0x30u),
+                sel24_rd(event, 0x34u), sel24_rd(event, 0x54u));
     }
     sel24_restore_state(c, &saved);
 }
@@ -1307,6 +1758,8 @@ void wc3_sel24_trace_order_exec(CPU *c, uint32_t stage, uint32_t unit,
 void wc3_sel24_trace_remove(CPU *c, uint32_t phase, uint32_t group,
                             uint32_t unit)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
 
     sel24_save_state(c, &saved);
@@ -1372,6 +1825,8 @@ void wc3_sel24_trace_apply(CPU *c, uint32_t phase, uint32_t a, uint32_t b)
  */
 void wc3_sel24_trace_evbirth(CPU *c, uint32_t object, uint32_t desc)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
     char probe[160];
     uint32_t klass = 0u;
@@ -1408,6 +1863,8 @@ void wc3_sel24_trace_evbirth(CPU *c, uint32_t object, uint32_t desc)
  */
 void wc3_sel24_trace_evrelease(CPU *c, uint32_t table, uint32_t handle)
 {
+    if (!sel24_verbose_trace())
+        return;
     Sel24CpuState saved;
     uint32_t index = ~handle; /* negative table: id is the complement of the slot */
     uint32_t base = 0u;
@@ -2036,6 +2493,158 @@ void wc3_sel24_init24(uint32_t pair_base)
     }
 }
 
+/*
+ * Selection-group entry snapshot.  The entry is 0x134 bytes: count +0,
+ * index[24] +4, pair[24] +0x64 and tail +0x124.  The trace deliberately
+ * prints the tail on every call and the full index/pair arrays only when the
+ * count exceeds the old twelve-entry capacity, so a normal 12-unit order
+ * stays one summary line while the failing 14-unit case leaves a complete
+ * before/after record.
+ */
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+static void sel24_trace_group_snapshot(const char *stage, uint32_t group)
+{
+    uint32_t cap = wc3_sel24_cap();
+    uint32_t count = rd32(group);
+    uint32_t n = count < 24u ? count : 24u;
+    uint32_t chk = count ^ 0x9E3779B9u;
+    uint32_t tail[4];
+    uint32_t i;
+
+    for (i = 0u; i < n; ++i) {
+        uint32_t idx = rd32(group + 4u + i * 4u);
+        uint32_t key = rd32(group + 0x64u + i * 8u);
+        uint32_t val = rd32(group + 0x68u + i * 8u);
+
+        chk += idx * 0x85EBCA6Bu ^ key * 0xC2B23AE3u ^ val;
+        if (count > 12u)
+            fprintf(SEL24_OUT,
+                    "[select24] group %s i=%u idx=%08X key=%08X val=%08X\n",
+                    stage, i, idx, key, val);
+    }
+    for (i = 0u; i < 4u; ++i) {
+        tail[i] = rd32(group + 0x124u + i * 4u);
+        chk += tail[i];
+    }
+    fprintf(SEL24_OUT,
+            "[select24] group %s seq=%u ptr=%08X count=%u cap=%u%s "
+            "tail=%08X,%08X,%08X,%08X chk=%08X\n",
+            stage, g_sel24_order_seq, group, count, cap,
+            count > cap ? " OVER" : "",
+            tail[0], tail[1], tail[2], tail[3], chk);
+}
+#endif
+
+/*
+ * Called by the LiftPass at 0x6F16A612 for each of the sixteen selection
+ * groups.  The snapshot is taken before zeroing, so a reused entry shows the
+ * tail left behind by an earlier order; the sort snapshots then show whether
+ * D270/CB80 installed a fresh one and whether the sort preserved it.
+ */
+void wc3_sel24_group_init(uint32_t pair_base)
+{
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+    if (pair_base >= 0x64u)
+        sel24_trace_group_snapshot("init", pair_base - 0x64u);
+#else
+    (void)pair_base;
+#endif
+    wc3_sel24_init24(pair_base);
+    /* The original L_6F169300 zeroed only the pair array (12 entries); the
+     * count at group+0 was left on the stack. On a fresh frame that is
+     * zero, but a reused frame (loading a save with >12 selected units)
+     * leaves garbage, and L_6F16A6E0 then feeds an uninitialized group to
+     * wc3_sel24_sort24, which walks the pair array with a huge count and
+     * faults. Zero the count so empty groups stay empty. The fill writer
+     * (L_6F16CB80) overwrites it for the groups that actually carry units. */
+    if (pair_base >= 0x64u)
+        wr32(pair_base - 0x64u, 0u);
+}
+
+/*
+ * Rev 62 diagnostic.  The fill (L_6F16CB80) zeroes all sixteen counts and
+ * increments them per unit, yet the sort loop observes a garbage count in an
+ * empty group.  Dump the whole count row at a synchronization point (fill
+ * return, sort-loop entry) so the writer that runs between them is visible.
+ * Compiled out unless WC3_DEBUG && WC3_DEBUG_SELECT24.
+ */
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+void wc3_sel24_trace_counts(uint32_t base)
+{
+    uint32_t i;
+
+    if (!sel24_readable(base))
+        return;
+    for (i = 0u; i < 16u; ++i) {
+        fprintf(SEL24_OUT,
+                "[select24] counts base=%08X i=%u count=%u\n",
+                base, i, sel24_rd(base, i * 0x134u));
+    }
+    fputc('\n', SEL24_OUT);
+}
+#else
+void wc3_sel24_trace_counts(uint32_t base)
+{
+    (void)base;
+}
+#endif
+
+/*
+ * Formation row length for the selection-group order path.
+ *
+ * L_6F16D270 (and its split copies L_6F16D286 / L_6F16D2D3) computes
+ * index = 13 * flag + count and reads a 32-bit table word; the value becomes
+ * min(count, word) and is stored at group+0x12C.  L_6F16A6E0 then passes that
+ * value as the batch step of the order loop.  The 1.27 table has four blocks
+ * of 13 entries:
+ *
+ *   A 0x6FA91D20: 0 1 2 3 2 3 3 3 3 3 4 4 4
+ *   B 0x6FA91D54: 0 1 2 3 2 3 3 3 3 3 3 3 3
+ *   C 0x6FA91D88: 0 1 2 3 4 3 3 4 4 4 4 4 4
+ *   D 0x6FA91DBC: 0 1 2 3 3 3 3 3 3 3 3 3 3
+ *
+ * Base 0x6FA91D20 selects A (flag 0) or B (flag 1); base 0x6FA91D88 selects
+ * C or D.  The table was sized for the 12-unit cap, so count 13 with flag 0
+ * reads B[0] and count 13 with flag 1 reads C[0]; both are zero.  A zero row
+ * length makes the order loop spin forever because its index never advances
+ * (observed with a 13-unit group after the Rev 58 shift fix).
+ *
+ * The table ends at 0x6FA91DF0, immediately before the list-object vtable at
+ * 0x6FA91DF4, so it cannot be extended in place.  This helper keeps the
+ * original read for count <= 12 (bit-exact baseline) and defines the 13..24
+ * range used by the 24-unit profile:
+ *
+ *   flag 1 (B/D, compact mode; 3 from count 6 on) -> 3
+ *   flag 0 (A/C, grid mode; 4 at count 10..12)    -> ceil(count / 3)
+ *
+ * The grid rule continues the table's own three-row shape: 13..15 -> 5,
+ * 16..18 -> 6, 19..21 -> 7, 22..24 -> 8, which also matches the 8x3 panel
+ * grid used for 24 units.  Any value >= 1 makes the loop advance; the loop
+ * clamps the step to the number of units that are left.
+ */
+uint32_t wc3_sel24_formation_columns(uint32_t index, uint32_t count,
+                                     uint32_t pair)
+{
+    uint32_t flag;
+    uint32_t value;
+
+    if (count <= 12u)
+        return rd32(index * 4u +
+                    GVA(pair ? 0x6FA91D88u : 0x6FA91D20u));
+
+    flag = (index - count) / 13u;
+    if (flag != 0u)
+        value = 3u;
+    else
+        value = (count + 2u) / 3u;
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+    fprintf(SEL24_OUT,
+            "[select24] formation columns idx=%u count=%u pair=%u value=%u\n",
+            index, count, pair, value);
+#endif
+    return value;
+}
+
 /* Bit-exact float load for the sort comparison. */
 static float sel24_f32(uint32_t bits)
 {
@@ -2054,8 +2663,39 @@ static float sel24_f32(uint32_t bits)
  * and pair at count_ptr+0x64 (24 pairs, second dword at +0x68).  The control
  * flow, comparisons, swap/rotate and index updates are the lifted ones; only
  * the two pair-base displacements differ from the original 12-entry sort.
- * L_6F16DFD0 itself is left untouched for the 12-entry caller 0x6F16A6E0.
+ * L_6F16DFD0 itself is left in place for reference; the solver calls sort24
+ * directly and the selection group goes through wc3_sel24_group_sort().
  */
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+/*
+ * Read-only dump of the formation sort workspace.  The count is the first
+ * value the solver reads; a count above the runtime cap explains a hang even
+ * before the insertion-sort loop is entered.  The index and pair arrays are
+ * printed in workspace order, not sorted order, so the caller can see what
+ * the solver received and what it produced.
+ */
+static void sel24_trace_sort_workspace(const char *stage, uint32_t count_ptr,
+                                       uint32_t count)
+{
+    uint32_t cap = wc3_sel24_cap();
+    uint32_t i;
+
+    if (!sel24_verbose_trace())
+        return;
+    (void)count_ptr;
+    fprintf(SEL24_OUT,
+            "[select24] sort %s seq=%u ptr=%08X count=%u cap=%u%s\n",
+            stage, g_sel24_order_seq, count_ptr, count, cap,
+            count > cap ? " OVER" : "");
+    for (i = 0u; i < count && i < cap && i < 32u; ++i)
+        fprintf(SEL24_OUT,
+                "[select24] sort %s i=%u idx=%u pair=%08X key=%08X\n",
+                stage, i, sel24_rd(count_ptr, 4u + i * 4u),
+                sel24_rd(count_ptr, 0x64u + i * 8u),
+                sel24_rd(count_ptr, 0x68u + i * 8u));
+}
+#endif
+
 void wc3_sel24_sort24(uint32_t count_ptr)
 {
     uint32_t count;
@@ -2073,6 +2713,9 @@ void wc3_sel24_sort24(uint32_t count_ptr)
     uint32_t ecx;
 
     count = rd32(count_ptr);
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+    sel24_trace_sort_workspace("begin", count_ptr, count);
+#endif
     if (count <= 1u)
         return;
 
@@ -2133,4 +2776,27 @@ void wc3_sel24_sort24(uint32_t count_ptr)
         if (ebp_edi <= 1u)
             break;
     }
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+    sel24_trace_sort_workspace("end", count_ptr, count);
+#endif
+}
+
+/*
+ * Called by the LiftPass at 0x6F16A6EF instead of the 12-entry sort.  The
+ * pre/post snapshots are the regression witness: if the old pair stride had
+ * remained, pair 12/13 would land on +0x94/+0x9C and the post tail/checksum
+ * would differ from the pre record.  With the 0x134 layout the tail is at
+ * +0x124..+0x130 and must survive unchanged.
+ */
+void wc3_sel24_group_sort(uint32_t group)
+{
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+    sel24_trace_group_snapshot("sort-pre", group);
+#else
+    (void)group;
+#endif
+    wc3_sel24_sort24(group);
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+    sel24_trace_group_snapshot("sort-post", group);
+#endif
 }

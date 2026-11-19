@@ -4,5 +4,4 @@
     <bool name="overlay_experiment_supported">true</bool>
     <!-- Debug-only Media3/movie trace. -->
     <bool name="movie_diagnostics_supported">true</bool>
-    <bool name="experimental_gameplay_options_supported">true</bool>
 </resources>

@@ -76,8 +76,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var selection24Switch: SwitchCompat
     private lateinit var hideCursorSwitch: SwitchCompat
     private lateinit var parallelExecutionSwitch: SwitchCompat
-    private lateinit var gridLabel: TextView
-    private lateinit var gridSwitch: SwitchCompat
     private lateinit var gridOptionsGroup: LinearLayout
     private lateinit var gridDarkenSlider: SeekBar
     private lateinit var gridDarkenValue: TextView
@@ -267,8 +265,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
         selection24Switch = findViewById(R.id.selection24_switch)
         hideCursorSwitch = findViewById(R.id.hide_cursor_switch)
         parallelExecutionSwitch = findViewById(R.id.parallel_execution_switch)
-        gridLabel = findViewById(R.id.grid_label)
-        gridSwitch = findViewById(R.id.grid_switch)
         gridOptionsGroup = findViewById(R.id.grid_options_group)
         gridDarkenSlider = findViewById(R.id.grid_darken_slider)
         gridDarkenValue = findViewById(R.id.grid_darken_value)
@@ -276,16 +272,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
         gridCycleValue = findViewById(R.id.grid_cycle_value)
         presentModeSpinner = findViewById(R.id.present_mode_spinner)
         presentBuffersSpinner = findViewById(R.id.present_buffers_spinner)
-
-        if (!resources.getBoolean(R.bool.experimental_gameplay_options_supported)) {
-            findViewById<View>(R.id.selection24_row).visibility = View.GONE
-            findViewById<View>(R.id.parallel_execution_row).visibility = View.GONE
-        }
-        if (resources.getBoolean(R.bool.userdebug_build)) {
-            findViewById<View>(R.id.selection24_row).visibility = View.GONE
-            findViewById<View>(R.id.grid_row).visibility = View.GONE
-            findViewById<View>(R.id.grid_options_group).visibility = View.GONE
-        }
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             // libadrenotools needs Android 9; keep the system-only path and
@@ -355,8 +341,14 @@ class LaunchSettingsActivity : AppCompatActivity() {
         binding = true
         folderInput.setText(settings.gameDir)
 
-        val resolutionIndex = resolutionOptions.indexOfFirst {
-            it.width == settings.width && it.height == settings.height
+        val resolutionIndex = if (settings.gridEnabled) {
+            resolutionOptions.indexOfFirst { it.grid }
+        } else {
+            resolutionOptions.indexOfFirst {
+                !it.grid &&
+                    it.width == settings.width &&
+                    it.height == settings.height
+            }
         }
         resolutionSpinner.setSelection(
             if (resolutionIndex >= 0) resolutionIndex else resolutionOptions.lastIndex,
@@ -367,11 +359,9 @@ class LaunchSettingsActivity : AppCompatActivity() {
         selection24Switch.isChecked = settings.selection24
         hideCursorSwitch.isChecked = settings.hideCursor
         parallelExecutionSwitch.isChecked = settings.parallelExecution
-        gridSwitch.isChecked = settings.gridEnabled
         bindGridDarkenSlider(settings.gridDarkenPercent)
         bindGridCycleSlider(settings.gridCycleSeconds)
         updateGridOptions()
-        updateGridLabel()
         gestureModeSpinner.setSelection(
             gestureModeOptions.indexOfFirst {
                 it.doubleTap == settings.doubleTapGestures
@@ -467,14 +457,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
             }
         }
 
-        gridSwitch.setOnCheckedChangeListener { _, _ ->
-            updateGridOptions()
-            if (!binding) {
-                refreshValidation()
-                saveIfValid()
-            }
-        }
-
         gestureModeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: AdapterView<*>?,
@@ -508,7 +490,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
-                updateGridLabel()
+                updateGridOptions()
                 if (!binding) {
                     refreshValidation()
                     saveIfValid()
@@ -631,6 +613,31 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 screenHeight
             )
         )
+
+        /* Half-resolution is one more display option, not a separate switch.
+         * It carries the exact extent the guest renders at and stays in the
+         * ascending order of the list. */
+        if (screenWidth >= 2 && screenHeight >= 2) {
+            val gridWidth = screenWidth / 2
+            val gridHeight = screenHeight / 2
+            val gridArea = gridWidth.toLong() * gridHeight
+            val grid = ResolutionOption(
+                width = 0,
+                height = 0,
+                label = getString(
+                    R.string.launch_resolution_grid_option,
+                    gridWidth,
+                    gridHeight
+                ),
+                grid = true
+            )
+            val index = options.indexOfFirst { option ->
+                val width = if (option.width > 0) option.width else screenWidth
+                val height = if (option.height > 0) option.height else screenHeight
+                width.toLong() * height > gridArea
+            }
+            if (index < 0) options += grid else options.add(index, grid)
+        }
         return options
     }
 
@@ -1316,7 +1323,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
     }
 
     private fun readForm(): LaunchSettings {
-        val resolution = resolutionOptions.getOrNull(resolutionSpinner.selectedItemPosition)
+        val resolution = currentResolutionOption()
             ?: resolutionOptions.lastOrNull()
             ?: ResolutionOption(0, 0, "")
 
@@ -1341,7 +1348,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 overlayOpacitySlider.progress
             ),
             parallelExecution = parallelExecutionSwitch.isChecked,
-            gridEnabled = gridSwitch.isChecked,
+            gridEnabled = resolution.grid,
             gridDarkenPercent =
                 LaunchContract.MIN_GRID_DARKEN_PERCENT +
                 gridDarkenSlider.progress.coerceIn(
@@ -1639,46 +1646,17 @@ class LaunchSettingsActivity : AppCompatActivity() {
             getString(R.string.launch_grid_cycle_value, seconds)
         }
 
+    /* The darken and cycle sliders belong to the half-resolution option and
+     * appear only while that resolution is selected. */
     private fun updateGridOptions() {
-        val grid = gridSwitch.isChecked
+        val grid = currentResolutionOption()?.grid == true
         gridOptionsGroup.visibility = if (grid) View.VISIBLE else View.GONE
-        /* Scaling is not a user choice.  The grid is a mask over the exact 2x
-         * source, so it implies the half-surface nearest path; without the
-         * grid the compositor gets the guest mode.  The launch resolution is
-         * fixed by the grid as well and stays visible but disabled. */
-        resolutionSpinner.isEnabled = !grid
     }
 
-    /*
-     * Source preview label: the native half mode is exactly half of the
-     * physical surface on both axes, rounded down for an odd surface.  It is
-     * the extent the present pass upscales 2x with nearest sampling, not a
-     * separate game-aspect window.
-     */
-    private fun updateGridLabel() {
-        val preview = gridPreview()
-        val label = if (preview == null) {
-            getString(R.string.launch_grid_label)
-        } else {
-            getString(
-                R.string.launch_grid_label_resolution,
-                preview.first,
-                preview.second
-            )
-        }
-        gridLabel.text = label
-        /* The source CheckBox carries the resolution preview in its own text;
-         * keep the switch's accessibility label in sync with the visible row. */
-        gridSwitch.contentDescription = label
-    }
+    private fun currentResolutionOption(): ResolutionOption? =
+        resolutionOptions.getOrNull(resolutionSpinner.selectedItemPosition)
 
-    private fun gridPreview(): Pair<Int, Int>? {
-        val (screenWidth, screenHeight) = nativeScreenSize()
-        if (screenWidth < 2 || screenHeight < 2) return null
-        return (screenWidth / 2) to (screenHeight / 2)
-    }
-
-    /* The slider is an index, not milliseconds: max = 10 maps 100..200 ms in
+    /* The slider is an index, not milliseconds: max = 15 maps 50..200 ms in
      * exact 10 ms steps on every Android version. */
     private fun delayToProgress(ms: Int): Int {
         val clamped = ms.coerceIn(MIN_GESTURE_DELAY_MS, MAX_GESTURE_DELAY_MS)
@@ -1713,7 +1691,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private data class ResolutionOption(
         val width: Int,
         val height: Int,
-        val label: String
+        val label: String,
+        val grid: Boolean = false
     )
 
     private data class GestureModeOption(
@@ -1738,7 +1717,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
         const val RESOLUTION_HEIGHT_STEP = 180
         const val DEFAULT_SCREEN_WIDTH = 1280
         const val DEFAULT_SCREEN_HEIGHT = 720
-        const val MIN_GESTURE_DELAY_MS = 100
+        const val MIN_GESTURE_DELAY_MS = 50
         const val MAX_GESTURE_DELAY_MS = 200
         const val GESTURE_DELAY_STEP_MS = 10
         const val GESTURE_DELAY_STEPS =

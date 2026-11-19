@@ -1,8 +1,0 @@
-{
-    global:
-        JNI_OnLoad;
-        android_main;
-        Java_*;
-    local:
-        *;
-};

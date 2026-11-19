@@ -32,7 +32,7 @@ data class LaunchSettings(
      * on finger-up without waiting for a second tap. */
     val doubleTapGestures: Boolean = true,
     /* Gesture timers in milliseconds.  The settings UI clamps them to
-     * 100..200 in 10 ms steps; the native product helper repeats the clamp. */
+     * 50..200 in 10 ms steps; the native product helper repeats the clamp. */
     val doubleTapTimeoutMs: Int = LaunchContract.DEFAULT_DOUBLE_TAP_TIMEOUT_MS,
     val longPressTimeoutMs: Int = LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS,
     /* Wall-clock delay before the LMB press in the SIMPLE overlay.  The

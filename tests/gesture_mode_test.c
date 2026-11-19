@@ -310,9 +310,15 @@ int main(int argc, char **argv) {
     expect_int("zero keeps long press timeout",
                profile.gesture_settings.long_press_timeout_ms, authored_lp);
 
-    wc3_profile_apply_gesture_timings(&profile, 90, 240);
+    wc3_profile_apply_gesture_timings(&profile, 40, 40);
     expect_int("double tap timeout low clamp",
-               profile.gesture_settings.double_tap_timeout_ms, 100);
+               profile.gesture_settings.double_tap_timeout_ms, 50);
+    expect_int("long press timeout low clamp",
+               profile.gesture_settings.long_press_timeout_ms, 50);
+
+    wc3_profile_apply_gesture_timings(&profile, 240, 240);
+    expect_int("double tap timeout high clamp",
+               profile.gesture_settings.double_tap_timeout_ms, 200);
     expect_int("long press timeout high clamp",
                profile.gesture_settings.long_press_timeout_ms, 200);
 

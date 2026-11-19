@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Symbolize WC3 native crash addresses from the unstripped build .symtab.
 
-O-42 release builds default to `WC3_HIDE_DYNSYM=ON`, so the shipped .so keeps
-only the JNI surface in `.dynsym` and the legacy `crash_sym` handler can no
-longer resolve an `L_<va>` name through dladdr.  The unstripped build .so still
-has `.symtab`;
-this tool maps a crash PC back to the link-time symbol with llvm-nm.  Debug
-builds keep the full `.dynsym` and can still use the on-device path.  The tool
-does not run the game and does not build anything.
+O-42 is retired: canonical release and debug keep the full `.dynsym`, so the
+on-device `crash_sym` handler resolves `L_<va>` and `wc3_*` names through
+dladdr().  `release_optimized` hides internal names at compile time with
+`-fvisibility=hidden`; it keeps only the JNI surface unless built with
+`-HiddenVisibility:$false`.  This tool remains the offline fallback for an old
+log, a stripped artifact without the matching `.so`, or a build where the
+on-device path was unavailable.  It maps a crash PC back to the link-time
+symbol with llvm-nm.  The tool does not run the game and does not build
+anything.
 
 The crash log usually contains absolute ASLR addresses.  Pass the module load
 base from /proc/self/maps or the tombstone (`--base 0x...`).  Without --base the

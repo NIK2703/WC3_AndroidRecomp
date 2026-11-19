@@ -71,7 +71,9 @@ static void set_default(const char *name, const char *value)
 /* userdebug writes its boot log to the public Download folder.  The app can
  * start before MANAGE_EXTERNAL_STORAGE is granted, and some devices expose a
  * read-only Download through FUSE, so probe first and fall back to the
- * app-private state dir instead of losing stdout/stderr entirely. */
+ * app-private state dir instead of losing stdout/stderr entirely.  Both paths
+ * use the variant-tagged file name so reports from different builds stay
+ * separate. */
 #define WC3_DOWNLOAD_LOG WC3_CRASH_DOWNLOAD_LOG
 
 static int open_log(const char *path)
@@ -111,7 +113,7 @@ static void redirect_output(const char *state_dir)
          strerror(errno));
 #endif
 
-    n = snprintf(path, sizeof path, "%s/wc3_log.txt", state_dir);
+    n = snprintf(path, sizeof path, "%s/" WC3_CRASH_LOG_FILE, state_dir);
     if (n <= 0 || (size_t)n >= sizeof path)
         return;
     open_log(path);

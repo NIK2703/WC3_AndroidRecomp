@@ -4,5 +4,4 @@
     <bool name="overlay_experiment_supported">false</bool>
     <!-- The Media3 movie trace lives only in the debug source set. -->
     <bool name="movie_diagnostics_supported">false</bool>
-    <bool name="experimental_gameplay_options_supported">false</bool>
 </resources>

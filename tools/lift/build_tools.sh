@@ -165,7 +165,7 @@ for f in "$bin"/*.exe; do
 done
 
 if [ "$smoke" = 1 ]; then
-    for t in dxvk_isolate_archive_elf flag_read_audit audit_tls dxvk_android_probe jobpool; do
+    for t in parallel_raycast dxvk_isolate_archive_elf flag_read_audit audit_tls dxvk_android_probe jobpool; do
         echo "smoke: $t"
         "$bin/$t.exe" --self-test
     done

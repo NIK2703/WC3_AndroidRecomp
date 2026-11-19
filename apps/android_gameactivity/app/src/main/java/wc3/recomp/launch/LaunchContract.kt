@@ -34,7 +34,7 @@ object LaunchContract {
     const val KEY_PRESENT_BUFFERS = "present_buffers"
 
     /* The authored .icp profile uses 120 ms for both gesture timers.  The
-     * settings screen exposes only the product range 100..200 ms, step 10. */
+     * settings screen exposes only the product range 50..200 ms, step 10. */
     const val DEFAULT_DOUBLE_TAP_TIMEOUT_MS = 120
     const val DEFAULT_LONG_PRESS_TIMEOUT_MS = 120
 

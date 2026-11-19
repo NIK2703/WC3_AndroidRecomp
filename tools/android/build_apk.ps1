@@ -15,7 +15,6 @@ param(
     [switch]$NativeDebug,
     [switch]$Install,
     [switch]$Launch,
-    [switch]$KeepDynsym,
     # Internal explicit variant selector for the two-stage release_optimized
     # profile flow and the userdebug diagnostic profile.  Public callers
     # normally use -Release or -ReleaseOptimized; userdebug is selected with
@@ -98,7 +97,6 @@ if ($Variant) {
     $variant = 'debug'
 }
 $isDebug = $variant -in @('debug', 'userdebug')
-$isUserDebug = $variant -eq 'userdebug'
 $isOptimized = $variant -in @('release_optimized', 'release_optimized_pgo')
 $isRelease = -not $isDebug
 if ($isOptimized) {
@@ -311,7 +309,6 @@ if ($AdrenotoolsDir) { $nativeParams['AdrenotoolsDir'] = $AdrenotoolsDir }
 # value is the legacy exact-baseline escape hatch and must override the
 # build_app default.
 $nativeParams['CorpusRoot'] = $CorpusRoot
-if ($KeepDynsym) { $nativeParams['KeepDynsym'] = $true }
 $nativeParams['TlsModel'] = $TlsModel
 if ($NoHostHardening) { $nativeParams['NoHostHardening'] = $true }
 # Forward the compat choice on every APK build; build_app resolves auto
@@ -497,15 +494,22 @@ if (-not (Test-Path $readelf)) {
 
 # O-41: AGP's stripReleaseDebugSymbols is a no-op for this prebuilt library in
 # the useLegacyPackaging=false layout.  Strip only the release copy and only
-# non-PT_LOAD metadata: .symtab/.strtab/.debug_* go away.  O-42 additionally
-# localizes every non-JNI definition at link time; .dynsym still exists for the
-# Java_* entry points, android_main and JNI_OnLoad.  Crash triage uses the module
-# base plus the unstripped .symtab through tools/symbolize_crash.py.
+# non-PT_LOAD metadata: .symtab/.strtab/.debug_* go away.  For canonical release
+# and debug, .dynsym stays in full so crash_sym() can resolve L_<va>/wc3_*
+# names on device; the unstripped .symtab remains the offline fallback in
+# tools/symbolize_crash.py.  release_optimized hides symbols at compile time
+# through -fvisibility=hidden, so it keeps only the JNI surface unless the
+# caller explicitly passes -HiddenVisibility:$false.
 # The debug/userdebug copy intentionally keeps symbols for the
 # wc3.recomp.debug package.
 # The release_optimized_pgo training APK is not a product: keep its symbols and
 # profile-name metadata so the raw counters remain mergeable.
 $stripProduct = $isRelease -and ($variant -ne 'release_optimized_pgo')
+$expectCrashSymbols = if ($PSBoundParameters.ContainsKey('HiddenVisibility')) {
+    -not [bool]$HiddenVisibility
+} else {
+    -not $isOptimized
+}
 if ($stripProduct) {
     $strip = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe'
     if (-not (Test-Path $strip) -or -not (Test-Path $readelf)) {
@@ -521,23 +525,26 @@ if ($stripProduct) {
         Write-Host '[apk] release strip removed .dynsym or kept .symtab/.debug_*'
         exit 1
     }
-    if (-not $KeepDynsym) {
-        $dynsyms = (& $readelf --dyn-syms $jniSo) -join "`n"
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host '[apk] llvm-readelf --dyn-syms failed'
+    $dynsyms = (& $readelf --dyn-syms $jniSo) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '[apk] llvm-readelf --dyn-syms failed'
+        exit 1
+    }
+    if ($dynsyms -notmatch 'Java_wc3_recomp_' -or
+        $dynsyms -notmatch '\bandroid_main\b' -or
+        $dynsyms -notmatch '\bJNI_OnLoad\b') {
+        Write-Host '[apk] release JNI/android_main surface missing from .dynsym'
+        exit 1
+    }
+    if ($expectCrashSymbols) {
+        if ($dynsyms -notmatch 'L_[0-9A-Fa-f]{8}' -or
+            $dynsyms -notmatch '\bwc3_') {
+            Write-Host '[apk] release .dynsym lost L_*/wc3_* crash symbols'
             exit 1
         }
-        if ($dynsyms -notmatch 'Java_wc3_recomp_' -or
-            $dynsyms -notmatch '\bandroid_main\b' -or
-            $dynsyms -notmatch '\bJNI_OnLoad\b') {
-            Write-Host '[apk] release JNI/android_main surface missing from .dynsym'
-            exit 1
-        }
-        if ($dynsyms -match 'L_[0-9A-Fa-f]{8}' -or $dynsyms -match '\bwc3_') {
-            Write-Host '[apk] release still exports non-JNI dynamic symbols'
-            exit 1
-        }
-        Write-Host '[apk] release .dynsym contains JNI surface only'
+        Write-Host '[apk] release .dynsym retains L_*/wc3_* for crash symbolization'
+    } else {
+        Write-Host '[apk] hidden visibility build: .dynsym has the JNI surface only'
     }
     Write-Host "[apk] stripped release .so: $((Get-Item $jniSo).Length) bytes"
 }
@@ -715,7 +722,6 @@ $gradleArgs = @(
     '-p', $projectDir,
     "-Pwc3GameActivityBuildDir=$gradleApp",
     $jniProperty,
-    "-Pwc3UserDebug=$(if ($isUserDebug) { 'true' } else { 'false' })",
     "-Pwc3LocalMaven=$localMaven",
     "-Pandroid.aapt2FromMavenOverride=$aapt2",
     ':app:clean',

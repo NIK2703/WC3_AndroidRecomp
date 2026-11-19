@@ -20,8 +20,8 @@ static void set_single_binding(ProfileBindPackage *package, const char *name)
 
 static int clamp_timeout_ms(int value)
 {
-    if (value < 100)
-        return 100;
+    if (value < 50)
+        return 50;
     if (value > 200)
         return 200;
     return value;

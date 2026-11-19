@@ -173,7 +173,8 @@ target_include_directories(wc3_boot PRIVATE
     "${WC3_ROOT}/runtime/platform/android")
 target_compile_definitions(wc3_boot PRIVATE
     GVA_DELTA=0
-    WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE})
+    WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
+    "WC3_BUILD_VARIANT=\"${WC3_BUILD_VARIANT}\"")
 if(WC3_DEBUG)
     target_compile_definitions(wc3_boot PRIVATE WC3_DEBUG=1)
 endif()
@@ -354,7 +355,8 @@ target_include_directories(wc3_hle_modules PRIVATE
     "${WC3_ROOT}/runtime/platform")
 target_compile_definitions(wc3_hle_modules PRIVATE
     GVA_DELTA=0
-    WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE})
+    WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
+    "WC3_BUILD_VARIANT=\"${WC3_BUILD_VARIANT}\"")
 if(WC3_DEBUG)
     target_compile_definitions(wc3_hle_modules PRIVATE WC3_DEBUG=1)
 endif()
@@ -390,7 +392,8 @@ target_link_libraries(wc3_hle_android PUBLIC wc3_platform)
 target_compile_definitions(wc3_hle_android PRIVATE
     GVA_DELTA=0
     WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
-    WC3_NO_MAIN=1)
+    WC3_NO_MAIN=1
+    "WC3_BUILD_VARIANT=\"${WC3_BUILD_VARIANT}\"")
 if(WC3_DEBUG)
     target_compile_definitions(wc3_hle_android PRIVATE WC3_DEBUG=1)
 endif()
