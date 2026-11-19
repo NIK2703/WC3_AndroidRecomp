@@ -2743,6 +2743,15 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
         WC3_VERTEX_GUARD_FAIL(VG_MODE);
     if (kind == WC3_VERTEX_TRANSFORM && rd32(c->ebp - 0x18u) != 0u)
         WC3_VERTEX_GUARD_FAIL(VG_SLOT);
+    /* p1 is written at EBX+0xC.  The copy wrapper runs before L_6F1419D4
+     * subtracts EBX from [ebp+8], so its slot still holds the absolute
+     * pointer; the transform wrapper runs after the setup already made it
+     * the 0xC offset.  Fail closed if a future call site changes that. */
+    uint32_t p1_off = rd32(c->ebp + 8u);
+    uint32_t p1_expected = kind == WC3_VERTEX_COPY
+                               ? c->ebx + 0x0Cu
+                               : 0x0Cu;
+    if (p1_off != p1_expected) WC3_VERTEX_GUARD_FAIL(VG_SLOT);
 #endif
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
@@ -2783,9 +2792,9 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
 #endif
 
 #if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
-    /* Source streams: p0 is a 12-byte position, p1..p4 are 8-byte
-     * attribute vectors, and the transform path also reads one byte from the
-     * matrix-index array pm per vertex. */
+    /* Source streams: p0 and p1 are 12-byte vectors, p2 is 4 bytes, p3/p4
+     * are 8 bytes.  Transform also reads one byte from the matrix-index array
+     * pm per vertex. */
     VertexRange src[5];
     memset(src, 0, sizeof src);
     src[0].lo = vg[1];
@@ -2796,14 +2805,16 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
     src[0].used = 1;
     uint32_t src_ptr[4] = { vg[3], vg[5], vg[9], vg[10] };
     uint32_t src_stride[4] = { vg[4], vg[6], vg[11], vg[12] };
+    static const uint32_t src_size[4] = { 12u, 4u, 8u, 8u };
     for (unsigned i = 0; i < 4; i++) {
-        if (!vertex_span_ok(src_ptr[i], src_stride[i], count, 8u))
+        uint32_t size = src_size[i];
+        if (!vertex_span_ok(src_ptr[i], src_stride[i], count, size))
             WC3_VERTEX_GUARD_FAIL((unsigned)VG_SRC1 + i);
         src[i + 1].lo = src_ptr[i];
         src[i + 1].hi = (uint64_t)src_ptr[i] +
-                        (uint64_t)(count - 1u) * src_stride[i] + 8u;
+                        (uint64_t)(count - 1u) * src_stride[i] + size;
         src[i + 1].stride = src_stride[i];
-        src[i + 1].size = 8u;
+        src[i + 1].size = size;
         src[i + 1].used = 1;
     }
     if (!vertex_span_ok(vg[1], vg[2], count, 12u))
@@ -2826,9 +2837,11 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
         rd32(c->ebp - 0x1Cu), rd32(c->ebp - 0x0Cu),
         rd32(c->ebp - 0x14u), rd32(c->ebp - 0x10u)
     };
-    /* Position (EBX) writes 12 bytes, ESI/EDI write 8 each, and the optional
-     * EDX stream writes 4. */
-    uint32_t out_size[4] = { 12u, 8u, 8u, 4u };
+    /* Position (EBX) writes p0 (12 bytes) then p1 (12 bytes) at +0xC.  ESI
+     * and EDI write 8 bytes each (p3/p4), and the optional EDX stream writes
+     * p2 (4 bytes).  Keeping p1 inside out[0] makes the oracle and the alias
+     * check see every byte the loop actually writes. */
+    uint32_t out_size[4] = { 24u, 8u, 8u, 4u };
     uint32_t frame_lo = c->ebp - VERTEX_FRAME_BELOW;
     uint32_t frame_hi = frame_lo + VERTEX_FRAME_COPY;
     VertexRange out[4];
@@ -2845,14 +2858,20 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
             if (dummy_lo < frame_lo || dummy_hi > (uint64_t)frame_hi)
                 WC3_VERTEX_GUARD_FAIL(VG_DUMMY_FRAME);
             if (skip_count >= 4u) WC3_VERTEX_GUARD_FAIL(VG_DUMMY_ALIAS);
-            /* The sequential run writes the caller's dummy; the parallel run
-             * writes only a private copy.  Skip the dummy in the frame
-             * comparison, but never let it alias observable merge state or a
-             * source range. */
+            /* The setup block can point the optional EDX output at [ebp-8]
+             * itself.  That is a self-pointer dummy: prepare_vertex_ctx
+             * retargets it at the worker's private frame, and
+             * run_vertex_batch takes the caller's EDX exit value from the
+             * pre-dispatch [ebp-8].  The dummy word is skipped in the frame
+             * comparison.  Allow exactly that word; every other overlap with
+             * merge state still rejects the batch. */
+            int self_dummy = dummy_lo == (uint64_t)c->ebp - 8u &&
+                             out_size[i] == 4u;
             if (dummy_lo < (uint64_t)c->ebp - 0x18u + 4u &&
                 (uint64_t)c->ebp - 0x18u < dummy_hi)
                 WC3_VERTEX_GUARD_FAIL(VG_DUMMY_ALIAS);
-            if (dummy_lo < (uint64_t)c->ebp - 8u + 4u &&
+            if (!self_dummy &&
+                dummy_lo < (uint64_t)c->ebp - 8u + 4u &&
                 (uint64_t)c->ebp - 8u < dummy_hi)
                 WC3_VERTEX_GUARD_FAIL(VG_DUMMY_ALIAS);
             if (dummy_lo < (uint64_t)c->ebp + 8u + 4u &&
@@ -2869,6 +2888,11 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
             continue;
         }
         if (!vertex_span_ok(out_ptr[i], out_stride[i], count, out_size[i]))
+            WC3_VERTEX_GUARD_FAIL(VG_OUT_SPAN);
+        /* Adjacent vertices of one output stream must not overlap.  A stride
+         * smaller than the element would make a later vertex overwrite the
+         * previous one; serial order hides it, parallel chunks do not. */
+        if (out_stride[i] < out_size[i])
             WC3_VERTEX_GUARD_FAIL(VG_OUT_SPAN);
         out[i].lo = out_ptr[i];
         out[i].hi = (uint64_t)out_ptr[i] +
