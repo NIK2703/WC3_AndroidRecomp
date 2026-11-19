@@ -1,18 +1,21 @@
 /*
- * selection24.h - 24-unit selection and adaptive 6x2 / 8x3 unit panel.
+ * selection24.h - 12/24/40-unit selection and adaptive 6x2 / 8x3 / 10x4 panel.
  *
  * This is gameplay/UI code, not HLE: the selection manager and the info panel
  * remain lifted guest code.  The helpers below are called from the generated
- * corpus by tools/lift/csrc_local/selection24.c when WC3_SELECTION_24 is ON.
+ * corpus by tools/lift/csrc_local/selection24.c when the selection24 profile is
+ * ON.
  *
  * The helpers call guest code only through push32 + dispatch and preserve the
  * caller's integer registers, esp, eip and flags.  They do not use host locks,
  * static TLS or untagged logging.
  *
- * The exact baseline (WC3_SELECTION_24=OFF) does not contain this module and
- * keeps the original 12-unit cap and the 6x2 grid.  With the module ON the
- * cap is a runtime choice: the launch settings switch enables 24 or keeps the
- * original 12 (the default), so one product build serves both modes.
+ * The exact baseline (selection24 OFF) does not contain this module and keeps
+ * the original 12-unit cap and the 6x2 grid.  With the module ON the corpus
+ * carries the 24-entry comparison layout or the 40-entry product layout chosen
+ * at configure time, and the cap is a runtime choice: the Android launch
+ * settings write WC3_SELECTION_CAP=12|24|40 before android_main, so the 40
+ * product build serves all three modes.
  */
 #ifndef WC3_FEATURES_SELECTION24_H
 #define WC3_FEATURES_SELECTION24_H
@@ -28,20 +31,43 @@ extern "C" {
 /*
  * Runtime unit cap used by every limit site the LiftPass rewrites.  The
  * product default is the original 12; the Android launch settings set
- * WC3_SELECTION_24=1 before android_main to enable the 24-unit profile
- * without a second corpus.  A missing variable, or any value other than "1",
- * keeps 12.  The value is latched on first use.
+ * WC3_SELECTION_CAP=12|24|40 before android_main.  The legacy
+ * WC3_SELECTION_24=1 is still honoured for older hosts and selects 24.  An
+ * unknown or missing value keeps 12.  The value is latched on first use.
  */
 uint32_t wc3_sel24_cap(void);
+
+/*
+ * Save/load stream compatibility for the PrClGen slot array.
+ *
+ * The pre-40 corpus wrote wc3_sel24_cap() slots and read wc3_sel24_cap()
+ * slots; the stream itself carried no count.  A 40-slot reader therefore
+ * over-read a legacy 24-slot save and produced a null unit at the end of the
+ * group.  New saves put a marker in the third dword of slot 0 (the field is
+ * zero in every initialised slot and is not part of the order state); the
+ * reader, which starts with the legacy 24 default, detects the marker after
+ * reading slot 0 and adjusts its remaining-slot counter.  Old unmarked saves
+ * therefore keep loading as 24, while new 12/24/40 saves round-trip at their
+ * own width.
+ *
+ * wc3_sel24_stream_slot_write/read are called from the generated serializer
+ * (0x6F16AE87) and deserializer (0x6F16ABD9).  They only touch guest memory
+ * and never call guest code.
+ */
+uint32_t wc3_sel24_stream_default_cap(void);
+uint32_t wc3_sel24_stream_slot_write(uint32_t self, uint32_t slot_ptr,
+                                     uint32_t value);
+void wc3_sel24_stream_slot_read(uint32_t slot_serial, uint32_t bool_base,
+                                uint32_t cap_addr);
 
 /*
  * Called at the entry of the CPrCluster member-vector insertion 0x6F16C077.
  * The member vector is normally a fixed 12-slot vector (growth chunk zero), so
  * the 13th insertion fails and the caller silently drops the unit.  In the
- * 24-unit profile this gives the vector the game's own growth chunk (12), which
- * lets the existing grow path 0x6F16C0B3 reallocate to 24 slots when needed.
- * It does nothing for the baseline 12-unit profile and for any vector that is
- * not the CPrCluster member vector at cluster+0x1C.
+ * 24/40-unit profile this gives the vector the game's own growth chunk (12),
+ * which lets the existing grow path 0x6F16C0B3 reallocate as needed.  It does
+ * nothing for the baseline 12-unit profile and for any vector that is not the
+ * CPrCluster member vector at cluster+0x1C.
  */
 void wc3_sel24_cluster_prepare(uint32_t vector);
 
@@ -58,28 +84,28 @@ void wc3_sel24_trace_order_base(CPU *c, uint32_t sel, uint32_t group,
                                 uint32_t cursor, uint32_t idx);
 
 /*
- * 24-entry ground-order formation workspace.
+ * 40-entry ground-order formation workspace.
  *
- * The lifted solver 0x6F16B2F0 keeps a local count, a 24-entry index array and
- * a 24-entry pair array at count+0, count+4 and count+0x64.  The original
+ * The lifted solver 0x6F16B2F0 keeps a local count, a 40-entry index array and
+ * a 40-entry pair array at count+0, count+4 and count+0xA4.  The original
  * helper 0x6F169300 zeroes only twelve pairs because it hard-codes
  * eax=count+0x34 and edx=2; the original sort 0x6F16DFD0 reads the pair array
  * at count+0x34/count+0x38 and is left in place for reference.  Both live
- * callers now use the 24-entry helpers: the pass routes the solver through
+ * callers now use the 40-entry helpers: the pass routes the solver through
  * init24/sort24 and the selection group through init_group/sort_group.
- * pair_base is the guest address count+0x64.
+ * pair_base is the guest address count+0xA4.
  */
 void wc3_sel24_init24(uint32_t pair_base);
 void wc3_sel24_sort24(uint32_t count_ptr);
 
 /*
  * Selection-group workspace wrappers used by the 16-element array in
- * L_6F16A5F8 / L_6F16A6E0.  One group entry is 0x134 bytes: count +0,
- * index[24] +4, pair[24] +0x64 (key/value dwords) and tail +0x124..+0x130.
+ * L_6F16A5F8 / L_6F16A6E0.  One group entry is 0x1F4 bytes: count +0,
+ * index[40] +4, pair[40] +0xA4 (key/value dwords) and tail +0x1E4..+0x1F0.
  * The wrappers do not modify the guest CPU state; under
  * WC3_DEBUG && WC3_DEBUG_SELECT24 they snapshot the entry around zeroing and
- * around the sort so a tail overwrite by the old 12-entry pair stride is
- * visible in sel24_trace.txt.  The names differ from the panel-group helper
+ * around the sort so a tail overwrite by the old pair stride is visible in
+ * sel24_trace.txt.  The names differ from the panel-group helper
  * wc3_sel24_init_group(CPU *, uint32_t), which creates the CInfoPanelGroup.
  */
 void wc3_sel24_group_init(uint32_t pair_base);
@@ -92,26 +118,32 @@ void wc3_sel24_group_sort(uint32_t group);
  * 1 = C/D at 0x6FA91D88).  For count <= 12 the original table value is
  * returned unchanged, so the 12-unit profile and the exact 1.27 behaviour
  * stay bit-identical.  The table only has 13 entries per block and is
- * followed by a vtable, so the 13..24 columns are defined here: the compact
+ * followed by a vtable, so the 13..40 columns are defined here: the compact
  * mode continues its constant 3, the grid mode continues the three-row shape
- * with ceil(count / 3) (13..15 -> 5, 16..18 -> 6, 19..21 -> 7, 22..24 -> 8).
- * The value is a row length: the order loop clamps it to the units left, so
- * every value >= 1 advances the loop.
+ * with ceil(count / 3) for 13..24 (13..15 -> 5, 16..18 -> 6, 19..21 -> 7,
+ * 22..24 -> 8) and the four-row shape with ceil(count / 4) for 25..40
+ * (25..28 -> 7, 29..32 -> 8, 33..36 -> 9, 37..40 -> 10).  The value is a row
+ * length: the order loop clamps it to the units left, so every value >= 1
+ * advances the loop.
  */
 uint32_t wc3_sel24_formation_columns(uint32_t index, uint32_t count,
                                      uint32_t pair);
 
 /*
  * Called from the CInfoPanelGroup constructor after the original 6x2 grid and
- * its 12 buttons exist.  Creates an 8x3 grid as a second child of the group.
+ * its 12 buttons exist.  Creates an 8x3 grid as a second child and, when the
+ * runtime cap is 40, a 10x4 grid as a third child of the group.
  *
  * group+0x130 = original 6x2 grid (unchanged)
  * group+0x134 = 8x3 grid, or zero when allocation failed
  * group+0x138 = active grid (grid12 initially)
  * group+0x13C = initialisation-attempted marker ("SEL2")
  * group+0x140 = total selected-unit count from CSelectionWar3+0x1F8
+ * group+0x144 = 10x4 grid, or zero when allocation failed or the structural
+ *                cap is 24 (the 24-entry allocation ends at 0x144)
  *
- * The group allocation is widened from 0x134 to 0x144 bytes by the LiftPass.
+ * The group allocation is widened from 0x134 to 0x144 (24 entries) or 0x150
+ * (40 entries) bytes by the LiftPass.
  * The marker gates every helper: before init writes the marker the added
  * fields are not owned by this profile, so hide/fill fall back to grid12 and
  * select/note return without touching group memory.
@@ -128,12 +160,13 @@ void wc3_sel24_note_selection(CPU *c, uint32_t group, uint32_t selection);
 
 /*
  * Called from CInfoPanelGroup::Update after [ebp-0x24] (the number of units in
- * the current subgroup) is known.  Selects 6x2 for <=12 and 8x3 for 13..24
- * using the total selection count in group+0x140.  subgroup_units is only a
- * fallback when the total is missing or out of range (a split fragment that
- * ran without the update prologue).  If grid24 is unavailable the mode stays
- * 6x2; if the mode does not change the active frame is still made visible
- * again, because a parent HideAll may have unregistered it.
+ * the current subgroup) is known.  Selects 6x2 for <=12, 8x3 for 13..24 and
+ * 10x4 for 25..40 using the total selection count in group+0x140.
+ * subgroup_units is only a fallback when the total is missing or out of range
+ * (a split fragment that ran without the update prologue).  If the target grid
+ * is unavailable the mode stays at the largest available grid; if the mode does
+ * not change the active frame is still made visible again, because a parent
+ * HideAll may have unregistered it.
  */
 void wc3_sel24_select(CPU *c, uint32_t group, uint32_t subgroup_units);
 

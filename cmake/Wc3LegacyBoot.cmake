@@ -236,11 +236,12 @@ if(WC3_W3L_COMPAT)
     set_target_properties(wc3_compat PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-# --- optional 24-unit selection helpers -----------------------------------
+# --- optional selection helpers -------------------------------------------
 # Gameplay/UI code, not HLE: this library exists only when
 # WC3_SELECTION_24=ON, and the generated corpus calls it through the
-# selection24 LiftPass.  The exact baseline and the headless DUT keep the
-# original 12-unit cap and the 6x2 grid.
+# selection24 LiftPass.  The runtime cap is 12/24/40; the corpus structure is
+# the 40-entry layout selected by WC3_SELECTION_STRUCT_CAP.  The exact baseline
+# and the headless DUT keep the original 12-unit cap and the 6x2 grid.
 if(WC3_SELECTION_24)
     add_library(wc3_selection24 STATIC
         "${WC3_ROOT}/runtime/features/selection24.c")
@@ -251,6 +252,7 @@ if(WC3_SELECTION_24)
         "${WC3_ROOT}/runtime/diag")
     target_compile_definitions(wc3_selection24 PRIVATE
         GVA_DELTA=0
+        WC3_SELECTION_STRUCT_CAP=${WC3_SELECTION_STRUCT_CAP}
         WC3_DEBUG=${WC3_DEBUG_DEFINE})
     target_compile_options(wc3_selection24 PRIVATE
         -fno-strict-aliasing

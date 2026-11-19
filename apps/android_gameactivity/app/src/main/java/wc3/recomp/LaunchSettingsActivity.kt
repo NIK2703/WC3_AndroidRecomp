@@ -73,7 +73,12 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var dxvkConfigRows: LinearLayout
     private lateinit var dxvkConfigAddButton: Button
     private lateinit var dxvkConfigImportButton: Button
-    private lateinit var selection24Switch: SwitchCompat
+    private lateinit var selectionCapSpinner: Spinner
+    private val selectionCapValues = listOf(
+        LaunchContract.SELECTION_CAP_12,
+        LaunchContract.SELECTION_CAP_24,
+        LaunchContract.SELECTION_CAP_40
+    )
     private lateinit var hideCursorSwitch: SwitchCompat
     private lateinit var parallelExecutionSwitch: SwitchCompat
     private lateinit var gridOptionsGroup: LinearLayout
@@ -262,7 +267,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
         dxvkConfigRows = findViewById(R.id.dxvk_config_rows)
         dxvkConfigAddButton = findViewById(R.id.dxvk_config_add)
         dxvkConfigImportButton = findViewById(R.id.dxvk_config_import)
-        selection24Switch = findViewById(R.id.selection24_switch)
+        selectionCapSpinner = findViewById(R.id.selection_cap_spinner)
         hideCursorSwitch = findViewById(R.id.hide_cursor_switch)
         parallelExecutionSwitch = findViewById(R.id.parallel_execution_switch)
         gridOptionsGroup = findViewById(R.id.grid_options_group)
@@ -335,6 +340,18 @@ class LaunchSettingsActivity : AppCompatActivity() {
         ).apply {
             setDropDownViewResource(R.layout.item_resolution_dropdown)
         }
+
+        selectionCapSpinner.adapter = ArrayAdapter(
+            this,
+            R.layout.item_resolution,
+            listOf(
+                getString(R.string.launch_selection_12),
+                getString(R.string.launch_selection_24),
+                getString(R.string.launch_selection_40)
+            )
+        ).apply {
+            setDropDownViewResource(R.layout.item_resolution_dropdown)
+        }
     }
 
     private fun bindSettings(settings: LaunchSettings) {
@@ -356,7 +373,10 @@ class LaunchSettingsActivity : AppCompatActivity() {
         )
 
         soundSwitch.isChecked = settings.sound
-        selection24Switch.isChecked = settings.selection24
+        selectionCapSpinner.setSelection(
+            selectionCapValues.indexOf(settings.selectionCap).coerceAtLeast(0),
+            false
+        )
         hideCursorSwitch.isChecked = settings.hideCursor
         parallelExecutionSwitch.isChecked = settings.parallelExecution
         bindGridDarkenSlider(settings.gridDarkenPercent)
@@ -436,12 +456,22 @@ class LaunchSettingsActivity : AppCompatActivity() {
             }
         }
 
-        selection24Switch.setOnCheckedChangeListener { _, _ ->
-            if (!binding) {
-                refreshValidation()
-                saveIfValid()
+        selectionCapSpinner.onItemSelectedListener =
+            object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(
+                    parent: AdapterView<*>?,
+                    view: View?,
+                    position: Int,
+                    id: Long
+                ) {
+                    if (!binding) {
+                        refreshValidation()
+                        saveIfValid()
+                    }
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
-        }
 
         hideCursorSwitch.setOnCheckedChangeListener { _, _ ->
             if (!binding) {
@@ -1342,7 +1372,12 @@ class LaunchSettingsActivity : AppCompatActivity() {
             doubleTapTimeoutMs = progressToDelay(doubleTapDelaySlider.progress),
             longPressTimeoutMs = progressToDelay(longPressDelaySlider.progress),
             tapClickDelayMs = tapClickDelayFromProgress(tapClickDelaySlider.progress),
-            selection24 = selection24Switch.isChecked,
+            selectionCap = selectionCapValues[
+                selectionCapSpinner.selectedItemPosition.coerceIn(
+                    0,
+                    selectionCapValues.lastIndex
+                )
+            ],
             hideCursor = hideCursorSwitch.isChecked,
             overlayOpacityPercent = overlayOpacityFromProgress(
                 overlayOpacitySlider.progress

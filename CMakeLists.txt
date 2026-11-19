@@ -644,9 +644,17 @@ else()
     set(WC3_SELECTION_24_DEFAULT OFF)
 endif()
 option(WC3_SELECTION_24
-       "Apply the 24-unit selection / 8x3 panel profile to the relifted corpus"
+       "Apply the 12/24/40-unit selection / 6x2, 8x3, 10x4 panel profile to the relifted corpus"
        ${WC3_SELECTION_24_DEFAULT})
 if(WC3_SELECTION_24)
+    set(WC3_SELECTION_STRUCT_CAP "40" CACHE STRING
+        "Selection structural capacity: 24 (legacy layout) or 40 (product layout)")
+    set_property(CACHE WC3_SELECTION_STRUCT_CAP PROPERTY STRINGS "24" "40")
+    if(NOT WC3_SELECTION_STRUCT_CAP MATCHES "^(24|40)$")
+        message(FATAL_ERROR
+            "WC3_SELECTION_STRUCT_CAP must be 24 or 40, got "
+            "'${WC3_SELECTION_STRUCT_CAP}'")
+    endif()
     if(NOT WC3_RELIFTED_CORPUS_ROOT)
         message(FATAL_ERROR
             "WC3_SELECTION_24=ON requires WC3_RELIFTED_CORPUS_ROOT; the legacy "
@@ -664,7 +672,8 @@ if(WC3_SELECTION_24)
             "is linked into wc3gameactivity, which does not exist otherwise.")
     endif()
     message(STATUS
-        "selection24: 24-unit selection profile, 6x2 for <=12, 8x3 for 13..24")
+        "selection24: 12/24/40 runtime cap, structural ${WC3_SELECTION_STRUCT_CAP}, "
+        "6x2 for <=12, 8x3 for 13..24, 10x4 for 25..40")
 endif()
 
 # Optional post-lift parallel raycast.  The pass rewrites exactly one call to

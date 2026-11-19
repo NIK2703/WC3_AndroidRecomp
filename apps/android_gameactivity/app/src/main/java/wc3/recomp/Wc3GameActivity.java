@@ -71,8 +71,8 @@ public class Wc3GameActivity extends GameActivity {
 
     /* JNI matches by name only; host_shell.c must keep the same parameter
      * order (driver id before driver root, DXVK version and config path, then
-     * the gesture flag and timers, the SIMPLE tap delay, the selection24
-     * toggle, the hideCursor toggle, the parallelExecution toggle, the overlay
+     * the gesture flag and timers, the SIMPLE tap delay, the selection cap
+     * (12/24/40), the hideCursor toggle, the parallelExecution toggle, the overlay
      * opacity percent, the grid toggle, darken percent and cycle seconds, the
      * presentation scale string, and finally the screen present mode string
      * and buffering count).  These values are strings, so a swap compiles and
@@ -83,7 +83,7 @@ public class Wc3GameActivity extends GameActivity {
             String hookDir, String dxvkVersion, String dxvkConfigPath,
             boolean doubleTapGestures, int doubleTapTimeoutMs,
             int longPressTimeoutMs, int tapClickDelayMs,
-            boolean selection24, boolean hideCursor, boolean parallelExecution,
+            int selectionCap, boolean hideCursor, boolean parallelExecution,
             int overlayOpacityPercent, boolean gridEnabled,
             int gridDarkenPercent, int gridCycleSeconds, String presentScale,
             String presentMode, int presentBuffers);
@@ -374,9 +374,9 @@ public class Wc3GameActivity extends GameActivity {
                 settings.getInt(
                         LaunchContract.KEY_TAP_CLICK_DELAY_MS,
                         LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS),
-                settings.getBoolean(
-                        LaunchContract.KEY_SELECTION_24,
-                        LaunchContract.DEFAULT_SELECTION_24),
+                settings.getInt(
+                        LaunchContract.KEY_SELECTION_CAP,
+                        LaunchContract.DEFAULT_SELECTION_CAP),
                 settings.getBoolean(
                         LaunchContract.KEY_HIDE_CURSOR,
                         LaunchContract.DEFAULT_HIDE_CURSOR),

@@ -12,7 +12,10 @@
     <string name="launch_resolution_grid_option">%1$d × %2$d (сетка)</string>
 
     <string name="launch_sound_label">Звук</string>
-    <string name="launch_selection24_label">Выделение до 24 юнитов</string>
+    <string name="launch_selection_label">Лимит выделения юнитов</string>
+    <string name="launch_selection_12">12 юнитов (по умолчанию)</string>
+    <string name="launch_selection_24">24 юнита</string>
+    <string name="launch_selection_40">40 юнитов</string>
     <string name="launch_hide_cursor_label">Скрыть игровой курсор</string>
     <string name="launch_parallel_label">Параллельные игровые циклы</string>
     <string name="launch_gesture_mode_label">Жесты тачскрин управления</string>

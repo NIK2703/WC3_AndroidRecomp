@@ -1,5 +1,5 @@
 /*
- * selection24.c - 24-unit selection and adaptive 6x2 / 8x3 unit panel.
+ * selection24.c - 12/24/40-unit selection and adaptive 6x2 / 8x3 / 10x4 panel.
  *
  * The lifted CInfoPanelGroup and CSelectionWar3 code stays in the generated
  * corpus.  This module supplies the host helpers that the
@@ -21,6 +21,20 @@
 #include "wc3_debug.h"
 
 #include <stdlib.h>
+#include <string.h>
+
+/* Structural capacity of the generated corpus this module is linked with.
+ * The LiftPass is run with the same value (WC3_SELECTION_STRUCT_CAP), so the
+ * helper offsets and the lifted literal displacements always describe one
+ * layout.  40 is the product layout; 24 is kept for comparison and migration
+ * builds.  The runtime WC3_SELECTION_CAP can only lower this hard maximum. */
+#ifndef WC3_SELECTION_STRUCT_CAP
+#define WC3_SELECTION_STRUCT_CAP 40
+#endif
+#if WC3_SELECTION_STRUCT_CAP != 24 && WC3_SELECTION_STRUCT_CAP != 40
+#error "WC3_SELECTION_STRUCT_CAP must be 24 or 40"
+#endif
+#define SEL24_STRUCT_CAP ((uint32_t)WC3_SELECTION_STRUCT_CAP)
 
 /* Debug-only trace.  Every diagnostic write below is inside an explicit
  * WC3_DEBUG && WC3_DEBUG_SELECT24 guard; the tag names the observed
@@ -92,29 +106,97 @@ static int sel24_verbose_trace(void)
 #endif
 
 /* One definition in the helper library: the product build links this module
- * whenever WC3_SELECTION_24 is ON, so the marker is present exactly once. */
+ * whenever the selection24 profile is ON, so the marker is present exactly
+ * once. */
 #if defined(__GNUC__)
 __attribute__((used))
 #endif
 const char wc3_selection24_build_marker[] = "WC3_SELECTION_24";
 
-/* Runtime 24/12 cap.  Zero means "not latched yet"; every limit site and the
- * panel helper read the same value for the process lifetime.  The Android host
- * exports WC3_SELECTION_24=1 to enable the 24-unit profile before android_main;
- * a missing variable, or any value other than "1", keeps the product default
- * of the original 12 units. */
+/* Runtime 12/24/40 cap.  Zero means "not latched yet"; every limit site and
+ * the panel helper read the same value for the process lifetime.  The Android
+ * host exports WC3_SELECTION_CAP=12|24|40 before android_main; the older
+ * WC3_SELECTION_24=1 is still honoured for hosts that have not been updated
+ * and selects 24.  A missing variable, or any other value, keeps the product
+ * default of the original 12 units. */
 static uint32_t g_sel24_cap;
+
+static uint32_t sel24_parse_cap(const char *value)
+{
+    if (value && value[0] == '1' && value[1] == '2' && value[2] == '\0')
+        return 12u;
+    if (value && value[0] == '2' && value[1] == '4' && value[2] == '\0')
+        return 24u;
+    if (value && value[0] == '4' && value[1] == '0' && value[2] == '\0')
+        return 40u;
+    return 0u;
+}
 
 uint32_t wc3_sel24_cap(void)
 {
     uint32_t cap = g_sel24_cap;
 
     if (cap == 0u) {
-        const char *value = getenv("WC3_SELECTION_24");
-        cap = (value && value[0] == '1' && value[1] == '\0') ? 24u : 12u;
+        const char *value = getenv("WC3_SELECTION_CAP");
+        const char *legacy = getenv("WC3_SELECTION_24");
+
+        cap = sel24_parse_cap(value);
+        if (cap == 0u)
+            cap = (legacy && legacy[0] == '1' && legacy[1] == '\0') ? 24u : 12u;
+        if (cap > SEL24_STRUCT_CAP)
+            cap = SEL24_STRUCT_CAP;
         g_sel24_cap = cap;
     }
     return cap;
+}
+
+/* The third dword of every PrClGen slot is initialised to zero and is not
+ * used by the order path.  Slot 0 uses it as the save-stream width marker:
+ * 0x57430000 | cap.  A legacy stream has zero there, so the reader keeps the
+ * pre-40 24-slot default.  The marker is stored in the stream only; the
+ * writer never modifies the live object, and the reader clears the field
+ * after consuming it. */
+#define SEL24_STREAM_MARKER      0x57430000u
+#define SEL24_STREAM_MARKER_MASK 0xFFFFFF00u
+#define SEL24_STREAM_LEGACY_CAP  24u
+#define SEL24_STREAM_SLOT0_SERIAL_AT 0x20u
+#define SEL24_STREAM_SLOT0_THIRD_AT  0x24u
+#define SEL24_STREAM_BOOLS_AT        0x1FCu
+
+uint32_t wc3_sel24_stream_default_cap(void)
+{
+    return SEL24_STREAM_LEGACY_CAP;
+}
+
+uint32_t wc3_sel24_stream_slot_write(uint32_t self, uint32_t slot_ptr,
+                                     uint32_t value)
+{
+    if (slot_ptr == self + SEL24_STREAM_SLOT0_THIRD_AT)
+        return SEL24_STREAM_MARKER | (wc3_sel24_cap() & 0xFFu);
+    return value;
+}
+
+void wc3_sel24_stream_slot_read(uint32_t slot_serial, uint32_t bool_base,
+                                uint32_t cap_addr)
+{
+    uint32_t marker;
+    uint32_t cap;
+
+    /* The helper is emitted at every slot read.  Only slot 0 carries the
+     * marker; bool_base is the slot-valid array at self+0x1FC. */
+    if (slot_serial != bool_base - (SEL24_STREAM_BOOLS_AT -
+                                    SEL24_STREAM_SLOT0_SERIAL_AT))
+        return;
+    marker = rd32(slot_serial + 4u);
+    if ((marker & SEL24_STREAM_MARKER_MASK) != SEL24_STREAM_MARKER)
+        return;
+    cap = marker & 0xFFu;
+    if (cap != 12u && cap != 24u && cap != 40u)
+        return;
+    if (cap > SEL24_STRUCT_CAP)
+        return; /* a 40-slot stream cannot fit the 24-layout comparison build */
+    wr32(cap_addr, cap);
+    wr32(slot_serial + 4u, 0u);
 }
 
 /*
@@ -136,9 +218,9 @@ uint32_t wc3_sel24_cap(void)
  * chunk activates the game's own grow path: 0x6F16C077 computes the new size,
  * 0x6F1C5130 reallocates and frees the old block, and 0x6F16C0B3 installs the
  * new capacity/count and copies the new members.  A 12-capacity cluster grows
- * 12 -> 24 on the first overflow; a 24-capacity vector grows by another 12 only
+ * 12 -> 24 on the first overflow; a larger vector keeps growing by another 12
  * when it already holds members, so a cluster reused across orders can still
- * accept a full 24-unit selection.
+ * accept a full 40-unit selection within the fixed 40-entry structure.
  *
  * Only the CPrCluster member vector is touched.  Both its vtable and the vtable
  * of the owning cluster are checked, because 0x6F16C077 is the generic insert
@@ -149,6 +231,18 @@ uint32_t wc3_sel24_cap(void)
 #define SEL24_CLUSTER_VECTOR_VT   0x6FA90D5Cu
 #define SEL24_CLUSTER_VT          0x6FA90D64u
 #define SEL24_CLUSTER_VT_EMBEDDED 0x6FA91964u
+
+/* CPrCluster/PrClGen tail in the compiled structural layout.  The cap only
+ * limits how many of the available slots the game fills. */
+#if WC3_SELECTION_STRUCT_CAP == 24
+#define SEL24_CLUSTER_PTRS  0x13Cu
+#define SEL24_CLUSTER_TAIL  0x19Cu
+#define SEL24_CLUSTER_FLAGS 0x1C0u
+#else
+#define SEL24_CLUSTER_PTRS  0x1FCu
+#define SEL24_CLUSTER_TAIL  0x29Cu
+#define SEL24_CLUSTER_FLAGS 0x2C0u
+#endif
 #define SEL24_VECTOR_GROW         0x14u
 #define SEL24_VECTOR_GROW_CHUNK   12u
 
@@ -156,7 +250,7 @@ void wc3_sel24_cluster_prepare(uint32_t vector)
 {
     uint32_t owner_vtable;
 
-    if (wc3_sel24_cap() != 24u || vector < SEL24_CLUSTER_VECTOR_AT)
+    if (wc3_sel24_cap() < 24u || vector < SEL24_CLUSTER_VECTOR_AT)
         return;
     if (rd32(vector) != GVA(SEL24_CLUSTER_VECTOR_VT))
         return;
@@ -168,12 +262,30 @@ void wc3_sel24_cluster_prepare(uint32_t vector)
         wr32(vector + SEL24_VECTOR_GROW, SEL24_VECTOR_GROW_CHUNK);
 }
 
-/* CInfoPanelGroup fields added by the selection24 profile. */
+/* CInfoPanelGroup fields added by the selection24 profile.  The extra 10x4
+ * child only exists in the 40-entry allocation; the 24-entry allocation ends
+ * after the total field. */
 #define SEL24_GROUP_GRID12   0x130u
 #define SEL24_GROUP_GRID24   0x134u
 #define SEL24_GROUP_ACTIVE   0x138u
 #define SEL24_GROUP_INIT     0x13Cu
 #define SEL24_GROUP_TOTAL    0x140u
+#if WC3_SELECTION_STRUCT_CAP == 40
+#define SEL24_GROUP_GRID40   0x144u
+#endif
+
+/* Selection-group entry: count +0, index[cap] +4, pair[cap] +pair_base
+ * (key/value dwords), tail after the pair array. */
+#if WC3_SELECTION_STRUCT_CAP == 24
+#define SEL24_GROUP_ENTRY_SIZE 0x134u
+#define SEL24_GROUP_PAIR       0x64u
+#define SEL24_GROUP_TAIL       0x124u
+#else
+#define SEL24_GROUP_ENTRY_SIZE 0x1F4u
+#define SEL24_GROUP_PAIR       0xA4u
+#define SEL24_GROUP_TAIL       0x1E4u
+#endif
+#define SEL24_GROUP_INDEX      0x4u
 
 /* CSelectionWar3 field with the total number of selected units. */
 #define SEL24_SELECTION_TOTAL 0x1F8u
@@ -196,8 +308,12 @@ void wc3_sel24_cluster_prepare(uint32_t vector)
 
 #define SEL24_BUTTON_VISIBLE 0x090u
 
-/* Size of the CInfoPanelGroup allocation is widened 0x134 -> 0x144. */
+/* Size of the widened CInfoPanelGroup allocation. */
+#if WC3_SELECTION_STRUCT_CAP == 24
 #define SEL24_GROUP_SIZE     0x144u
+#else
+#define SEL24_GROUP_SIZE     0x150u
+#endif
 
 #define SEL24_GRID_SIZE      0x15Cu
 #define SEL24_GRID_LINE      0x024u
@@ -205,7 +321,9 @@ void wc3_sel24_cluster_prepare(uint32_t vector)
 #define SEL24_BUTTON_LINE    0x076u
 #define SEL24_ALLOC_FILE     0x6FABF9F8u
 
-/* Original grid12 geometry and the scaled 8x3 grid24 geometry. */
+/* Original grid12 geometry, the scaled 8x3 grid24 geometry and the 10x4
+ * grid40 geometry.  The 40-unit grid uses 0.55 scale with 0.3125 x 0.184
+ * local extents; the X offset keeps the panel centred in the original slot. */
 #define SEL24_GRID12_WIDTH   0x3E3E6666u
 #define SEL24_GRID12_HEIGHT  0x3DD00000u
 #define SEL24_GRID24_WIDTH   0x3E7DDDDDu
@@ -213,9 +331,16 @@ void wc3_sel24_cluster_prepare(uint32_t vector)
 #define SEL24_GRID24_OFFSET_X 0xBB088889u
 #define SEL24_GRID24_OFFSET_Y 0x00000000u
 #define SEL24_GRID24_SCALE   0x3F400000u /* 0.75f */
+#define SEL24_GRID40_WIDTH   0x3EA00000u /* 0.3125f */
+#define SEL24_GRID40_HEIGHT  0x3E3C6A7Fu /* 0.184f */
+#define SEL24_GRID40_OFFSET_X 0xBB3A2E8Cu /* -0.0015625 / 0.55 */
+#define SEL24_GRID40_OFFSET_Y 0x00000000u
+#define SEL24_GRID40_SCALE   0x3F0CCCCDu /* 0.55f */
 
 #define SEL24_GRID24_ROWS    3u
 #define SEL24_GRID24_COLS    8u
+#define SEL24_GRID40_ROWS    4u
+#define SEL24_GRID40_COLS    10u
 #define SEL24_GRID12_ROWS    2u
 #define SEL24_GRID12_COLS    6u
 
@@ -555,7 +680,14 @@ static void sel24_trace_object_line(const char *tag, uint32_t object,
  * fills +0x04, +0x08 and +0x0C..+0x20 as well.  Print all of them, so a record
  * that was never written is distinguishable from one with a stale handle. */
 #define SEL24_ORDER_RECORD_STRIDE 0x24u
-#define SEL24_ORDER_RECORD_MAX    24u
+#define SEL24_ORDER_RECORD_MAX    SEL24_STRUCT_CAP
+#if WC3_SELECTION_STRUCT_CAP == 24
+#define SEL24_ORDER_ARRAY_OFF     0x960u
+#define SEL24_ORDER_FRAME_MIN     0x9A0u
+#else
+#define SEL24_ORDER_ARRAY_OFF     0xBA0u
+#define SEL24_ORDER_FRAME_MIN     0xBE8u
+#endif
 
 static void sel24_trace_order_record(const char *tag, uint32_t index,
                                      uint32_t record)
@@ -774,22 +906,22 @@ static void sel24_trace_event_context(CPU *c, uint32_t self, uint32_t arg,
          * Builder 0x6F6B98F0 keeps the same object at [ebp-0x20C] and
          * [ebp-0x204], its record count at [ebp-0x1C4] and the current index
          * at [ebp-0x208].  The object repeats the count at +0x40, which makes
-         * the match specific; the record array was moved to [ebp-0x960].
+         * the match specific; the record array was moved to [ebp-0xBA0].
          * [ebp-0x200] in this frame is a pointer to a local handed to the
          * event lookup, so reading it as the index would make the check
          * unsatisfiable.
          */
-        if (ebp >= SEL24_GUEST_STACK_LO + 0x9A0u) {
+        if (ebp >= SEL24_GUEST_STACK_LO + SEL24_ORDER_FRAME_MIN) {
             uint32_t object = rd32(ebp - 0x204u);
             uint32_t alias = rd32(ebp - 0x20Cu);
             uint32_t count = rd32(ebp - 0x1C4u);
             uint32_t index = rd32(ebp - 0x208u);
-            int strict = object == alias && count <= 24u && index <= count &&
+            int strict = object == alias && count <= 40u && index <= count &&
                          sel24_heap_word(object) &&
                          sel24_rd(object, 0x40u) == count;
 
             if (strict) {
-                uint32_t array = ebp - 0x960u;
+                uint32_t array = ebp - SEL24_ORDER_ARRAY_OFF;
                 uint32_t element = array + index * 0x24u;
                 uint32_t i;
 
@@ -862,7 +994,7 @@ static void sel24_trace_event_context(CPU *c, uint32_t self, uint32_t arg,
                         frame, ebp, object, alias, count, index, object40,
                         strict);
                 if (index <= 64u) {
-                    uint32_t array = ebp - 0x960u;
+                    uint32_t array = ebp - SEL24_ORDER_ARRAY_OFF;
                     uint32_t element = array + index * 0x24u;
 
                     if (sel24_stack_word(array) &&
@@ -1129,7 +1261,7 @@ void wc3_sel24_trace_lookup(CPU *c, uint32_t stage, uint32_t a, uint32_t b)
 }
 
 /* Index and record-cursor slots of the two order loops.  The array base is
- * [ebp-0x960] in both.  The cursor points past the record start by 0x18 in one
+ * [ebp-0xBA0] in both.  The cursor points past the record start by 0x18 in one
  * loop and by 0x1C in the other, which is exactly the offset the loop uses for
  * its unit read; the index slot follows the loop shape, not a builder name:
  *   cursor 0x18 -> index [ebp-0x208]  (site 0x6F6B9E8D)
@@ -1190,7 +1322,7 @@ void wc3_sel24_trace_order_begin(CPU *c, uint32_t request, uint32_t source)
  * a slot index (`edx`) that is -1 when both the existing-slot lookup and the
  * free-slot lookup failed; the original code then writes the pointer array
  * out of bounds.  `list` is the PrClGen object (edi), `index` is edx, `value`
- * is the pointer about to be stored in the widened array at +0x13C, `unit`
+ * is the pointer about to be stored in the widened array at +0x1FC, `unit`
  * is the function argument and `store` is the "store pointer" flag.
  * `slot`/`serial` show the slot's {handle, serial} pair and `used` counts
  * occupied slots across the runtime cap, so a path that still stops at twelve
@@ -1210,12 +1342,12 @@ void wc3_sel24_trace_listadd(CPU *c, uint32_t list, uint32_t index,
 
     sel24_save_state(c, &saved);
     if (idx >= 0 && (uint32_t)idx < cap && sel24_readable(list)) {
-        ptr = sel24_rd(list, 0x13Cu + (uint32_t)idx * 4u);
+        ptr = sel24_rd(list, SEL24_CLUSTER_PTRS + (uint32_t)idx * 4u);
         handle = sel24_rd(list, 0x1Cu + (uint32_t)idx * 0xCu);
         serial = sel24_rd(list, 0x20u + (uint32_t)idx * 0xCu);
     }
     if (sel24_readable(list)) {
-        for (i = 0u; i < cap && i < 32u; ++i)
+        for (i = 0u; i < cap; ++i)
             if (sel24_rd(list, 0x1Cu + i * 0xCu) != 0xFFFFFFFFu)
                 ++used;
     }
@@ -1225,9 +1357,12 @@ void wc3_sel24_trace_listadd(CPU *c, uint32_t list, uint32_t index,
             "tgt=%08X/%08X pt=%08X,%08X,%08X flags=%08X\n",
             g_sel24_order_seq, list, cap, idx, unit, value, store, used, ptr,
             handle, serial,
-            sel24_rd(list, 0x19Cu), sel24_rd(list, 0x1A0u),
-            sel24_rd(list, 0x1A4u), sel24_rd(list, 0x1A8u),
-            sel24_rd(list, 0x1ACu), sel24_rd(list, 0x1C0u));
+            sel24_rd(list, SEL24_CLUSTER_TAIL),
+            sel24_rd(list, SEL24_CLUSTER_TAIL + 4u),
+            sel24_rd(list, SEL24_CLUSTER_TAIL + 8u),
+            sel24_rd(list, SEL24_CLUSTER_TAIL + 12u),
+            sel24_rd(list, SEL24_CLUSTER_TAIL + 16u),
+            sel24_rd(list, SEL24_CLUSTER_FLAGS));
     sel24_restore_state(c, &saved);
 }
 
@@ -1288,14 +1423,17 @@ void wc3_sel24_trace_formation_begin(CPU *c, uint32_t cluster)
             "flags=%08X\n",
             g_sel24_order_seq, cluster, cap, vcap, count,
             sel24_rd(cluster, 0x30u), base,
-            sel24_rd(cluster, 0x19Cu), sel24_rd(cluster, 0x1A0u),
-            sel24_rd(cluster, 0x1A4u), sel24_rd(cluster, 0x1A8u),
-            sel24_rd(cluster, 0x1ACu), sel24_rd(cluster, 0x1C0u));
+            sel24_rd(cluster, SEL24_CLUSTER_TAIL),
+            sel24_rd(cluster, SEL24_CLUSTER_TAIL + 4u),
+            sel24_rd(cluster, SEL24_CLUSTER_TAIL + 8u),
+            sel24_rd(cluster, SEL24_CLUSTER_TAIL + 12u),
+            sel24_rd(cluster, SEL24_CLUSTER_TAIL + 16u),
+            sel24_rd(cluster, SEL24_CLUSTER_FLAGS));
     if (count > cap)
         fprintf(SEL24_OUT,
                 "[select24] formation seq=%u OVER count=%u cap=%u vcap=%u\n",
                 g_sel24_order_seq, count, cap, vcap);
-    for (i = 0u; i < count && i < cap && i < 32u; ++i) {
+    for (i = 0u; i < count && i < cap; ++i) {
         uint32_t rec = base + i * 0x2Cu;
         uint32_t unit;
 
@@ -1348,9 +1486,12 @@ void wc3_sel24_trace_cluster_try(CPU *c, uint32_t vector, uint32_t add)
             "base=%08X tgt=%08X/%08X pt=%08X,%08X,%08X flags=%08X\n",
             g_sel24_order_seq, vector, cluster, sel24_rd(cluster, 0u), cap,
             vcap, count, add, want, want > vcap ? 1u : 0u, grow, base,
-            sel24_rd(cluster, 0x19Cu), sel24_rd(cluster, 0x1A0u),
-            sel24_rd(cluster, 0x1A4u), sel24_rd(cluster, 0x1A8u),
-            sel24_rd(cluster, 0x1ACu), sel24_rd(cluster, 0x1C0u));
+            sel24_rd(cluster, SEL24_CLUSTER_TAIL),
+            sel24_rd(cluster, SEL24_CLUSTER_TAIL + 4u),
+            sel24_rd(cluster, SEL24_CLUSTER_TAIL + 8u),
+            sel24_rd(cluster, SEL24_CLUSTER_TAIL + 12u),
+            sel24_rd(cluster, SEL24_CLUSTER_TAIL + 16u),
+            sel24_rd(cluster, SEL24_CLUSTER_FLAGS));
     sel24_restore_state(c, &saved);
 }
 
@@ -1976,6 +2117,9 @@ static uint32_t sel24_valid_grid(uint32_t group)
     uint32_t grid12;
     uint32_t grid24;
     uint32_t active;
+#if WC3_SELECTION_STRUCT_CAP == 40
+    uint32_t grid40;
+#endif
 
     if (!group) {
         return 0u;
@@ -1991,6 +2135,12 @@ static uint32_t sel24_valid_grid(uint32_t group)
     if (active == grid12 || (grid24 && active == grid24)) {
         return active;
     }
+#if WC3_SELECTION_STRUCT_CAP == 40
+    grid40 = rd32(group + SEL24_GROUP_GRID40);
+    if (grid40 && active == grid40) {
+        return active;
+    }
+#endif
     return grid12;
 }
 
@@ -2081,12 +2231,69 @@ static int sel24_grid_ready(uint32_t grid, uint32_t rows, uint32_t cols)
     return 1;
 }
 
+/*
+ * Allocate, initialise and populate one extra panel grid.  Returns zero when
+ * the grid, a row array or a button could not be allocated; the partial grid
+ * is then hidden and left as a dormant child of the group, so the 6x2 path
+ * stays intact.  A successful grid is also hidden: it is only shown when the
+ * update selects it.
+ */
+static uint32_t sel24_create_grid(CPU *c, uint32_t group, uint32_t rows,
+                                  uint32_t cols, uint32_t scale,
+                                  uint32_t width, uint32_t height,
+                                  uint32_t offset_x, uint32_t offset_y)
+{
+    uint32_t grid;
+    uint32_t row;
+    uint32_t col;
+
+    grid = sel24_alloc(c, SEL24_GRID_SIZE, SEL24_GRID_LINE,
+                       SEL24_RET_GRID_ALLOC);
+    if (!grid) {
+        return 0u;
+    }
+    sel24_grid_ctor(c, grid, group);
+    wr32(grid + SEL24_GRID_SCALE, scale);
+    sel24_grid_width(c, grid, width);
+    sel24_grid_height(c, grid, height);
+    sel24_grid_anchor(c, grid, 7u, group, 7u, offset_x, offset_y, 1u);
+    sel24_grid_resize(c, grid, rows, cols);
+    if (!sel24_grid_ready(grid, rows, cols)) {
+        wr32(grid + SEL24_GRID_VISIBLE, 0u);
+        sel24_frame_method(c, grid, SEL24_VT_HIDE, SEL24_RET_HIDE, 0u);
+        sel24_hide_grid(c, grid);
+        return 0u;
+    }
+    for (row = 0u; row < rows; ++row) {
+        for (col = 0u; col < cols; ++col) {
+            uint32_t button = sel24_alloc(c, SEL24_BUTTON_SIZE,
+                                          SEL24_BUTTON_LINE,
+                                          SEL24_RET_BUTTON_ALLOC);
+
+            if (!button) {
+                wr32(grid + SEL24_GRID_VISIBLE, 0u);
+                sel24_frame_method(c, grid, SEL24_VT_HIDE, SEL24_RET_HIDE,
+                                   0u);
+                sel24_hide_grid(c, grid);
+                return 0u;
+            }
+            sel24_button_ctor(c, button, grid);
+            sel24_grid_insert(c, grid, col, row, button);
+        }
+    }
+    wr32(grid + SEL24_GRID_VISIBLE, 0u);
+    sel24_frame_method(c, grid, SEL24_VT_HIDE, SEL24_RET_HIDE, 0u);
+    sel24_hide_grid(c, grid);
+    return grid;
+}
+
 void wc3_sel24_init_group(CPU *c, uint32_t group)
 {
     uint32_t grid12;
-    uint32_t grid24;
-    uint32_t row;
-    uint32_t col;
+    uint32_t grid24 = 0u;
+#if WC3_SELECTION_STRUCT_CAP == 40
+    uint32_t grid40 = 0u;
+#endif
 
     if (!group) {
         return;
@@ -2098,6 +2305,9 @@ void wc3_sel24_init_group(CPU *c, uint32_t group)
     grid12 = rd32(group + SEL24_GROUP_GRID12);
     wr32(group + SEL24_GROUP_INIT, SEL24_INIT_MAGIC);
     wr32(group + SEL24_GROUP_GRID24, 0u);
+#if WC3_SELECTION_STRUCT_CAP == 40
+    wr32(group + SEL24_GROUP_GRID40, 0u);
+#endif
     wr32(group + SEL24_GROUP_ACTIVE, grid12);
     wr32(group + SEL24_GROUP_TOTAL, 0u);
     if (wc3_sel24_cap() < 24u) {
@@ -2112,76 +2322,39 @@ void wc3_sel24_init_group(CPU *c, uint32_t group)
     }
 #if WC3_DEBUG && WC3_DEBUG_SELECT24
     fprintf(SEL24_OUT,
-            "[select24] init group=%08X grid12=%08X marker=%08X\n",
-            group, grid12, (unsigned)SEL24_INIT_MAGIC);
+            "[select24] init group=%08X grid12=%08X marker=%08X cap=%u\n",
+            group, grid12, (unsigned)SEL24_INIT_MAGIC, wc3_sel24_cap());
 #endif
     if (!grid12) {
         return;
     }
 
-    grid24 = sel24_alloc(c, SEL24_GRID_SIZE, SEL24_GRID_LINE,
-                         SEL24_RET_GRID_ALLOC);
+    grid24 = sel24_create_grid(c, group, SEL24_GRID24_ROWS, SEL24_GRID24_COLS,
+                               SEL24_GRID24_SCALE, SEL24_GRID24_WIDTH,
+                               SEL24_GRID24_HEIGHT, SEL24_GRID24_OFFSET_X,
+                               SEL24_GRID24_OFFSET_Y);
 #if WC3_DEBUG && WC3_DEBUG_SELECT24
     fprintf(SEL24_OUT, "[select24] init group=%08X grid24=%08X\n",
             group, grid24);
 #endif
-    if (!grid24) {
-        return;
-    }
+    wr32(group + SEL24_GROUP_GRID24, grid24);
 
-    sel24_grid_ctor(c, grid24, group);
-    wr32(grid24 + SEL24_GRID_SCALE, SEL24_GRID24_SCALE);
-    sel24_grid_width(c, grid24, SEL24_GRID24_WIDTH);
-    sel24_grid_height(c, grid24, SEL24_GRID24_HEIGHT);
-    sel24_grid_anchor(c, grid24, 7u, group, 7u,
-                      SEL24_GRID24_OFFSET_X, SEL24_GRID24_OFFSET_Y, 1u);
-    sel24_grid_resize(c, grid24, SEL24_GRID24_ROWS, SEL24_GRID24_COLS);
+#if WC3_SELECTION_STRUCT_CAP == 40
+    if (wc3_sel24_cap() >= 40u) {
+        grid40 = sel24_create_grid(c, group, SEL24_GRID40_ROWS,
+                                   SEL24_GRID40_COLS, SEL24_GRID40_SCALE,
+                                   SEL24_GRID40_WIDTH, SEL24_GRID40_HEIGHT,
+                                   SEL24_GRID40_OFFSET_X,
+                                   SEL24_GRID40_OFFSET_Y);
 #if WC3_DEBUG && WC3_DEBUG_SELECT24
-    fprintf(SEL24_OUT,
-            "[select24] init group=%08X grid24=%08X ready=%d rows=%u cols=%u\n",
-            group, grid24,
-            sel24_grid_ready(grid24, SEL24_GRID24_ROWS,
-                             SEL24_GRID24_COLS),
-            (unsigned)SEL24_GRID24_ROWS, (unsigned)SEL24_GRID24_COLS);
+        fprintf(SEL24_OUT, "[select24] init group=%08X grid40=%08X\n",
+                group, grid40);
+#endif
+        wr32(group + SEL24_GROUP_GRID40, grid40);
+    }
 #endif
 
-    if (!sel24_grid_ready(grid24, SEL24_GRID24_ROWS, SEL24_GRID24_COLS)) {
-        /* The partial grid stays a hidden child of the group.  It is not
-         * referenced by the group fields, so the 6x2 path remains intact. */
-        wr32(grid24 + SEL24_GRID_VISIBLE, 0u);
-        sel24_frame_method(c, grid24, SEL24_VT_HIDE, SEL24_RET_HIDE, 0u);
-        sel24_hide_grid(c, grid24);
-        wr32(group + SEL24_GROUP_GRID24, 0u);
-        wr32(group + SEL24_GROUP_ACTIVE, grid12);
-        return;
-    }
-
-    wr32(group + SEL24_GROUP_GRID24, grid24);
     wr32(group + SEL24_GROUP_ACTIVE, grid12);
-
-    for (row = 0u; row < SEL24_GRID24_ROWS; ++row) {
-        for (col = 0u; col < SEL24_GRID24_COLS; ++col) {
-            uint32_t button = sel24_alloc(c, SEL24_BUTTON_SIZE,
-                                          SEL24_BUTTON_LINE,
-                                          SEL24_RET_BUTTON_ALLOC);
-            if (!button) {
-                wr32(grid24 + SEL24_GRID_VISIBLE, 0u);
-                sel24_frame_method(c, grid24, SEL24_VT_HIDE, SEL24_RET_HIDE,
-                                   0u);
-                sel24_hide_grid(c, grid24);
-                wr32(group + SEL24_GROUP_GRID24, 0u);
-                wr32(group + SEL24_GROUP_ACTIVE, grid12);
-                return;
-            }
-            sel24_button_ctor(c, button, grid24);
-            sel24_grid_insert(c, grid24, col, row, button);
-        }
-    }
-
-    /* The 8x3 grid is a dormant child until the first 13..24 update. */
-    wr32(grid24 + SEL24_GRID_VISIBLE, 0u);
-    sel24_frame_method(c, grid24, SEL24_VT_HIDE, SEL24_RET_HIDE, 0u);
-    sel24_hide_grid(c, grid24);
     wr32(grid12 + SEL24_GRID_VISIBLE, 1u);
 }
 
@@ -2274,6 +2447,7 @@ void wc3_sel24_select(CPU *c, uint32_t group, uint32_t subgroup_units)
 {
     uint32_t grid12;
     uint32_t grid24;
+    uint32_t grid40 = 0u;
     uint32_t desired;
     uint32_t old;
     uint32_t total;
@@ -2291,33 +2465,44 @@ void wc3_sel24_select(CPU *c, uint32_t group, uint32_t subgroup_units)
     }
     grid12 = rd32(group + SEL24_GROUP_GRID12);
     grid24 = rd32(group + SEL24_GROUP_GRID24);
+#if WC3_SELECTION_STRUCT_CAP == 40
+    grid40 = rd32(group + SEL24_GROUP_GRID40);
+#endif
     if (!grid12) {
         return;
     }
 
     total = rd32(group + SEL24_GROUP_TOTAL);
-    if (total == 0u || total > 24u) {
+    if (total == 0u || total > SEL24_STRUCT_CAP) {
         /* The split-entry fragment may run without the update prologue.  The
          * current subgroup's unit count is a safe lower bound: it never asks
          * for more cells than this fragment can fill. */
         total = subgroup_units;
     }
 
-    desired = (wc3_sel24_cap() >= 24u &&
-               total > SEL24_GRID12_ROWS * SEL24_GRID12_COLS && grid24)
-                  ? grid24
-                  : grid12;
+    if (wc3_sel24_cap() >= 40u && grid40 &&
+        total > SEL24_GRID12_ROWS * SEL24_GRID12_COLS &&
+        (total > SEL24_GRID24_ROWS * SEL24_GRID24_COLS || !grid24)) {
+        desired = grid40;
+    } else if (wc3_sel24_cap() >= 24u &&
+               total > SEL24_GRID12_ROWS * SEL24_GRID12_COLS && grid24) {
+        desired = grid24;
+    } else {
+        desired = grid12;
+    }
 
     old = rd32(group + SEL24_GROUP_ACTIVE);
-    if (old != grid12 && (grid24 == 0u || old != grid24)) {
+    if (old != grid12 && (grid24 == 0u || old != grid24) &&
+        (grid40 == 0u || old != grid40)) {
         old = grid12;
         wr32(group + SEL24_GROUP_ACTIVE, old);
     }
 #if WC3_DEBUG && WC3_DEBUG_SELECT24
     fprintf(SEL24_OUT,
             "[select24] select group=%08X subgroup=%u total=%u grid12=%08X "
-            "grid24=%08X active=%08X desired=%08X\n",
-            group, subgroup_units, total, grid12, grid24, old, desired);
+            "grid24=%08X grid40=%08X active=%08X desired=%08X\n",
+            group, subgroup_units, total, grid12, grid24, grid40, old,
+            desired);
 #endif
     if (desired == old) {
         /* A parent HideAll can unregister the active grid; ShowAll would not
@@ -2411,25 +2596,25 @@ void wc3_sel24_fill(CPU *c, uint32_t group, uint32_t index,
 }
 
 /*
- * 24-entry ground-order formation workspace.
+ * 40-entry ground-order formation workspace.
  *
  * wc3_sel24_init24 replaces the L_6F169300 -> L_6F169310 zeroing sequence for
  * the widened solver frame: the original zeroes 12 pairs (2 * 0x30 bytes),
- * this one zeroes 24 pairs at count+0x64.
+ * this one zeroes 40 pairs at count+0xA4.
  */
 void wc3_sel24_init24(uint32_t pair_base)
 {
     uint32_t i;
 
-    for (i = 0u; i < 24u; ++i) {
+    for (i = 0u; i < SEL24_STRUCT_CAP; ++i) {
         wr32(pair_base + i * 8u, 0u);
         wr32(pair_base + i * 8u + 4u, 0u);
     }
 }
 
 /*
- * Selection-group entry snapshot.  The entry is 0x134 bytes: count +0,
- * index[24] +4, pair[24] +0x64 and tail +0x124.  The trace deliberately
+ * Selection-group entry snapshot.  The entry is 0x1F4 bytes: count +0,
+ * index[40] +4, pair[40] +0xA4 and tail +0x1E4.  The trace deliberately
  * prints the tail on every call and the full index/pair arrays only when the
  * count exceeds the old twelve-entry capacity, so a normal 12-unit order
  * stays one summary line while the failing 14-unit case leaves a complete
@@ -2440,15 +2625,15 @@ static void sel24_trace_group_snapshot(const char *stage, uint32_t group)
 {
     uint32_t cap = wc3_sel24_cap();
     uint32_t count = rd32(group);
-    uint32_t n = count < 24u ? count : 24u;
+    uint32_t n = count < SEL24_STRUCT_CAP ? count : SEL24_STRUCT_CAP;
     uint32_t chk = count ^ 0x9E3779B9u;
     uint32_t tail[4];
     uint32_t i;
 
     for (i = 0u; i < n; ++i) {
-        uint32_t idx = rd32(group + 4u + i * 4u);
-        uint32_t key = rd32(group + 0x64u + i * 8u);
-        uint32_t val = rd32(group + 0x68u + i * 8u);
+        uint32_t idx = rd32(group + SEL24_GROUP_INDEX + i * 4u);
+        uint32_t key = rd32(group + SEL24_GROUP_PAIR + i * 8u);
+        uint32_t val = rd32(group + SEL24_GROUP_PAIR + i * 8u + 4u);
 
         chk += idx * 0x85EBCA6Bu ^ key * 0xC2B23AE3u ^ val;
         if (count > 12u)
@@ -2457,7 +2642,7 @@ static void sel24_trace_group_snapshot(const char *stage, uint32_t group)
                     stage, i, idx, key, val);
     }
     for (i = 0u; i < 4u; ++i) {
-        tail[i] = rd32(group + 0x124u + i * 4u);
+        tail[i] = rd32(group + SEL24_GROUP_TAIL + i * 4u);
         chk += tail[i];
     }
     fprintf(SEL24_OUT,
@@ -2478,8 +2663,8 @@ static void sel24_trace_group_snapshot(const char *stage, uint32_t group)
 void wc3_sel24_group_init(uint32_t pair_base)
 {
 #if WC3_DEBUG && WC3_DEBUG_SELECT24
-    if (pair_base >= 0x64u)
-        sel24_trace_group_snapshot("init", pair_base - 0x64u);
+    if (pair_base >= SEL24_GROUP_PAIR)
+        sel24_trace_group_snapshot("init", pair_base - SEL24_GROUP_PAIR);
 #else
     (void)pair_base;
 #endif
@@ -2491,8 +2676,8 @@ void wc3_sel24_group_init(uint32_t pair_base)
      * wc3_sel24_sort24, which walks the pair array with a huge count and
      * faults. Zero the count so empty groups stay empty. The fill writer
      * (L_6F16CB80) overwrites it for the groups that actually carry units. */
-    if (pair_base >= 0x64u)
-        wr32(pair_base - 0x64u, 0u);
+    if (pair_base >= SEL24_GROUP_PAIR)
+        wr32(pair_base - SEL24_GROUP_PAIR, 0u);
 }
 
 /*
@@ -2517,16 +2702,19 @@ void wc3_sel24_group_init(uint32_t pair_base)
  *
  * The table ends at 0x6FA91DF0, immediately before the list-object vtable at
  * 0x6FA91DF4, so it cannot be extended in place.  This helper keeps the
- * original read for count <= 12 (bit-exact baseline) and defines the 13..24
- * range used by the 24-unit profile:
+ * original read for count <= 12 (bit-exact baseline) and defines the 13..40
+ * range used by the 24/40-unit profile:
  *
  *   flag 1 (B/D, compact mode; 3 from count 6 on) -> 3
- *   flag 0 (A/C, grid mode; 4 at count 10..12)    -> ceil(count / 3)
+ *   flag 0 (A/C, grid mode) -> ceil(count / 3) for 13..24
+ *                           -> ceil(count / 4) for 25..40
  *
  * The grid rule continues the table's own three-row shape: 13..15 -> 5,
  * 16..18 -> 6, 19..21 -> 7, 22..24 -> 8, which also matches the 8x3 panel
- * grid used for 24 units.  Any value >= 1 makes the loop advance; the loop
- * clamps the step to the number of units that are left.
+ * grid used for 24 units, and the four-row shape 25..28 -> 7, 29..32 -> 8,
+ * 33..36 -> 9, 37..40 -> 10, which matches the 10x4 panel grid.  Any value
+ * >= 1 makes the loop advance; the loop clamps the step to the number of
+ * units that are left.
  */
 uint32_t wc3_sel24_formation_columns(uint32_t index, uint32_t count,
                                      uint32_t pair)
@@ -2541,8 +2729,15 @@ uint32_t wc3_sel24_formation_columns(uint32_t index, uint32_t count,
     flag = (index - count) / 13u;
     if (flag != 0u)
         value = 3u;
+#if WC3_SELECTION_STRUCT_CAP == 24
     else
         value = (count + 2u) / 3u;
+#else
+    else if (count <= 24u)
+        value = (count + 2u) / 3u;
+    else
+        value = (count + 3u) / 4u;
+#endif
 #if WC3_DEBUG && WC3_DEBUG_SELECT24
     fprintf(SEL24_OUT,
             "[select24] formation columns idx=%u count=%u pair=%u value=%u\n",
@@ -2564,9 +2759,9 @@ static float sel24_f32(uint32_t bits)
 }
 
 /*
- * wc3_sel24_sort24 is a transliteration of L_6F16DFD0 with the 24-entry
- * workspace layout: count at count_ptr+0, index at count_ptr+4 (24 dwords)
- * and pair at count_ptr+0x64 (24 pairs, second dword at +0x68).  The control
+ * wc3_sel24_sort24 is a transliteration of L_6F16DFD0 with the 40-entry
+ * workspace layout: count at count_ptr+0, index at count_ptr+4 (40 dwords)
+ * and pair at count_ptr+0xA4 (40 pairs, second dword at +0xA8).  The control
  * flow, comparisons, swap/rotate and index updates are the lifted ones; only
  * the two pair-base displacements differ from the original 12-entry sort.
  * L_6F16DFD0 itself is left in place for reference; the solver calls sort24
@@ -2593,12 +2788,12 @@ static void sel24_trace_sort_workspace(const char *stage, uint32_t count_ptr,
             "[select24] sort %s seq=%u ptr=%08X count=%u cap=%u%s\n",
             stage, g_sel24_order_seq, count_ptr, count, cap,
             count > cap ? " OVER" : "");
-    for (i = 0u; i < count && i < cap && i < 32u; ++i)
+    for (i = 0u; i < count && i < cap; ++i)
         fprintf(SEL24_OUT,
                 "[select24] sort %s i=%u idx=%u pair=%08X key=%08X\n",
-                stage, i, sel24_rd(count_ptr, 4u + i * 4u),
-                sel24_rd(count_ptr, 0x64u + i * 8u),
-                sel24_rd(count_ptr, 0x68u + i * 8u));
+                stage, i, sel24_rd(count_ptr, SEL24_GROUP_INDEX + i * 4u),
+                sel24_rd(count_ptr, SEL24_GROUP_PAIR + i * 8u),
+                sel24_rd(count_ptr, SEL24_GROUP_PAIR + i * 8u + 4u));
 }
 #endif
 
@@ -2625,7 +2820,7 @@ void wc3_sel24_sort24(uint32_t count_ptr)
     if (count <= 1u)
         return;
 
-    pair_end = count_ptr + 0x64u + count * 8u;
+    pair_end = count_ptr + SEL24_GROUP_PAIR + count * 8u;
     index_end = count_ptr + 4u + count * 4u;
     ebp_edi = count;
 
@@ -2666,16 +2861,16 @@ void wc3_sel24_sort24(uint32_t count_ptr)
                 eax = rd32(eax + 4u);
                 wr32(ecx, edx);
                 ecx = count_ptr;
-                edx = rd32(ecx + ebx * 8u + 0x64u);
+                edx = rd32(ecx + ebx * 8u + SEL24_GROUP_PAIR);
                 ecx = saved_pair;
                 wr32(ecx, edx);
-                edx = rd32(count_ptr + ebx * 8u + 0x68u);
+                edx = rd32(count_ptr + ebx * 8u + SEL24_GROUP_PAIR + 4u);
                 wr32(ecx + 4u, edx);
                 edx = count_ptr;
                 ecx = key_orig;
                 wr32(edx + ebx * 4u + 4u, esi);
-                wr32(edx + ebx * 8u + 0x64u, ecx);
-                wr32(edx + ebx * 8u + 0x68u, eax);
+                wr32(edx + ebx * 8u + SEL24_GROUP_PAIR, ecx);
+                wr32(edx + ebx * 8u + SEL24_GROUP_PAIR + 4u, eax);
             }
         }
 
@@ -2691,8 +2886,8 @@ void wc3_sel24_sort24(uint32_t count_ptr)
  * Called by the LiftPass at 0x6F16A6EF instead of the 12-entry sort.  The
  * pre/post snapshots are the regression witness: if the old pair stride had
  * remained, pair 12/13 would land on +0x94/+0x9C and the post tail/checksum
- * would differ from the pre record.  With the 0x134 layout the tail is at
- * +0x124..+0x130 and must survive unchanged.
+ * would differ from the pre record.  With the 0x1F4 layout the tail is at
+ * +0x1E4..+0x1F0 and must survive unchanged.
  */
 void wc3_sel24_group_sort(uint32_t group)
 {

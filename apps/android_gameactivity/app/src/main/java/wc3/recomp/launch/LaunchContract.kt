@@ -22,7 +22,11 @@ object LaunchContract {
     const val KEY_DOUBLE_TAP_TIMEOUT_MS = "double_tap_timeout_ms"
     const val KEY_LONG_PRESS_TIMEOUT_MS = "long_press_timeout_ms"
     const val KEY_TAP_CLICK_DELAY_MS = "tap_click_delay_ms"
-    const val KEY_SELECTION_24 = "selection_24"
+    /* Unit-selection runtime cap: 12, 24 or 40.  The corpus is always built
+     * with the 40-unit structure; this key only selects the cap and the panel
+     * grid (6x2, 8x3 or 10x4).  The old boolean key "selection_24" is
+     * migrated by LaunchSettingsStore. */
+    const val KEY_SELECTION_CAP = "selection_cap"
     const val KEY_HIDE_CURSOR = "hide_cursor"
     const val KEY_OVERLAY_OPACITY_PERCENT = "overlay_opacity_percent"
     const val KEY_PARALLEL_EXECUTION = "parallel_execution"
@@ -45,10 +49,21 @@ object LaunchContract {
     const val MIN_TAP_CLICK_DELAY_MS = 8
     const val MAX_TAP_CLICK_DELAY_MS = 40
 
-    /* Off is the product default: the original 12-unit cap and the 6x2
-     * panel.  The settings switch enables the 24-unit profile and the 8x3
-     * panel at run time; the corpus is not rebuilt. */
-    const val DEFAULT_SELECTION_24 = false
+    /* 12 is the original product cap.  The settings dropdown offers 24 and
+     * 40 as additional modes; the corpus itself is built with the 40-unit
+     * structure, so switching the cap does not rebuild anything. */
+    const val DEFAULT_SELECTION_CAP = 12
+    const val SELECTION_CAP_12 = 12
+    const val SELECTION_CAP_24 = 24
+    const val SELECTION_CAP_40 = 40
+    const val MIN_SELECTION_CAP = 12
+    const val MAX_SELECTION_CAP = 40
+
+    /** Clamp a persisted or intent-supplied cap to the three supported modes. */
+    fun normalizeSelectionCap(value: Int): Int = when (value) {
+        SELECTION_CAP_24, SELECTION_CAP_40 -> value
+        else -> DEFAULT_SELECTION_CAP
+    }
 
     /* The guest draws its own CCursorFrame sprite.  Off keeps the original
      * behavior; on skips that render without changing touch input. */

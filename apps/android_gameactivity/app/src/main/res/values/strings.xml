@@ -22,7 +22,10 @@
     <string name="launch_resolution_grid_option">%1$d × %2$d (grid)</string>
 
     <string name="launch_sound_label">Sound</string>
-    <string name="launch_selection24_label">24-unit selection</string>
+    <string name="launch_selection_label">Unit selection limit</string>
+    <string name="launch_selection_12">12 units (default)</string>
+    <string name="launch_selection_24">24 units</string>
+    <string name="launch_selection_40">40 units</string>
     <string name="launch_hide_cursor_label">Hide game cursor</string>
     <string name="launch_parallel_label">Parallel game loops</string>
     <string name="launch_gesture_mode_label">Touchscreen control gestures</string>

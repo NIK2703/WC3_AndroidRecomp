@@ -38,11 +38,12 @@ data class LaunchSettings(
     /* Wall-clock delay before the LMB press in the SIMPLE overlay.  The
      * native helper clamps it to 8..40 ms; 10 ms is the product default. */
     val tapClickDelayMs: Int = LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS,
-    /* True enables the 24-unit selection profile and the 8x3 unit panel;
-     * false (the product default) keeps the original 12-unit cap and the
-     * 6x2 panel.  Applied on the next game launch, not to an already running
-     * host. */
-    val selection24: Boolean = LaunchContract.DEFAULT_SELECTION_24,
+    /* Unit-selection runtime cap: 12 (the original product default), 24 or
+     * 40.  The 6x2 panel is used up to 12 units, 8x3 for 13..24 and 10x4 for
+     * 25..40.  The corpus always carries the 40-unit structure; the cap is a
+     * launch-time choice.  Applied on the next game launch, not to an already
+     * running host. */
+    val selectionCap: Int = LaunchContract.DEFAULT_SELECTION_CAP,
     /* True suppresses CCursorFrame::Render in the guest.  Touch input still
      * works; only the game-drawn cursor sprite is skipped.  Applied on the
      * next game launch. */
@@ -85,7 +86,10 @@ data class LaunchSettings(
         putInt(LaunchContract.KEY_DOUBLE_TAP_TIMEOUT_MS, doubleTapTimeoutMs)
         putInt(LaunchContract.KEY_LONG_PRESS_TIMEOUT_MS, longPressTimeoutMs)
         putInt(LaunchContract.KEY_TAP_CLICK_DELAY_MS, tapClickDelayMs)
-        putBoolean(LaunchContract.KEY_SELECTION_24, selection24)
+        putInt(
+            LaunchContract.KEY_SELECTION_CAP,
+            LaunchContract.normalizeSelectionCap(selectionCap)
+        )
         putBoolean(LaunchContract.KEY_HIDE_CURSOR, hideCursor)
         putInt(LaunchContract.KEY_OVERLAY_OPACITY_PERCENT, overlayOpacityPercent)
         putBoolean(LaunchContract.KEY_PARALLEL_EXECUTION, parallelExecution)

@@ -667,15 +667,24 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             set(_chunks "${_compat_chunks}")
         endif()
         if(WC3_SELECTION_24)
-            # The 24-unit selection profile runs after every other enabled
-            # pass, so it sees the final instruction text.  The pass edits the
-            # generated C only; no source file under build/corpus-full is
-            # modified in place.  Each chunk reports its own site counts and
-            # the union is verified after all modules.
+            # The 12/24/40-unit selection profile runs after every other
+            # enabled pass, so it sees the final instruction text.  The pass
+            # edits the generated C only; no source file under
+            # build/corpus-full is modified in place.  Each chunk reports its
+            # own site counts and the union is verified after all modules.
             if(NOT WC3_SELECTION24_EXE)
                 message(FATAL_ERROR
                     "selection24.exe missing; run tools/lift/build_tools.ps1 "
                     "before configuring")
+            endif()
+            set(_sel24_cap "${WC3_SELECTION_STRUCT_CAP}")
+            if(NOT _sel24_cap)
+                set(_sel24_cap "40")
+            endif()
+            if(NOT _sel24_cap MATCHES "^(24|40)$")
+                message(FATAL_ERROR
+                    "WC3_SELECTION_STRUCT_CAP must be 24 or 40, got "
+                    "'${_sel24_cap}'")
             endif()
             # A stale pass silently re-emits the old source text while the
             # configure still reports success.  Refuse that state instead of
@@ -694,9 +703,10 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             # otherwise a rubattle build could reuse a pvpgn-patched chunk
             # whose mtime happens to be newer than the new input.
             if(WC3_W3L_COMPAT)
-                set(_sel24_tag "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}")
+                set(_sel24_tag
+                    "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}-cap${_sel24_cap}")
             else()
-                set(_sel24_tag "plain")
+                set(_sel24_tag "plain-cap${_sel24_cap}")
             endif()
             set(_sel24_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/selection24/${_name}/${_kind}/${_sel24_tag}")
@@ -714,7 +724,8 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                    "${_chunk}" IS_NEWER_THAN "${_sel24_out}" OR
                    "${WC3_SELECTION24_EXE}" IS_NEWER_THAN "${_sel24_out}")
                     string(APPEND _sel24_job_text
-                        "8\n${WC3_SELECTION24_EXE}\n"
+                        "10\n${WC3_SELECTION24_EXE}\n"
+                        "--struct-cap\n${_sel24_cap}\n"
                         "--lift\n${_chunk}\n"
                         "--out\n${_sel24_out}\n"
                         "--json\n${_sel24_json}\n"
@@ -810,7 +821,13 @@ if(WC3_W3L_COMPAT)
     set(_wc3_leaf_tag "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}")
 endif()
 if(WC3_SELECTION_24)
-    string(APPEND _wc3_leaf_tag "-sel24")
+    if(NOT _sel24_cap)
+        set(_sel24_cap "${WC3_SELECTION_STRUCT_CAP}")
+    endif()
+    if(NOT _sel24_cap)
+        set(_sel24_cap "40")
+    endif()
+    string(APPEND _wc3_leaf_tag "-sel24-cap${_sel24_cap}")
 endif()
 set(_wc3_leaf_dir "${CMAKE_CURRENT_BINARY_DIR}/leaf_call/${_wc3_leaf_tag}")
 set(_wc3_leaf_list "${CMAKE_CURRENT_BINARY_DIR}/leaf_call_inputs.txt")

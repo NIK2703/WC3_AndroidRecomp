@@ -1242,7 +1242,7 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     jstring hook_dir, jstring dxvk_version, jstring dxvk_config_path,
     jboolean double_tap_gestures, jint double_tap_timeout_ms,
     jint long_press_timeout_ms, jint tap_click_delay_ms,
-    jboolean selection24, jboolean hide_cursor, jboolean parallel_execution,
+    jint selection_cap, jboolean hide_cursor, jboolean parallel_execution,
     jint overlay_opacity_percent, jboolean grid_enabled,
     jint grid_darken_percent, jint grid_cycle_seconds, jstring present_scale,
     jstring present_mode, jint present_buffers)
@@ -1250,7 +1250,7 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     /* JNI has no type checking between two jstring parameters.  Keep this
      * order identical to Wc3GameActivity.nativeApplyLaunchSettings: id before
      * root, DXVK version and config path, then the gesture flag and timers,
-     * the SIMPLE tap delay, the selection24 toggle, the hideCursor toggle,
+     * the SIMPLE tap delay, the selection cap (12/24/40), the hideCursor toggle,
      * the parallelExecution toggle, the overlay opacity percent, then the
      * grid toggle, darken percent and cycle seconds, the presentation scale
      * string, and the screen present mode string plus buffering count last, or
@@ -1264,11 +1264,17 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     g_long_press_timeout_ms = (int)long_press_timeout_ms;
     g_tap_click_delay_ms = (int)tap_click_delay_ms;
     g_overlay_opacity_percent = (int)overlay_opacity_percent;
-    /* The 24-unit selection module latches this before the first panel is
-     * constructed.  "1" enables the 24-unit cap and the 8x3 panel; "0" (the
-     * product default) keeps the original 12-unit cap and 6x2 panel without a
-     * second corpus. */
-    setenv("WC3_SELECTION_24", selection24 ? "1" : "0", 1);
+    /* The selection cap is a runtime choice over the fixed 40-unit structure:
+     * 12 keeps the original 6x2 panel, 24 uses 8x3, 40 adds the 10x4 panel.
+     * Anything else falls back to the product default of 12. */
+    {
+        char selection_cap_value[4];
+        int cap = (selection_cap == 24 || selection_cap == 40)
+                      ? (int)selection_cap
+                      : 12;
+        snprintf(selection_cap_value, sizeof selection_cap_value, "%d", cap);
+        setenv("WC3_SELECTION_CAP", selection_cap_value, 1);
+    }
     /* CCursorFrame::Render checks this before drawing the guest cursor sprite.
      * "0" explicitly overrides an inherited diagnostic value. */
     setenv("WC3_HIDE_CURSOR", hide_cursor ? "1" : "0", 1);

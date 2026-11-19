@@ -1,4 +1,5 @@
-/* selection24.c - 24-unit selection / adaptive 6x2 <-> 8x3 panel LiftPass.
+/* selection24.c - 12/24/40-unit selection / adaptive 6x2 <-> 8x3 <-> 10x4 panel
+ * LiftPass.
  *
  * The pass edits the generated corpus through address-comment anchors.  It is
  * idempotent, fail-closed on a template mismatch, and publishes a per-kind
@@ -7,7 +8,7 @@
  * --verify-coverage and compares the union with the fixed totals below.
  *
  *   selection24 --lift IN --out OUT [--json REPORT] [--profile seed|closed]
- *               [--quiet]
+ *               [--struct-cap 24|40] [--quiet]
  *   selection24 --verify-coverage @manifest
  *   selection24 --self-test
  *
@@ -26,7 +27,14 @@
 #include "sha256.h"
 
 #define PASS "selection24"
-#define PASS_REV 45
+#define PASS_REV 48
+
+/* Structural capacity of the emitted layout.  The product uses 40 so one
+ * corpus can serve the 12/24/40 runtime caps; 24 is kept for pass
+ * self-tests and for a structural A/B build. */
+#define STRUCT_CAP_MIN 24u
+#define STRUCT_CAP_MAX 40u
+static unsigned g_struct_cap = STRUCT_CAP_MAX;
 
 typedef enum {
     K_GROUP_ALLOC = 0,
@@ -64,7 +72,6 @@ typedef enum {
     K_TRACE_REMOVE,
     K_TRACE_EVBIRTH,
     K_TRACE_APPLY,
-    K_CAP_SLOT,
     K_TRACE_TASKNULL,
     K_TRACE_EVINIT,
     K_TRACE_ORDERDROP,
@@ -114,7 +121,6 @@ static const char *const kind_name[K_COUNT] = {
     "trace_remove",
     "trace_evbirth",
     "trace_apply",
-    "cap_slot",
     "trace_tasknull",
     "trace_evinit",
     "trace_orderdrop",
@@ -164,7 +170,6 @@ static const unsigned expected_total[K_COUNT] = {
     4, /* trace_remove */
     1, /* trace_evbirth */
     2, /* trace_apply */
-    10, /* cap_slot */
     1, /* trace_tasknull */
     1, /* trace_evinit */
     1, /* trace_orderdrop */
@@ -173,7 +178,7 @@ static const unsigned expected_total[K_COUNT] = {
     2, /* order_group_full */
     1, /* trace_evrelease */
     1, /* slot_unlink */
-    204, /* group24 */
+    207, /* group24 */
     9, /* trace_formation */
 };
 /* Whole-file expectations.  seed.c carries both order prologues. */
@@ -213,7 +218,6 @@ static const unsigned expected_seed[K_COUNT] = {
     0, /* trace_remove */
     0, /* trace_evbirth */
     0, /* trace_apply */
-    0, /* cap_slot */
     0, /* trace_tasknull */
     0, /* trace_evinit */
     0, /* trace_orderdrop */
@@ -222,7 +226,7 @@ static const unsigned expected_seed[K_COUNT] = {
     0, /* order_group_full */
     0, /* trace_evrelease */
     0, /* slot_unlink */
-    44, /* group24 */
+    46, /* group24 */
     2, /* trace_formation */
 };
 /* seed: builders B/C.  closed: listadd x2, cluster try/insert, formation. */
@@ -264,7 +268,6 @@ static const unsigned expected_closed[K_COUNT] = {
     4, /* trace_remove */
     1, /* trace_evbirth */
     2, /* trace_apply */
-    10, /* cap_slot */
     1, /* trace_tasknull */
     1, /* trace_evinit */
     1, /* trace_orderdrop */
@@ -273,7 +276,7 @@ static const unsigned expected_closed[K_COUNT] = {
     2, /* order_group_full */
     1, /* trace_evrelease */
     1, /* slot_unlink */
-    160, /* group24 */
+    161, /* group24 */
     7, /* trace_formation */
 };
 
@@ -650,12 +653,22 @@ static void sites_add(Sites *s, Kind k, uint32_t va, const char *action,
  * Every ebp reference inside the old container range shifts by the same
  * amount, so the rewrite is a range shift, not a per-offset map.  The two
  * ranges do not overlap the shifted ranges, which makes the pass idempotent.
+ *
+ * The 40-unit profile is a second relocation on top of the 24-unit one: the
+ * container grows from 0x350 to 0x550 bytes and the frame grows by the same
+ * 0x200.  Its source range is the 24-unit result, so a fresh corpus runs both
+ * shifts in sequence and a 24-profile corpus can be upgraded in place.
  */
-#define ORDER_CONTAINER_DELTA 0x3C4u
-#define ORDER_CONTAINER_A_LO  0xFFFFFE1Cu  /* [ebp - 0x1e4] = container + 0 */
-#define ORDER_CONTAINER_A_HI  0xFFFFFFE8u  /* [ebp - 0x18]  = container+0x1CC */
-#define ORDER_CONTAINER_B_LO  0xFFFFFE20u  /* [ebp - 0x1e0] = container + 0 */
-#define ORDER_CONTAINER_B_HI  0xFFFFFFECu  /* [ebp - 0x14]  = container+0x1CC */
+#define ORDER_CONTAINER_DELTA    0x3C4u
+#define ORDER_CONTAINER_A_LO     0xFFFFFE1Cu /* [ebp - 0x1e4] = container + 0 */
+#define ORDER_CONTAINER_A_HI     0xFFFFFFE8u /* [ebp - 0x18]  = container+0x1CC */
+#define ORDER_CONTAINER_B_LO     0xFFFFFE20u /* [ebp - 0x1e0] = container + 0 */
+#define ORDER_CONTAINER_B_HI     0xFFFFFFECu /* [ebp - 0x14] = container+0x1CC */
+#define ORDER_CONTAINER_40_DELTA 0x200u
+#define ORDER_CONTAINER_A24_LO   0xFFFFFA58u /* A_LO - 0x3C4 */
+#define ORDER_CONTAINER_A24_HI   0xFFFFFC24u /* A_HI - 0x3C4 */
+#define ORDER_CONTAINER_B24_LO   0xFFFFFA5Cu /* B_LO - 0x3C4 */
+#define ORDER_CONTAINER_B24_HI   0xFFFFFC28u /* B_HI - 0x3C4 */
 #define ORDER_HANDLER_A_LO    0x6F6BAAA0u
 #define ORDER_HANDLER_A_HI    0x6F6BB050u
 #define ORDER_HANDLER_B_LO    0x6F6BB050u
@@ -894,23 +907,14 @@ static const char *const INSERT_TRACE_ORDEREV_RET[] = {
 };
 
 /*
- * The remaining twelve-slots constants.  These loops walk either the bit mask
- * of selected panel slots (`inc counter; rol bitmask,1; cmp counter, 0xc`) or
- * the group's unit list, and one computes the number of free slots as
- * 12 - selected.  Every one of them truncates the selection at twelve, so units
- * past the twelfth never reach the panel, the order loop or the slot update -
- * which is the observed "units beyond twelve obey at random".
+ * The former "twelve-slots" substitution at 0x6F26B522, 0x6F3DEBEE,
+ * 0x6F66BEFA, 0x6F69D217, 0x6F3DB037, 0x6F3DBE14, 0x6F68C0CB, 0x6F3C2E33
+ * and 0x6F39737B was wrong: those loops walk player/control-group masks, not
+ * the selection array.  Their 0xC is part of a 32/16-bit mask walk and must
+ * stay 12.  At a 40-unit cap the rotating bit wrapped at index 32 and the
+ * player accessor returned NULL, which was the load-screen SIGSEGV.  The
+ * selection-width sites are the explicit GROUP24/deserialize sites only.
  */
-#define VA_CAP_SLOT_MASK_A 0x6F26B522u
-#define VA_CAP_SLOT_MASK_B 0x6F3DEBEEu
-#define VA_CAP_SLOT_MASK_C 0x6F66BEFAu
-#define VA_CAP_SLOT_MASK_D 0x6F69D217u
-#define VA_CAP_SLOT_MASK_E 0x6F3DB037u
-#define VA_CAP_SLOT_UNIT_LIST 0x6F3DBE14u
-#define VA_CAP_SLOT_PANEL_A 0x6F68C0CBu
-#define VA_CAP_SLOT_PANEL_B 0x6F3C2E33u
-#define VA_CAP_SLOT_FREE 0x6F39737Bu
-
 /*
  * 0x6F6B93A0 hands the order event to the unit through a virtual call on the
  * event object: `event->vtbl[0x1C](event)` at 0x6F6B93E7.  The handler is the
@@ -1247,6 +1251,198 @@ static int is_fill_va(uint32_t va)
 }
 
 /* ------------------------------------------------------------------ */
+/* Structural capacity 24 -> 40                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The 24-unit profile is the reference layout for every site below.  The
+ * 40-unit profile only moves structure: member pointers, pair arrays, stack
+ * frames and the point-order container.  Limits still come from
+ * wc3_sel24_cap(), so the same substitutions are used for both layouts and
+ * only their numeric targets differ.
+ *
+ * Values were derived from the 1.27 layout:
+ *   CPrCluster   12 -> 24 adds 0x90 pointer bytes and 0x100 tail bytes;
+ *                24 -> 40 adds another 0xF0 pointer bytes and 0x100 tail.
+ *   group entry  24 -> 40: index[24] 0x64 -> index[40] 0xA4,
+ *                pair[24] +0x64 -> pair[40] +0xA4, tail 0x124 -> 0x1E4.
+ *   group frame  0x1354 -> 0x1F54 (16 * entry + 0x14).
+ *   solver       0x240 -> 0x300, pair -0x1DC -> -0x25C.
+ *   order batch  records 0x18 -> 0x28, frame 0x9A0/0x9A8 ->
+ *                0xBE0/0xBE8, array -0x960 -> -0xBA0.
+ *   point order  container 0x350 -> 0x550, so the second shift is 0x200.
+ */
+typedef struct {
+    uint32_t from;
+    uint32_t to;
+} Struct40Value;
+
+static const Struct40Value STRUCT40_VALUES[] = {
+    /* CPrCluster member vector and tail. */
+    { 0x1C8u, 0x2C8u },
+    { 0x13Cu, 0x1FCu },
+    { 0x19Cu, 0x29Cu },
+    { 0x1A0u, 0x2A0u },
+    { 0x1A4u, 0x2A4u },
+    { 0x1A8u, 0x2A8u },
+    { 0x1ACu, 0x2ACu },
+    { 0x1B0u, 0x2B0u },
+    { 0x1B4u, 0x2B4u },
+    { 0x1B8u, 0x2B8u },
+    { 0x1BCu, 0x2BCu },
+    { 0x1C0u, 0x2C0u },
+    /* Selection-group entry and frame. */
+    { 0x134u, 0x1F4u },
+    { 0x124u, 0x1E4u },
+    { 0x128u, 0x1E8u },
+    { 0x12Cu, 0x1ECu },
+    { 0x130u, 0x1F0u },
+    { 0x64u, 0xA4u },
+    { 0x68u, 0xA8u },
+    { 0x4Du, 0x7Du },
+    { 0x1354u, 0x1F54u },
+    { 0xFFFFECACu, 0xFFFFE0ACu },
+    { 0xFFFFECB0u, 0xFFFFE0B0u },
+    { 0xFFFFECB4u, 0xFFFFE0B4u },
+    { 0xFFFFECB8u, 0xFFFFE0B8u },
+    { 0xFFFFECBCu, 0xFFFFE0BCu },
+    /* Ground-order solver. */
+    { 0x240u, 0x300u },
+    { 0xFFFFFDC0u, 0xFFFFFD00u },
+    { 0xFFFFFDC4u, 0xFFFFFD04u },
+    { 0xFFFFFE24u, 0xFFFFFDA4u },
+    { 0xFFFFFE28u, 0xFFFFFDA8u },
+    /* Point-order batch handlers. */
+    { 0x9A0u, 0xBE0u },
+    { 0x9A8u, 0xBE8u },
+    { 0x5B8u, 0x7B8u },
+    { 0x5B4u, 0x7B4u },
+    { 0x18u, 0x28u },
+    { 0xFFFFF6A0u, 0xFFFFF460u },
+    { 0xFFFFF6B8u, 0xFFFFF478u },
+    { 0xFFFFF6BCu, 0xFFFFF47Cu },
+    { 0xFFFFF860u, 0xFFFFF620u },
+    { 0xFFFFF8A4u, 0xFFFFF664u },
+    { 0xFFFFF8C0u, 0xFFFFF680u },
+    { 0xFFFFF8A8u, 0xFFFFF668u },
+    /* CInfoBar allocation grows by the third grid pointer and padding. */
+    { 0x144u, 0x150u },
+    /* Comment displacements for the same sites. */
+    { 0x960u, 0xBA0u },
+    { 0x948u, 0xB88u },
+    { 0x944u, 0xB84u }
+};
+
+static int struct40_value(uint32_t from, uint32_t *to)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(STRUCT40_VALUES) / sizeof(STRUCT40_VALUES[0]);
+         ++i) {
+        if (STRUCT40_VALUES[i].from == from) {
+            *to = STRUCT40_VALUES[i].to;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int struct40_copy(char *out, size_t outsz, size_t *used,
+                         const char *s, size_t n)
+{
+    if (*used + n + 1 > outsz)
+        return -1;
+    memcpy(out + *used, s, n);
+    *used += n;
+    out[*used] = '\0';
+    return 0;
+}
+
+/*
+ * Rewrite every 0x... token that belongs to the 12 -> 24 structural table.
+ * Width is preserved when the source token is eight digits; case follows the
+ * source token so code stays uppercase and comments stay lowercase.  A token
+ * longer than 32 bits is left alone.  Non-hex text and the `u` suffix are
+ * copied verbatim.
+ */
+static int map_struct40_text(const char *s, char *out, size_t outsz)
+{
+    const char *p = s;
+    size_t used = 0;
+
+    if (!outsz)
+        return -1;
+    out[0] = '\0';
+    while (*p) {
+        const char *tok = strstr(p, "0x");
+        const char *d;
+        const char *q;
+        unsigned digits = 0;
+        uint32_t value = 0;
+        uint32_t mapped = 0;
+        int lower = 0;
+
+        if (!tok) {
+            if (struct40_copy(out, outsz, &used, p, strlen(p)) != 0)
+                return -1;
+            break;
+        }
+        if (struct40_copy(out, outsz, &used, p,
+                          (size_t)(tok - p)) != 0)
+            return -1;
+        d = tok + 2;
+        q = d;
+        while (q < d + 9 && hex_digit((unsigned char)*q) >= 0) {
+            if (*q >= 'a' && *q <= 'f')
+                lower = 1;
+            if (digits < 8)
+                value = (value << 4) | (uint32_t)hex_digit((unsigned char)*q);
+            ++q;
+            ++digits;
+        }
+        if (digits == 0 || digits > 8 || !struct40_value(value, &mapped)) {
+            if (struct40_copy(out, outsz, &used, tok,
+                              (size_t)(q - tok)) != 0)
+                return -1;
+        } else {
+            char num[16];
+            unsigned width = (digits == 8) ? 8u : 0u;
+
+            if (width)
+                snprintf(num, sizeof(num), lower ? "%08x" : "%08X",
+                         (unsigned)mapped);
+            else
+                snprintf(num, sizeof(num), lower ? "%x" : "%X",
+                         (unsigned)mapped);
+            if (struct40_copy(out, outsz, &used, "0x", 2) != 0 ||
+                struct40_copy(out, outsz, &used, num, strlen(num)) != 0)
+                return -1;
+        }
+        p = q;
+    }
+    return 0;
+}
+
+/* Replace one span in a Buf that is owned by the caller. */
+static int buf_replace_once(Buf *b, const char *from, const char *to)
+{
+    char *next = NULL;
+    size_t nextlen = 0;
+    int r;
+
+    r = replace_once(b->p, b->n, from, to, &next, &nextlen);
+    if (r != 1) {
+        free(next);
+        return -1;
+    }
+    free(b->p);
+    b->p = next;
+    b->n = nextlen;
+    b->cap = nextlen + 1;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Site handlers                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -1256,22 +1452,59 @@ static int handle_subst(Buf *out, const char *p, const char *e,
                         Kind k, uint32_t va, int line, Counts *counts,
                         Sites *sites, int *handled, char *err, size_t errsz)
 {
-    int has_old = contains_sub(p, (size_t)(e - p), old_code);
-    int has_new = contains_sub(p, (size_t)(e - p), new_code);
+    char target_buf[512];
+    char target_comment_buf[512];
+    const char *target_code = new_code;
+    const char *target_comment = new_comment;
+    int has_old;
+    int has_target;
+    int has_prev;
     char before[65];
     char after[65];
     Buf tmp = {0};
     const char *action;
 
+    if (g_struct_cap == 40) {
+        if (map_struct40_text(new_code, target_buf, sizeof(target_buf)) != 0) {
+            snprintf(err, errsz, "site 0x%08X line %d: target too large",
+                     va, line);
+            return -1;
+        }
+        target_code = target_buf;
+        if (new_comment) {
+            if (map_struct40_text(new_comment, target_comment_buf,
+                                  sizeof(target_comment_buf)) != 0) {
+                snprintf(err, errsz,
+                         "site 0x%08X line %d: comment too large", va, line);
+                return -1;
+            }
+            target_comment = target_comment_buf;
+        }
+    }
+
+    has_old = contains_sub(p, (size_t)(e - p), old_code);
+    has_target = contains_sub(p, (size_t)(e - p), target_code);
+    /* A corpus produced by the 24-profile pass can be upgraded in place:
+     * recognize its target as the "old" form.  The normal configure path
+     * always starts from an unpatched chunk, so this only makes reruns safe. */
+    has_prev = strcmp(new_code, target_code) != 0 &&
+               contains_sub(p, (size_t)(e - p), new_code);
+
     hash_hex(p, (size_t)(e - p), before);
 
-    if (has_old && has_new) {
+    if (has_old && has_target) {
         snprintf(err, errsz,
                  "site 0x%08X line %d contains both '%s' and '%s'",
-                 va, line, old_code, new_code);
+                 va, line, old_code, target_code);
         return -1;
     }
-    if (!has_old && !has_new) {
+    if (has_target && has_prev) {
+        snprintf(err, errsz,
+                 "site 0x%08X line %d contains both 24- and 40-profile "
+                 "targets '%s' and '%s'", va, line, new_code, target_code);
+        return -1;
+    }
+    if (!has_old && !has_target && !has_prev) {
         snprintf(err, errsz,
                  "site 0x%08X line %d does not match '%s'", va, line, old_code);
         return -1;
@@ -1282,67 +1515,51 @@ static int handle_subst(Buf *out, const char *p, const char *e,
         return -1;
     }
 
-    if (has_old) {
-        char *cur = NULL;
-        size_t curlen = 0;
-        char *next = NULL;
-        size_t nextlen = 0;
+    if (has_old || has_prev) {
+        const char *from = has_old ? old_code : new_code;
+        char *replaced = NULL;
+        size_t replaced_n = 0;
         int r;
 
-        r = replace_once((char *)p, (size_t)(e - p), old_code, new_code,
-                         &cur, &curlen);
+        r = replace_once(tmp.p, tmp.n, from, target_code, &replaced,
+                         &replaced_n);
         if (r != 1) {
+            free(replaced);
             snprintf(err, errsz,
                      "site 0x%08X line %d: ambiguous substitution", va, line);
-            free(cur);
             buf_free(&tmp);
             return -1;
         }
         free(tmp.p);
-        tmp.p = cur;
-        tmp.n = curlen;
-        tmp.cap = curlen + 1;
-
-        if (old_comment && new_comment &&
-            contains_sub(tmp.p, tmp.n, old_comment)) {
-            r = replace_once(tmp.p, tmp.n, old_comment, new_comment,
-                             &next, &nextlen);
-            if (r != 1) {
-                snprintf(err, errsz,
-                         "site 0x%08X line %d: ambiguous comment edit",
-                         va, line);
-                free(next);
-                buf_free(&tmp);
-                return -1;
-            }
-            free(tmp.p);
-            tmp.p = next;
-            tmp.n = nextlen;
-            tmp.cap = nextlen + 1;
-        }
+        tmp.p = replaced;
+        tmp.n = replaced_n;
+        tmp.cap = replaced_n + 1;
         action = "replace";
     } else {
-        /* Already patched.  A stale comment is repaired, otherwise the line
-         * is copied byte-for-byte. */
+        /* Already patched.  A stale comment is repaired below, otherwise the
+         * line is copied byte-for-byte. */
         action = "already";
-        if (old_comment && new_comment &&
-            contains_sub(tmp.p, tmp.n, old_comment)) {
-            char *next = NULL;
-            size_t nextlen = 0;
-            int r = replace_once(tmp.p, tmp.n, old_comment, new_comment,
-                                 &next, &nextlen);
-            if (r != 1) {
+    }
+
+    if (target_comment) {
+        if (old_comment && contains_sub(tmp.p, tmp.n, old_comment)) {
+            if (buf_replace_once(&tmp, old_comment, target_comment) != 0) {
                 snprintf(err, errsz,
                          "site 0x%08X line %d: ambiguous comment edit",
                          va, line);
-                free(next);
                 buf_free(&tmp);
                 return -1;
             }
-            free(tmp.p);
-            tmp.p = next;
-            tmp.n = nextlen;
-            tmp.cap = nextlen + 1;
+        } else if (new_comment && target_comment != new_comment &&
+                   strcmp(new_comment, target_comment) != 0 &&
+                   contains_sub(tmp.p, tmp.n, new_comment)) {
+            if (buf_replace_once(&tmp, new_comment, target_comment) != 0) {
+                snprintf(err, errsz,
+                         "site 0x%08X line %d: ambiguous comment edit",
+                         va, line);
+                buf_free(&tmp);
+                return -1;
+            }
         }
     }
 
@@ -1690,8 +1907,8 @@ static int shift_container_line(const char *p, const char *e,
 /* from 0x104 to 0x1C4 and the flags land at +0x1C0, inside the new    */
 /* element.  Only literal displacements change;                        */
 /* the lifted control flow is identical.  wc3_sel24_cap() keeps the    */
-/* old 12 when WC3_SELECTION_24 is not set, so the default build keeps */
-/* the original 12-unit limit.                                         */
+/* old 12 when WC3_SELECTION_CAP is absent or invalid, so the      */
+/* default build keeps the original 12-unit limit.                 */
 /*                                                                     */
 /* Rev 42 adds the second root: the CPrCluster member-vector capacity  */
 /* (0x6F14FCAF) and the 12-entry solver workspace L_6F16B2F0.  The      */
@@ -1713,12 +1930,21 @@ static int shift_container_line(const char *p, const char *e,
 /* +0x94/+0x9C.  The debug-only group snapshot wrappers log the entry   */
 /* around init/sort under WC3_DEBUG_SELECT24.                          */
 /*                                                                     */
+/* Rev 46 makes every structural site above relative to the 40-unit    */
+/* layout through STRUCT40_VALUES / --struct-cap 40: pair +0x64 ->     */
+/* +0xA4, entry 0x134 -> 0x1F4, frame 0x1354 -> 0x1F54, order frames    */
+/* 0x9A0/0x9A8 -> 0xBE0/0xBE8 and the point-order container shifted by */
+/* another 0x200.  The runtime cap stays separate: the Android setting  */
+/* writes WC3_SELECTION_CAP=12|24|40, while the corpus always carries  */
+/* the 40-entry structure.                                             */
+/*                                                                     */
 /* Rev 59 replaces the formation-table reads in L_6F16D270/D286/D2D3   */
 /* with wc3_sel24_formation_columns().  The 12-entry table at           */
 /* 0x6FA91D20/0x6FA91D88 is followed by a vtable, so count 13 read      */
 /* B[0]/C[0] = 0 and the order loop never advanced its step.  The       */
-/* helper returns the original word for count <= 12 and a defined 13..24 */
-/* row length otherwise (compact 3, grid ceil(count/3)).               */
+/* helper returns the original word for count <= 12 and a defined       */
+/* 13..40 row length otherwise (compact 3, grid ceil(count/3) up to      */
+/* 24 then ceil(count/4)).                                               */
 /*                                                                     */
 /* Every row is one anchor VA from                                    */
 /* docs/research/SELECTION_24_SITES.tsv plus the exact operand text    */
@@ -1818,7 +2044,10 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16AB9Bu, "0x000000ACu", "0x0000013Cu" },
     { 0x6F16ABA1u, "0x000000F8u", "0x000001B8u" },
     { 0x6F16ABA7u, "0x000000F0u", "0x000001B0u" },
-    { 0x6F16ABB7u, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F16ABB7u, "0xCu", "wc3_sel24_stream_default_cap()" },
+    { 0x6F16ABD9u,
+      "c->esp -= 4; WC3_DIRECT_CALL(L_6F06A690, c);",
+      "c->esp -= 4; WC3_DIRECT_CALL(L_6F06A690, c); wc3_sel24_stream_slot_read(c->edi, rd32((c->ebp + 0xFFFFFFFCu)), (uint32_t)(c->ebp + 0xFFFFFFF8u));" },
     { 0x6F16ADDEu, "0x000000DCu", "0x0000019Cu" },
     { 0x6F16ADECu, "0x000000E0u", "0x000001A0u" },
     { 0x6F16ADF9u, "0x000000E4u", "0x000001A4u" },
@@ -1830,6 +2059,9 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16AE53u, "0x000000F8u", "0x000001B8u" },
     { 0x6F16AE63u, "0xACu", "0x13Cu" },
     { 0x6F16AE6Cu, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F16AE87u,
+      "push32(c, rd32((c->esi)));",
+      "push32(c, wc3_sel24_stream_slot_write(rd32((c->ebp + 0xFFFFFFFCu)), c->esi, rd32((c->esi))));" },
     { 0x6F16AFF0u, "0x000000F4u", "0x000001B4u" },
     { 0x6F16B000u, "0x000000F4u", "0x000001B4u" },
     /* Ground-order solver workspace L_6F16B2F0: 12 -> 24 entries. */
@@ -1886,8 +2118,8 @@ static const Group24Site GROUP24_SITES[] = {
     /* Formation table 0x6FA91D20/0x6FA91D88 is 13 entries per block and is
      * followed immediately by the list-object vtable at 0x6FA91DF4, so it
      * cannot be widened in place.  The read moves to a host helper that
-     * returns the original table word for count <= 12 and the defined 24-unit
-     * row length for 13..24.  eax = 13 * flag + count, ecx = count. */
+     * returns the original table word for count <= 12 and the defined
+     * row length for 13..40.  eax = 13 * flag + count, ecx = count. */
     { 0x6F16D2CAu,
       "c->edi = rd32((c->eax*4 + GVA(0x6FA91D20)));",
       "c->edi = wc3_sel24_formation_columns(c->eax, c->ecx, 0u);" },
@@ -1944,7 +2176,7 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16E11Au, "0x00000034u", "0x00000064u" },
     { 0x6F16E127u, "0x00000038u", "0x00000068u" },
     { 0x6F16E137u, "0x00000034u", "0x00000064u" },
-    { 0x6F16E13Eu, "0x00000038u", "0x00000068u" }
+    { 0x6F16E13Eu, "0x00000038u", "0x00000068u" },
 };
 
 /* The call-macro spelling of the two helper call sites depends on the
@@ -2036,48 +2268,77 @@ static int handle_group24(Buf *out, const char *p, const char *e,
                           Sites *sites, int *handled, char *err, size_t errsz)
 {
     size_t n = (size_t)(e - p);
-    int has_old = contains_sub(p, n, g->old_code);
-    int has_new = contains_sub(p, n, g->new_code);
+    char target_buf[1024];
+    const char *target = g->new_code;
+    int has_old;
+    int has_target;
+    int has_prev;
     char before[65];
     char after[65];
     char *res = NULL;
     size_t resn = 0;
+    const char *action;
 
-    if (has_old && has_new) {
+    if (g_struct_cap == 40) {
+        if (map_struct40_text(g->new_code, target_buf, sizeof(target_buf)) != 0) {
+            snprintf(err, errsz, "site 0x%08X line %d: target too large",
+                     g->va, line);
+            return -1;
+        }
+        target = target_buf;
+    }
+
+    has_old = contains_sub(p, n, g->old_code);
+    has_target = contains_sub(p, n, target);
+    /* Accept output from the 24-profile pass so a structural upgrade does not
+     * require a fresh corpus.  This is the same "already patched" path. */
+    has_prev = strcmp(g->new_code, target) != 0 &&
+               contains_sub(p, n, g->new_code);
+
+    if (has_old && has_target) {
         /* A replacement may legitimately contain the old text (a trace
          * prefix in front of the original statement).  Only an old
          * occurrence outside the new text is a real conflict. */
-        const char *hit = find_sub(p, n, g->new_code);
-        size_t nlen = strlen(g->new_code);
+        const char *hit = find_sub(p, n, target);
+        size_t tlen = strlen(target);
         int leftover = 1;
 
         if (hit) {
             leftover = find_sub(p, (size_t)(hit - p), g->old_code) != NULL ||
-                       find_sub(hit + nlen,
-                                n - (size_t)(hit + nlen - p),
+                       find_sub(hit + tlen,
+                                n - (size_t)(hit + tlen - p),
                                 g->old_code) != NULL;
         }
         if (leftover) {
             snprintf(err, errsz,
                      "site 0x%08X line %d contains both '%s' and '%s'",
-                     g->va, line, g->old_code, g->new_code);
+                     g->va, line, g->old_code, target);
             return -1;
         }
         has_old = 0; /* already applied; the old text is inside the new */
     }
-    if (!has_old && !has_new) {
+    if (has_target && has_prev) {
+        snprintf(err, errsz,
+                 "site 0x%08X line %d contains both 24- and 40-profile "
+                 "targets '%s' and '%s'", g->va, line, g->new_code, target);
+        return -1;
+    }
+    if (!has_old && !has_target && !has_prev) {
         snprintf(err, errsz, "site 0x%08X line %d does not match '%s'",
                  g->va, line, g->old_code);
         return -1;
     }
 
     hash_hex(p, n, before);
-    if (has_old) {
-        if (replace_all(p, n, g->old_code, g->new_code, &res, &resn) != 0) {
+    if (has_old || has_prev) {
+        const char *from = has_old ? g->old_code : g->new_code;
+
+        if (replace_all(p, n, from, target, &res, &resn) != 0) {
             snprintf(err, errsz, "site 0x%08X line %d: out of memory",
                      g->va, line);
             return -1;
         }
+        action = "replace";
     } else {
         res = (char *)malloc(n + 1);
         if (!res) {
@@ -2088,6 +2349,7 @@ static int handle_group24(Buf *out, const char *p, const char *e,
         memcpy(res, p, n);
         res[n] = '\0';
         resn = n;
+        action = "already";
     }
 
     hash_hex(res, resn, after);
@@ -2097,8 +2359,7 @@ static int handle_group24(Buf *out, const char *p, const char *e,
     }
     free(res);
     counts->n[K_GROUP24]++;
-    sites_add(sites, K_GROUP24, g->va, has_old ? "replace" : "already",
-              line, before, after);
+    sites_add(sites, K_GROUP24, g->va, action, line, before, after);
     *handled = 1;
     return 0;
 }
@@ -2111,6 +2372,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
     const char *end = data + n;
     int line = 1;
     ShiftSpan span;
+    ShiftSpan span40;
     uint32_t cur_block = 0;
     int block_site = 0;
 
@@ -2118,6 +2380,10 @@ static int process_buffer(const char *data, size_t n, const char *profile,
     span.lo = 0;
     span.hi = 0;
     span.delta = ORDER_CONTAINER_DELTA;
+    span40.active = 0;
+    span40.lo = 0;
+    span40.hi = 0;
+    span40.delta = ORDER_CONTAINER_40_DELTA;
 
     if (err && errsz)
         err[0] = '\0';
@@ -2135,15 +2401,26 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             cur_block = block_va;
             block_site = 0;
             span.active = 0;
+            span40.active = 0;
             if (block_va >= ORDER_HANDLER_A_LO && block_va < ORDER_HANDLER_A_HI) {
                 span.active = 1;
                 span.lo = ORDER_CONTAINER_A_LO;
                 span.hi = ORDER_CONTAINER_A_HI;
+                if (g_struct_cap == 40) {
+                    span40.active = 1;
+                    span40.lo = ORDER_CONTAINER_A24_LO;
+                    span40.hi = ORDER_CONTAINER_A24_HI;
+                }
             } else if (block_va >= ORDER_HANDLER_B_LO &&
                        block_va < ORDER_HANDLER_B_HI) {
                 span.active = 1;
                 span.lo = ORDER_CONTAINER_B_LO;
                 span.hi = ORDER_CONTAINER_B_HI;
+                if (g_struct_cap == 40) {
+                    span40.active = 1;
+                    span40.lo = ORDER_CONTAINER_B24_LO;
+                    span40.hi = ORDER_CONTAINER_B24_HI;
+                }
             }
         } else if (le - p >= 7 && memcmp(p, "void L_", 7) == 0) {
             /* A definition the lift emitted with another signature: do not
@@ -2151,6 +2428,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             cur_block = 0;
             block_site = 0;
             span.active = 0;
+            span40.active = 0;
         }
 
         if (has_va) {
@@ -2656,22 +2934,6 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
-            case VA_CAP_SLOT_MASK_A:
-            case VA_CAP_SLOT_MASK_B:
-            case VA_CAP_SLOT_MASK_C:
-            case VA_CAP_SLOT_MASK_D:
-            case VA_CAP_SLOT_MASK_E:
-            case VA_CAP_SLOT_UNIT_LIST:
-            case VA_CAP_SLOT_PANEL_A:
-            case VA_CAP_SLOT_PANEL_B:
-            case VA_CAP_SLOT_FREE:
-                if (handle_subst(out, p, le,
-                                 "0xCu", "wc3_sel24_cap()",
-                                 NULL, NULL,
-                                 K_CAP_SLOT, va, line, counts, sites,
-                                 &handled, err, errsz) != 0)
-                    return -1;
-                break;
             case VA_TRACE_TASKNULL:
                 next = p;
                 if (handle_insert(out, &next, end,
@@ -2938,38 +3200,62 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             }
         }
 
-        if (!handled && span.active) {
-            Buf shifted = {0};
+        if (!handled && (span.active || span40.active)) {
+            Buf stage1 = {0};
+            Buf stage2 = {0};
+            const char *src = p;
+            size_t srcn = (size_t)(le - p);
             int replaced = 0;
-            int already = 0;
+            int hit = 0;
+            int r = 0;
+            int a = 0;
 
-            if (shift_container_line(p, le, &span, &shifted,
-                                     &replaced, &already) != 0) {
-                buf_free(&shifted);
-                return -1;
+            if (span.active) {
+                if (shift_container_line(src, src + srcn, &span, &stage1,
+                                         &r, &a) != 0) {
+                    buf_free(&stage1);
+                    buf_free(&stage2);
+                    return -1;
+                }
+                src = stage1.p;
+                srcn = stage1.n;
+                hit |= (r || a);
+                replaced |= r;
             }
-            if (replaced || already) {
+            if (span40.active) {
+                if (shift_container_line(src, src + srcn, &span40, &stage2,
+                                         &r, &a) != 0) {
+                    buf_free(&stage1);
+                    buf_free(&stage2);
+                    return -1;
+                }
+                src = stage2.p;
+                srcn = stage2.n;
+                hit |= (r || a);
+                replaced |= r;
+            }
+            if (hit) {
                 if (!block_site) {
                     char before[65];
                     char after[65];
 
                     hash_hex(p, (size_t)(le - p), before);
-                    hash_hex(shifted.p, shifted.n, after);
+                    hash_hex(src, srcn, after);
                     counts->n[K_ORDER_OBJ_CONTAINER]++;
                     sites_add(sites, K_ORDER_OBJ_CONTAINER, cur_block,
                               replaced ? "replace" : "already", line,
                               before, after);
                     block_site = 1;
                 }
-                if (buf_append(out, shifted.p, shifted.n) != 0) {
-                    buf_free(&shifted);
+                if (buf_append(out, src, srcn) != 0) {
+                    buf_free(&stage1);
+                    buf_free(&stage2);
                     return -1;
                 }
-                buf_free(&shifted);
                 handled = 1;
-            } else {
-                buf_free(&shifted);
             }
+            buf_free(&stage1);
+            buf_free(&stage2);
         }
 
         if (!handled && buf_append(out, p, (size_t)(le - p)) != 0)
@@ -3230,7 +3516,8 @@ static int write_json(const char *path, const char *input, const char *output,
         write_json_string(f, profile);
     else
         fputs("null", f);
-    fputs(",\n  \"counts\": {\n", f);
+    fprintf(f, ",\n  \"struct_cap\": %u,\n", g_struct_cap);
+    fputs("  \"counts\": {\n", f);
     for (i = 0; i < K_COUNT; ++i) {
         fputs("    \"", f);
         fputs(kind_name[i], f);
@@ -3653,6 +3940,8 @@ static int self_test(char *err, size_t errsz)
     char err2[512];
     unsigned exp_fix[K_COUNT];
 
+    g_struct_cap = 24;
+
     /* The fixture exercises one sample of every site kind, including the two
      * relocated order handlers.  Corpus totals live in expected_total and are
      * checked against the coverage JSON below. */
@@ -3683,7 +3972,7 @@ static int self_test(char *err, size_t errsz)
         count_occurrences(out1.p, out1.n, "wc3_sel24_fill") != 2 ||
         count_occurrences(out1.p, out1.n, "0x144u") != 1 ||
         count_occurrences(out1.p, out1.n, "0x00000138u") != 1 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel24_cap()") != 42 ||
+        count_occurrences(out1.p, out1.n, "wc3_sel24_cap()") != 32 ||
         count_occurrences(out1.p, out1.n, "0x9A0u") != 1 ||
         count_occurrences(out1.p, out1.n, "0x9A8u") != 1 ||
         count_occurrences(out1.p, out1.n, "0xFFFFF6A0u") != 4 ||
@@ -3769,6 +4058,130 @@ static int self_test(char *err, size_t errsz)
     if (out1.n != out2.n || memcmp(out1.p, out2.p, out1.n) != 0) {
         snprintf(err, errsz, "self-test is not idempotent");
         goto fail;
+    }
+
+    /* Structural 40 profile: the same 352 sites must produce the 40-layout
+     * targets, and a second 40-profile pass must be byte-identical. */
+    {
+        Buf out40a = {0};
+        Buf out40b = {0};
+        Buf out40c = {0};
+        Counts c40a;
+        Counts c40b;
+        Counts c40c;
+        Sites s40a = {0};
+        Sites s40b = {0};
+        Sites s40c = {0};
+
+        g_struct_cap = 40;
+        if (process_buffer(SELF_FIXTURE, strlen(SELF_FIXTURE), NULL,
+                           &out40a, &c40a, &s40a, err2, sizeof(err2)) != 0) {
+            snprintf(err, errsz, "self-test 40 first pass failed: %s", err2);
+            ok = 0;
+            goto fail40;
+        }
+        if (!counts_match(&c40a, exp_fix)) {
+            snprintf(err, errsz, "self-test 40 counts mismatch");
+            ok = 0;
+            goto fail40;
+        }
+        if (count_occurrences(out40a.p, out40a.n, "0x150u") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0x2C8u") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0x0000029Cu") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0x000001FCu") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0x1FCu") != 2 ||
+            count_occurrences(out40a.p, out40a.n, "0x000002C0u") != 2 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFE0B4u") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0x7B8u") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0x7B4u") != 1 ||
+            count_occurrences(out40a.p, out40a.n,
+                              "sub esp, 0x7b8 */") != 1 ||
+            count_occurrences(out40a.p, out40a.n,
+                              "sub esp, 0x7b4 */") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0xBE0u") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0xBE8u") != 1 ||
+            count_occurrences(out40a.p, out40a.n,
+                              "sub esp, 0xbe0 */") != 1 ||
+            count_occurrences(out40a.p, out40a.n,
+                              "sub esp, 0xbe8 */") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0x28u") != 1 ||
+            count_occurrences(out40a.p, out40a.n,
+                              "[esi + 0x4c], 0x28 */") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF620u") != 4 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF460u") != 4 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF478u") != 2 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF47Cu") != 2 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF664u") != 2 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF680u") != 2 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF668u") != 4 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF858u") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "[ebp - 0x7a8]") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF8A4u") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "[ebp - 0x75c]") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF85Cu") != 1 ||
+            count_occurrences(out40a.p, out40a.n, "[ebp - 0x7a4]") != 1) {
+            snprintf(err, errsz, "self-test 40 first pass content mismatch");
+            ok = 0;
+            goto fail40;
+        }
+        if (count_occurrences(out40a.p, out40a.n, "0xFFFFF5B4u") != 0 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFECB4u") != 0 ||
+            count_occurrences(out40a.p, out40a.n, "0xFFFFF6A0u") != 0 ||
+            count_occurrences(out40a.p, out40a.n, "0x9A0u") != 0 ||
+            count_occurrences(out40a.p, out40a.n, "0x1C8u") != 0 ||
+            count_occurrences(out40a.p, out40a.n, "0x000001C0u") != 0) {
+            snprintf(err, errsz, "self-test 40 group24 shift mismatch");
+            ok = 0;
+            goto fail40;
+        }
+
+        if (process_buffer(out40a.p, out40a.n, NULL, &out40b, &c40b,
+                           &s40b, err2, sizeof(err2)) != 0) {
+            snprintf(err, errsz, "self-test 40 second pass failed: %s", err2);
+            ok = 0;
+            goto fail40;
+        }
+        if (!counts_match(&c40b, exp_fix)) {
+            snprintf(err, errsz, "self-test 40 counts mismatch after second pass");
+            ok = 0;
+            goto fail40;
+        }
+        if (out40a.n != out40b.n ||
+            memcmp(out40a.p, out40b.p, out40a.n) != 0) {
+            snprintf(err, errsz, "self-test 40 profile is not idempotent");
+            ok = 0;
+            goto fail40;
+        }
+
+        /* A corpus emitted by the 24-profile pass must upgrade in place to
+         * exactly the same bytes as a fresh 40-profile pass. */
+        if (process_buffer(out1.p, out1.n, NULL, &out40c, &c40c, &s40c,
+                           err2, sizeof(err2)) != 0) {
+            snprintf(err, errsz, "self-test 24->40 upgrade failed: %s", err2);
+            ok = 0;
+            goto fail40;
+        }
+        if (!counts_match(&c40c, exp_fix)) {
+            snprintf(err, errsz, "self-test 24->40 upgrade counts mismatch");
+            ok = 0;
+            goto fail40;
+        }
+        if (out40a.n != out40c.n ||
+            memcmp(out40a.p, out40c.p, out40a.n) != 0) {
+            snprintf(err, errsz,
+                     "self-test 24->40 upgrade differs from a fresh pass");
+            ok = 0;
+            goto fail40;
+        }
+fail40:
+        buf_free(&out40a);
+        buf_free(&out40b);
+        buf_free(&out40c);
+        free(s40a.v);
+        free(s40b.v);
+        free(s40c.v);
+        if (!ok)
+            goto fail;
     }
 
     {
@@ -3860,10 +4273,10 @@ static int self_test(char *err, size_t errsz)
     }
 
     {
-        /* Mirrors a current report: PASS_REV 45 (349 sites). */
+        /* Mirrors a current report: PASS_REV 48 (342 sites). */
         const char json[] =
             "{\"pass\":\"" PASS "\","
-            "\"pass_rev\":45,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
+            "\"pass_rev\":48,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
             "\"cap_outer\":2,\"cap_inner\":2,\"fill_block\":2,\"fill_grid\":1,"
             "\"note_selection\":1,\"hide_all\":1,\"addunit_cap\":1,\"cap_local_list\":5,"
             "\"cap_copy_list\":3,\"cap_sync_add\":1,\"cap_net_recv\":1,\"cap_net_apply\":5,"
@@ -3872,11 +4285,11 @@ static int self_test(char *err, size_t errsz)
             "\"trace_lookup\":2,\"cap_group_store\":3,\"cap_add_merge\":3,"
             "\"trace_order_unit_b\":1,\"trace_order_unit_c\":1,\"trace_order_loop_b\":2,"
             "\"trace_order_loop_c\":2,\"trace_order_apply\":2,\"trace_order_exec\":2,"
-            "\"trace_remove\":4,\"trace_evbirth\":1,\"trace_apply\":2,\"cap_slot\":10,"
+            "\"trace_remove\":4,\"trace_evbirth\":1,\"trace_apply\":2,"
             "\"trace_tasknull\":1,\"trace_evinit\":1,\"trace_orderdrop\":1,"
             "\"order_obj_container\":35,\"trace_order_slots\":3,\"order_group_full\":2,"
-            "\"trace_evrelease\":1,\"slot_unlink\":1,\"group24\":204,\"trace_formation\":9},"
-            "\"total\":349};";
+            "\"trace_evrelease\":1,\"slot_unlink\":1,\"group24\":207,\"trace_formation\":9},"
+            "\"total\":342};";
         Counts c3;
 
         if (json_counts_parse(json, &c3, err2, sizeof(err2)) != 0 ||
@@ -3909,7 +4322,7 @@ static void usage(void)
 {
     fprintf(stderr,
             "usage: " PASS " --lift IN --out OUT [--json REPORT] "
-            "[--profile seed|closed] [--quiet]\n"
+            "[--profile seed|closed] [--struct-cap 24|40] [--quiet]\n"
             "       " PASS " --verify-coverage @manifest [--quiet]\n"
             "       " PASS " --self-test\n");
 }
@@ -3936,6 +4349,17 @@ int main(int argc, char **argv)
             json = argv[++i];
         } else if (strcmp(a, "--profile") == 0 && i + 1 < argc) {
             profile = argv[++i];
+        } else if (strcmp(a, "--struct-cap") == 0 && i + 1 < argc) {
+            const char *v = argv[++i];
+
+            if (strcmp(v, "24") == 0)
+                g_struct_cap = 24;
+            else if (strcmp(v, "40") == 0)
+                g_struct_cap = 40;
+            else {
+                usage();
+                return 2;
+            }
         } else if (strcmp(a, "--verify-coverage") == 0 && i + 1 < argc) {
             coverage = argv[++i];
         } else if (strcmp(a, "--quiet") == 0) {

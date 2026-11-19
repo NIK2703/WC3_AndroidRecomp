@@ -194,29 +194,42 @@
             </LinearLayout>
 
             <LinearLayout
-                android:id="@+id/selection24_row"
+                android:id="@+id/selection_cap_row"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
+                android:layout_marginTop="20dp"
+                android:orientation="vertical">
 
                 <TextView
                     style="@style/Wc3RowLabel"
-                    android:layout_width="0dp"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/launch_selection24_label" />
+                    android:text="@string/launch_selection_label" />
 
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/selection24_switch"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:contentDescription="@string/launch_selection24_label"
-                    android:saveEnabled="false"
-                    app:thumbTint="@color/switch_thumb"
-                    app:trackTint="@color/switch_track" />
+                <FrameLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp">
+
+                    <Spinner
+                        android:id="@+id/selection_cap_spinner"
+                        style="@style/Wc3Spinner"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:contentDescription="@string/launch_selection_label"
+                        android:saveEnabled="false" />
+
+                    <ImageView
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:layout_gravity="end|center_vertical"
+                        android:layout_marginEnd="12dp"
+                        android:clickable="false"
+                        android:focusable="false"
+                        android:importantForAccessibility="no"
+                        android:src="@drawable/ic_expand_more"
+                        android:tint="@color/launch_gold_light" />
+                </FrameLayout>
             </LinearLayout>
 
             <LinearLayout
