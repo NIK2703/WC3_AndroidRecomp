@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# Manage the distcc worker on the desktop PC from this POSIX host.
+# Manage a distcc worker from this POSIX host.  The default worker is the
+# desktop PC (ideacentre); --worker ideapad selects the laptop.  Each worker
+# has its own key, state files and resolver cache, so both can run together.
 #
-# The PC address is never stored as a fixed IPv4 address.  The worker is
-# identified by its Ethernet MAC, resolved to the current IPv6 link-local (or
-# IPv4) neighbour entry on every start; an explicit WC3_PC_HOST/WC3_PC_IPV6
-# override is available for diagnostics.  The transport is the same one used
-# by tools/dist/distcc_tunnel.ps1: a local SSH forward to a distccd bound to
-# 127.0.0.1 on the PC.
+# The worker address is never stored as a fixed IPv4 address.  The default
+# identity is the Ethernet MAC, resolved to the current IPv6 link-local (or
+# IPv4) neighbour entry on every start; an explicit WC3_PC_HOST /
+# WC3_IDEAPAD_HOST override is available for diagnostics.  The transport is
+# the same one used by tools/dist/distcc_tunnel.ps1: a local SSH forward to a
+# distccd bound to 127.0.0.1 on the worker.
 #
 # Usage:
-#   tools/dist/pc_tunnel.sh resolve [--json]
-#   tools/dist/pc_tunnel.sh setup-key
-#   tools/dist/pc_tunnel.sh start [--slots N] [--local-slots N] [--ndk <dir>]
+#   tools/dist/pc_tunnel.sh [--worker pc|ideapad] resolve [--json]
+#   tools/dist/pc_tunnel.sh [--worker pc|ideapad] setup-key
+#   tools/dist/pc_tunnel.sh [--worker pc|ideapad] start [--slots N]
+#                                 [--local-slots N] [--ndk <dir>]
 #                                 [--force] [--quiet] [--json]
-#   tools/dist/pc_tunnel.sh status [--json]
-#   tools/dist/pc_tunnel.sh stop [--keep-remote] [--quiet]
+#   tools/dist/pc_tunnel.sh [--worker pc|ideapad] status [--json]
+#   tools/dist/pc_tunnel.sh [--worker pc|ideapad] stop [--keep-remote] [--quiet]
 #
 # State and logs live in ${WC3_DIST_STATE_DIR:-$HOME/.wc3-dist}.  The start
 # action prints shell assignments by default (WC3_PC_PORT, WC3_PC_SLOTS, ...)
@@ -22,26 +25,102 @@
 # 4 a live tunnel is already owned by another process.
 set -euo pipefail
 
+# Worker selection happens before argument dispatch: every worker has its own
+# defaults, key, SSH alias and state files.  The desktop remains the default,
+# and the laptop is selected explicitly or by the caller that starts both.
+worker=${WC3_PC_WORKER:-pc}
+worker_args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --worker)
+            [ $# -ge 2 ] || {
+                printf '[pc-dist] --worker needs a value\n' >&2
+                exit 2
+            }
+            worker=$2
+            shift 2
+            ;;
+        --worker=*) worker=${1#*=}; shift ;;
+        *)
+            worker_args+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- ${worker_args[@]+"${worker_args[@]}"}
+unset worker_args
+case "$worker" in
+    pc|ideacentre|desktop) worker=pc ;;
+    ideapad|laptop) worker=ideapad ;;
+    *)
+        printf '[pc-dist] unknown worker: %s (pc|ideapad)\n' "$worker" >&2
+        exit 2
+        ;;
+esac
+
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 state_dir=${WC3_DIST_STATE_DIR:-$HOME/.wc3-dist}
-state_file=$state_dir/pc-tunnel.env
-config_file=$state_dir/pc-ssh.conf
-probe_file=$state_dir/pc-probe.ps1
-daemon_file=$state_dir/pc-daemon.cmd
-remote_dir=${WC3_PC_REMOTE_DIR:-wc3-dist}
-alias_name=wc3-pc-distcc
-ssh_user=${WC3_PC_USER:-nikita}
-ssh_port=${WC3_PC_SSH_PORT:-22}
-remote_port=${WC3_PC_DISTCCD_PORT:-3632}
-key=${WC3_PC_KEY:-$HOME/.ssh/id_wc3_pc}
-mac=${WC3_PC_MAC:-d0:37:45:3b:03:b4}
-name=${WC3_PC_NAME:-ideacentre}
+if [ "$worker" = ideapad ]; then
+    prefix=ideapad
+    name=${WC3_IDEAPAD_NAME:-ideapad}
+    # The Wi-Fi MAC is the stable identity; the DHCP lease is not stored in
+    # the source tree.  An empty WC3_IDEAPAD_MAC disables MAC matching.
+    mac=${WC3_IDEAPAD_MAC-5c:61:99:28:ea:27}
+    default_key=$HOME/.ssh/id_ideapad
+    [ -f "$default_key" ] || default_key=$HOME/.ssh/id_wc3_pc
+    key=${WC3_IDEAPAD_KEY:-${WC3_PC_KEY:-$default_key}}
+    ssh_user=${WC3_IDEAPAD_USER:-${WC3_PC_USER:-nikita}}
+    ssh_port=${WC3_IDEAPAD_SSH_PORT:-${WC3_PC_SSH_PORT:-22}}
+    remote_port=${WC3_IDEAPAD_DISTCCD_PORT:-${WC3_PC_DISTCCD_PORT:-3632}}
+    remote_dir=${WC3_IDEAPAD_REMOTE_DIR:-${WC3_PC_REMOTE_DIR:-wc3-dist}}
+    alias_name=wc3-ideapad-distcc
+    host_key_alias=wc3-ideapad
+    # Use the laptop's own logical CPU count by default (the probe currently
+    # reports 12).  WC3_IDEAPAD_SLOTS and --slots override it when a manual
+    # split is needed.
+    slots_env=${WC3_IDEAPAD_SLOTS:-}
+    local_port_env=${WC3_IDEAPAD_LOCAL_PORT:-}
+    distccd_env=${WC3_IDEAPAD_DISTCCD:-${WC3_PC_DISTCCD:-}}
+    remote_ndk_env=${WC3_IDEAPAD_REMOTE_NDK:-${WC3_PC_REMOTE_NDK:-}}
+    allow_mismatch=${WC3_IDEAPAD_ALLOW_VERSION_MISMATCH:-${WC3_PC_ALLOW_VERSION_MISMATCH:-0}}
+    allow_mismatch_env=WC3_IDEAPAD_ALLOW_VERSION_MISMATCH
+    host_override=${WC3_IDEAPAD_HOST:-}
+    ipv6_override=${WC3_IDEAPAD_IPV6:-}
+    ipv4_override=${WC3_IDEAPAD_IPV4:-}
+    iface_override=${WC3_IDEAPAD_IFACE:-${WC3_PC_IFACE:-}}
+else
+    prefix=pc
+    name=${WC3_PC_NAME:-ideacentre}
+    # As with the laptop, an explicitly empty WC3_PC_MAC disables MAC matching.
+    mac=${WC3_PC_MAC-d0:37:45:3b:03:b4}
+    key=${WC3_PC_KEY:-$HOME/.ssh/id_wc3_pc}
+    ssh_user=${WC3_PC_USER:-nikita}
+    ssh_port=${WC3_PC_SSH_PORT:-22}
+    remote_port=${WC3_PC_DISTCCD_PORT:-3632}
+    remote_dir=${WC3_PC_REMOTE_DIR:-wc3-dist}
+    alias_name=wc3-pc-distcc
+    host_key_alias=wc3-pc
+    slots_env=${WC3_PC_SLOTS:-}
+    local_port_env=${WC3_PC_LOCAL_PORT:-}
+    distccd_env=${WC3_PC_DISTCCD:-}
+    remote_ndk_env=${WC3_PC_REMOTE_NDK:-}
+    allow_mismatch=${WC3_PC_ALLOW_VERSION_MISMATCH:-0}
+    allow_mismatch_env=WC3_PC_ALLOW_VERSION_MISMATCH
+    host_override=${WC3_PC_HOST:-}
+    ipv6_override=${WC3_PC_IPV6:-}
+    ipv4_override=${WC3_PC_IPV4:-}
+    iface_override=${WC3_PC_IFACE:-}
+fi
+state_file=$state_dir/$prefix-tunnel.env
+config_file=$state_dir/$prefix-ssh.conf
+probe_file=$state_dir/$prefix-probe.ps1
+daemon_file=$state_dir/$prefix-daemon.cmd
+resolve_err=$state_dir/$prefix-resolve.err
+probe_err=$state_dir/$prefix-probe.err
+cache_file=$state_dir/$prefix.host
 # Keep explicit overrides separate from values read back from a previous state
 # file; a stale state must not pin the slot count or compiler path.
-pc_slots_env=${WC3_PC_SLOTS:-}
 pc_local_slots_env=${WC3_DIST_LOCAL_SLOTS:-}
-pc_distccd_env=${WC3_PC_DISTCCD:-}
-pc_remote_ndk_env=${WC3_PC_REMOTE_NDK:-}
 pc_owner_env=${WC3_PC_OWNER_PID:-}
 
 case "$state_dir" in
@@ -126,27 +205,41 @@ except OSError:
 PY
 }
 
+remember_target() {
+    [ -n "$1" ] || return 0
+    printf '%s\n' "$1" > "$cache_file"
+    chmod 600 "$cache_file" 2>/dev/null || true
+}
+
 resolve_target() {
-    if [ -n "${WC3_PC_HOST:-}" ]; then
-        printf '%s\n' "$WC3_PC_HOST"
+    if [ -n "$host_override" ]; then
+        remember_target "$host_override"
+        printf '%s\n' "$host_override"
         return 0
     fi
-    if [ -n "${WC3_PC_IPV6:-}" ]; then
-        printf '%s\n' "$WC3_PC_IPV6"
+    if [ -n "$ipv6_override" ]; then
+        remember_target "$ipv6_override"
+        printf '%s\n' "$ipv6_override"
         return 0
     fi
-    if [ -n "${WC3_PC_IPV4:-}" ]; then
-        printf '%s\n' "$WC3_PC_IPV4"
+    if [ -n "$ipv4_override" ]; then
+        remember_target "$ipv4_override"
+        printf '%s\n' "$ipv4_override"
         return 0
     fi
     local json address
+    local -a iface_args=()
+    [ -n "$iface_override" ] && iface_args=(--iface "$iface_override")
     if ! json=$("$python" "$root/tools/dist/pc_resolve.py" \
-            --mac "$mac" --name "$name" --port "$ssh_port" --json 2>"$state_dir/pc-resolve.err"); then
-        warn "could not resolve the PC by MAC $mac: $(tail -n 2 "$state_dir/pc-resolve.err" 2>/dev/null | tr '\n' ' ')"
+            --mac "$mac" --name "$name" --port "$ssh_port" \
+            ${iface_args[@]+"${iface_args[@]}"} \
+            --cache "$cache_file" --json 2>"$resolve_err"); then
+        warn "could not resolve $worker ($name) by MAC '$mac': $(tail -n 2 "$resolve_err" 2>/dev/null | tr '\n' ' ')"
         return 3
     fi
     address=$("$python" -c 'import json,sys; print(json.load(sys.stdin)["address"])' <<<"$json")
     [ -n "$address" ] || return 3
+    remember_target "$address"
     printf '%s\n' "$address"
 }
 
@@ -164,7 +257,7 @@ Host $alias_name
     IdentitiesOnly yes
     BatchMode yes
     StrictHostKeyChecking accept-new
-    HostKeyAlias wc3-pc
+    HostKeyAlias $host_key_alias
     LogLevel ERROR
     WarnWeakCrypto no
     ServerAliveInterval 15
@@ -249,7 +342,7 @@ PY
     [ -n "$encoded" ] || return 1
     info 'ssh-copy-id did not work; trying a PowerShell key install (enter the PC password again)'
     "$ssh_bin" -p "$ssh_port" -o BatchMode=no \
-        -o StrictHostKeyChecking=accept-new -o HostKeyAlias=wc3-pc \
+        -o StrictHostKeyChecking=accept-new -o HostKeyAlias=$host_key_alias \
         "$ssh_user@$target" \
         "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
 }
@@ -363,11 +456,11 @@ probe_remote() {
     ssh_run "cmd /c mkdir $remote_dir" >/dev/null 2>&1 || true
     "$scp_bin" -F "$config_file" -o BatchMode=yes \
         -o ConnectTimeout="${WC3_PC_CONNECT_TIMEOUT:-8}" \
-        "$probe_file" "$alias_name:$remote_dir/pc-probe.ps1" >/dev/null 2>&1 ||
+        "$probe_file" "$alias_name:$remote_dir/$prefix-probe.ps1" >/dev/null 2>&1 ||
         die 'could not upload the remote probe script with scp'
     local output
-    output=$(ssh_run "cmd /c powershell -NoProfile -ExecutionPolicy Bypass -File $remote_dir\\pc-probe.ps1" 2>"$state_dir/pc-probe.err") ||
-        die "remote probe failed: $(tail -n 2 "$state_dir/pc-probe.err" 2>/dev/null | tr '\n' ' ')"
+    output=$(ssh_run "cmd /c powershell -NoProfile -ExecutionPolicy Bypass -File $remote_dir\\$prefix-probe.ps1" 2>"$probe_err") ||
+        die "remote probe failed: $(tail -n 2 "$probe_err" 2>/dev/null | tr '\n' ' ')"
     probe_value() {
         printf '%s\n' "$output" | sed -n "s/^$1=//p" | tail -n 1 | tr -d '\r'
     }
@@ -464,7 +557,7 @@ action_setup_key() {
         info "copying $key.pub to $ssh_user@$target (the PC will ask for its password)"
         if "$ssh_copy_id" -i "$key.pub" -p "$ssh_port" \
             -o BatchMode=no -o StrictHostKeyChecking=accept-new \
-            -o HostKeyAlias=wc3-pc "$ssh_user@$target"; then
+            -o HostKeyAlias=$host_key_alias "$ssh_user@$target"; then
             if remote_ok; then
                 info 'SSH key accepted'
                 return 0
@@ -490,8 +583,11 @@ EOF
 }
 
 action_start() {
-    local force=0 slots_arg=0 local_slots_arg=0
-    local target ndk_arg=${pc_remote_ndk_env:-}
+    # Keep "not passed" distinct from an explicit --slots 0 so
+    # WC3_IDEAPAD_SLOTS/WC3_PC_SLOTS and WC3_DIST_LOCAL_SLOTS are honoured
+    # before falling back to the remote probe or the local CPU count.
+    local force=0 slots_arg='' local_slots_arg=''
+    local target ndk_arg=${remote_ndk_env:-}
     local probed_ndk='' probed_revision='' probed_distccd=''
     local probed_distccd_version='' probed_cpus=''
     while [ $# -gt 0 ]; do
@@ -513,7 +609,7 @@ action_start() {
         if [ "$force" != 1 ]; then
             local owner=${WC3_PC_OWNER_PID:-0}
             if pid_alive "$owner" && [ "$owner" != "$$" ]; then
-                die "a pc tunnel is already active on 127.0.0.1:${WC3_PC_LOCAL_PORT:-?} (pid ${WC3_PC_SSH_PID}, owner pid $owner); stop it or use --force" 4
+                die "a $worker tunnel is already active on 127.0.0.1:${WC3_PC_LOCAL_PORT:-?} (pid ${WC3_PC_SSH_PID}, owner pid $owner); stop it or use --force" 4
             fi
             info 'replacing a stale tunnel whose owning build is gone'
         fi
@@ -530,21 +626,21 @@ action_start() {
 
     probed_ndk=${ndk_arg:-}
     probed_revision=''
-    probed_distccd=${pc_distccd_env:-}
+    probed_distccd=${distccd_env:-}
     probed_distccd_version=''
     probed_cpus=''
     if [ -z "$probed_ndk" ] || [ -z "$probed_distccd" ]; then
         probe_remote
         [ -n "$probed_ndk" ] || probed_ndk=$ndk_arg
-        [ -n "$probed_distccd" ] || probed_distccd=${pc_distccd_env:-}
+        [ -n "$probed_distccd" ] || probed_distccd=${distccd_env:-}
     else
         # An explicit pair still gets the CPU count from the remote shell.
         probed_cpus=$(ssh_run 'cmd /c powershell -NoProfile -Command "[Environment]::ProcessorCount"' 2>/dev/null | tr -d '\r\n ' || true)
     fi
-    [ -n "$probed_ndk" ] || die 'no remote NDK; set WC3_PC_REMOTE_NDK'
-    [ -n "$probed_distccd" ] || die 'no remote distccd; set WC3_PC_DISTCCD'
+    [ -n "$probed_ndk" ] || die 'no remote NDK; set WC3_PC_REMOTE_NDK or WC3_IDEAPAD_REMOTE_NDK'
+    [ -n "$probed_distccd" ] || die 'no remote distccd; set WC3_PC_DISTCCD or WC3_IDEAPAD_DISTCCD'
     [ -n "$ndk_arg" ] && probed_ndk=$ndk_arg
-    [ -n "$pc_distccd_env" ] && probed_distccd=$pc_distccd_env
+    [ -n "$distccd_env" ] && probed_distccd=$distccd_env
     case "$probed_cpus" in ''|*[!0-9]*) probed_cpus=0 ;; esac
 
     local local_ndk=${WC3_DIST_NDK_ROOT:-${WC3_NDK:-${ANDROID_NDK_HOME:-}}}
@@ -552,8 +648,8 @@ action_start() {
         local revision
         revision=$(local_ndk_revision "$local_ndk")
         if [ -n "$revision" ] && [ "$revision" != "$probed_revision" ] &&
-           [ "${WC3_PC_ALLOW_VERSION_MISMATCH:-0}" != 1 ]; then
-            die "PC NDK $probed_revision does not match local NDK $revision; set WC3_PC_ALLOW_VERSION_MISMATCH=1 to override"
+           [ "$allow_mismatch" != 1 ]; then
+            die "$name NDK $probed_revision does not match local NDK $revision; set $allow_mismatch_env=1 to override"
         fi
     fi
 
@@ -565,35 +661,35 @@ action_start() {
     [ "$local_slots" -gt "$cap" ] 2>/dev/null && local_slots=$cap
     [ "$local_slots" -ge 1 ] 2>/dev/null || local_slots=1
 
-    remote_slots=${slots_arg:-${pc_slots_env:-0}}
+    remote_slots=${slots_arg:-${slots_env:-0}}
     if [ "$remote_slots" -le 0 ] 2>/dev/null; then
         remote_slots=$probed_cpus
     fi
     [ "$remote_slots" -gt 0 ] 2>/dev/null ||
-        die 'the PC reported no CPU count; set WC3_PC_SLOTS or --slots'
+        die "$name reported no CPU count; set WC3_IDEAPAD_SLOTS, WC3_PC_SLOTS or --slots"
 
     local local_port
-    local_port=${WC3_PC_LOCAL_PORT:-$(free_port)}
+    local_port=${local_port_env:-$(free_port)}
 
     write_daemon "$probed_ndk" "$probed_distccd" "$remote_slots"
     ssh_run "cmd /c mkdir $remote_dir" >/dev/null 2>&1 || true
     "$scp_bin" -F "$config_file" -o BatchMode=yes \
         -o ConnectTimeout="${WC3_PC_CONNECT_TIMEOUT:-8}" \
-        "$daemon_file" "$alias_name:$remote_dir/pc-daemon.cmd" >/dev/null 2>&1 ||
+        "$daemon_file" "$alias_name:$remote_dir/$prefix-daemon.cmd" >/dev/null 2>&1 ||
         die 'could not upload the remote daemon script with scp'
     # Remove a daemon left by a crashed tunnel.  The one-build rule applies to
-    # the PC worker just as it does to IDEAPAD and the phone.  Keep cmd-style
-    # redirection out of the remote string: the PC login shell can be
-    # PowerShell, which would try to open a file named "nul".
+    # every worker.  Keep cmd-style redirection out of the remote string: the
+    # peer login shell can be PowerShell, which would try to open a file named
+    # "nul".
     ssh_run 'cmd /c taskkill /F /IM distccd.exe' >/dev/null 2>&1 || true
 
-    : > "$state_dir/pc-tunnel.out.log"
-    : > "$state_dir/pc-tunnel.err.log"
+    : > "$state_dir/$prefix-tunnel.out.log"
+    : > "$state_dir/$prefix-tunnel.err.log"
     "$ssh_bin" -F "$config_file" -o BatchMode=yes -o ExitOnForwardFailure=yes \
         -o ConnectTimeout="${WC3_PC_CONNECT_TIMEOUT:-8}" -o ServerAliveInterval=15 \
         -L "127.0.0.1:$local_port:127.0.0.1:$remote_port" \
-        "$alias_name" "cmd /c $remote_dir\\pc-daemon.cmd" \
-        </dev/null >"$state_dir/pc-tunnel.out.log" 2>"$state_dir/pc-tunnel.err.log" &
+        "$alias_name" "cmd /c $remote_dir\\$prefix-daemon.cmd" \
+        </dev/null >"$state_dir/$prefix-tunnel.out.log" 2>"$state_dir/$prefix-tunnel.err.log" &
     local tunnel_pid=$!
 
     local ready=0 i=0
@@ -613,14 +709,15 @@ action_start() {
         wait "$tunnel_pid" 2>/dev/null || true
         ssh_run 'cmd /c taskkill /F /IM distccd.exe' >/dev/null 2>&1 || true
         local detail
-        detail=$(tail -n 4 "$state_dir/pc-tunnel.err.log" 2>/dev/null | tr '\n' ' ')
-        [ -n "$detail" ] || detail=$(tail -n 4 "$state_dir/pc-tunnel.out.log" 2>/dev/null | tr '\n' ' ')
+        detail=$(tail -n 4 "$state_dir/$prefix-tunnel.err.log" 2>/dev/null | tr '\n' ' ')
+        [ -n "$detail" ] || detail=$(tail -n 4 "$state_dir/$prefix-tunnel.out.log" 2>/dev/null | tr '\n' ' ')
         die "distcc tunnel did not come up: $detail"
     fi
 
     umask 077
     cat > "$state_file" <<EOF
 WC3_PC_STATUS=ready
+WC3_PC_WORKER=$worker
 WC3_PC_TARGET=$(printf '%q' "$target")
 WC3_PC_USER=$(printf '%q' "$ssh_user")
 WC3_PC_SSH_PORT=$ssh_port
@@ -702,7 +799,7 @@ action=${1:-start}
 json=0
 case "$action" in
     -h|--help|help)
-        sed -n '2,22p' "$0"
+        sed -n '2,25p' "$0"
         exit 0
         ;;
     resolve)

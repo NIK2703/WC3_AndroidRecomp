@@ -15,10 +15,10 @@ protocol in `compile_one.py` (IDEAPAD only). If the phone's `sshd` is down,
 root `su`; the phone stays optional either way.
 
 The same scripts also run in the opposite direction: a Termux phone can use the
-desktop PC as its distcc worker. The POSIX native targets `build_app.sh`,
-`build_apk.sh`, `build_dxvk.sh` and `build_adrenotools.sh` start that tunnel
-automatically on the phone; see
-[Termux client to desktop PC worker](#termux-client-to-desktop-pc-worker).
+ideapad laptop, the ideacentre desktop, or both as its distcc workers. The
+POSIX native targets `build_app.sh`, `build_apk.sh`, `build_dxvk.sh` and
+`build_adrenotools.sh` start every reachable worker automatically on the phone;
+see [Termux client to worker machines](#termux-client-to-worker-machines).
 
 IDEAPAD runs the same NDK at the same absolute path and produces byte-identical
 objects. The phone runs the native aarch64 build of the same NDK revision; its
@@ -38,6 +38,7 @@ The scripts read the capacity of every machine instead of using a fixed split:
 | hotspot phone | boosted top-app `Cpus_allowed_list`, else `nproc` | 6-8, or 3 without root |
 | Termux phone client | `nproc` (capped by its own cpuset) | 5-7 |
 | desktop PC worker | remote logical CPU count via PowerShell | 4 |
+| laptop worker | remote logical CPU count via PowerShell (12 here) | 12 |
 | Ninja | local + whichever workers are available | 4-24 |
 
 `build_dist.ps1` writes:
@@ -449,93 +450,115 @@ not start a project build by themselves.
   phone not opted in they are local; `WC3_DIST_PHONE_OPTIMIZED=1` enables the
   phone-only LTO path. PGO profile-use remains local on the phone.
 
-## Termux client to desktop PC worker
+## Termux client to worker machines
 
-The POSIX launchers can distribute clang to the desktop PC instead of only
-receiving work from it. `tools/android/build_app.sh` calls
-`tools/dist/distcc_env.sh` after the GameActivity AAR checks and before the
-dependency builds, so the corpus, DXVK and adrenotools all use the same worker.
-`build_dxvk.sh` and `build_adrenotools.sh` also enable it when invoked on their
-own; when called from `build_app.sh` they detect the already-active parent
-transport and reuse it rather than opening a second tunnel. `build_apk.sh`
-inherits the same path through `build_app.sh`. The PC is optional: if it is
-missing, unreachable or has the wrong NDK, the build runs locally with no
-change in sources or flags.
+The POSIX launchers can distribute clang to the ideapad laptop and the
+ideacentre desktop instead of only receiving work from them.
+`tools/android/build_app.sh` calls `tools/dist/distcc_env.sh` after the
+GameActivity AAR checks and before the dependency builds, so the corpus, DXVK
+and adrenotools all use the same workers. `build_dxvk.sh` and
+`build_adrenotools.sh` also enable them when invoked on their own; when called
+from `build_app.sh` they detect the already-active parent transport and reuse
+it rather than opening a second tunnel. `build_apk.sh` inherits the same path
+through `build_app.sh`. Workers are independent and optional: if one is
+missing, unreachable, has the wrong NDK or has no `distccd`, the build still
+uses the other worker and the local slots.
 
 One-time setup on the phone:
 
 ```sh
 pkg install -y openssh distcc ccache
 cd /storage/emulated/0/Projects/wc3_android_recomp
-tools/dist/pc_tunnel.sh setup-key
+tools/dist/pc_tunnel.sh setup-key --worker ideapad
+tools/dist/pc_tunnel.sh setup-key --worker pc
 ```
 
-`setup-key` creates `~/.ssh/id_wc3_pc` if needed and copies the public key with
-`ssh-copy-id`; enter the Windows account password when asked. If that copy
-fails, a PowerShell fallback writes both
-`%USERPROFILE%\.ssh\authorized_keys` and, when the directory is accessible,
+The laptop defaults to `~/.ssh/id_ideapad` and falls back to
+`~/.ssh/id_wc3_pc` when that file is absent; the desktop uses
+`~/.ssh/id_wc3_pc`. `setup-key` creates the key if needed and copies the public
+key with `ssh-copy-id`; enter the Windows account password when asked. If that
+copy fails, a PowerShell fallback writes both `%USERPROFILE%\.ssh\authorized_keys`
+and, when the directory is accessible,
 `%ProgramData%\ssh\administrators_authorized_keys`; it can ask for the password
-again. If both automatic paths fail, add `~/.ssh/id_wc3_pc.pub` to the
-appropriate file on the PC, using an elevated PowerShell for
+again. If both automatic paths fail, add `<key>.pub` to the appropriate file on
+the worker, using an elevated PowerShell for
 `%ProgramData%\ssh\administrators_authorized_keys`. Every later start is
-non-interactive.
+non-interactive. A pre-existing key can be selected with `WC3_IDEAPAD_KEY` or
+`WC3_PC_KEY`.
 
-The PC needs an OpenSSH server, the same NDK revision as the phone, and a
+Each worker needs an OpenSSH server, the same NDK revision as the phone, and a
 `distccd.exe`. The probe checks `ANDROID_NDK_ROOT`/`ANDROID_NDK_HOME`, the usual
 SDK locations (`%LOCALAPPDATA%\Android\Sdk`, `C:\Android\Sdk`,
 `E:\Android\Sdk`, ...), and the usual MSYS2, `%USERPROFILE%\.local\bin` and
 `E:\wc3-dist\bin` distccd locations. Override a non-standard layout with
-`WC3_PC_REMOTE_NDK` and
-`WC3_PC_DISTCCD`; the local NDK is checked against the PC `Pkg.Revision`
-unless `WC3_PC_ALLOW_VERSION_MISMATCH=1` is set.
+`WC3_IDEAPAD_REMOTE_NDK`/`WC3_PC_REMOTE_NDK` and
+`WC3_IDEAPAD_DISTCCD`/`WC3_PC_DISTCCD`; the local NDK is checked against the
+worker's `Pkg.Revision` unless `WC3_IDEAPAD_ALLOW_VERSION_MISMATCH=1` or
+`WC3_PC_ALLOW_VERSION_MISMATCH=1` is set.
 
-The PC is never addressed by a stored IPv4 address. On every start
-`pc_resolve.py` reads the IPv6/IPv4 neighbour table, matches the PC's Ethernet
-MAC (`d0:37:45:3b:03:b4` by default) and probes SSH. It prefers the IPv6
-link-local address with the interface zone, which is also the form used for
-the SSH config. A new DHCP lease or link-local address is picked up on the next
-start. `WC3_PC_MAC`, `WC3_PC_IFACE`, `WC3_PC_HOST`, `WC3_PC_IPV6` and
-`WC3_PC_IPV4` are diagnostic overrides; none is required.
+No worker is addressed by a stored IPv4 address. On every start
+`pc_resolve.py` reads the IPv6/IPv4 neighbour table, matches the laptop MAC
+(`5c:61:99:28:ea:27`) or the desktop Ethernet MAC (`d0:37:45:3b:03:b4`) and
+probes SSH. It prefers the IPv6 link-local address with the interface zone,
+which is also the form used for the SSH config. A new DHCP lease or link-local
+address is picked up on the next start. The last successful address is kept in
+`~/.wc3-dist/ideapad.host` or `~/.wc3-dist/pc.host` and retried after MAC
+discovery; the cache is only a fallback, not the identity. `WC3_IDEAPAD_HOST` and `WC3_PC_HOST` are temporary diagnostic
+overrides that bypass discovery; `WC3_IDEAPAD_MAC`, `WC3_PC_MAC`,
+`WC3_IDEAPAD_IFACE`, `WC3_PC_IFACE`, `WC3_IDEAPAD_IPV6`, `WC3_PC_IPV6`,
+`WC3_IDEAPAD_IPV4` and `WC3_PC_IPV4` are the remaining per-worker overrides.
+None is required.
 
 ```sh
-# inspect the resolved address without logging in to the PC
+# inspect the resolved address without logging in to a worker
 tools/dist/pc_tunnel.sh resolve --json
+tools/dist/pc_tunnel.sh resolve --worker ideapad --json
 
-# start/stop the worker manually
-tools/dist/pc_tunnel.sh start
-tools/dist/pc_tunnel.sh status --json
-tools/dist/pc_tunnel.sh stop
+# start/stop one worker manually
+tools/dist/pc_tunnel.sh start --worker ideapad
+tools/dist/pc_tunnel.sh status --worker ideapad --json
+tools/dist/pc_tunnel.sh stop --worker ideapad
 
-# build with the worker, or force one local invocation
+# build with every reachable worker (the default; WC3_DIST_AUTO=0 forces local)
 tools/android/build_app.sh --variant release
 tools/android/build_dxvk.sh --variant debug
 tools/android/build_adrenotools.sh
-tools/android/build_app.sh --variant release --no-dist
 ```
 
-The automatic path uses every local CPU slot plus every PC core. The PC slot
-count is the larger of `NUMBER_OF_PROCESSORS` and .NET `ProcessorCount`.
-`WC3_DIST_LOCAL_SLOTS`, `WC3_PC_SLOTS` and `WC3_DIST_JOBS` override the split,
-total, and total Ninja job count; leaving them unset uses all available CPU
-cores. There is no fixed 12-job default in the DXVK target on either host. The
-worker address is `127.0.0.1:<local-port>` through an SSH `-L` forward to a
-distccd bound to `127.0.0.1` on the PC, so the daemon is not exposed to the
-LAN. `wc3_dist_cc.py` sends `clang`/`clang++` by basename; the PC daemon finds
-its own NDK through `PATH`, and small local shims answer distcc's local
-preprocessing and local retry. The original local `--sysroot` is kept: it is
-not used for preprocessed code generation, and a failed remote job can retry
-locally without path rewriting. On a standalone target, `--no-dist` or
-`WC3_DIST_AUTO=0` disables the automatic worker; `build_app.sh --no-dist`
-propagates the same setting to its DXVK and adrenotools children. An inherited
-transport is removed as well, so a nested `--no-dist` target cannot keep using
-a parent's `CCACHE_PREFIX`/`DISTCC_HOSTS` by accident.
+`wc3_dist_enable` starts the laptop and the desktop independently, then builds
+`DISTCC_HOSTS` from one loopback term per ready worker plus the local slots.
+The automatic path uses every local CPU slot plus every reachable worker's
+probed slots; the total Ninja job count is that sum. Each worker reports its
+own logical CPU count: the current laptop reports 12 and the desktop 4.
+`WC3_DIST_WORKERS=ideapad` (or `pc,ideapad`) is an explicit list and takes
+precedence over the per-worker toggles; when it is unset,
+`WC3_DIST_IDEAPAD=0` and `WC3_DIST_PC=0` disable one worker.
+`WC3_DIST_LOCAL_SLOTS`, `WC3_IDEAPAD_SLOTS`, `WC3_PC_SLOTS` and
+`WC3_DIST_JOBS` override the local split, a worker's slot count, and the total
+Ninja job count. Leaving them unset uses all local CPU cores and each worker's
+probed count. There is no fixed 12-job default in the DXVK
+target on either host. Each worker address is `127.0.0.1:<local-port>` through
+its own SSH `-L` forward to a distccd bound to `127.0.0.1` on that worker, so
+the daemons are not exposed to the LAN. `wc3_dist_cc.py` sends `clang`/`clang++`
+by basename; each daemon finds its own NDK through `PATH`, and small local shims
+answer distcc's local preprocessing and local retry. The original local
+`--sysroot` is kept: it is not used for preprocessed code generation, and a
+failed remote job can retry locally without path rewriting. The app and APK
+entries probe the workers by default and have no `--jobs` or `--no-dist`
+switch; `WC3_DIST_AUTO=0` forces a local build. On a standalone DXVK or
+adrenotools target, `--no-dist` or `WC3_DIST_AUTO=0` does the same. In every
+case an inherited transport is removed as well, so a nested auto-disabled
+target cannot keep using a parent's `CCACHE_PREFIX`/`DISTCC_HOSTS` by
+accident.
 
-State and logs live in `~/.wc3-dist` (`WC3_DIST_STATE_DIR` overrides it):
-`pc-tunnel.env`, `pc-ssh.conf`, `pc-tunnel.err.log` and the local
-`client.log`. Use `WC3_DIST_DEBUG=1` for the wrapper log. Only one distributed
-build may run at a time: `stop` and a stale-start cleanup run
-`taskkill /F /IM distccd.exe` on the PC. Do not start a second build while the
-first one owns the worker.
+State and logs live in `~/.wc3-dist` (`WC3_DIST_STATE_DIR` overrides it), one
+set per worker: `ideapad-tunnel.env`, `ideapad-ssh.conf`, `ideapad.host`,
+`ideapad-tunnel.err.log`, `ideapad-probe.ps1` and `ideapad-daemon.cmd`, with
+the same `pc-*` names for the desktop, plus the local `client.log`. Use
+`WC3_DIST_DEBUG=1` for the wrapper log. Only one distributed build may run at a
+time. `stop` and a stale-start cleanup run `taskkill /F /IM distccd.exe` on the
+affected worker only. Do not start a second build while the first one owns the
+workers.
 
 ## Limits
 

@@ -8,10 +8,13 @@
 # and config/debug_tags.txt.
 #
 # Usage:
-#   tools/android/build_app.sh [--variant debug] [--jobs N]
+#   tools/android/build_app.sh [--variant debug]
 #                              [--corpus build/corpus-full] [--aar <file>]
 #                              [--ndk <dir>] [--cmake-args "<args>"] [--no-deps]
-#                              [--no-dist]
+#
+# By default the native job count is derived from the reachable distcc
+# workers; WC3_DIST_AUTO=0 forces a local build.  There is no --jobs or
+# --no-dist switch.
 #
 # Exit codes: 0 built, 1 failure, 2 unavailable (SDK/NDK/CMake/AAR).
 set -euo pipefail
@@ -21,20 +24,16 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 variant=debug
 jobs=""
-jobs_explicit=0
 corpus=build/corpus-full
 aar=""
 ndk_arg=""
 no_deps=0
-no_dist=0
 cmake_args=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --variant) variant=${2:-}; shift 2 ;;
         --variant=*) variant=${1#*=}; shift ;;
-        --jobs) jobs=${2:-}; jobs_explicit=1; shift 2 ;;
-        --jobs=*) jobs=${1#*=}; jobs_explicit=1; shift ;;
         --corpus) corpus=${2:-}; shift 2 ;;
         --corpus=*) corpus=${1#*=}; shift ;;
         --aar) aar=${2:-}; shift 2 ;;
@@ -44,21 +43,20 @@ while [ $# -gt 0 ]; do
         --cmake-args) read -r -a _extra <<<"${2:-}"; cmake_args+=(${_extra[@]+"${_extra[@]}"}); shift 2 ;;
         --cmake-args=*) read -r -a _extra <<<"${1#*=}"; cmake_args+=(${_extra[@]+"${_extra[@]}"}); shift ;;
         --no-deps) no_deps=1; shift ;;
-        --no-dist) no_dist=1; shift ;;
-        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
         *) echo "build_app.sh: unknown argument: $1" >&2; exit 1 ;;
     esac
 done
 case "$variant" in release|debug) ;;
     *) echo "build_app.sh: bad variant: $variant" >&2; exit 1 ;;
 esac
-if [ "$no_dist" = 1 ]; then
-    # Child targets source the same helper; without this they could start a
-    # worker that this invocation explicitly asked to avoid.
-    export WC3_DIST_AUTO=0
-fi
+# Probe the configured distcc workers (ideapad and ideacentre) by default.
+# WC3_DIST_AUTO=0 is the documented local-build escape hatch; keep it and
+# discard any transport inherited from a parent build.
+: "${WC3_DIST_AUTO:=1}"
+export WC3_DIST_AUTO
 . "$root/tools/dist/distcc_env.sh"
-if [ "$no_dist" = 1 ] || [ "${WC3_DIST_AUTO:-1}" = 0 ]; then
+if [ "$WC3_DIST_AUTO" = 0 ]; then
     wc3_dist_clear_env
 fi
 is_debug=0; [ "$variant" = debug ] && is_debug=1
@@ -97,11 +95,9 @@ if [ "$WC3_IS_WINDOWS" = 1 ]; then
         ps_args+=(-CorpusRoot "$(wc3_win_arg_path "$(wc3_abs "$corpus")")")
     [ -n "$aar" ] &&
         ps_args+=(-GamesActivityAar "$(wc3_win_arg_path "$(wc3_abs "$aar")")")
-    # Leave the native job count unset by default so build_app.ps1 can use
-    # every local and distributed slot.  An explicit --jobs still caps it.
-    [ "$jobs_explicit" = 1 ] && ps_args+=(-NativeBuildArgs "-j $jobs")
+    # Leave the native job count unset so build_app.ps1 can use every local
+    # and distributed slot.
     [ "${#cmake_args[@]}" -gt 0 ] && ps_args+=(-CMakeArgs "${cmake_args[*]}")
-    [ "$no_dist" = 1 ] && export WC3_DIST_AUTO=0
     wc3_delegate_ps1 tools/android/build_app.ps1 "${ps_args[@]}"
     exit $?
 fi
@@ -159,18 +155,19 @@ if [ ! -d "$ga/prefab" ] || [ "$aar" -nt "$ga/prefab" ]; then
     "$python" -m zipfile -e "$aar" "$ga"
 fi
 
-# Start the desktop-PC distcc worker before the dependency builds so DXVK,
-# adrenotools and the corpus all share it.  The PC is optional: an unreachable
+# Start the distcc workers before the dependency builds so DXVK, adrenotools
+# and the corpus all share them.  Every worker is optional: an unreachable
 # worker leaves the exact same build running locally.
-if [ "$no_dist" = 0 ] && [ "$WC3_IS_WINDOWS" = 0 ]; then
+if [ "$WC3_IS_WINDOWS" = 0 ]; then
     WC3_DIST_NDK_ROOT=${WC3_DIST_NDK_ROOT:-$ndk}
     export WC3_DIST_NDK_ROOT
     if wc3_dist_enable "$variant"; then
         trap 'wc3_dist_cleanup' EXIT
         [ -n "$jobs" ] || jobs=$WC3_DIST_JOBS_EFFECTIVE
     else
-        # The parent already probed the PC.  Do not make every nested target
-        # repeat the same timeout; a standalone target still probes normally.
+        # The parent already probed the workers and found none usable.  Keep
+        # the local fallback for this invocation and do not make every nested
+        # target repeat the same timeout; a standalone target still probes.
         export WC3_DIST_AUTO=0
     fi
 fi
@@ -191,9 +188,9 @@ if [ "$no_deps" = 0 ]; then
     if [ -z "${WC3_ADRENOTOOLS_DIR:-}" ] &&
        { [ ! -f "$adrenotools_dir/libadrenotools.a" ] ||
          [ ! -f "$adrenotools_dir/liblinkernsbypass.a" ]; }; then
-        "$root/tools/android/build_adrenotools.sh" --jobs "$jobs"
+        "$root/tools/android/build_adrenotools.sh"
     fi
-    "$root/tools/android/build_dxvk.sh" --variant "$variant" --jobs "$jobs"
+    "$root/tools/android/build_dxvk.sh" --variant "$variant"
 fi
 for f in libadrenotools.a liblinkernsbypass.a; do
     [ -f "$adrenotools_dir/$f" ] || {

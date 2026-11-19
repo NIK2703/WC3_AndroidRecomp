@@ -168,23 +168,30 @@ tools/android/build_app.sh
 tools/android/build_apk.sh --install --launch
 ```
 
-On Termux these launchers can also distribute clang to the desktop PC, using
-the PC as a distcc worker over an SSH tunnel. The PC is found by MAC on every
-start, so no IPv4 address is stored. One-time setup is needed before the first
-distributed build:
+On Termux these launchers can also distribute clang to two optional distcc
+workers: the `ideapad` laptop and the `ideacentre` desktop. Each worker reports
+its own logical CPU count (currently 12 and 4). Both are found by MAC on every
+start, so no IPv4 address is stored and a new DHCP lease is picked up
+automatically. One-time setup is needed per worker, before the first distributed
+build:
 
 ```sh
-tools/dist/pc_tunnel.sh setup-key
+tools/dist/pc_tunnel.sh setup-key --worker ideapad
+tools/dist/pc_tunnel.sh setup-key --worker pc
 ```
 
 After that every native POSIX target (`build_app.sh`, `build_apk.sh`,
-`build_dxvk.sh`, and `build_adrenotools.sh`) starts the worker automatically
-when it is reachable and falls back to a local build otherwise. A nested target
-inherits the parent's tunnel instead of opening a second one. By default each
-machine contributes all of its available cores: every local CPU on the phone
-plus every PC core. Pass `--no-dist` to force one local invocation and keep
-nested targets local too. See `tools/dist/README.md` for the PC prerequisites,
-slot overrides and state files.
+`build_dxvk.sh`, and `build_adrenotools.sh`) starts every reachable worker and
+shares them between the corpus and dependency builds. A nested target inherits
+the parent's tunnels instead of opening a second set. By default each machine
+contributes all of its available cores: every local CPU on the phone plus every
+laptop and desktop core. Either worker may be skipped with
+`WC3_DIST_IDEAPAD=0` or `WC3_DIST_PC=0`, and `WC3_DIST_WORKERS=ideapad`
+selects an explicit subset. By default the app and APK entries probe the
+workers and derive the job count from the reachable slots; `WC3_DIST_AUTO=0`
+forces a local build. There is no `--jobs` or `--no-dist` switch. See
+`tools/dist/README.md` for the worker prerequisites, slot overrides and state
+files.
 
 On Termux/Linux/macOS they discover the SDK, NDK, JDK, Gradle, CMake, Ninja,
 and ccache from the host layout, build missing lift tools, DXVK archives, and

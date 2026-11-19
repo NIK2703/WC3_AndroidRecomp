@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Resolve the desktop distcc worker without a fixed IP address.
+"""Resolve a distcc worker without a fixed IP address.
 
-The worker is a Windows PC on the same link as this host.  Its DHCP lease can
-change, so the only stable identity used here is its Ethernet MAC address.
-The resolver reads the IPv6/IPv4 neighbour table, prefers an IPv6 link-local
+The workers are Windows machines on the same link as this host.  Their DHCP
+leases can change, so the stable identity is the Ethernet MAC address.  The
+resolver reads the IPv6/IPv4 neighbour table, prefers an IPv6 link-local
 address, and returns it together with the interface zone (``fe80::1%wlan0``)
 so ``ssh`` can use it directly.  Android hides the neighbour table from
 ordinary apps; when root ``su`` is available the table is read through it.
@@ -11,10 +11,18 @@ If the table has no entry yet, an optional TCP scan of the local IPv4 subnet
 finds hosts with the SSH port open and keeps only an address whose neighbour
 entry carries the configured MAC.  A wrong host is therefore never selected.
 
+The known names have their own MAC defaults: ``ideacentre`` (the desktop) and
+``ideapad`` (the laptop).  ``--mac ''`` disables MAC matching for a host that
+is found by DNS name or by its last known address.  ``--cache FILE`` remembers
+the last resolved address and retries it after neighbour discovery; MAC
+matching still applies.  The file is rewritten after every successful resolve,
+so a changed lease is picked up without storing an address in the source tree.
+
 Run manually:
 
-    python3 tools/dist/pc_resolve.py --mac d0:37:45:3b:03:b4
-    python3 tools/dist/pc_resolve.py --json
+    python3 tools/dist/pc_resolve.py --name ideacentre --json
+    python3 tools/dist/pc_resolve.py --name ideapad --json
+    python3 tools/dist/pc_resolve.py --name ideapad --cache ~/.wc3-dist/ideapad.host
 
 Exit codes: 0 resolved, 3 not found, 2 usage/error.
 """
@@ -31,6 +39,8 @@ import sys
 import threading
 
 DEFAULT_MAC = "d0:37:45:3b:03:b4"
+DEFAULT_IDEAPAD_MAC = "5c:61:99:28:ea:27"
+DEFAULT_MACS = {"ideacentre": DEFAULT_MAC, "ideapad": DEFAULT_IDEAPAD_MAC}
 DEFAULT_NAME = "ideacentre"
 IP_TOOL = "/system/bin/ip" if os.path.exists("/system/bin/ip") else "ip"
 
@@ -59,6 +69,38 @@ def mac_to_eui64(mac):
     eui = parts[0:3] + [0xFF, 0xFE] + parts[3:6]
     groups = ["%02x%02x" % (eui[i], eui[i + 1]) for i in range(0, 8, 2)]
     return "fe80::" + ":".join(groups).lstrip(":")
+
+
+def cache_candidates(path):
+    """Return addresses from a last-known-address file, newest first."""
+    if not path:
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return [line.strip() for line in handle
+                    if line.strip() and not line.lstrip().startswith("#")]
+    except OSError:
+        return []
+
+
+def remember(path, address):
+    """Persist a resolved address for the next start."""
+    if not path:
+        return
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(address + "\n")
+        os.replace(temporary, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        pass
 
 
 def run(command, timeout=3.0):
@@ -324,12 +366,38 @@ def scan_subnet(iface, port, timeout, workers, mac):
 
 
 def resolve(args):
-    mac = norm_mac(args.mac)
-    if not mac:
+    mac = norm_mac(args.mac) if args.mac else None
+    if args.mac and not mac:
         raise SystemExit("pc_resolve: invalid MAC address: %s" % args.mac)
     iface = choose_iface(args.iface)
     if not iface:
         raise SystemExit("pc_resolve: no local network interface with IPv4")
+
+    def found(address, source):
+        result = {
+            "address": address,
+            "family": "ipv6" if ":" in address else "ipv4",
+            "iface": iface,
+            "mac": mac or "",
+            "source": source,
+        }
+        remember(args.cache, address)
+        return result
+
+    def neighbour_addresses():
+        table = neighbor_table(iface)
+        matches = [address for address, entry_mac in table
+                   if mac and entry_mac == mac]
+        matches.sort(key=lambda a: (0 if is_link_local(a) else 1,
+                                    ":" not in a))
+        return matches
+
+    def matches_mac(address):
+        if not mac:
+            return True
+        bare = address.split("%", 1)[0].lower()
+        return any(addr.split("%", 1)[0].lower() == bare and entry_mac == mac
+                   for addr, entry_mac in neighbor_table(iface))
 
     explicit = []
     if args.host:
@@ -342,86 +410,71 @@ def resolve(args):
     for address in explicit:
         hit = probe(address, args.port, args.timeout, iface)
         if hit:
-            return {
-                "address": hit,
-                "family": "ipv6" if ":" in hit else "ipv4",
-                "iface": iface,
-                "mac": mac,
-                "source": "override",
-            }
+            return found(hit, "override")
 
-    table = neighbor_table(iface)
-    matches = [address for address, entry_mac in table if entry_mac == mac]
-    matches.sort(key=lambda a: (0 if is_link_local(a) else 1, ":" not in a))
-    for address in matches:
+    for address in neighbour_addresses():
         hit = probe(address, args.port, args.timeout, iface)
         if hit:
-            return {
-                "address": hit,
-                "family": "ipv6" if ":" in hit else "ipv4",
-                "iface": iface,
-                "mac": mac,
-                "source": "neighbour",
-            }
+            return found(hit, "neighbour")
 
     for address in dns_candidates(args.name):
         hit = probe(address, args.port, args.timeout, iface)
         if not hit:
             continue
-        bare = hit.split("%", 1)[0].lower()
-        table = neighbor_table(iface)
-        if any(addr.split("%", 1)[0].lower() == bare and entry_mac == mac
-               for addr, entry_mac in table):
-            return {
-                "address": hit,
-                "family": "ipv6" if ":" in hit else "ipv4",
-                "iface": iface,
-                "mac": mac,
-                "source": "name+neighbour",
-            }
+        if mac:
+            if matches_mac(hit):
+                return found(hit, "name+neighbour")
+        else:
+            return found(hit, "name")
 
-    derived = mac_to_eui64(mac)
-    hit = probe(derived, args.port, args.timeout, iface)
-    if hit:
-        return {
-            "address": hit,
-            "family": "ipv6",
-            "iface": iface,
-            "mac": mac,
-            "source": "mac-eui64",
-        }
+    if mac:
+        derived = mac_to_eui64(mac)
+        hit = probe(derived, args.port, args.timeout, iface)
+        if hit:
+            return found(hit, "mac-eui64")
 
-    if args.scan != "never":
+    for address in cache_candidates(args.cache):
+        hit = probe(address, args.port, args.timeout, iface)
+        if not hit:
+            continue
+        if mac:
+            if matches_mac(hit):
+                return found(hit, "cache+neighbour")
+        else:
+            return found(hit, "cache")
+
+    if mac and args.scan != "never":
         scan_subnet(iface, args.port, min(args.timeout, 0.4), 32, mac)
 
-    table = neighbor_table(iface)
-    matches = [address for address, entry_mac in table if entry_mac == mac]
-    matches.sort(key=lambda a: (0 if is_link_local(a) else 1, ":" not in a))
-    for address in matches:
+    for address in neighbour_addresses():
         hit = probe(address, args.port, args.timeout, iface)
         if hit:
-            return {
-                "address": hit,
-                "family": "ipv6" if ":" in hit else "ipv4",
-                "iface": iface,
-                "mac": mac,
-                "source": "scan",
-            }
+            return found(hit, "scan" if mac and args.scan != "never"
+                         else "neighbour")
 
+    if mac:
+        detail = "no host with MAC %s answered on port %d (%s)" % (
+            mac, args.port, iface)
+    else:
+        detail = "no host named %s or cached address answered on port %d (%s)" % (
+            args.name, args.port, iface)
     raise SystemExit(
-        "pc_resolve: no host with MAC %s answered on port %d (%s); "
-        "set WC3_PC_HOST or WC3_PC_IPV6 explicitly" %
-        (mac, args.port, iface))
+        "pc_resolve: %s; set WC3_PC_HOST, WC3_IDEAPAD_HOST or --host explicitly"
+        % detail)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mac", default=env("WC3_PC_MAC", DEFAULT_MAC))
+    # Keep None distinct from an explicit empty --mac: empty disables MAC
+    # matching for a name/cache-only worker such as a laptop with an unknown
+    # adapter MAC.
+    parser.add_argument("--mac", default=None)
     parser.add_argument("--iface", default=env("WC3_PC_IFACE"))
     parser.add_argument("--host", default=env("WC3_PC_HOST"))
     parser.add_argument("--ipv6", default=env("WC3_PC_IPV6"))
     parser.add_argument("--ipv4", default=env("WC3_PC_IPV4"))
     parser.add_argument("--name", default=env("WC3_PC_NAME", DEFAULT_NAME))
+    parser.add_argument("--cache", default=env("WC3_PC_CACHE"))
     parser.add_argument("--port", type=int,
                         default=int(env("WC3_PC_SSH_PORT", "22")))
     parser.add_argument("--timeout", type=float, default=2.0)
@@ -429,6 +482,15 @@ def main():
                         default=env("WC3_PC_SCAN", "auto"))
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    if args.mac is None:
+        args.mac = env("WC3_PC_MAC")
+    if args.mac is None:
+        args.mac = DEFAULT_MACS.get(args.name.lower(), DEFAULT_MAC)
+    if args.name.lower() == "ideapad":
+        args.iface = args.iface or env("WC3_IDEAPAD_IFACE")
+        args.host = args.host or env("WC3_IDEAPAD_HOST")
+        args.ipv6 = args.ipv6 or env("WC3_IDEAPAD_IPV6")
+        args.ipv4 = args.ipv4 or env("WC3_IDEAPAD_IPV4")
 
     result = resolve(args)
     if args.json:

@@ -8,10 +8,14 @@
 # PC and in Termux without a second implementation.
 #
 # Usage:
-#   tools/android/build_apk.sh [--variant debug] [--jobs N] [--install]
+#   tools/android/build_apk.sh [--variant debug] [--install]
 #                              [--launch] [--offline] [--skip-native]
 #                              [--aar <file>] [--ndk <dir>]
-#                              [--serial <adb-serial>] [--no-dist]
+#                              [--serial <adb-serial>]
+#
+# By default the native job count is derived from the reachable distcc
+# workers; WC3_DIST_AUTO=0 forces a local build.  There is no --jobs or
+# --no-dist switch.
 #
 # Exit codes: 0 built, 1 failure, 2 unavailable (SDK/JDK/Gradle/AAR).
 set -euo pipefail
@@ -24,9 +28,6 @@ install=0
 launch=0
 offline=0
 skip_native=0
-no_dist=0
-jobs=""
-jobs_explicit=0
 serial=""
 aar_arg=""
 ndk_arg=""
@@ -38,27 +39,26 @@ while [ $# -gt 0 ]; do
         --launch) launch=1; shift ;;
         --offline) offline=1; shift ;;
         --skip-native) skip_native=1; shift ;;
-        --no-dist) no_dist=1; shift ;;
-        --jobs) jobs=${2:-}; jobs_explicit=1; shift 2 ;;
-        --jobs=*) jobs=${1#*=}; jobs_explicit=1; shift ;;
         --serial) serial=${2:-}; shift 2 ;;
         --serial=*) serial=${1#*=}; shift ;;
         --aar) aar_arg=${2:-}; shift 2 ;;
         --aar=*) aar_arg=${1#*=}; shift ;;
         --ndk) ndk_arg=${2:-}; shift 2 ;;
         --ndk=*) ndk_arg=${1#*=}; shift ;;
-        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
         *) echo "build_apk.sh: unknown argument: $1" >&2; exit 1 ;;
     esac
 done
 case "$variant" in release|debug) ;;
     *) echo "build_apk.sh: bad variant: $variant" >&2; exit 1 ;;
 esac
-if [ "$no_dist" = 1 ]; then
-    export WC3_DIST_AUTO=0
-fi
+# Probe the configured distcc workers (ideapad and ideacentre) by default.
+# WC3_DIST_AUTO=0 is the documented local-build escape hatch; keep it and
+# discard any transport inherited from a parent build.
+: "${WC3_DIST_AUTO:=1}"
+export WC3_DIST_AUTO
 . "$root/tools/dist/distcc_env.sh"
-if [ "$no_dist" = 1 ] || [ "${WC3_DIST_AUTO:-1}" = 0 ]; then
+if [ "$WC3_DIST_AUTO" = 0 ]; then
     wc3_dist_clear_env
 fi
 is_debug=0; [ "$variant" = debug ] && is_debug=1
@@ -113,10 +113,9 @@ if [ "$WC3_IS_WINDOWS" = 1 ]; then
     [ -n "$serial" ] && ps_args+=(-Serial "$serial")
     [ -n "$aar_arg" ] &&
         ps_args+=(-GamesActivityAar "$(wc3_win_arg_path "$(wc3_abs "$aar_arg")")")
-    # Leave the native job count unset by default.  build_app.ps1 then uses
+    # Leave the native job count unset.  build_app.ps1 then uses
     # CMAKE_BUILD_PARALLEL_LEVEL from its auto-distribution helper, which
-    # includes every reachable worker; a fixed local -j would cap it.
-    [ "$jobs_explicit" = 1 ] && ps_args+=(-NativeBuildArgs "-j $jobs")
+    # includes every reachable worker.
     wc3_delegate_ps1 tools/android/build_apk.ps1 "${ps_args[@]}"
     exit $?
 fi
@@ -148,8 +147,6 @@ so_src=$out/cmake/libwc3gameactivity.so
 
 if [ "$skip_native" = 0 ]; then
     app_args=(--variant "$variant")
-    [ -n "$jobs" ] && app_args+=(--jobs "$jobs")
-    [ "$no_dist" = 1 ] && app_args+=(--no-dist)
     [ -n "$ndk_arg" ] && app_args+=(--ndk "$ndk_arg")
     [ -n "$aar_arg" ] && app_args+=(--aar "$aar_arg")
     "$root/tools/android/build_app.sh" "${app_args[@]}" || exit 1

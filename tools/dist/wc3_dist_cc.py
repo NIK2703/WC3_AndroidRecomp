@@ -243,6 +243,13 @@ def run_distcc(compiler, args, local_only=False):
     # wrapper already supplies the exact NDK compiler and target; disable all
     # of distcc's cross-compilation rewrites.
     child_env["DISTCC_NO_REWRITE_CROSS"] = "1"
+    # ccache exports UNCACHED_ERR_FD so a compiler can flag an uncached
+    # result.  distcc 3.4 honours the same variable and writes its trace to
+    # that descriptor.  Python closes the descriptor before exec, so distcc's
+    # later socket() reuses the number and its own verbose trace corrupts the
+    # protocol stream.  The wrapper is the compiler from ccache's point of
+    # view and never uses the descriptor, so keep distcc off it.
+    child_env.pop("UNCACHED_ERR_FD", None)
     if local_only:
         try:
             slots = int(env("WC3_DIST_LOCAL_SLOTS", str(os.cpu_count() or 4)))
