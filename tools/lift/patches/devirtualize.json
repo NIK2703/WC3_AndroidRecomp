@@ -1,0 +1,51 @@
+{
+  "schema": 2,
+  "id": "devirtualize",
+  "rev": 1,
+  "description": "P0-1 indirect-call devirtualization; needs the project boot list.",
+  "engine": "devirtualize",
+  "kind": "transform",
+  "mode": "per_chunk",
+  "scope": "all",
+  "order": 14,
+  "after": [
+    "save_list_display"
+  ],
+  "params": {
+    "boot_list": "build/corpus-full/wc3_all_list.h"
+  },
+  "command": {
+    "args": [
+      "--list",
+      "{root}/{boot_list}",
+      "--lift",
+      "{in}",
+      "--out",
+      "{out}",
+      "--json",
+      "{report}"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "verdict",
+      "equals": "pass"
+    },
+    {
+      "kind": "field_equals",
+      "path": "files",
+      "equals": 1
+    },
+    {
+      "kind": "field_equals",
+      "path": "skipped_unknown",
+      "equals": 0
+    },
+    {
+      "kind": "field_equals",
+      "path": "skipped_hle_window",
+      "equals": 0
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "schema": 2,
+  "id": "return_address_elide",
+  "rev": 1,
+  "description": "P0-6 return-address store elision using the global safety map.",
+  "engine": "return_address_elide",
+  "kind": "transform",
+  "mode": "per_chunk",
+  "scope": "all",
+  "order": 16,
+  "after": [
+    "return_address_elide_index",
+    "devirtualize"
+  ],
+  "command": {
+    "args": [
+      "--lift",
+      "{in}",
+      "--out",
+      "{out}",
+      "--json",
+      "{report}",
+      "--index",
+      "{state}/return_address_elide.index",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "pass_id",
+      "equals": "return_address_elide"
+    },
+    {
+      "kind": "field_equals",
+      "path": "files",
+      "equals": 1
+    },
+    {
+      "kind": "field_equals",
+      "path": "skipped_unknown",
+      "equals": 0
+    },
+    {
+      "kind": "field_equals",
+      "path": "skipped_hle",
+      "equals": 0
+    }
+  ]
+}

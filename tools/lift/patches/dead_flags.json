@@ -1,0 +1,37 @@
+{
+  "schema": 2,
+  "id": "dead_flags",
+  "rev": 1,
+  "description": "P0-2 straight-line dead flag-write elimination.",
+  "engine": "dead_flags",
+  "kind": "transform",
+  "mode": "per_chunk",
+  "scope": "all",
+  "order": 18,
+  "after": [
+    "return_address_elide"
+  ],
+  "command": {
+    "args": [
+      "--lift",
+      "{in}",
+      "--out",
+      "{out}",
+      "--json",
+      "{report}",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "pass",
+      "equals": "dead_flags"
+    },
+    {
+      "kind": "field_equals",
+      "path": "totals.errors",
+      "equals": 0
+    }
+  ]
+}

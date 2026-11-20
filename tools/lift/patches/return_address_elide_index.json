@@ -1,0 +1,26 @@
+{
+  "schema": 2,
+  "id": "return_address_elide_index",
+  "rev": 1,
+  "description": "Global return-address safety map consumed by the per-chunk P0-6 stage.",
+  "engine": "return_address_elide",
+  "kind": "prepare",
+  "mode": "once",
+  "scope": "once",
+  "order": 12,
+  "after": [
+    "save_list_display"
+  ],
+  "command": {
+    "args": [
+      "--index-out",
+      "{state}/return_address_elide.index"
+    ],
+    "inputs_args": [
+      "--index-input"
+    ],
+    "outputs": [
+      "{state}/return_address_elide.index"
+    ]
+  }
+}

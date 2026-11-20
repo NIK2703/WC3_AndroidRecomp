@@ -1,0 +1,39 @@
+{
+  "schema": 2,
+  "id": "atomiccheck",
+  "rev": 1,
+  "description": "Whole-corpus gate: every memory xchg/lock RMW must use the atomic helpers.",
+  "engine": "atomiccheck",
+  "kind": "gate",
+  "mode": "once",
+  "scope": "once",
+  "order": 5,
+  "after": [],
+  "command": {
+    "args": [
+      "--require-any",
+      "--report",
+      "{report}"
+    ],
+    "inputs_args": [
+      "--file"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "verdict",
+      "equals": "pass"
+    },
+    {
+      "kind": "field_equals",
+      "path": "violations",
+      "equals": 0
+    },
+    {
+      "kind": "field_equals",
+      "path": "files",
+      "equals_chunk_count": true
+    }
+  ]
+}

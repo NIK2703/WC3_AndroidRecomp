@@ -1,0 +1,43 @@
+{
+  "schema": 2,
+  "id": "leaf_call",
+  "rev": 1,
+  "description": "Whole-corpus batch transform; consumes the current work tree as an input list.",
+  "engine": "leaf_call",
+  "kind": "transform",
+  "mode": "batch",
+  "scope": "all",
+  "order": 50,
+  "after": [
+    "selection24_cap40"
+  ],
+  "output_layout": "flat",
+  "command": {
+    "args": [
+      "--inputs",
+      "{inputs}",
+      "--out-dir",
+      "{out_dir}",
+      "--report",
+      "{report}",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "verdict",
+      "equals": "pass"
+    },
+    {
+      "kind": "field_equals",
+      "path": "inputs",
+      "equals_chunk_count": true
+    },
+    {
+      "kind": "field_equals",
+      "path": "unsafe_callers",
+      "equals": 0
+    }
+  ]
+}

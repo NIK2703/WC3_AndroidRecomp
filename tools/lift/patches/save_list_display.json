@@ -1,0 +1,69 @@
+{
+  "schema": 2,
+  "id": "save_list_display",
+  "rev": 5,
+  "description": "Declared save-list display fix; one marker block belongs to the first target chunk.",
+  "engine": "save_list_display",
+  "kind": "transform",
+  "mode": "per_chunk",
+  "scope": "targets",
+  "order": 10,
+  "after": [],
+  "module": "game",
+  "targets": [
+    {
+      "function": "L_6F2A950C",
+      "sites": 1,
+      "why": "call site 0x6F2A953D inside the caller"
+    },
+    {
+      "function": "L_6F2A953D",
+      "sites": 1,
+      "why": "function entry at 0x6F2A953D"
+    }
+  ],
+  "expect_sites": 2,
+  "command": {
+    "args": [
+      "--lift",
+      "{in}",
+      "--out",
+      "{out}",
+      "--json",
+      "{report}",
+      "--expect-sites",
+      "{sites}"
+    ],
+    "first_chunk_args": [
+      "--marker"
+    ],
+    "other_chunk_args": []
+  },
+  "assertions": [
+    {
+      "kind": "report_pass"
+    },
+    {
+      "kind": "site_count",
+      "path": "files[0].sites",
+      "equals_targets": true
+    },
+    {
+      "kind": "function_coverage",
+      "path": "files[0].functions",
+      "field": "function"
+    },
+    {
+      "kind": "output_changed"
+    },
+    {
+      "kind": "marker_count",
+      "string": "WC3_SAVE_LIST_STRIP_W3Z",
+      "equals": 4
+    },
+    {
+      "kind": "marker_defined_once",
+      "symbol": "wc3_save_list_display_fix_marker"
+    }
+  ]
+}

@@ -1,0 +1,186 @@
+{
+  "schema": 2,
+  "id": "w3l_compat",
+  "rev": 4,
+  "description": "Declared W3L compatibility profile; target set is profile-dependent.",
+  "engine": "w3l_compat",
+  "kind": "transform",
+  "mode": "per_chunk",
+  "scope": "targets",
+  "order": 30,
+  "after": [
+    "xmm_lane"
+  ],
+  "module": "game",
+  "profiles": [
+    "pvpgn",
+    "rubattle"
+  ],
+  "targets": [
+    {
+      "function": "L_6F8DDC80",
+      "sites": 1,
+      "why": "wl27 auth_req",
+      "profiles": [
+        "pvpgn",
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F8DD71D",
+      "sites": 1,
+      "why": "wl27 logon_proof_hash_verify",
+      "profiles": [
+        "pvpgn",
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F9A7DB0",
+      "sites": 1,
+      "why": "wl27 create_account",
+      "profiles": [
+        "pvpgn",
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F8DD290",
+      "sites": 1,
+      "why": "wl27 hash_56",
+      "profiles": [
+        "pvpgn",
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F8DD62D",
+      "sites": 1,
+      "why": "wl27 hash_54",
+      "profiles": [
+        "pvpgn",
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F970FA0",
+      "sites": 1,
+      "why": "wl27 delay_reducer",
+      "profiles": [
+        "pvpgn",
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F094308",
+      "sites": 1,
+      "why": "Android local_auth_308",
+      "profiles": [
+        "pvpgn",
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F094364",
+      "sites": 1,
+      "why": "Android local_auth_364",
+      "profiles": [
+        "pvpgn",
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F094807",
+      "sites": 1,
+      "why": "Android local_auth_checkrev",
+      "profiles": [
+        "pvpgn",
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F09497F",
+      "sites": 1,
+      "why": "Android local_auth_extrawork",
+      "profiles": [
+        "pvpgn",
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F8D3EB0",
+      "sites": 1,
+      "why": "rubattle SID_AUTH_INFO 0x50",
+      "profiles": [
+        "rubattle"
+      ]
+    },
+    {
+      "function": "L_6F8DC630",
+      "sites": 1,
+      "why": "rubattle packet 0x83",
+      "profiles": [
+        "rubattle"
+      ]
+    }
+  ],
+  "expect_sites": {
+    "pvpgn": 10,
+    "rubattle": 12
+  },
+  "command": {
+    "args": [
+      "--profile",
+      "{profile}",
+      "--latency",
+      "{latency}",
+      "--lift",
+      "{in}",
+      "--out",
+      "{out}",
+      "--json",
+      "{report}",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "report_pass"
+    },
+    {
+      "kind": "field_equals",
+      "path": "profile",
+      "equals_param": "profile"
+    },
+    {
+      "kind": "field_equals",
+      "path": "latency",
+      "equals_param": "latency"
+    },
+    {
+      "kind": "status_coverage",
+      "path": "files[0].sites",
+      "function": "function",
+      "status": "status",
+      "applied": [
+        "applied",
+        "already"
+      ],
+      "absent": "absent"
+    },
+    {
+      "kind": "output_changed"
+    }
+  ],
+  "coverage": [
+    "--profile",
+    "{profile}",
+    "--latency",
+    "{latency}",
+    "--verify-coverage"
+  ],
+  "params": {
+    "profile": "rubattle",
+    "latency": "100"
+  }
+}

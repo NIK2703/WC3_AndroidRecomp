@@ -1,0 +1,958 @@
+{
+  "schema": 2,
+  "id": "selection24_cap40",
+  "rev": 49,
+  "description": "Declared selection-cap transform; target functions replace the removed line-number report mapping.",
+  "engine": "selection24",
+  "kind": "transform",
+  "mode": "per_chunk",
+  "scope": "targets",
+  "order": 40,
+  "after": [
+    "w3l_compat"
+  ],
+  "module": "game",
+  "targets": [
+    {
+      "function": "L_6F04D9C0",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F13D62E",
+      "sites": 4,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F146D30",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F14FC40",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F154B60",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F157610",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F15FD50",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F1672D4",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F169220",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F169260",
+      "sites": 11,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F169550",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F169658",
+      "sites": 3,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F169666",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F169910",
+      "sites": 9,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F169C50",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F169D60",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16A010",
+      "sites": 7,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16A120",
+      "sites": 7,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16A5B0",
+      "sites": 5,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16A5F8",
+      "sites": 18,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16A6E0",
+      "sites": 5,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16AB20",
+      "sites": 11,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16ABC0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16ADD0",
+      "sites": 12,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16AFF0",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16B2F0",
+      "sites": 15,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16B500",
+      "sites": 3,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16B53D",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16B77D",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16B780",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16B782",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16B7B0",
+      "sites": 4,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16B8B8",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16B8D0",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BA11",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BA75",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BA86",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BAB0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BB0F",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BB12",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BD37",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BDB0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BDD3",
+      "sites": 8,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BE70",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BF70",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16BFF0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16C077",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16C8E0",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16C907",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16CB80",
+      "sites": 5,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16CF94",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16D270",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16D286",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16D2D3",
+      "sites": 6,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16D2DA",
+      "sites": 5,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16D37D",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16D5D0",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16D61C",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16D810",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16D8B0",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DA10",
+      "sites": 3,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DA3A",
+      "sites": 3,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DAF0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DB70",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DC00",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DC30",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DC50",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DC64",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DC70",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DC90",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DCB0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DD00",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DDB0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DDE0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16DE20",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16E090",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F16E0C0",
+      "sites": 4,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F1CBE60",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F1CBFB0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F28D660",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F28DBE0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F28EB2A",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F28EB31",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F28EB48",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F28EB59",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F28EB6A",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F28EEF0",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F28EF53",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F28EF8F",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F292FF0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F293050",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F390220",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F391977",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F391ACC",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F391ACF",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F3968B0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F39E6D0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F39ED41",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F39ED43",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F3ACCA0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F3C7CF0",
+      "sites": 4,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F3C7D71",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F3C7DD0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F3C7E45",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F3C7E48",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F3DA470",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F67DDDC",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F67DDDF",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6926B0",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F69BD80",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F69D59F",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6B8720",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6B90D0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6B93A0",
+      "sites": 4,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6B98F0",
+      "sites": 3,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6B99CF",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6B9DFA",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6B9DFF",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6B9E48",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6B9E4B",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6B9F70",
+      "sites": 4,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BA439",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BA43E",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BA48A",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BA48F",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BA590",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BA74F",
+      "sites": 4,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BA762",
+      "sites": 4,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BA800",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BA9C3",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BA9CC",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAA57",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAA6C",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAAA0",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAB54",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAB62",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BACCB",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BACD3",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAD5F",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAD67",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BADEF",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BADF7",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAEA6",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAEAB",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAF11",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAF16",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAF5F",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAF62",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BAFCE",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB050",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB0FD",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB10B",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB274",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB27C",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB308",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB310",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB3AC",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB3B4",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB463",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB468",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB4BD",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB4C2",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB50B",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB50E",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB577",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB5F0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BB7A0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BBEB0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BC0F0",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BC7C0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BCA67",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BCA69",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BCA89",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BCA8B",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BCAC6",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BCD30",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6BCEF0",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F6D998C",
+      "sites": 1,
+      "why": "selection24 cap40 declared site(s)"
+    },
+    {
+      "function": "L_6F9C12DF",
+      "sites": 2,
+      "why": "selection24 cap40 declared site(s)"
+    }
+  ],
+  "expect_sites": 348,
+  "command": {
+    "args": [
+      "--struct-cap",
+      "40",
+      "--lift",
+      "{in}",
+      "--out",
+      "{out}",
+      "--json",
+      "{report}",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "report_pass"
+    },
+    {
+      "kind": "field_equals",
+      "path": "struct_cap",
+      "equals_param": "struct_cap"
+    },
+    {
+      "kind": "counts_sum",
+      "path": "counts",
+      "equals_targets": true
+    },
+    {
+      "kind": "array_length",
+      "path": "sites",
+      "equals_targets": true
+    },
+    {
+      "kind": "output_changed"
+    }
+  ],
+  "coverage": {
+    "args": [
+      "--verify-coverage"
+    ],
+    "reports": "manifest"
+  },
+  "params": {
+    "struct_cap": "40"
+  }
+}

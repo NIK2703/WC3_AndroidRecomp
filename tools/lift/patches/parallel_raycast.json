@@ -1,0 +1,74 @@
+{
+  "schema": 2,
+  "id": "parallel_raycast",
+  "rev": 1,
+  "description": "Whole-corpus batch transform after leaf_call; direct-call macros from leaf_call are an input.",
+  "engine": "parallel_raycast",
+  "kind": "transform",
+  "mode": "batch",
+  "scope": "all",
+  "order": 60,
+  "after": [
+    "leaf_call"
+  ],
+  "output_layout": "flat",
+  "command": {
+    "args": [
+      "--inputs",
+      "{inputs}",
+      "--out-dir",
+      "{out_dir}",
+      "--report",
+      "{report}",
+      "--expect-sites",
+      "1",
+      "--vertex",
+      "--expect-vertex-sites",
+      "2",
+      "--triangle",
+      "--expect-triangle-sites",
+      "1",
+      "--vertex-counter",
+      "--expect-vertex-counter-sites",
+      "1",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "verdict",
+      "equals": "ok"
+    },
+    {
+      "kind": "field_equals",
+      "path": "inputs",
+      "equals_chunk_count": true
+    },
+    {
+      "kind": "field_equals",
+      "path": "files_rewritten",
+      "equals": 3
+    },
+    {
+      "kind": "field_equals",
+      "path": "sites_rewritten",
+      "equals": 1
+    },
+    {
+      "kind": "field_equals",
+      "path": "expected_sites",
+      "equals": 1
+    },
+    {
+      "kind": "field_equals",
+      "path": "vertex_functions",
+      "equals": 2
+    },
+    {
+      "kind": "field_equals",
+      "path": "triangle_functions",
+      "equals": 1
+    }
+  ]
+}

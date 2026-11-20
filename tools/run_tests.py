@@ -1299,6 +1299,15 @@ def test_leaf_call_pass() -> int:
     return run_host_tool("leaf_call", ["--self-test"])
 
 
+def test_patch_pipeline() -> int:
+    """Build-time patch registry: modes, DAG, assertions and provenance."""
+    return subprocess.call(
+        [sys.executable, str(ROOT / "tools" / "lift" /
+                              "patch_pipeline.py"), "self-test"],
+        cwd=ROOT,
+    )
+
+
 def test_lift_cond_fold() -> int:
     """A.29 source check: fused branch conditions fold only exact constants."""
     return run_host_tool("lift32", ["--self-test-cond"])
@@ -3557,6 +3566,7 @@ TESTS = {
     "direct_call_multi_tu": test_direct_call_multi_tu,
     "devirtualize_pass": test_devirtualize_pass,
     "dead_flags_pass": test_dead_flags_pass,
+    "patch_pipeline": test_patch_pipeline,
     "leaf_call_pass": test_leaf_call_pass,
     "lift_cond_fold": test_lift_cond_fold,
     "lift_x87_summary": test_lift_x87_summary,

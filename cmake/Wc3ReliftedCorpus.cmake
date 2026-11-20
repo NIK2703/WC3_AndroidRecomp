@@ -28,6 +28,14 @@ if(NOT WC3_SPLITCORPUS_EXE)
         "splitcorpus.exe missing; run tools/lift/build_tools.ps1 before configuring")
 endif()
 
+if(WC3_PATCH_PIPELINE)
+    find_program(WC3_PYTHON3 NAMES python3 python)
+    if(NOT WC3_PYTHON3)
+        message(FATAL_ERROR
+            "WC3_PATCH_PIPELINE=ON needs python3 (or python) on PATH")
+    endif()
+endif()
+
 find_program(WC3_MANIFEST_TOOL
     NAMES manifest manifest.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -428,6 +436,9 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
         if(NOT _chunks)
             message(FATAL_ERROR "splitcorpus produced no chunks for ${_src}")
         endif()
+        # Old per-stage path.  It stays the default until the opt-in pipeline
+        # is checked by an explicit configure and product build.
+        if(NOT WC3_PATCH_PIPELINE)
         if(WC3_DEVIRTUALIZE_P0_1)
             # P0-1 LiftPass runs after splitcorpus, so every chunk receives the
             # direct_call.h include and prototypes for cross-TU targets.  The
@@ -738,6 +749,7 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             wc3_run_jobpool("${_sel24_jobs}" "selection24 ${_name}/${_kind}")
             set(_chunks "${_sel24_chunks}")
         endif()
+        endif()
         list(APPEND WC3_RELIFTED_SOURCES ${_chunks})
     endforeach()
 
@@ -748,6 +760,101 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
     endif()
 endforeach()
 
+# Registry-driven cutover.  The split tree is already post-save, so the save
+# stage stays in the split loop and this branch owns only the later transforms.
+if(WC3_PATCH_PIPELINE)
+    if(WC3_SELECTION_24 AND NOT "${WC3_SELECTION_STRUCT_CAP}" STREQUAL "40")
+        message(FATAL_ERROR
+            "WC3_PATCH_PIPELINE has a selection24 manifest only for "
+            "WC3_SELECTION_STRUCT_CAP=40 (got "
+            "'${WC3_SELECTION_STRUCT_CAP}').  Set "
+            "-DWC3_PATCH_PIPELINE=OFF for the cap-24 experiment, or add a "
+            "cap-24 stage manifest with its own verified target list.")
+    endif()
+    set(_patch_base "${CMAKE_CURRENT_BINARY_DIR}/relifted")
+    set(_patch_index "${CMAKE_CURRENT_BINARY_DIR}/patch-index.tsv")
+    set(_patch_out "${CMAKE_CURRENT_BINARY_DIR}/patch-overlay")
+    set(_patch_engine_dir "${WC3_ROOT}/build/lift-tools")
+    set(_patch_stage_args)
+    list(APPEND _patch_stage_args --patch atomiccheck)
+    if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
+        list(APPEND _patch_stage_args
+             --patch return_address_elide_index
+             --patch return_address_elide)
+    endif()
+    if(WC3_DEVIRTUALIZE_P0_1)
+        list(APPEND _patch_stage_args --patch devirtualize)
+    endif()
+    if(WC3_DEAD_FLAGS_P0_2)
+        list(APPEND _patch_stage_args --patch dead_flags)
+    endif()
+    list(APPEND _patch_stage_args --patch xmm_local --patch xmm_lane)
+    if(WC3_W3L_COMPAT)
+        list(APPEND _patch_stage_args --patch w3l_compat)
+    endif()
+    if(WC3_SELECTION_24)
+        list(APPEND _patch_stage_args --patch selection24_cap40)
+    endif()
+    list(APPEND _patch_stage_args --patch leaf_call)
+    if(WC3_PARALLEL_RAYCAST)
+        list(APPEND _patch_stage_args --patch parallel_raycast)
+    endif()
+    set(_patch_param_args)
+    file(SHA256 "${WC3_ROOT}/tools/lift/patch_pipeline.py" _patch_pipeline_sha)
+    list(APPEND _patch_param_args --param "pipeline_sha=${_patch_pipeline_sha}")
+    if(WC3_W3L_COMPAT)
+        list(APPEND _patch_param_args
+             --param "profile=${WC3_W3L_PROFILE}"
+             --param "latency=${WC3_W3L_LATENCY}")
+    endif()
+    if(WC3_SELECTION_24 AND WC3_SELECTION_STRUCT_CAP)
+        list(APPEND _patch_param_args
+             --param "struct_cap=${WC3_SELECTION_STRUCT_CAP}")
+    endif()
+    if(WC3_DEVIRTUALIZE_P0_1)
+        file(RELATIVE_PATH _patch_boot_list "${WC3_ROOT}" "${WC3_BOOT_LIST}")
+        list(APPEND _patch_param_args --param "boot_list=${_patch_boot_list}")
+    endif()
+    execute_process(
+        COMMAND "${WC3_PYTHON3}" "${WC3_ROOT}/tools/lift/patch_pipeline.py"
+                index --base "${_patch_base}" --out "${_patch_index}"
+        RESULT_VARIABLE _patch_index_rc
+        OUTPUT_VARIABLE _patch_index_out
+        ERROR_VARIABLE _patch_index_err)
+    if(NOT _patch_index_rc EQUAL 0)
+        message(FATAL_ERROR
+            "patch pipeline index failed (rc=${_patch_index_rc}):\n"
+            "${_patch_index_out}\n${_patch_index_err}")
+    endif()
+    execute_process(
+        COMMAND "${WC3_PYTHON3}" "${WC3_ROOT}/tools/lift/patch_pipeline.py"
+                apply --base "${_patch_base}" --index "${_patch_index}"
+                --out "${_patch_out}" --engine-dir "${_patch_engine_dir}"
+                ${_patch_stage_args} ${_patch_param_args}
+                --reuse --force --quiet
+        RESULT_VARIABLE _patch_rc
+        OUTPUT_VARIABLE _patch_out_log
+        ERROR_VARIABLE _patch_err_log)
+    if(NOT _patch_rc EQUAL 0)
+        message(FATAL_ERROR
+            "patch pipeline apply failed (rc=${_patch_rc}):\n"
+            "${_patch_out_log}\n${_patch_err_log}")
+    endif()
+    file(READ "${_patch_out}/overlay.json" _patch_manifest)
+    string(JSON _patch_nchunks LENGTH "${_patch_manifest}" chunks)
+    if(_patch_nchunks LESS 1)
+        message(FATAL_ERROR "patch pipeline produced no chunks")
+    endif()
+    set(WC3_RELIFTED_SOURCES)
+    math(EXPR _patch_last "${_patch_nchunks} - 1")
+    foreach(_patch_i RANGE 0 ${_patch_last})
+        string(JSON _patch_chunk GET
+               "${_patch_manifest}" chunks ${_patch_i} chunk)
+        list(APPEND WC3_RELIFTED_SOURCES "${_patch_out}/${_patch_chunk}")
+    endforeach()
+    message(STATUS
+        "patch pipeline: ${_patch_nchunks} chunk(s) -> ${_patch_out}")
+else()
 if(WC3_W3L_COMPAT)
     # Per-chunk runs cannot use --require-all, because sites are spread over
     # several chunks.  Verify the union instead: every site of the selected
@@ -1030,6 +1137,8 @@ if(WC3_PARALLEL_RAYCAST)
             PROPERTY OBJECT_DEPENDS "${_wc3_ray_stamp}")
     endif()
     set(WC3_RELIFTED_SOURCES "${_wc3_ray_outputs}")
+endif()
+
 endif()
 
 add_library(wc3_corpus_relifted STATIC ${WC3_RELIFTED_SOURCES})

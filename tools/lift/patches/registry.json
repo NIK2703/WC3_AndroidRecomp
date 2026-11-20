@@ -1,0 +1,88 @@
+{
+  "schema": 2,
+  "id": "wc3-build-patches",
+  "description": "Single registry for build-time corpus mutations. New stages are added here, not in the orchestrator.",
+  "stages": [
+    "atomiccheck.json",
+    {
+      "manifest": "save_list_display.json",
+      "enabled": false
+    },
+    {
+      "manifest": "return_address_elide_index.json",
+      "enabled": false
+    },
+    {
+      "manifest": "devirtualize.json",
+      "enabled": false
+    },
+    {
+      "manifest": "return_address_elide.json",
+      "enabled": false
+    },
+    {
+      "manifest": "dead_flags.json",
+      "enabled": false
+    },
+    {
+      "manifest": "xmm_local.json",
+      "enabled": false
+    },
+    {
+      "manifest": "xmm_lane.json",
+      "enabled": false
+    },
+    "w3l_compat.json",
+    "selection24_cap40.json",
+    "leaf_call.json",
+    "parallel_raycast.json"
+  ],
+  "reserved": [
+    {
+      "id": "guest_data",
+      "kind": "data",
+      "reason": "guest-memory data overlay"
+    },
+    {
+      "id": "link_wrappers",
+      "kind": "link",
+      "reason": "link-time wrapper map"
+    }
+  ],
+  "pipelines": {
+    "semantic": [
+      "atomiccheck",
+      "w3l_compat",
+      "selection24_cap40",
+      "leaf_call",
+      "parallel_raycast"
+    ],
+    "post_save": [
+      "atomiccheck",
+      "return_address_elide_index",
+      "devirtualize",
+      "return_address_elide",
+      "dead_flags",
+      "xmm_local",
+      "xmm_lane",
+      "w3l_compat",
+      "selection24_cap40",
+      "leaf_call",
+      "parallel_raycast"
+    ],
+    "raw": [
+      "atomiccheck",
+      "save_list_display",
+      "return_address_elide_index",
+      "devirtualize",
+      "return_address_elide",
+      "dead_flags",
+      "xmm_local",
+      "xmm_lane",
+      "w3l_compat",
+      "selection24_cap40",
+      "leaf_call",
+      "parallel_raycast"
+    ]
+  }
+}

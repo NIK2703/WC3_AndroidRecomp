@@ -617,6 +617,16 @@ if(WC3_RELIFTED_CORPUS_ROOT AND WC3_BUILD_APP AND
 else()
     set(WC3_SELECTION_24_DEFAULT OFF)
 endif()
+# Opt-in cutover: the old per-stage blocks stay the default until this path is
+# checked by an explicit configure and product build.
+option(WC3_PATCH_PIPELINE
+       "Run the registry-driven build-time patch pipeline over the relifted corpus"
+       OFF)
+if(WC3_PATCH_PIPELINE AND NOT WC3_RELIFTED_CORPUS_ROOT)
+    message(FATAL_ERROR
+        "WC3_PATCH_PIPELINE=ON requires WC3_RELIFTED_CORPUS_ROOT")
+endif()
+
 option(WC3_SELECTION_24
        "Apply the 12/24/40-unit selection / 6x2, 8x3, 10x4 panel profile to the relifted corpus"
        ${WC3_SELECTION_24_DEFAULT})

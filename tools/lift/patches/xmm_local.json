@@ -1,0 +1,34 @@
+{
+  "schema": 2,
+  "id": "xmm_local",
+  "rev": 1,
+  "description": "Block/lazy local-XMM lowering for leaf functions.",
+  "engine": "xmm_local",
+  "kind": "transform",
+  "mode": "per_chunk",
+  "scope": "all",
+  "order": 20,
+  "after": [
+    "dead_flags"
+  ],
+  "command": {
+    "args": [
+      "--lift",
+      "{in}",
+      "--out",
+      "{out}",
+      "--json",
+      "{report}",
+      "--block",
+      "--block-lazy",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "tool",
+      "equals": "xmm_local"
+    }
+  ]
+}
