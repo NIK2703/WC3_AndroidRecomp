@@ -726,7 +726,7 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                    "${_chunk}" IS_NEWER_THAN "${_sel_out}" OR
                    "${WC3_SELECTION_EXE}" IS_NEWER_THAN "${_sel_out}")
                     string(APPEND _sel_job_text
-                        "10\n${WC3_SELECTION_EXE}\n"
+                        "8\n${WC3_SELECTION_EXE}\n"
                         "--lift\n${_chunk}\n"
                         "--out\n${_sel_out}\n"
                         "--json\n${_sel_json}\n"
