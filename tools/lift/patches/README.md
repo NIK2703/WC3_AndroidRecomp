@@ -241,9 +241,11 @@ a stale overlay is rebuilt.  CMake passes the orchestrator hash as a cache
 parameter, so editing `patch_pipeline.py` also invalidates an overlay.
 `selection` scans every chunk, like the legacy per-stage path; the
 engine's `--verify-coverage` union check against its fixed total is the single
-site-count authority, so the manifest carries no duplicated target list.  The
-CMake switch still fails closed when `WC3_SELECTION_STRUCT_CAP=24`, because
-the stage is pinned to the 40-entry layout.
+site-count authority, so the manifest carries no duplicated target list.  Its
+anchors expect the post-XMM `WC3_DIRECT_CALL` text, so the manifest is ordered
+after `xmm_local`, `xmm_lane` and `w3l_compat`; a base that already contains
+those passes may omit them.  The stage always emits the fixed 40-entry
+layout; the runtime cap selects 12, 24 or 40 without a second corpus.
 
 The switch is not exercised by a configure or product build yet.  The old path
 remains the default until that check is run explicitly; the pipeline itself is

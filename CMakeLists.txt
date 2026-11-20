@@ -631,14 +631,6 @@ option(WC3_SELECTION
        "Apply the 12/24/40-unit selection / 6x2, 8x3, 10x4 panel profile to the relifted corpus"
        ${WC3_SELECTION_DEFAULT})
 if(WC3_SELECTION)
-    set(WC3_SELECTION_STRUCT_CAP "40" CACHE STRING
-        "Selection structural capacity: 24 (legacy layout) or 40 (product layout)")
-    set_property(CACHE WC3_SELECTION_STRUCT_CAP PROPERTY STRINGS "24" "40")
-    if(NOT WC3_SELECTION_STRUCT_CAP MATCHES "^(24|40)$")
-        message(FATAL_ERROR
-            "WC3_SELECTION_STRUCT_CAP must be 24 or 40, got "
-            "'${WC3_SELECTION_STRUCT_CAP}'")
-    endif()
     if(NOT WC3_RELIFTED_CORPUS_ROOT)
         message(FATAL_ERROR
             "WC3_SELECTION=ON requires WC3_RELIFTED_CORPUS_ROOT; the legacy "
@@ -656,7 +648,7 @@ if(WC3_SELECTION)
             "is linked into wc3gameactivity, which does not exist otherwise.")
     endif()
     message(STATUS
-        "selection: 12/24/40 runtime cap, structural ${WC3_SELECTION_STRUCT_CAP}, "
+        "selection: 12/24/40 runtime cap, fixed 40-entry layout, "
         "6x2 for <=12, 8x3 for 13..24, 10x4 for 25..40")
 endif()
 

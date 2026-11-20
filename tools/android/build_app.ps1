@@ -718,12 +718,6 @@ $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
 $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
 $configure += "-DWC3_SELECTION=$selectionValue"
-if ($selectionValue -eq 'ON') {
-    # The product always carries the 40-entry structural layout; the runtime
-    # dropdown chooses 12, 24 or 40.  Pass it explicitly so a cached 24-entry
-    # comparison configure cannot leak into the product build.
-    $configure += '-DWC3_SELECTION_STRUCT_CAP=40'
-}
 $configure += '-DWC3_CORPUS_WERROR=OFF'
 # Release is the optimized product.  The final release build (PGO use and the
 # explicit -Pgo off A/B mode) uses ThinLTO; the internal training pass skips LTO

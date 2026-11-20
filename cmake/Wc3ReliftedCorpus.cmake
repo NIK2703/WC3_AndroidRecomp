@@ -688,15 +688,6 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                     "selection.exe missing; run tools/lift/build_tools.ps1 "
                     "before configuring")
             endif()
-            set(_sel_cap "${WC3_SELECTION_STRUCT_CAP}")
-            if(NOT _sel_cap)
-                set(_sel_cap "40")
-            endif()
-            if(NOT _sel_cap MATCHES "^(24|40)$")
-                message(FATAL_ERROR
-                    "WC3_SELECTION_STRUCT_CAP must be 24 or 40, got "
-                    "'${_sel_cap}'")
-            endif()
             # A stale pass silently re-emits the old source text while the
             # configure still reports success.  Refuse that state instead of
             # letting an executable older than its source define the product.
@@ -715,9 +706,9 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             # whose mtime happens to be newer than the new input.
             if(WC3_W3L_COMPAT)
                 set(_sel_tag
-                    "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}-layout${_sel_cap}")
+                    "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}-layout40")
             else()
-                set(_sel_tag "plain-layout${_sel_cap}")
+                set(_sel_tag "plain-layout40")
             endif()
             set(_sel_dir
                 "${CMAKE_CURRENT_BINARY_DIR}/selection/${_name}/${_kind}/${_sel_tag}")
@@ -736,7 +727,6 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
                    "${WC3_SELECTION_EXE}" IS_NEWER_THAN "${_sel_out}")
                     string(APPEND _sel_job_text
                         "10\n${WC3_SELECTION_EXE}\n"
-                        "--struct-cap\n${_sel_cap}\n"
                         "--lift\n${_chunk}\n"
                         "--out\n${_sel_out}\n"
                         "--json\n${_sel_json}\n"
@@ -763,14 +753,6 @@ endforeach()
 # Registry-driven cutover.  The split tree is already post-save, so the save
 # stage stays in the split loop and this branch owns only the later transforms.
 if(WC3_PATCH_PIPELINE)
-    if(WC3_SELECTION AND NOT "${WC3_SELECTION_STRUCT_CAP}" STREQUAL "40")
-        message(FATAL_ERROR
-            "WC3_PATCH_PIPELINE has a selection manifest only for "
-            "WC3_SELECTION_STRUCT_CAP=40 (got "
-            "'${WC3_SELECTION_STRUCT_CAP}').  Set "
-            "-DWC3_PATCH_PIPELINE=OFF for the cap-24 experiment, or add a "
-            "cap-24 stage manifest with its own verified target list.")
-    endif()
     set(_patch_base "${CMAKE_CURRENT_BINARY_DIR}/relifted")
     set(_patch_index "${CMAKE_CURRENT_BINARY_DIR}/patch-index.tsv")
     set(_patch_out "${CMAKE_CURRENT_BINARY_DIR}/patch-overlay")
@@ -806,10 +788,6 @@ if(WC3_PATCH_PIPELINE)
         list(APPEND _patch_param_args
              --param "profile=${WC3_W3L_PROFILE}"
              --param "latency=${WC3_W3L_LATENCY}")
-    endif()
-    if(WC3_SELECTION AND WC3_SELECTION_STRUCT_CAP)
-        list(APPEND _patch_param_args
-             --param "struct_cap=${WC3_SELECTION_STRUCT_CAP}")
     endif()
     if(WC3_DEVIRTUALIZE_P0_1)
         file(RELATIVE_PATH _patch_boot_list "${WC3_ROOT}" "${WC3_BOOT_LIST}")
@@ -928,13 +906,7 @@ if(WC3_W3L_COMPAT)
     set(_wc3_leaf_tag "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}")
 endif()
 if(WC3_SELECTION)
-    if(NOT _sel_cap)
-        set(_sel_cap "${WC3_SELECTION_STRUCT_CAP}")
-    endif()
-    if(NOT _sel_cap)
-        set(_sel_cap "40")
-    endif()
-    string(APPEND _wc3_leaf_tag "-layout${_sel_cap}")
+    string(APPEND _wc3_leaf_tag "-layout40")
 endif()
 set(_wc3_leaf_dir "${CMAKE_CURRENT_BINARY_DIR}/leaf_call/${_wc3_leaf_tag}")
 set(_wc3_leaf_list "${CMAKE_CURRENT_BINARY_DIR}/leaf_call_inputs.txt")

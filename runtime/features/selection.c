@@ -24,18 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Structural capacity of the generated corpus this module is linked with.
- * The LiftPass is run with the same value (WC3_SELECTION_STRUCT_CAP), so the
- * helper offsets and the lifted literal displacements always describe one
- * layout.  40 is the product layout; 24 is kept for comparison and migration
- * builds.  The runtime WC3_SELECTION_CAP can only lower this hard maximum. */
-#ifndef WC3_SELECTION_STRUCT_CAP
-#define WC3_SELECTION_STRUCT_CAP 40
-#endif
-#if WC3_SELECTION_STRUCT_CAP != 24 && WC3_SELECTION_STRUCT_CAP != 40
-#error "WC3_SELECTION_STRUCT_CAP must be 24 or 40"
-#endif
-#define SEL_STRUCT_CAP ((uint32_t)WC3_SELECTION_STRUCT_CAP)
+/* The corpus always carries the 40-entry structural layout.  The runtime
+ * WC3_SELECTION_CAP only lowers how many slots the game fills. */
+#define SEL_STRUCT_CAP 40u
 
 /* Debug-only trace.  Every diagnostic write below is inside an explicit
  * WC3_DEBUG && WC3_DEBUG_SELECTION guard; the tag names the observed
@@ -193,7 +184,7 @@ void wc3_sel_stream_slot_read(uint32_t slot_serial, uint32_t bool_base,
     if (cap != 12u && cap != 24u && cap != 40u)
         return;
     if (cap > SEL_STRUCT_CAP)
-        return; /* a 40-slot stream cannot fit the 24-layout comparison build */
+        return; /* keep the read within the fixed 40-entry layout */
     wr32(cap_addr, cap);
     wr32(slot_serial + 4u, 0u);
 }
@@ -233,15 +224,9 @@ void wc3_sel_stream_slot_read(uint32_t slot_serial, uint32_t bool_base,
 
 /* CPrCluster/PrClGen tail in the compiled structural layout.  The cap only
  * limits how many of the available slots the game fills. */
-#if WC3_SELECTION_STRUCT_CAP == 24
-#define SEL_CLUSTER_PTRS  0x13Cu
-#define SEL_CLUSTER_TAIL  0x19Cu
-#define SEL_CLUSTER_FLAGS 0x1C0u
-#else
 #define SEL_CLUSTER_PTRS  0x1FCu
 #define SEL_CLUSTER_TAIL  0x29Cu
 #define SEL_CLUSTER_FLAGS 0x2C0u
-#endif
 #define SEL_VECTOR_GROW         0x14u
 #define SEL_VECTOR_GROW_CHUNK   12u
 
@@ -262,28 +247,19 @@ void wc3_sel_cluster_prepare(uint32_t vector)
 }
 
 /* CInfoPanelGroup fields added by the selection profile.  The extra 10x4
- * child only exists in the 40-entry allocation; the 24-entry allocation ends
- * after the total field. */
+ * child exists in the fixed 40-entry allocation. */
 #define SEL_GROUP_GRID12   0x130u
 #define SEL_GROUP_GRID24   0x134u
 #define SEL_GROUP_ACTIVE   0x138u
 #define SEL_GROUP_INIT     0x13Cu
 #define SEL_GROUP_TOTAL    0x140u
-#if WC3_SELECTION_STRUCT_CAP == 40
 #define SEL_GROUP_GRID40   0x144u
-#endif
 
-/* Selection-group entry: count +0, index[cap] +4, pair[cap] +pair_base
+/* Selection-group entry: count +0, index[40] +4, pair[40] +pair_base
  * (key/value dwords), tail after the pair array. */
-#if WC3_SELECTION_STRUCT_CAP == 24
-#define SEL_GROUP_ENTRY_SIZE 0x134u
-#define SEL_GROUP_PAIR       0x64u
-#define SEL_GROUP_TAIL       0x124u
-#else
 #define SEL_GROUP_ENTRY_SIZE 0x1F4u
 #define SEL_GROUP_PAIR       0xA4u
 #define SEL_GROUP_TAIL       0x1E4u
-#endif
 #define SEL_GROUP_INDEX      0x4u
 
 /* CSelectionWar3 field with the total number of selected units. */
@@ -308,11 +284,7 @@ void wc3_sel_cluster_prepare(uint32_t vector)
 #define SEL_BUTTON_VISIBLE 0x090u
 
 /* Size of the widened CInfoPanelGroup allocation. */
-#if WC3_SELECTION_STRUCT_CAP == 24
-#define SEL_GROUP_SIZE     0x144u
-#else
 #define SEL_GROUP_SIZE     0x150u
-#endif
 
 #define SEL_GRID_SIZE      0x15Cu
 #define SEL_GRID_LINE      0x024u
@@ -686,13 +658,8 @@ static void sel_trace_object_line(const char *tag, uint32_t object,
  * that was never written is distinguishable from one with a stale handle. */
 #define SEL_ORDER_RECORD_STRIDE 0x24u
 #define SEL_ORDER_RECORD_MAX    SEL_STRUCT_CAP
-#if WC3_SELECTION_STRUCT_CAP == 24
-#define SEL_ORDER_ARRAY_OFF     0x960u
-#define SEL_ORDER_FRAME_MIN     0x9A0u
-#else
 #define SEL_ORDER_ARRAY_OFF     0xBA0u
 #define SEL_ORDER_FRAME_MIN     0xBE8u
-#endif
 
 static void sel_trace_order_record(const char *tag, uint32_t index,
                                      uint32_t record)
@@ -2122,9 +2089,7 @@ static uint32_t sel_valid_grid(uint32_t group)
     uint32_t grid12;
     uint32_t grid24;
     uint32_t active;
-#if WC3_SELECTION_STRUCT_CAP == 40
     uint32_t grid40;
-#endif
 
     if (!group) {
         return 0u;
@@ -2140,12 +2105,10 @@ static uint32_t sel_valid_grid(uint32_t group)
     if (active == grid12 || (grid24 && active == grid24)) {
         return active;
     }
-#if WC3_SELECTION_STRUCT_CAP == 40
     grid40 = rd32(group + SEL_GROUP_GRID40);
     if (grid40 && active == grid40) {
         return active;
     }
-#endif
     return grid12;
 }
 
@@ -2296,9 +2259,7 @@ void wc3_sel_grid_init(CPU *c, uint32_t group)
 {
     uint32_t grid12;
     uint32_t grid24 = 0u;
-#if WC3_SELECTION_STRUCT_CAP == 40
     uint32_t grid40 = 0u;
-#endif
 
     if (!group) {
         return;
@@ -2310,9 +2271,7 @@ void wc3_sel_grid_init(CPU *c, uint32_t group)
     grid12 = rd32(group + SEL_GROUP_GRID12);
     wr32(group + SEL_GROUP_INIT, SEL_INIT_MAGIC);
     wr32(group + SEL_GROUP_GRID24, 0u);
-#if WC3_SELECTION_STRUCT_CAP == 40
     wr32(group + SEL_GROUP_GRID40, 0u);
-#endif
     wr32(group + SEL_GROUP_ACTIVE, grid12);
     wr32(group + SEL_GROUP_TOTAL, 0u);
     if (wc3_sel_cap() < 24u) {
@@ -2344,7 +2303,6 @@ void wc3_sel_grid_init(CPU *c, uint32_t group)
 #endif
     wr32(group + SEL_GROUP_GRID24, grid24);
 
-#if WC3_SELECTION_STRUCT_CAP == 40
     if (wc3_sel_cap() >= 40u) {
         grid40 = sel_create_grid(c, group, SEL_GRID40_ROWS,
                                    SEL_GRID40_COLS, SEL_GRID40_SCALE,
@@ -2357,7 +2315,6 @@ void wc3_sel_grid_init(CPU *c, uint32_t group)
 #endif
         wr32(group + SEL_GROUP_GRID40, grid40);
     }
-#endif
 
     wr32(group + SEL_GROUP_ACTIVE, grid12);
     wr32(grid12 + SEL_GRID_VISIBLE, 1u);
@@ -2470,9 +2427,7 @@ void wc3_sel_panel_select(CPU *c, uint32_t group, uint32_t subgroup_units)
     }
     grid12 = rd32(group + SEL_GROUP_GRID12);
     grid24 = rd32(group + SEL_GROUP_GRID24);
-#if WC3_SELECTION_STRUCT_CAP == 40
     grid40 = rd32(group + SEL_GROUP_GRID40);
-#endif
     if (!grid12) {
         return;
     }
@@ -2748,18 +2703,13 @@ void wc3_sel_formation_commit(uint32_t x)
 }
 
 /*
- * L_6F16A5B0 stores the base into the x cursor at [ebp-0x1F50] (cap 40) or
- * [ebp-0xA50] (cap 24) before the group loop.  The offset belongs to the
- * generated frame, not to the structural table, so the pass calls these two
- * type-safe wrappers instead of embedding a profile-dependent displacement.
- * Both wrappers touch only the guest stack local; they do not change the CPU
- * registers or flags.
+ * L_6F16A5B0 stores the base into the x cursor at [ebp-0x1F50] before the
+ * group loop.  The offset belongs to the generated 40-layout frame, not to
+ * the structural table, so the pass calls these two type-safe wrappers
+ * instead of embedding a displacement.  Both wrappers touch only the guest
+ * stack local; they do not change the CPU registers or flags.
  */
-#if WC3_SELECTION_STRUCT_CAP == 40
 #define SEL_A5F8_X_OFF 0xFFFFE0B0u
-#else
-#define SEL_A5F8_X_OFF 0xFFFFF5B0u
-#endif
 
 void wc3_sel_formation_origin_apply(CPU *c)
 {
@@ -2823,15 +2773,10 @@ uint32_t wc3_sel_formation_columns(uint32_t index, uint32_t count,
     flag = (index - count) / 13u;
     if (flag != 0u)
         value = 3u;
-#if WC3_SELECTION_STRUCT_CAP == 24
-    else
-        value = (count + 2u) / 3u;
-#else
     else if (count <= 24u)
         value = (count + 2u) / 3u;
     else
         value = (count + 3u) / 4u;
-#endif
 #if WC3_DEBUG && WC3_DEBUG_SELECTION
     fprintf(SEL_OUT,
             "[select24] formation columns idx=%u count=%u pair=%u value=%u\n",

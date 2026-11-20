@@ -8,7 +8,7 @@
  * --verify-coverage and compares the union with the fixed totals below.
  *
  *   selection --lift IN --out OUT [--json REPORT] [--profile seed|closed]
- *               [--struct-cap 24|40] [--quiet]
+ *               [--quiet]
  *   selection --verify-coverage @manifest
  *   selection --self-test
  *
@@ -27,14 +27,10 @@
 #include "sha256.h"
 
 #define PASS "selection"
-#define PASS_REV 49
+#define PASS_REV 50
 
-/* Structural capacity of the emitted layout.  The product uses 40 so one
- * corpus can serve the 12/24/40 runtime caps; 24 is kept for pass
- * self-tests and for a structural A/B build. */
-#define STRUCT_CAP_MIN 24u
-#define STRUCT_CAP_MAX 40u
-static unsigned g_struct_cap = STRUCT_CAP_MAX;
+/* The pass always emits the product 40-entry layout.  The site table is
+ * authored against the 24-reference displacements and mapped once below. */
 
 typedef enum {
     K_GROUP_ALLOC = 0,
@@ -661,8 +657,8 @@ static void sites_add(Sites *s, Kind k, uint32_t va, const char *action,
  *
  * The 40-unit profile is a second relocation on top of the 24-unit one: the
  * container grows from 0x350 to 0x550 bytes and the frame grows by the same
- * 0x200.  Its source range is the 24-unit result, so a fresh corpus runs both
- * shifts in sequence and a 24-profile corpus can be upgraded in place.
+ * 0x200.  Its source range is the 24-unit result, so a fresh 24-reference
+ * corpus runs both shifts in sequence.
  */
 #define ORDER_CONTAINER_DELTA    0x3C4u
 #define ORDER_CONTAINER_A_LO     0xFFFFFE1Cu /* [ebp - 0x1e4] = container + 0 */
@@ -1503,41 +1499,33 @@ static int handle_subst(Buf *out, const char *p, const char *e,
 {
     char target_buf[512];
     char target_comment_buf[512];
-    const char *target_code = new_code;
+    const char *target_code;
     const char *target_comment = new_comment;
     int has_old;
     int has_target;
-    int has_prev;
     char before[65];
     char after[65];
     Buf tmp = {0};
     const char *action;
 
-    if (g_struct_cap == 40) {
-        if (map_struct40_text(new_code, target_buf, sizeof(target_buf)) != 0) {
-            snprintf(err, errsz, "site 0x%08X line %d: target too large",
-                     va, line);
+    if (map_struct40_text(new_code, target_buf, sizeof(target_buf)) != 0) {
+        snprintf(err, errsz, "site 0x%08X line %d: target too large",
+                 va, line);
+        return -1;
+    }
+    target_code = target_buf;
+    if (new_comment) {
+        if (map_struct40_text(new_comment, target_comment_buf,
+                              sizeof(target_comment_buf)) != 0) {
+            snprintf(err, errsz,
+                     "site 0x%08X line %d: comment too large", va, line);
             return -1;
         }
-        target_code = target_buf;
-        if (new_comment) {
-            if (map_struct40_text(new_comment, target_comment_buf,
-                                  sizeof(target_comment_buf)) != 0) {
-                snprintf(err, errsz,
-                         "site 0x%08X line %d: comment too large", va, line);
-                return -1;
-            }
-            target_comment = target_comment_buf;
-        }
+        target_comment = target_comment_buf;
     }
 
     has_old = contains_sub(p, (size_t)(e - p), old_code);
     has_target = contains_sub(p, (size_t)(e - p), target_code);
-    /* A corpus produced by the 24-profile pass can be upgraded in place:
-     * recognize its target as the "old" form.  The normal configure path
-     * always starts from an unpatched chunk, so this only makes reruns safe. */
-    has_prev = strcmp(new_code, target_code) != 0 &&
-               contains_sub(p, (size_t)(e - p), new_code);
 
     hash_hex(p, (size_t)(e - p), before);
 
@@ -1547,13 +1535,7 @@ static int handle_subst(Buf *out, const char *p, const char *e,
                  va, line, old_code, target_code);
         return -1;
     }
-    if (has_target && has_prev) {
-        snprintf(err, errsz,
-                 "site 0x%08X line %d contains both 24- and 40-profile "
-                 "targets '%s' and '%s'", va, line, new_code, target_code);
-        return -1;
-    }
-    if (!has_old && !has_target && !has_prev) {
+    if (!has_old && !has_target) {
         snprintf(err, errsz,
                  "site 0x%08X line %d does not match '%s'", va, line, old_code);
         return -1;
@@ -1564,8 +1546,8 @@ static int handle_subst(Buf *out, const char *p, const char *e,
         return -1;
     }
 
-    if (has_old || has_prev) {
-        const char *from = has_old ? old_code : new_code;
+    if (has_old) {
+        const char *from = old_code;
         char *replaced = NULL;
         size_t replaced_n = 0;
         int r;
@@ -1980,7 +1962,7 @@ static int shift_container_line(const char *p, const char *e,
 /* around init/sort under WC3_DEBUG_SELECTION.                          */
 /*                                                                     */
 /* Rev 46 makes every structural site above relative to the 40-unit    */
-/* layout through STRUCT40_VALUES / --struct-cap 40: pair +0x64 ->     */
+/* layout through STRUCT40_VALUES: pair +0x64 ->                      */
 /* +0xA4, entry 0x134 -> 0x1F4, frame 0x1354 -> 0x1F54, order frames    */
 /* 0x9A0/0x9A8 -> 0xBE0/0xBE8 and the point-order container shifted by */
 /* another 0x200.  The runtime cap stays separate: the Android setting  */
@@ -2318,31 +2300,24 @@ static int handle_selection_sites(Buf *out, const char *p, const char *e,
 {
     size_t n = (size_t)(e - p);
     char target_buf[1024];
-    const char *target = g->new_code;
+    const char *target;
     int has_old;
     int has_target;
-    int has_prev;
     char before[65];
     char after[65];
     char *res = NULL;
     size_t resn = 0;
     const char *action;
 
-    if (g_struct_cap == 40) {
-        if (map_struct40_text(g->new_code, target_buf, sizeof(target_buf)) != 0) {
-            snprintf(err, errsz, "site 0x%08X line %d: target too large",
-                     g->va, line);
-            return -1;
-        }
-        target = target_buf;
+    if (map_struct40_text(g->new_code, target_buf, sizeof(target_buf)) != 0) {
+        snprintf(err, errsz, "site 0x%08X line %d: target too large",
+                 g->va, line);
+        return -1;
     }
+    target = target_buf;
 
     has_old = contains_sub(p, n, g->old_code);
     has_target = contains_sub(p, n, target);
-    /* Accept output from the 24-profile pass so a structural upgrade does not
-     * require a fresh corpus.  This is the same "already patched" path. */
-    has_prev = strcmp(g->new_code, target) != 0 &&
-               contains_sub(p, n, g->new_code);
 
     if (has_old && has_target) {
         /* A replacement may legitimately contain the old text (a trace
@@ -2366,21 +2341,15 @@ static int handle_selection_sites(Buf *out, const char *p, const char *e,
         }
         has_old = 0; /* already applied; the old text is inside the new */
     }
-    if (has_target && has_prev) {
-        snprintf(err, errsz,
-                 "site 0x%08X line %d contains both 24- and 40-profile "
-                 "targets '%s' and '%s'", g->va, line, g->new_code, target);
-        return -1;
-    }
-    if (!has_old && !has_target && !has_prev) {
+    if (!has_old && !has_target) {
         snprintf(err, errsz, "site 0x%08X line %d does not match '%s'",
                  g->va, line, g->old_code);
         return -1;
     }
 
     hash_hex(p, n, before);
-    if (has_old || has_prev) {
-        const char *from = has_old ? g->old_code : g->new_code;
+    if (has_old) {
+        const char *from = g->old_code;
 
         if (replace_all(p, n, from, target, &res, &resn) != 0) {
             snprintf(err, errsz, "site 0x%08X line %d: out of memory",
@@ -2455,21 +2424,17 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 span.active = 1;
                 span.lo = ORDER_CONTAINER_A_LO;
                 span.hi = ORDER_CONTAINER_A_HI;
-                if (g_struct_cap == 40) {
-                    span40.active = 1;
-                    span40.lo = ORDER_CONTAINER_A24_LO;
-                    span40.hi = ORDER_CONTAINER_A24_HI;
-                }
+                span40.active = 1;
+                span40.lo = ORDER_CONTAINER_A24_LO;
+                span40.hi = ORDER_CONTAINER_A24_HI;
             } else if (block_va >= ORDER_HANDLER_B_LO &&
                        block_va < ORDER_HANDLER_B_HI) {
                 span.active = 1;
                 span.lo = ORDER_CONTAINER_B_LO;
                 span.hi = ORDER_CONTAINER_B_HI;
-                if (g_struct_cap == 40) {
-                    span40.active = 1;
-                    span40.lo = ORDER_CONTAINER_B24_LO;
-                    span40.hi = ORDER_CONTAINER_B24_HI;
-                }
+                span40.active = 1;
+                span40.lo = ORDER_CONTAINER_B24_LO;
+                span40.hi = ORDER_CONTAINER_B24_HI;
             }
         } else if (le - p >= 7 && memcmp(p, "void L_", 7) == 0) {
             /* A definition the lift emitted with another signature: do not
@@ -3621,7 +3586,6 @@ static int write_json(const char *path, const char *input, const char *output,
         write_json_string(f, profile);
     else
         fputs("null", f);
-    fprintf(f, ",\n  \"struct_cap\": %u,\n", g_struct_cap);
     fputs("  \"counts\": {\n", f);
     for (i = 0; i < K_COUNT; ++i) {
         fputs("    \"", f);
@@ -4035,17 +3999,10 @@ static size_t count_occurrences(const char *p, size_t n, const char *needle)
 
 static int self_test(char *err, size_t errsz)
 {
-    Buf out1 = {0};
-    Buf out2 = {0};
-    Counts c1;
-    Counts c2;
-    Sites s1 = {0};
-    Sites s2 = {0};
     int ok = 1;
     char err2[512];
     unsigned exp_fix[K_COUNT];
-
-    g_struct_cap = 24;
+    unsigned tested_sites = 0;
 
     /* The fixture exercises one sample of every site kind, including the two
      * relocated order handlers.  Corpus totals live in expected_total and are
@@ -4061,125 +4018,16 @@ static int self_test(char *err, size_t errsz)
     exp_fix[K_TRACE_FORMATION] = 0;
     exp_fix[K_ORDER_CURSOR] = 0;
 
-    if (process_buffer(SELF_FIXTURE, strlen(SELF_FIXTURE), NULL,
-                       &out1, &c1, &s1, err2, sizeof(err2)) != 0) {
-        snprintf(err, errsz, "self-test first pass failed: %s", err2);
-        goto fail;
-    }
-    if (!counts_match(&c1, exp_fix)) {
-        snprintf(err, errsz, "self-test counts mismatch after first pass");
-        goto fail;
-    }
-    if (count_occurrences(out1.p, out1.n, "wc3_sel_grid_init") != 2 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel_panel_note") != 1 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel_panel_select") != 2 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_panel_hide(c, c->ebx)") != 1 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel_panel_fill") != 2 ||
-        count_occurrences(out1.p, out1.n, "0x144u") != 1 ||
-        count_occurrences(out1.p, out1.n, "0x00000138u") != 1 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel_cap()") != 32 ||
-        count_occurrences(out1.p, out1.n, "0x9A0u") != 1 ||
-        count_occurrences(out1.p, out1.n, "0x9A8u") != 1 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFF6A0u") != 4 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFF6B8u") != 2 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFF6BCu") != 2 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFF860u") != 4 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFF8A4u") != 2 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFF8C0u") != 2 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFF8A8u") != 4 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_addunit") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_evt2") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_lookup") != 2 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection remove entry trace") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection remove unit trace") != 3 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection event birth trace") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection orderev result trace") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "selection orderev event trace") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_order_unit") != 2 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_order_loop") != 4 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_order_slots") != 3 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_order_apply") != 2 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_order_exec") != 2 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_tasknull") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_evinit") != 1 ||
-        count_occurrences(out1.p, out1.n,
-                          "wc3_sel_trace_orderdrop") != 1 ||
-        count_occurrences(out1.p, out1.n, "0x5B8u") != 1 ||
-        count_occurrences(out1.p, out1.n, "0x5B4u") != 1 ||
-        count_occurrences(out1.p, out1.n, "[esi + 0x4c], 0x18 */") != 1 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFFA58u") != 1 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFFAA4u") != 1 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFFA5Cu") != 1 ||
-        count_occurrences(out1.p, out1.n, "[ebp - 0x5a8]") != 1 ||
-        count_occurrences(out1.p, out1.n, "[ebp - 0x5a4]") != 1 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFFE1Cu") != 0 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFFE20u") != 0 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFFE68u") != 0) {
-        snprintf(err, errsz, "self-test first pass content mismatch");
-        goto fail;
-    }
-    if (count_occurrences(out1.p, out1.n, "0xFFFFF5B4u") != 0 ||
-        count_occurrences(out1.p, out1.n, "0xFFFFECB4u") != 1 ||
-        count_occurrences(out1.p, out1.n, "0x000001C0u") != 2 ||
-        count_occurrences(out1.p, out1.n, "0x0000013Cu") != 1 ||
-        count_occurrences(out1.p, out1.n, "0x13Cu") != 2 ||
-        count_occurrences(out1.p, out1.n, "0x0000019Cu") != 1 ||
-        count_occurrences(out1.p, out1.n, "0x1C8u") != 1 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel_cap() - 1") != 1 ||
-        count_occurrences(out1.p, out1.n, "0xBu") != 0 ||
-        count_occurrences(out1.p, out1.n, "0x00000100u") != 0 ||
-        count_occurrences(out1.p, out1.n, "0x000000ACu") != 0 ||
-        count_occurrences(out1.p, out1.n, "0xACu") != 0 ||
-        count_occurrences(out1.p, out1.n, "0x000000DCu") != 0 ||
-        count_occurrences(out1.p, out1.n, "0x108u") != 0) {
-        snprintf(err, errsz, "self-test layout shift mismatch");
-        goto fail;
-    }
-
-    if (process_buffer(out1.p, out1.n, NULL, &out2, &c2, &s2,
-                       err2, sizeof(err2)) != 0) {
-        snprintf(err, errsz, "self-test second pass failed: %s", err2);
-        goto fail;
-    }
-    if (!counts_match(&c2, exp_fix)) {
-        snprintf(err, errsz, "self-test counts mismatch after second pass");
-        goto fail;
-    }
-    if (out1.n != out2.n || memcmp(out1.p, out2.p, out1.n) != 0) {
-        snprintf(err, errsz, "self-test is not idempotent");
-        goto fail;
-    }
-
-    /* Structural 40 profile: the same 352 sites must produce the 40-layout
-     * targets, and a second 40-profile pass must be byte-identical. */
+    /* The fixture must produce the 40-layout targets, and a second pass must
+     * be byte-identical. */
     {
         Buf out40a = {0};
         Buf out40b = {0};
-        Buf out40c = {0};
         Counts c40a;
         Counts c40b;
-        Counts c40c;
         Sites s40a = {0};
         Sites s40b = {0};
-        Sites s40c = {0};
 
-        g_struct_cap = 40;
         if (process_buffer(SELF_FIXTURE, strlen(SELF_FIXTURE), NULL,
                            &out40a, &c40a, &s40a, err2, sizeof(err2)) != 0) {
             snprintf(err, errsz, "self-test 40 first pass failed: %s", err2);
@@ -4259,33 +4107,12 @@ static int self_test(char *err, size_t errsz)
             goto fail40;
         }
 
-        /* A corpus emitted by the 24-profile pass must upgrade in place to
-         * exactly the same bytes as a fresh 40-profile pass. */
-        if (process_buffer(out1.p, out1.n, NULL, &out40c, &c40c, &s40c,
-                           err2, sizeof(err2)) != 0) {
-            snprintf(err, errsz, "self-test 24->40 upgrade failed: %s", err2);
-            ok = 0;
-            goto fail40;
-        }
-        if (!counts_match(&c40c, exp_fix)) {
-            snprintf(err, errsz, "self-test 24->40 upgrade counts mismatch");
-            ok = 0;
-            goto fail40;
-        }
-        if (out40a.n != out40c.n ||
-            memcmp(out40a.p, out40c.p, out40a.n) != 0) {
-            snprintf(err, errsz,
-                     "self-test 24->40 upgrade differs from a fresh pass");
-            ok = 0;
-            goto fail40;
-        }
+        tested_sites = counts_sum(&c40a);
 fail40:
         buf_free(&out40a);
         buf_free(&out40b);
-        buf_free(&out40c);
         free(s40a.v);
         free(s40b.v);
-        free(s40c.v);
         if (!ok)
             goto fail;
     }
@@ -4379,10 +4206,10 @@ fail40:
     }
 
     {
-        /* Mirrors a current report: PASS_REV 49 (348 sites). */
+        /* Mirrors a current report: PASS_REV 50 (348 sites). */
         const char json[] =
             "{\"pass\":\"" PASS "\","
-            "\"pass_rev\":49,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
+            "\"pass_rev\":50,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
             "\"cap_outer\":2,\"cap_inner\":2,\"fill_block\":2,\"fill_grid\":1,"
             "\"note_selection\":1,\"hide_all\":1,\"addunit_cap\":1,\"cap_local_list\":5,"
             "\"cap_copy_list\":3,\"cap_sync_add\":1,\"cap_net_recv\":1,\"cap_net_apply\":5,"
@@ -4407,17 +4234,13 @@ fail40:
     }
 
     printf("self-test: OK (%u sites, idempotent, fail-closed)\n",
-           counts_sum(&c1));
+           tested_sites);
     ok = 1;
     goto done;
 
 fail:
     ok = 0;
 done:
-    buf_free(&out1);
-    buf_free(&out2);
-    free(s1.v);
-    free(s2.v);
     return ok ? 0 : -1;
 }
 
@@ -4429,7 +4252,7 @@ static void usage(void)
 {
     fprintf(stderr,
             "usage: " PASS " --lift IN --out OUT [--json REPORT] "
-            "[--profile seed|closed] [--struct-cap 24|40] [--quiet]\n"
+            "[--profile seed|closed] [--quiet]\n"
             "       " PASS " --verify-coverage @manifest [--quiet]\n"
             "       " PASS " --self-test\n");
 }
@@ -4456,17 +4279,6 @@ int main(int argc, char **argv)
             json = argv[++i];
         } else if (strcmp(a, "--profile") == 0 && i + 1 < argc) {
             profile = argv[++i];
-        } else if (strcmp(a, "--struct-cap") == 0 && i + 1 < argc) {
-            const char *v = argv[++i];
-
-            if (strcmp(v, "24") == 0)
-                g_struct_cap = 24;
-            else if (strcmp(v, "40") == 0)
-                g_struct_cap = 40;
-            else {
-                usage();
-                return 2;
-            }
         } else if (strcmp(a, "--verify-coverage") == 0 && i + 1 < argc) {
             coverage = argv[++i];
         } else if (strcmp(a, "--quiet") == 0) {

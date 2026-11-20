@@ -12,10 +12,9 @@
  *
  * The exact baseline (selection OFF) does not contain this module and keeps
  * the original 12-unit cap and the 6x2 grid.  With the module ON the corpus
- * carries the 24-entry comparison layout or the 40-entry product layout chosen
- * at configure time, and the cap is a runtime choice: the Android launch
- * settings write WC3_SELECTION_CAP=12|24|40 before android_main, so the 40
- * product build serves all three modes.
+ * always carries the fixed 40-entry layout, and the cap is a runtime choice:
+ * the Android launch settings write WC3_SELECTION_CAP=12|24|40 before
+ * android_main, so the same build serves all three modes.
  */
 #ifndef WC3_FEATURES_SELECTION_H
 #define WC3_FEATURES_SELECTION_H
@@ -165,11 +164,9 @@ uint32_t wc3_sel_formation_columns(uint32_t index, uint32_t count,
  * group+0x138 = active grid (grid12 initially)
  * group+0x13C = initialisation-attempted marker ("SEL2")
  * group+0x140 = total selected-unit count from CSelectionWar3+0x1F8
- * group+0x144 = 10x4 grid, or zero when allocation failed or the structural
- *                cap is 24 (the 24-entry allocation ends at 0x144)
+ * group+0x144 = 10x4 grid, or zero when allocation failed
  *
- * The group allocation is widened from 0x134 to 0x144 (24 entries) or 0x150
- * (40 entries) bytes by the LiftPass.
+ * The group allocation is widened from 0x134 to 0x150 bytes by the LiftPass.
  * The marker gates every helper: before init writes the marker the added
  * fields are not owned by this profile, so hide/fill fall back to grid12 and
  * select/note return without touching group memory.
