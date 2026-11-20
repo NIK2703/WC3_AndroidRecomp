@@ -44,7 +44,7 @@
  * Keys:
  *   enabled=0|1             soft disable; keeps the pool alive
  *   threshold=auto|N        minimum top-level candidates for the pool;
- *                           `auto` is max(2*min_chunk, chunks*32)
+ *                           `auto` is max(2*min_chunk, chunks*2)
  *   chunks=auto|N           active workers for a batch (1..pool size);
  *                           `auto` uses min(pool size, candidate count)
  *   min_chunk=N             minimum candidate count per split chunk
@@ -105,18 +105,22 @@
 #define RAY_STACK_ZERO_MIN       0x00000040u
 #define RAY_STACK_TOP_RESERVE    0x00000100u
 #define RAY_TEB_SIZE             0x00001000u
-/* Each worker pays a fixed cost before it touches a candidate: a container
- * copy, a stack clear, a CPU/register setup and a wakeup.  A caller that only
- * has a few dozen candidates is therefore much slower through the pool than
- * on the calling thread.  Require at least this many candidates per worker
- * before splitting a batch.  The environment/config override still wins.
- * A 32-candidate chunk spends more time on its private stack/container setup
- * and wake than on the candidate loop in the old shadow test.  The loaded
- * TwistedMeadows/Justice render path is different: its candidate lists are
- * 64..127 entries (98 average, 103 maximum), so a 64-candidate floor leaves
- * every batch on the caller.  Use 24 entries per chunk: a typical batch then
- * splits into four chunks, while a 64-entry batch still needs two.  The auto
- * threshold follows the same measurements. */
+/* Each worker pays a fixed cost before it touches a candidate: a CPU copy,
+ * a 336-byte container copy, a 256-byte stack clear and a wakeup.  The fixed
+ * bytes are about 1.3 KiB; the candidate chain is much larger.  The loaded
+ * path measured on 2026-11-20 had 2048 samples in the 32..63 bucket
+ * (avg 45, max 48), so it runs three chunks of 11..16 candidates.  A
+ * 16-candidate batch would be two chunks of eight; the 16..31 bucket was not
+ * present in that sample, so its break-even is still unproven.  Keep the
+ * eight-candidate floor and the auto threshold
+ * max(2*min_chunk, 2*workers) = 16 for eight workers.  The older 24/64 notes
+ * and the 64/256 numbers in docs/research/PARALLEL_CPU_LAYOUT_2026-11-17.md
+ * came from a different shadow candidate cost and are not the as-built
+ * default.  The 453 us batch average for 44 candidates/3 chunks is about
+ * 30 us per candidate, so even an eight-candidate chunk has roughly 240 us
+ * of candidate work; a 50 us wake would still leave it ahead of the two
+ * sequential chunks.  That is a model, not an A/B: the 16..31 bucket was not
+ * observed and must still be measured before changing the floor. */
 #define RAY_MIN_CHUNK            8u
 #define RAY_AUTO_THRESHOLD_CHUNK 2u
 #define RAY_MAX_THRESHOLD        1000000u
@@ -155,9 +159,25 @@
  * batch is below the profitable split: a 16-triangle chunk is almost all
  * frame-copy and wakeup cost, and the outer raycast batch already parallelizes
  * the candidates that contain these triangles.  Keep the 128/32 defaults so
- * the small batch stays sequential.  WC3_TRIANGLE_THRESHOLD and
- * WC3_TRIANGLE_MIN_CHUNK can still lower the gates for a measured diagnostic
- * experiment; do not treat 32/16 as a production default. */
+ * the small batch stays sequential.  Lowering the gate would not engage the
+ * pool for this call: the outer raycast job holds g_submit_lock, so
+ * run_triangle_batch fails the trylock and returns to the sequential loop.
+ *
+ * A split always leaves at least one worker on the critical path.  The caller
+ * cannot run a chunk in its own frame and then continue: L_6F125924 ends with
+ * the caller-frame epilogue, so a caller chunk needs its own copied frame and
+ * CPU state.  Giving the caller a private chunk (or an uneven split) avoids
+ * one worker, not the wake the remaining worker still pays.  The copies are
+ * about 1 KiB; they cannot by themselves explain a 32-triangle loss, but the
+ * split still has a wake that the sequential path does not.  A debug-only
+ * one-shot probe (`[triangle] ab`) measures this exact batch sequentially and
+ * over the pool with 16-triangle chunks, so the gate can be checked on device
+ * before it is changed.  The probe does not alter the normal path.  The only
+ * lever that removes the wake inside a split is keeping workers hot with
+ * WC3_RAY_SPIN_US, which trades idle CPU and needs an on-device A/B.
+ * WC3_TRIANGLE_THRESHOLD and WC3_TRIANGLE_MIN_CHUNK can still lower the gates
+ * for a measured diagnostic experiment; do not treat 32/16 as a production
+ * default. */
 #define TRIANGLE_FRAME_BELOW      0x100u
 #define TRIANGLE_FRAME_ABOVE      0x40u
 #define TRIANGLE_FRAME_COPY       (TRIANGLE_FRAME_BELOW + TRIANGLE_FRAME_ABOVE)
@@ -172,7 +192,7 @@
  * batch.  Keep it available in debug builds but off by default: an always-on
  * oracle turns every "parallel" measurement into parallel + sequential work.
  * A verification build can set WC3_TRIANGLE_VERIFY_DEFAULT=1 at compile time. */
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
 # ifndef WC3_TRIANGLE_VERIFY_DEFAULT
 #  define WC3_TRIANGLE_VERIFY_DEFAULT 0
 # endif
@@ -315,26 +335,41 @@ static int g_pool_init_active;
 static int g_raycast_enabled = 1;
 static int g_vertex_enabled = 1;
 static int g_triangle_enabled = 1;
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
 /* Run the original full vertex loop after a pooled batch and compare its
  * observable bytes/CPU state with the parallel result.  Debug-only and
  * opt-in through WC3_VERTEX_VERIFY=1. */
 static int g_vertex_verify;
 #endif
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE && WC3_DEBUG_PERF
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
 /* Per-kind oracle accounting.  The aggregate perf line cannot prove that
  * both entry points (copy and transform) were checked. */
 static unsigned long long g_vertex_verify_calls[2];
 static unsigned long long g_vertex_verify_failures[2];
 #endif
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
 /* Debug-only opt-in for the triangle sequential oracle.  Range checks stay
  * enabled; only the expensive whole-batch replay is gated. */
 static int g_triangle_verify;
 #endif
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE && WC3_DEBUG_PERF
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
 static unsigned long long g_triangle_verify_calls;
 static unsigned long long g_triangle_verify_failures;
+
+/* One-shot A/B probe for a small triangle batch.  It compares the generated
+ * sequential loop with the same loop split over the pool, without touching the
+ * caller's CPU, frame or output words.  The normal path stays sequential; this
+ * only supplies the numbers needed to decide whether the 128/32 gate is still
+ * right.  Three samples make a single short run comparable instead of relying
+ * on one noisy first-batch measurement. */
+#define TRIANGLE_AB_MIN_CHUNK 16u
+#define TRIANGLE_AB_SAMPLES   3u
+static RayCtx g_triangle_ab_ctx;
+static int g_triangle_ab_ctx_ready;
+static int g_triangle_ab_enabled = 1;
+static _Atomic int g_triangle_ab_state;        /* main A/B: 0 idle, 1 running, 2 done */
+static _Atomic int g_triangle_ab_nested_state; /* nested:  0 idle, 1 running, 2 done */
+static _Atomic int g_triangle_ab_ctx_busy;
 #endif
 static unsigned g_vertex_threshold = VERTEX_DEFAULT_THRESHOLD;
 static unsigned g_vertex_chunks;      /* 0 = one chunk per worker */
@@ -344,14 +379,24 @@ static unsigned g_triangle_chunks;    /* 0 = one chunk per worker */
 static unsigned g_triangle_min_chunk = TRIANGLE_MIN_CHUNK;
 static unsigned g_workers;
 static RayCtx *g_worker;
+#if WC3_DEBUG && WC3_DEBUG_PERF
+/* The triangle wrapper is also entered from a raycast/vertex worker.  Pointer
+ * identity is enough here; the pool owns these CPU objects for the process. */
+static int triangle_ab_cpu_is_worker(const CPU *c)
+{
+    if (!g_worker) return 0;
+    for (unsigned i = 0; i < g_workers; i++) {
+        if (c == &g_worker[i].cpu) return 1;
+    }
+    return 0;
+}
+#endif
 /* Product list from WC3_PARALLEL_WORKER_CPUS.  Empty means the automatic
  * one-worker-per-allowed-CPU layout; a non-empty list sets both the pool size
  * and a one-core affinity for each worker. */
 static int g_worker_cpu[WC3_PARALLEL_MAX_WORKERS];
 static unsigned g_worker_cpu_count;
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF || \
-                  WC3_PARALLEL_VERTEX_VALIDATE || \
-                  WC3_PARALLEL_TRIANGLE_VALIDATE)
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
 static RayCtx g_verify_ctx;
 #endif
 
@@ -524,6 +569,7 @@ static void tune_set_uint(_Atomic unsigned *p, unsigned v)
     atomic_store_explicit(p, v, memory_order_relaxed);
 }
 
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
 static unsigned env_u(const char *name, unsigned fallback, unsigned maximum)
 {
     const char *s = getenv(name);
@@ -533,6 +579,7 @@ static unsigned env_u(const char *name, unsigned fallback, unsigned maximum)
     if (end == s || v > maximum) return fallback;
     return (unsigned)v;
 }
+#endif
 
 static int env_off(const char *name)
 {
@@ -1039,6 +1086,7 @@ static int parse_bool(const char *s, int *out)
 }
 #endif
 
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
 static int parse_uint(const char *s, unsigned *out)
 {
     if (!s || !*s) return 0;
@@ -1050,6 +1098,7 @@ static int parse_uint(const char *s, unsigned *out)
     *out = (unsigned)v;
     return 1;
 }
+#endif
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
 static unsigned clamp_uint(unsigned v, unsigned lo, unsigned hi)
@@ -1298,6 +1347,7 @@ static void set_tuning_defaults(void)
 #if WC3_DEBUG && WC3_DEBUG_HLE
     int threshold_auto = 1;
 #endif
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
     const char *s = getenv("WC3_PARALLEL_RAYCAST_THRESHOLD");
     if (s && *s) {
         unsigned u;
@@ -1308,6 +1358,7 @@ static void set_tuning_defaults(void)
 #endif
         }
     }
+#endif
 
     tune_set_int(&g_tune.enabled, 1);
     tune_set_uint(&g_tune.threshold, threshold);
@@ -1332,14 +1383,16 @@ static void set_tuning_defaults(void)
     tune_set_int(&g_tune.timing, 1);
     tune_set_uint(&g_tune.stats_every, RAY_STATS_DEFAULT);
 #endif
+    tune_set_uint(&g_tune.spin_us, 0u);
+    tune_set_uint(&g_tune.main_spin_us, 1000u);
+    tune_set_uint(&g_tune.worker_cpu_mask, 0u);
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
     tune_set_uint(&g_tune.spin_us,
                   env_u("WC3_RAY_SPIN_US", 0u, 10000u));
     tune_set_uint(&g_tune.main_spin_us,
                   env_u("WC3_RAY_MAIN_SPIN_US", 1000u, 1000000u));
     tune_set_uint(&g_tune.worker_cpu_mask,
                   env_u("WC3_RAY_WORKER_CPU_MASK", 0u, UINT_MAX));
-#if WC3_DEBUG && WC3_DEBUG_PERF
-    tune_set_uint(&g_tune.stats_every, RAY_STATS_DEFAULT);
 #endif
 #if WC3_DEBUG && WC3_DEBUG_HLE
     g_threshold_auto = threshold_auto;
@@ -1507,7 +1560,7 @@ static void run_chunk(RayCtx *ctx, const RayJob *job)
  * epilogue once.
  */
 
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
 static int vertex_span_ok(uint32_t ptr, uint32_t stride, uint32_t count,
                           uint32_t element_size)
 {
@@ -1546,7 +1599,7 @@ static int prepare_vertex_ctx(RayCtx *ctx, const RayJob *job)
     uint32_t hi = lo + VERTEX_FRAME_COPY;
 
     if (dst_lo < ctx->stack_base) return 0;
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
     if (!hle_android_guest_ok(dst_lo, VERTEX_FRAME_COPY)) return 0;
 #endif
     memcpy(guest_host_ptr(dst_lo), guest_host_ptr(lo),
@@ -1655,7 +1708,7 @@ static void run_vertex_chunk(RayCtx *ctx, const RayJob *job)
  * equal distance keeps the lowest triangle index.
  */
 
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
 static int triangle_frame_ok(const CPU *c)
 {
     if (c->ebp < TRIANGLE_FRAME_BELOW) return 0;
@@ -1693,6 +1746,30 @@ static int triangle_vertex_span_ok(uint32_t vertex, uint32_t indices,
     if (hi > 0x100000000ull || hi <= lo) return 0;
     return hle_android_guest_ok((uint32_t)lo, (uint32_t)(hi - lo));
 }
+
+/* Validation shared by the normal slow path and the debug A/B probe.  The
+ * probe must not read a frame or index span that the real path would reject. */
+static int triangle_args_ok(const CPU *c, uint32_t tri_count, uint32_t indices,
+                            uint32_t vertex, uint32_t best_ptr,
+                            uint32_t index_ptr)
+{
+    if (!best_ptr || !index_ptr) return 0;
+    if (!hle_android_guest_ok(best_ptr, 4u) ||
+        !hle_android_guest_ok(index_ptr, 4u))
+        return 0;
+    if (!triangle_frame_ok(c)) return 0;
+    if (!triangle_index_span_ok(indices, tri_count)) return 0;
+    if (!triangle_vertex_span_ok(vertex, indices, tri_count)) return 0;
+
+    /* The workers write private words in their copied frames and the main
+     * thread writes these two words only after the batch, so an output inside
+     * the copied frame would be overwritten or alias caller state. */
+    uint32_t frame_lo = c->ebp - TRIANGLE_FRAME_BELOW;
+    uint32_t frame_hi = frame_lo + TRIANGLE_FRAME_COPY;
+    if (best_ptr >= frame_lo && best_ptr + 4u <= frame_hi) return 0;
+    if (index_ptr >= frame_lo && index_ptr + 4u <= frame_hi) return 0;
+    return 1;
+}
 #endif
 
 static int prepare_triangle_ctx(RayCtx *ctx, const RayJob *job,
@@ -1710,7 +1787,7 @@ static int prepare_triangle_ctx(RayCtx *ctx, const RayJob *job,
         return 0;
     dst_lo = ctx->stack_top - TRIANGLE_FRAME_COPY;
     if (dst_lo < ctx->stack_base) return 0;
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     if (!hle_android_guest_ok(dst_lo, TRIANGLE_FRAME_COPY)) return 0;
 #endif
     memcpy(guest_host_ptr(dst_lo), guest_host_ptr(lo),
@@ -1833,16 +1910,22 @@ static void apply_worker_affinity(RayCtx *ctx)
     }
     long rc = syscall(__NR_sched_setaffinity, 0, sizeof kernel_mask,
                       kernel_mask);
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
     if (rc != 0) {
         fprintf(stderr,
                 "[raycast] worker %d: affinity mask 0x%llX failed: %s\n",
                 ctx->index, (unsigned long long)set, strerror(errno));
     }
 #else
+    (void)rc;
+#endif
+#else
     (void)set;
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
     fprintf(stderr,
             "[raycast] worker %d: affinity unavailable, mask 0x%llX ignored\n",
             ctx->index, (unsigned long long)set);
+#endif
 #endif
 }
 
@@ -2012,8 +2095,10 @@ static void prewarm_one(uint32_t target, uint32_t sentinel)
 {
     wc3_lifted_fn fn = wc3_dispatch_resolve(target);
     if (!fn) {
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
         fprintf(stderr, "[raycast] prewarm: no lifted function at %08X\n",
                 target);
+#endif
         return;
     }
 
@@ -2059,18 +2144,23 @@ static void init_once(void)
         return;
     }
 
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
     g_vertex_threshold = env_u("WC3_VERTEX_THRESHOLD",
                                VERTEX_DEFAULT_THRESHOLD, VERTEX_MAX_COUNT);
     g_vertex_chunks = env_u("WC3_VERTEX_CHUNKS", 0, UINT_MAX);
     g_vertex_min_chunk = env_u("WC3_VERTEX_MIN_CHUNK",
                                VERTEX_DEFAULT_MIN_CHUNK, VERTEX_MAX_COUNT);
-    if (g_vertex_min_chunk && g_vertex_min_chunk < 4u) g_vertex_min_chunk = 4u;
     g_triangle_threshold = env_u("WC3_TRIANGLE_THRESHOLD",
                                  TRIANGLE_DEFAULT_THRESHOLD,
                                  TRIANGLE_MAX_COUNT);
     g_triangle_chunks = env_u("WC3_TRIANGLE_CHUNKS", 0, UINT_MAX);
     g_triangle_min_chunk = env_u("WC3_TRIANGLE_MIN_CHUNK", TRIANGLE_MIN_CHUNK,
                                  TRIANGLE_MAX_COUNT);
+#endif
+    if (g_vertex_min_chunk && g_vertex_min_chunk < 4u) g_vertex_min_chunk = 4u;
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
+    g_triangle_ab_enabled = !env_off("WC3_TRIANGLE_AB");
+#endif
 
     /* The product core table is authoritative: a non-empty list sets both
      * the pool size and a one-core affinity per worker.  An empty list keeps
@@ -2098,8 +2188,10 @@ static void init_once(void)
         }
 #endif
     }
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
     if (!g_workers)
         g_workers = env_u("WC3_PARALLEL_RAYCAST_THREADS", 0, UINT_MAX);
+#endif
     if (!g_workers) g_workers = auto_worker_count();
     if (g_workers < 1u) g_workers = 1u;
     if (g_vertex_chunks == 0 || g_vertex_chunks > g_workers)
@@ -2108,12 +2200,12 @@ static void init_once(void)
         g_triangle_chunks = g_workers;
 
     set_tuning_defaults();
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
     const char *vertex_verify = getenv("WC3_VERTEX_VERIFY");
     g_vertex_verify = vertex_verify && *vertex_verify &&
                       !env_off("WC3_VERTEX_VERIFY");
 #endif
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     g_triangle_verify = WC3_TRIANGLE_VERIFY_DEFAULT;
     const char *triangle_verify = getenv("WC3_TRIANGLE_VERIFY");
     if (triangle_verify && *triangle_verify)
@@ -2133,15 +2225,15 @@ static void init_once(void)
 
     g_worker = calloc((size_t)g_workers, sizeof *g_worker);
     if (!g_worker) {
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
         fprintf(stderr, "[raycast] cannot allocate %u worker context(s)\n",
                 g_workers);
+#endif
         atomic_store_explicit(&g_init_ok, 1, memory_order_release);
         return;
     }
 
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF || \
-                  WC3_PARALLEL_VERTEX_VALIDATE || \
-                  WC3_PARALLEL_TRIANGLE_VALIDATE)
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
     if (!alloc_ctx(&g_verify_ctx, g_workers)) {
         fprintf(stderr, "[raycast] cannot allocate verification context\n");
         free(g_worker);
@@ -2150,10 +2242,21 @@ static void init_once(void)
         return;
     }
 #endif
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
+    if (g_triangle_ab_enabled && g_triangle_enabled) {
+        if (alloc_ctx(&g_triangle_ab_ctx, g_workers)) {
+            g_triangle_ab_ctx_ready = 1;
+        } else {
+            fprintf(stderr, "[triangle] ab context allocation failed\n");
+        }
+    }
+#endif
 
     for (unsigned i = 0; i < g_workers; i++) {
         if (!alloc_ctx(&g_worker[i], i)) {
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
             fprintf(stderr, "[raycast] cannot allocate worker %u context\n", i);
+#endif
             goto fail;
         }
     }
@@ -2175,7 +2278,9 @@ static void init_once(void)
             g_worker[i].assigned_cpu = g_worker_cpu[i];
         if (pthread_create(&g_worker[i].thread, NULL, worker_main,
                            &g_worker[i]) != 0) {
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
             fprintf(stderr, "[raycast] cannot create worker %u\n", i);
+#endif
             goto fail;
         }
         g_worker[i].thread_started = 1;
@@ -2183,9 +2288,27 @@ static void init_once(void)
 
     g_parallel_ok = 1;
     atomic_store_explicit(&g_init_ok, 1, memory_order_release);
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     fprintf(stderr, "[triangle] sequential oracle %s\n",
             g_triangle_verify ? "on" : "off (set WC3_TRIANGLE_VERIFY=1)");
+#endif
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
+    if (g_triangle_ab_ctx_ready && g_workers >= 2u) {
+        fprintf(stderr,
+                "[triangle] ab probe armed: main A/B %u samples, nested "
+                "sequential sample, %u-triangle chunks\n",
+                TRIANGLE_AB_SAMPLES, TRIANGLE_AB_MIN_CHUNK);
+    } else if (g_triangle_ab_ctx_ready) {
+        fprintf(stderr,
+                "[triangle] ab probe unavailable (need at least 2 workers)\n");
+    } else if (!g_triangle_ab_enabled) {
+        fprintf(stderr, "[triangle] ab probe off (WC3_TRIANGLE_AB=0)\n");
+    } else if (!g_triangle_enabled) {
+        fprintf(stderr,
+                "[triangle] ab probe off (triangle path disabled)\n");
+    } else {
+        fprintf(stderr, "[triangle] ab probe unavailable\n");
+    }
 #endif
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE && \
     WC3_PARALLEL_TRIANGLE_VALIDATE
@@ -2197,11 +2320,12 @@ static void init_once(void)
     fprintf(stderr,
             "[parallel] pool: %u worker(s), %u selected core(s), "
             "%ld online CPU(s), "
-            "ray threshold %u, vertex threshold %u, vertex chunks %u, "
-            "vertex min_chunk %u, triangle threshold %u, triangle chunks %u, "
-            "triangle min_chunk %u, verify %s\n",
+            "ray threshold %u, ray min_chunk %u, vertex threshold %u, "
+            "vertex chunks %u, vertex min_chunk %u, triangle threshold %u, "
+            "triangle chunks %u, triangle min_chunk %u, verify %s\n",
             g_workers, g_worker_cpu_count, sysconf(_SC_NPROCESSORS_ONLN),
-            tune_uint(&g_tune.threshold), g_vertex_threshold,
+            tune_uint(&g_tune.threshold), tune_uint(&g_tune.min_chunk),
+            g_vertex_threshold,
             g_vertex_chunks, g_vertex_min_chunk, g_triangle_threshold,
             g_triangle_chunks, g_triangle_min_chunk,
             tune_int(&g_tune.verify) ? "on" : "off");
@@ -2209,7 +2333,7 @@ static void init_once(void)
             g_tune_file_enabled
                 ? "enabled by WC3_RAY_TUNE"
                 : "ignored; set WC3_RAY_TUNE=1 to load");
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
     fprintf(stderr, "[vertex] bit-exact verification %s\n",
             g_vertex_verify ? "on" : "off (set WC3_VERTEX_VERIFY=1)");
 #endif
@@ -2233,12 +2357,16 @@ fail:
             g_worker[i].wake_init = 0;
         }
     }
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF || \
-                  WC3_PARALLEL_VERTEX_VALIDATE || \
-                  WC3_PARALLEL_TRIANGLE_VALIDATE)
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
     if (g_verify_ctx.wake_init) {
         sem_destroy(&g_verify_ctx.wake);
         g_verify_ctx.wake_init = 0;
+    }
+#endif
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
+    if (g_triangle_ab_ctx.wake_init) {
+        sem_destroy(&g_triangle_ab_ctx.wake);
+        g_triangle_ab_ctx.wake_init = 0;
     }
 #endif
     free(g_worker);
@@ -2380,8 +2508,8 @@ static void maybe_print_stats(void)
     fprintf(stderr,
             "[raycast] stats +%llu calls: parallel=%llu (+%llu) "
             "fallback=%llu (+%llu) par_avg=%s fb_avg=%s "
-            "last_total=%u last_chunks=%u threshold=%u chunks=%u "
-            "stack_zero=%u copy=%u spin_us=%u main_spin_us=%u "
+            "last_total=%u last_chunks=%u threshold=%u min_chunk=%u "
+            "chunks=%u stack_zero=%u copy=%u spin_us=%u main_spin_us=%u "
             "cpu_mask=0x%X total_n=%llu total_avg=%llu total_max=%u "
             "total_hist=[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]\n",
             d_calls,
@@ -2390,6 +2518,7 @@ static void maybe_print_stats(void)
             par_avg, fb_avg,
             g_last_total, g_last_chunks,
             tune_uint(&g_tune.threshold),
+            tune_uint(&g_tune.min_chunk),
             tune_uint(&g_tune.chunk_limit),
             tune_uint(&g_tune.stack_zero),
             tune_uint(&g_tune.container_copy),
@@ -2594,7 +2723,7 @@ static int run_vertex_batch(CPU *c, wc3_lifted_fn fn, unsigned kind,
     return 1;
 }
 
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
 typedef struct VertexRange {
     uint64_t lo;
     uint64_t hi;
@@ -2632,7 +2761,7 @@ static int ranges_overlap(const VertexRange *a, const VertexRange *b)
 }
 #endif
 
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
 typedef struct VertexFrameSkip {
     uint32_t off;
     uint32_t size;
@@ -2870,7 +2999,7 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
         }
     }
 #endif
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
     VertexOracle oracle;
     CPU oracle_before;
     uint8_t oracle_frame[VERTEX_FRAME_COPY];
@@ -2884,7 +3013,7 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
     if (count < g_vertex_threshold) WC3_VERTEX_GUARD_FAIL(VG_LOW);
     if (count > VERTEX_MAX_COUNT) WC3_VERTEX_GUARD_FAIL(VG_HIGH);
 
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
     if (!vertex_frame_ok(c)) WC3_VERTEX_GUARD_FAIL(VG_FRAME);
 
     /* The setup block leaves the object pointer in [ebp-4] and the loop kind
@@ -2937,7 +3066,7 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
     }
 #endif
 
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
     /* Source streams: p0 and p1 are 12-byte vectors, p2 is 4 bytes, p3/p4
      * are 8 bytes.  Transform also reads one byte from the matrix-index array
      * pm per vertex. */
@@ -3082,7 +3211,7 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
     }
 #endif
 
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
     int oracle_run = oracle_ready && g_vertex_verify;
     if (oracle_run) {
         oracle_before = *c;
@@ -3110,7 +3239,7 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
         }
     }
 #endif
-#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
     if (pooled && oracle_run && pthread_mutex_trylock(&g_submit_lock) == 0) {
         /* Keep the pool idle while the oracle replays the sequential loop on
          * the caller.  A concurrent wrapper that loses this trylock remains
@@ -3126,7 +3255,7 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
     return pooled;
 }
 
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
 typedef struct TriangleState {
     uint32_t best;
     uint32_t index;
@@ -3190,11 +3319,13 @@ static void log_triangle_mismatch(const char *where, uint32_t total,
  * caller's frame, best word and index word are untouched until the merge
  * succeeds; a worker failure or a validation mismatch simply returns 0 so the
  * generated function runs the original loop on the caller.  On 1 the frame has
- * already been advanced exactly like the sequential epilogue. */
+ * already been advanced exactly like the sequential epilogue.  `allow_verify`
+ * lets the debug A/B probe skip the shared g_verify_ctx oracle without
+ * changing the process-wide WC3_TRIANGLE_VERIFY setting. */
 static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
                               unsigned chunks, uint32_t indices,
                               uint32_t best_ptr, uint32_t index_ptr,
-                              uint32_t orig_best)
+                              uint32_t orig_best, int allow_verify)
 {
     if (pthread_mutex_trylock(&g_submit_lock) != 0) return 0;
     if (t_ray_active || c->parallel_vertex_bypass) {
@@ -3202,6 +3333,9 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
         return 0;
     }
     t_ray_active = 1;
+#if !(WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE)
+    (void)allow_verify;
+#endif
 
     RayJob job;
     job.kind = RAY_JOB_TRIANGLE;
@@ -3213,13 +3347,13 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
     job.triangle_index_ptr = index_ptr;
     job.triangle_orig_best = orig_best;
 
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     /* The oracle writes the real best/index words, so snapshot them first.
      * The caller's frame is not touched: prepare_triangle_ctx copies it.
      * Range checks in triangle_try_slow are always on in a validation build;
      * only this full sequential replay is opt-in. */
     TriangleState expect;
-    int verify = g_triangle_verify;
+    int verify = allow_verify && g_triangle_verify;
     memset(&expect, 0, sizeof expect);
     if (verify) {
         RayCtx *v = &g_verify_ctx;
@@ -3274,7 +3408,7 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
 
     RayCtx *last = &g_worker[chunks - 1u];
 
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     /* Compare everything the chunks produce before the epilogue pops the
      * caller's frame.  XMM0 on a worker is its own chunk's best, so only
      * XMM1..7 and ECX/EDX are comparable here. */
@@ -3326,7 +3460,7 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
     c->ecx = last->cpu.ecx;
     c->edx = last->cpu.edx;
 
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     if (verify) {
         TriangleState got;
         memset(&got, 0, sizeof got);
@@ -3360,7 +3494,7 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
     }
 #endif
 
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE && WC3_DEBUG_PERF
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     if (verify) {
         g_triangle_verify_calls++;
         if (g_triangle_verify_calls == 1u ||
@@ -3383,6 +3517,238 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
                                                        wc3_lifted_fn fn,
                                                        uint32_t raw_count,
                                                        uint32_t tri_count);
+
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
+/* A 32-triangle call from a raycast worker cannot use the pool: the outer job
+ * already owns it, and the pool is not re-entrant.  Still sample the sequential
+ * cost once, on a private frame, and say why the parallel half is unavailable.
+ * This is the case the loaded map actually hits, so silence here would make the
+ * main-thread A/B look armed but never produce a line. */
+static __attribute__((noinline)) void triangle_ab_nested_probe(
+    CPU *c, wc3_lifted_fn fn, uint32_t raw_count, uint32_t tri_count)
+{
+    if (!g_triangle_ab_enabled || !g_triangle_ab_ctx_ready) return;
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_triangle_ab_nested_state, &expected, 1,
+            memory_order_acq_rel, memory_order_relaxed))
+        return;
+    int busy = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_triangle_ab_ctx_busy, &busy, 1,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        atomic_store_explicit(&g_triangle_ab_nested_state, 0,
+                              memory_order_release);
+        return;
+    }
+
+    const char *reason = triangle_ab_cpu_is_worker(c) ? "worker" :
+                         t_ray_active ? "nested" :
+                         atomic_load_explicit(&g_job_addr,
+                                              memory_order_acquire) ?
+                             "pool-active" : "unknown";
+    unsigned pool_busy = atomic_load_explicit(&g_job_addr,
+                                              memory_order_acquire) != 0;
+
+    uint32_t indices = rd32(c->ebp + 0x18u);
+    uint32_t vertex = rd32(c->ebp + 0x0Cu);
+    uint32_t best_ptr = c->esi;
+    uint32_t index_ptr = rd32(c->ebp + 0x20u);
+    if (!triangle_args_ok(c, tri_count, indices, vertex, best_ptr, index_ptr))
+        goto abort;
+
+    unsigned chunks = tri_count / TRIANGLE_AB_MIN_CHUNK;
+    if (chunks > g_workers) chunks = g_workers;
+    if (g_triangle_chunks && chunks > g_triangle_chunks)
+        chunks = g_triangle_chunks;
+    if (chunks < 2u) goto abort;
+
+    RayJob job;
+    memset(&job, 0, sizeof job);
+    job.kind = RAY_JOB_TRIANGLE;
+    job.fn = fn;
+    job.cpu = c;
+    job_set_chunk_split(&job, tri_count, chunks);
+    job.triangle_indices = indices;
+    job.triangle_best_ptr = best_ptr;
+    job.triangle_index_ptr = index_ptr;
+    job.triangle_orig_best = rd32(best_ptr);
+
+    RayCtx *v = &g_triangle_ab_ctx;
+    v->start = 0;
+    v->count = tri_count;
+    if (!prepare_triangle_ctx(v, &job, 1)) goto abort;
+
+    int saved_active = t_ray_active;
+    t_ray_active = 1;
+    uint64_t t0 = now_ns();
+    WC3_DIRECT_CALL_CLEAN(fn, &v->cpu);
+    uint64_t t1 = now_ns();
+    t_ray_active = saved_active;
+    uint64_t seq_ns = t1 >= t0 ? t1 - t0 : 0;
+    uint32_t seq_best = rd32(v->triangle_best_addr);
+    uint32_t seq_index = rd32(v->triangle_index_addr);
+
+    fprintf(stderr,
+            "[triangle] ab nested raw=%u tris=%u chunks=%u minc=%u "
+            "samples=1 seq_ns=%llu par=unavailable reason=%s pool_busy=%u "
+            "best=%08X idx=%u\n",
+            raw_count, tri_count, chunks, TRIANGLE_AB_MIN_CHUNK,
+            (unsigned long long)seq_ns, reason, pool_busy,
+            seq_best, seq_index);
+    atomic_store_explicit(&g_triangle_ab_nested_state, 2,
+                          memory_order_release);
+    atomic_store_explicit(&g_triangle_ab_ctx_busy, 0, memory_order_release);
+    return;
+
+abort:
+    atomic_store_explicit(&g_triangle_ab_nested_state, 0,
+                          memory_order_release);
+    atomic_store_explicit(&g_triangle_ab_ctx_busy, 0, memory_order_release);
+}
+
+/* Measure the small batch before the normal threshold returns.  Both trials
+ * use g_triangle_ab_ctx: the sequential one runs the generated function on a
+ * private frame, the parallel one hands the same private frame to
+ * run_triangle_batch.  Private best/index words at +0x28/+0x2C keep the real
+ * caller's output untouched, so the normal sequential path can still run after
+ * this probe.  The first valid sample stays one-shot for the process. */
+static __attribute__((noinline)) void triangle_ab_probe(CPU *c,
+                                                        wc3_lifted_fn fn,
+                                                        uint32_t raw_count,
+                                                        uint32_t tri_count)
+{
+    if (!g_triangle_ab_enabled || !g_triangle_ab_ctx_ready) return;
+    if (atomic_load_explicit(&g_triangle_ab_state, memory_order_relaxed) == 2 &&
+        atomic_load_explicit(&g_triangle_ab_nested_state,
+                             memory_order_relaxed) == 2)
+        return;
+    /* A raycast/vertex worker also reaches the triangle wrapper.  Its call is
+     * inside an active outer job, so the pool cannot be re-entered; log the
+     * nested sequential cost instead of waiting for a main-thread call that
+     * may never happen.  The pool-active check comes first because it is the
+     * common worker case and avoids scanning the worker CPU table on every
+     * small batch after the one-shot nested sample is done. */
+    int nested = t_ray_active ||
+                 atomic_load_explicit(&g_job_addr, memory_order_acquire) != 0;
+    if (!nested) nested = triangle_ab_cpu_is_worker(c);
+    if (nested) {
+        if (atomic_load_explicit(&g_triangle_ab_nested_state,
+                                 memory_order_relaxed) == 2)
+            return;
+        triangle_ab_nested_probe(c, fn, raw_count, tri_count);
+        return;
+    }
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_triangle_ab_state, &expected, 1,
+            memory_order_acq_rel, memory_order_relaxed))
+        return;
+    int busy = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_triangle_ab_ctx_busy, &busy, 1,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        atomic_store_explicit(&g_triangle_ab_state, 0, memory_order_release);
+        return;
+    }
+    uint32_t indices = rd32(c->ebp + 0x18u);
+    uint32_t vertex = rd32(c->ebp + 0x0Cu);
+    uint32_t best_ptr = c->esi;
+    uint32_t index_ptr = rd32(c->ebp + 0x20u);
+    if (!triangle_args_ok(c, tri_count, indices, vertex, best_ptr, index_ptr))
+        goto abort;
+
+    unsigned chunks = tri_count / TRIANGLE_AB_MIN_CHUNK;
+    if (chunks > g_workers) chunks = g_workers;
+    if (g_triangle_chunks && chunks > g_triangle_chunks)
+        chunks = g_triangle_chunks;
+    if (chunks < 2u) goto abort;
+
+    uint32_t orig_best = rd32(best_ptr);
+    RayJob job;
+    memset(&job, 0, sizeof job);
+    job.kind = RAY_JOB_TRIANGLE;
+    job.fn = fn;
+    job.cpu = c;
+    job_set_chunk_split(&job, tri_count, chunks);
+    job.triangle_indices = indices;
+    job.triangle_best_ptr = best_ptr;
+    job.triangle_index_ptr = index_ptr;
+    job.triangle_orig_best = orig_best;
+
+    RayCtx *v = &g_triangle_ab_ctx;
+    uint64_t seq_min = ~(uint64_t)0;
+    uint64_t par_min = ~(uint64_t)0;
+    uint64_t seq_sum = 0;
+    uint64_t par_sum = 0;
+    uint32_t seq_best = 0, seq_index = 0;
+    uint32_t par_best = 0, par_index = 0;
+    int equal = 1;
+
+    for (unsigned sample = 0; sample < TRIANGLE_AB_SAMPLES; sample++) {
+        v->start = 0;
+        v->count = tri_count;
+        if (!prepare_triangle_ctx(v, &job, 1)) goto abort;
+
+        int saved_active = t_ray_active;
+        t_ray_active = 1;
+        uint64_t seq_t0 = now_ns();
+        WC3_DIRECT_CALL_CLEAN(fn, &v->cpu);
+        uint64_t seq_t1 = now_ns();
+        t_ray_active = saved_active;
+        uint64_t seq_dt = seq_t1 >= seq_t0 ? seq_t1 - seq_t0 : 0;
+        seq_best = rd32(v->triangle_best_addr);
+        seq_index = rd32(v->triangle_index_addr);
+
+        v->start = 0;
+        v->count = tri_count;
+        if (!prepare_triangle_ctx(v, &job, 1)) goto abort;
+        uint32_t best_addr = v->triangle_best_addr;
+        uint32_t index_addr = v->triangle_index_addr;
+
+        uint64_t par_t0 = now_ns();
+        int pooled = run_triangle_batch(&v->cpu, fn, tri_count, chunks,
+                                        indices, best_addr, index_addr,
+                                        orig_best, 0);
+        uint64_t par_t1 = now_ns();
+        if (!pooled) goto abort;
+        uint64_t par_dt = par_t1 >= par_t0 ? par_t1 - par_t0 : 0;
+
+        par_best = rd32(best_addr);
+        par_index = rd32(index_addr);
+        if (seq_best != par_best || seq_index != par_index) equal = 0;
+        if (seq_dt < seq_min) seq_min = seq_dt;
+        if (par_dt < par_min) par_min = par_dt;
+        seq_sum += seq_dt;
+        par_sum += par_dt;
+    }
+
+    {
+        unsigned long long seq_avg = seq_sum / TRIANGLE_AB_SAMPLES;
+        unsigned long long par_avg = par_sum / TRIANGLE_AB_SAMPLES;
+        unsigned long long speedup =
+            par_avg ? (seq_avg * 100ull) / par_avg : 0;
+        long long gain = (long long)seq_avg - (long long)par_avg;
+        fprintf(stderr,
+                "[triangle] ab raw=%u tris=%u chunks=%u minc=%u samples=%u "
+                "seq_min_ns=%llu seq_avg_ns=%llu par_min_ns=%llu "
+                "par_avg_ns=%llu gain_avg_ns=%lld speedup_x100=%llu "
+                "equal=%d seq_best=%08X seq_idx=%u par_best=%08X par_idx=%u\n",
+                raw_count, tri_count, chunks, TRIANGLE_AB_MIN_CHUNK,
+                TRIANGLE_AB_SAMPLES,
+                (unsigned long long)seq_min, seq_avg,
+                (unsigned long long)par_min, par_avg, gain, speedup,
+                equal, seq_best, seq_index, par_best, par_index);
+    }
+    atomic_store_explicit(&g_triangle_ab_state, 2, memory_order_release);
+    atomic_store_explicit(&g_triangle_ab_ctx_busy, 0, memory_order_release);
+    return;
+
+abort:
+    atomic_store_explicit(&g_triangle_ab_state, 0, memory_order_release);
+    atomic_store_explicit(&g_triangle_ab_ctx_busy, 0, memory_order_release);
+}
+#endif
 
 /* Cold half of the triangle wrapper: run pthread_once and retry.  Keeping it
  * out of line leaves the initialized hot path free of a stack frame. */
@@ -3410,10 +3776,19 @@ int wc3_parallel_triangle_try_impl(CPU *c, wc3_lifted_fn fn)
         if (trace < 4u) {
             uint32_t trace_tri =
                 raw_count ? (raw_count - 1u) / 3u + 1u : 0u;
+            const char *ctx =
+                triangle_ab_cpu_is_worker(c) ? "worker" : "main";
+            /* `pool` is the process-wide job address; `active` is the local
+             * submission guard.  A worker inside an outer job therefore logs
+             * ctx=worker pool=1 active=0. */
             fprintf(stderr,
-                    "[triangle] dispatch raw=%u tris=%u threshold=%u minc=%u\n",
+                    "[triangle] dispatch raw=%u tris=%u threshold=%u minc=%u "
+                    "ctx=%s pool=%u active=%u\n",
                     raw_count, trace_tri, g_triangle_threshold,
-                    g_triangle_min_chunk);
+                    g_triangle_min_chunk, ctx,
+                    (unsigned)(atomic_load_explicit(&g_job_addr,
+                                                    memory_order_acquire) != 0),
+                    (unsigned)(t_ray_active != 0));
             trace++;
         }
     }
@@ -3424,6 +3799,13 @@ int wc3_parallel_triangle_try_impl(CPU *c, wc3_lifted_fn fn)
      * ceil((count-1)/3).  Use the same formula so a chunk boundary always
      * lands on a triangle the original loop would have visited. */
     uint32_t tri_count = (raw_count - 1u) / 3u + 1u;
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
+    /* The production gate keeps this batch sequential.  Sample it once in a
+     * debug build so the log can say whether a 16-triangle split would win;
+     * the probe itself never changes the path or the caller's outputs. */
+    if (tri_count >= 32u && tri_count < g_triangle_threshold)
+        triangle_ab_probe(c, fn, raw_count, tri_count);
+#endif
     if (tri_count < g_triangle_threshold || tri_count > TRIANGLE_MAX_COUNT)
         return 0;
     return triangle_try_slow(c, fn, raw_count, tri_count);
@@ -3435,26 +3817,16 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
                                                        uint32_t tri_count)
 {
     uint32_t indices = rd32(c->ebp + 0x18u);
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     uint32_t vertex = rd32(c->ebp + 0x0Cu);
+#endif
     uint32_t best_ptr = c->esi;
     uint32_t index_ptr = rd32(c->ebp + 0x20u);
     if (!best_ptr || !index_ptr) return 0;
 
-#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
-    if (!hle_android_guest_ok(best_ptr, 4u) ||
-        !hle_android_guest_ok(index_ptr, 4u))
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
+    if (!triangle_args_ok(c, tri_count, indices, vertex, best_ptr, index_ptr))
         return 0;
-    if (!triangle_frame_ok(c)) return 0;
-    if (!triangle_index_span_ok(indices, tri_count)) return 0;
-    if (!triangle_vertex_span_ok(vertex, indices, tri_count)) return 0;
-
-    /* The workers write private words in their copied frames and the main
-     * thread writes these two words only after the batch, so an output inside
-     * the copied frame would be overwritten or alias caller state. */
-    uint32_t frame_lo = c->ebp - TRIANGLE_FRAME_BELOW;
-    uint32_t frame_hi = frame_lo + TRIANGLE_FRAME_COPY;
-    if (best_ptr >= frame_lo && best_ptr + 4u <= frame_hi) return 0;
-    if (index_ptr >= frame_lo && index_ptr + 4u <= frame_hi) return 0;
 #endif
 
     unsigned chunks = triangle_chunk_limit();
@@ -3498,7 +3870,7 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
     uint64_t perf_t0 = now_ns();
 #endif
     int pooled = run_triangle_batch(c, fn, tri_count, chunks, indices,
-                                    best_ptr, index_ptr, rd32(best_ptr));
+                                    best_ptr, index_ptr, rd32(best_ptr), 1);
 #if WC3_DEBUG && WC3_DEBUG_PERF
     perf_note_kind(KIND_PERF_TRIANGLE, tri_count, chunks, pooled,
                    now_ns() - perf_t0);
@@ -3506,8 +3878,10 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
         static unsigned seen;
         if (!seen) {
             seen = 1;
-            fprintf(stderr, "[triangle] first pooled tris=%u chunks=%u\n",
-                    tri_count, chunks);
+            fprintf(stderr,
+                    "[triangle] first pooled tris=%u chunks=%u wall_us=%llu\n",
+                    tri_count, chunks,
+                    (unsigned long long)((now_ns() - perf_t0) / 1000u));
         }
     }
 #endif
@@ -3517,8 +3891,10 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
 /* Dispatch one job and merge the results.  Returns 0 only when the pool could
  * not be used.  On success the merged output is in `merged`. */
 /* Small raycast batches lose more in wakeups and frame copies than they gain
- * from splitting.  The tuning floor is 64 candidates per chunk; the split is
- * also capped by the batch size. */
+ * from splitting.  The as-built floor is eight candidates per chunk
+ * (RAY_MIN_CHUNK), with the auto threshold at
+ * max(2*min_chunk, 2*workers) = 16 for eight workers; the split is also
+ * capped by the batch size. */
 static unsigned raycast_chunk_count(uint32_t total)
 {
     unsigned limit = tune_uint(&g_tune.chunk_limit);

@@ -52,13 +52,14 @@ extern "C" {
 #define WC3_VERTEX_COPY      0u
 #define WC3_VERTEX_TRANSFORM 1u
 
-/* Debug-only range, overlap and frame checks.  The debug app variant defines
- * WC3_DEBUG=1 even though its native code is optimized; the release variant
- * defines WC3_DEBUG=0.  Keep validation on the debug side of that tag so it
- * cannot leak into a product build.  The generated loop's layout is verified
- * by the debug build and by the lift tool before the corpus is produced. */
+/* Debug-only range, overlap and frame checks.  The flag and the
+ * implementation in parallel_raycast.c require
+ * WC3_DEBUG && WC3_DEBUG_PERF, so they cannot leak into a product build and
+ * follow the tagged-guard rule.  The generated loop's layout is verified by
+ * the debug build and by the lift tool before the corpus is produced. */
 #ifndef WC3_PARALLEL_VERTEX_VALIDATE
-# if defined(WC3_DEBUG) && WC3_DEBUG
+# if defined(WC3_DEBUG) && WC3_DEBUG && \
+     defined(WC3_DEBUG_PERF) && WC3_DEBUG_PERF
 #  define WC3_PARALLEL_VERTEX_VALIDATE 1
 # else
 #  define WC3_PARALLEL_VERTEX_VALIDATE 0

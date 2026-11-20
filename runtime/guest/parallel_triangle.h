@@ -28,10 +28,14 @@
  * that reproduces the original `ret 0x1c`, the register pops and the hit flag
  * in EAX.
  *
- * The triangle path never nests inside a parallel raycast batch: that batch
- * holds the pool submit lock, so the trylock here fails and the original loop
- * runs on the calling worker.  This is intentional - the outer batch already
- * splits different candidates across the pool.
+ * The triangle helper is reached from inside the outer raycast batch:
+ * L_6F78D9B0 -> wc3_parallel_raycast(L_6F749F90) -> L_6F749DB0 ->
+ * L_6F125810 -> L_6F125924.  That outer batch holds the pool submit lock, so
+ * the triangle trylock fails and the original loop runs on the calling
+ * worker.  The parallel triangle path therefore does not nest; this is
+ * intentional - the outer batch already splits different candidates across
+ * the pool.  Lowering the triangle threshold cannot engage the pool on this
+ * path: the outer job holds the submit lock until all candidates finish.
  *
  * WC3_PARALLEL_GAMEPLAY=0 disables this path together with the other pool
  * paths.  WC3_TRIANGLE=0 disables only this one.  A small batch, an invalid
@@ -49,12 +53,12 @@
 extern "C" {
 #endif
 
-/* Debug-only frame and range checks, plus the sequential oracle.  The debug
- * app variant defines WC3_DEBUG=1 even though its native code is optimized;
- * the release variant defines WC3_DEBUG=0, so none of this reaches a product
- * build. */
+/* Debug-only frame and range checks, plus the sequential oracle.  The flag
+ * and the implementation in parallel_raycast.c require
+ * WC3_DEBUG && WC3_DEBUG_PERF, so none of this reaches a product build. */
 #ifndef WC3_PARALLEL_TRIANGLE_VALIDATE
-# if defined(WC3_DEBUG) && WC3_DEBUG
+# if defined(WC3_DEBUG) && WC3_DEBUG && \
+     defined(WC3_DEBUG_PERF) && WC3_DEBUG_PERF
 #  define WC3_PARALLEL_TRIANGLE_VALIDATE 1
 # else
 #  define WC3_PARALLEL_TRIANGLE_VALIDATE 0

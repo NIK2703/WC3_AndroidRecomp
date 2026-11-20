@@ -23,12 +23,12 @@
  * function pointer, an unavailable pool, a small candidate count or a nested
  * call all fall back to the original function on the caller's CPU.
  *
- * The default threshold is max(2 * min_chunk, workers * 32) candidates and the
- * split keeps at least min_chunk (default 64) candidates per chunk.  The
- * wrapper's hot path is frameless: it
- * checks the cached init result, tuning switches and candidate threshold
- * before reading the five stack arguments, validating ranges or touching a
- * job.  Initialization, tuning reload, validation and dispatch are out of
+ * The default threshold is max(2 * min_chunk, 2 * workers) candidates and the
+ * split keeps at least min_chunk (default 8) candidates per chunk.  With the
+ * as-built eight workers that is a 16-candidate threshold.  The wrapper's
+ * hot path is frameless: it checks the cached init result, tuning switches
+ * and candidate threshold before reading the five stack arguments, validating
+ * ranges or touching a job.  Initialization, tuning reload, validation and dispatch are out of
  * line.
  *
  * WC3_RAY_VERIFY=1 runs the original function on a private CPU after every
