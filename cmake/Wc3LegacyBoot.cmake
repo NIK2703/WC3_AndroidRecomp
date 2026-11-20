@@ -375,6 +375,7 @@ set_target_properties(wc3_hle_modules PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(wc3_hle_android STATIC
     "${WC3_ROOT}/runtime/hle/android/boot_probe.c"
     "${WC3_ROOT}/runtime/hle/android/hle_android.c"
+    "${WC3_ROOT}/runtime/hle/android/hle_direct_touch.c"
     "${WC3_ROOT}/runtime/hle/android/pe32.c"
     "${WC3_ROOT}/runtime/hle/android/guest_mem.c"
     "${WC3_ROOT}/runtime/hle/android/hle_cursor127.c"

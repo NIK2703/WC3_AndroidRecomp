@@ -19,11 +19,13 @@
 #define WC3_CTRL_LOG(...) ((void)0)
 #endif
 
+#include "core/element_helpers.h"
 #include "core/processor.h"
 #include "core/state.h"
 #include "profile/bind.h"
 #include "profile/convert.h"
 #include "profile/loader.h"
+#include "direct_touch.h"
 #include "overlay_mode.h"
 #include "profile_mode.h"
 
@@ -68,6 +70,32 @@ static int g_opacity_percent;
 static char g_error[256];
 static bool g_key_down[256];
 static bool g_button_down[8];
+
+/*
+ * Direct-touch routing owns a pointer from DOWN to UP.  A touch that starts
+ * on an overlay element, outside the phase-1 field viewport, or while the
+ * feature is disabled stays on the vendored path.  The ownership table is
+ * touched only by the Android input thread.
+ */
+#define DIRECT_OWNER_SLOTS 16
+#define DIRECT_OWNER_NONE 0
+#define DIRECT_OWNER_VENDOR 1
+#define DIRECT_OWNER_FIELD 2
+
+typedef struct {
+    int pointer_id;
+    int owner;
+    float last_x;
+    float last_y;
+} DirectOwner;
+
+static bool g_direct_touch_enabled;
+static Wc3DirectTouchSink g_direct_touch_sink;
+static void *g_direct_touch_user;
+static Wc3DirectTouch g_direct_touch;
+static DirectOwner g_direct_owners[DIRECT_OWNER_SLOTS];
+
+static void direct_touch_configure(int width, int height);
 
 static void set_error(const char *fmt, ...) {
     va_list ap;
@@ -562,6 +590,7 @@ int controls_init_ex(const char *profile_json, int width, int height,
     g_profile_json = copy;
     g_simple_build_rc = simple_rc;
     g_simple_esc_build_rc = simple_esc_rc;
+    direct_touch_configure(width, height);
     return 0;
 }
 
@@ -572,6 +601,180 @@ int controls_init(const char *profile_json, int width, int height) {
 void controls_set_action_sink(Wc3ActionSink sink, void *user) {
     g_sink = sink;
     g_sink_user = user;
+}
+
+static uint64_t engine_tick_from_ms(uint64_t time_ms);
+
+static void direct_owners_clear(void) {
+    memset(g_direct_owners, 0, sizeof(g_direct_owners));
+}
+
+static DirectOwner *direct_owner_find(int pointer_id) {
+    for (int i = 0; i < DIRECT_OWNER_SLOTS; i++) {
+        if (g_direct_owners[i].owner != DIRECT_OWNER_NONE &&
+            g_direct_owners[i].pointer_id == pointer_id) {
+            return &g_direct_owners[i];
+        }
+    }
+    return NULL;
+}
+
+static DirectOwner *direct_owner_add(int pointer_id, int owner,
+                                     float x, float y) {
+    DirectOwner *slot = direct_owner_find(pointer_id);
+    if (!slot) {
+        for (int i = 0; i < DIRECT_OWNER_SLOTS; i++) {
+            if (g_direct_owners[i].owner == DIRECT_OWNER_NONE) {
+                slot = &g_direct_owners[i];
+                break;
+            }
+        }
+    }
+    if (!slot) return NULL;
+    slot->pointer_id = pointer_id;
+    slot->owner = owner;
+    slot->last_x = x;
+    slot->last_y = y;
+    return slot;
+}
+
+static void direct_owner_remove(int pointer_id) {
+    DirectOwner *slot = direct_owner_find(pointer_id);
+    if (slot) {
+        slot->owner = DIRECT_OWNER_NONE;
+        slot->pointer_id = -1;
+    }
+}
+
+static int direct_owner_any_vendor(void) {
+    for (int i = 0; i < DIRECT_OWNER_SLOTS; i++) {
+        if (g_direct_owners[i].owner == DIRECT_OWNER_VENDOR) return 1;
+    }
+    return 0;
+}
+
+/*
+ * Phase 1 keeps direct touch out of the native HUD.  The overlay profile
+ * already covers its own elements; the command card, minimap, portrait and
+ * resource bar are native frames whose exact guest-side hit test is not yet
+ * confirmed.  Until it is, a conservative central viewport is the only field
+ * region allowed to produce direct actions.  This is deliberately a product
+ * boundary, not a guessed substitute for a missing native call.
+ */
+static int direct_touch_field_contains(float x, float y) {
+    if (g_width <= 0 || g_height <= 0) return 0;
+    const float left = (float)g_width * 0.03f;
+    const float right = (float)g_width * 0.97f;
+    const float top = (float)g_height * 0.10f;
+    const float bottom = (float)g_height * 0.72f;
+    return x >= left && x <= right && y >= top && y <= bottom;
+}
+
+static int direct_touch_ui_contains(float x, float y) {
+    ELEMENTS_LOCK();
+    const int hit = hit_test_element(x, y) != NULL;
+    ELEMENTS_UNLOCK();
+    return hit;
+}
+
+static int direct_touch_wants(float x, float y) {
+    if (!g_initialized || !g_direct_touch_enabled || !g_direct_touch.sink) {
+        return 0;
+    }
+    if (g_overlay_mode != WC3_OVERLAY_MODE_FULL) return 0;
+    if (!direct_touch_field_contains(x, y)) return 0;
+    return !direct_touch_ui_contains(x, y);
+}
+
+static void direct_touch_configure(int width, int height) {
+    const float min_dim = (float)(width < height ? width : height);
+    const float tap_slop = min_dim * 0.022f;
+    const float long_slop = min_dim * 0.065f;
+    const int long_press_ms = 450;
+    wc3_direct_touch_init(&g_direct_touch, (float)width, (float)height,
+                          tap_slop, long_slop, long_press_ms,
+                          g_direct_touch_sink, g_direct_touch_user);
+}
+
+void controls_set_direct_touch_enabled(bool enabled) {
+    g_direct_touch_enabled = enabled;
+    if (!enabled && g_initialized) controls_cancel_all();
+}
+
+void controls_set_direct_touch_sink(Wc3DirectTouchSink sink, void *user) {
+    g_direct_touch_sink = sink;
+    g_direct_touch_user = user;
+    if (g_initialized) {
+        wc3_direct_touch_set_sink(&g_direct_touch, sink, user);
+    }
+}
+
+/*
+ * A second finger turns the gesture into a camera/zoom candidate.  The direct
+ * recognizer cannot represent that, and letting both paths see the gesture
+ * would produce a tap plus a camera move.  Hand the already-owned field
+ * pointers to the vendor engine at their current positions and let it own the
+ * continuation; no direct event is emitted for the cancelled gesture.
+ */
+static void direct_touch_handoff(int new_pointer_id, float new_x, float new_y,
+                                 uint64_t tick) {
+    int ids[WC3_DIRECT_TOUCH_MAX_POINTERS];
+    float xs[WC3_DIRECT_TOUCH_MAX_POINTERS];
+    float ys[WC3_DIRECT_TOUCH_MAX_POINTERS];
+    int count = 0;
+    for (int i = 0;
+         i < WC3_DIRECT_TOUCH_MAX_POINTERS &&
+         count < WC3_DIRECT_TOUCH_MAX_POINTERS;
+         i++) {
+        if (!wc3_direct_touch_pointer_at(&g_direct_touch, i,
+                                         &ids[count], &xs[count], &ys[count])) {
+            break;
+        }
+        count++;
+    }
+
+    TouchActionResult result;
+    memset(&result, 0, sizeof(result));
+
+    TP_STATE_LOCK();
+    ELEMENTS_LOCK();
+    for (int i = 0; i < count; i++) {
+        DirectOwner *slot = direct_owner_add(ids[i], DIRECT_OWNER_VENDOR,
+                                             xs[i], ys[i]);
+        if (slot) {
+            slot->last_x = xs[i];
+            slot->last_y = ys[i];
+        }
+        touch_processor_on_finger_down(&result, ids[i], xs[i], ys[i], tick);
+    }
+    wc3_direct_touch_reset(&g_direct_touch);
+    direct_owner_add(new_pointer_id, DIRECT_OWNER_VENDOR, new_x, new_y);
+    touch_processor_on_finger_down(&result, new_pointer_id, new_x, new_y,
+                                   tick);
+    ELEMENTS_UNLOCK();
+    TP_STATE_UNLOCK();
+
+    g_last_engine_tick = tick;
+    emit_actions(&result);
+}
+
+static int direct_touch_begin(int pointer_id, float x, float y,
+                              uint64_t event_time_ms) {
+    /* Once any pointer belongs to the vendor engine, the gesture is a
+     * camera/pinch or an overlay interaction.  Keep later field pointers on
+     * that path until every pointer is up; starting a fresh semantic tap in
+     * the middle of a two-finger gesture would mix an order into a pan. */
+    if (direct_owner_any_vendor()) return 0;
+    if (wc3_direct_touch_active_count(&g_direct_touch) > 0) {
+        direct_touch_handoff(pointer_id, x, y,
+                             engine_tick_from_ms(event_time_ms));
+        return 1;
+    }
+    if (!direct_touch_wants(x, y)) return 0;
+    if (!direct_owner_add(pointer_id, DIRECT_OWNER_FIELD, x, y)) return 0;
+    wc3_direct_touch_down(&g_direct_touch, pointer_id, x, y,
+                          event_time_ms);
+    return 1;
 }
 
 static uint64_t engine_tick_from_ms(uint64_t time_ms) {
@@ -590,6 +793,28 @@ int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
     if (!g_initialized) {
         set_error("touch before init");
         return -1;
+    }
+
+    if (phase == WC3_TOUCH_DOWN) {
+        if (direct_touch_begin(pointer_id, x, y, event_time_ms)) return 0;
+        direct_owner_add(pointer_id, DIRECT_OWNER_VENDOR, x, y);
+    } else {
+        DirectOwner *owner = direct_owner_find(pointer_id);
+        if (owner) {
+            owner->last_x = x;
+            owner->last_y = y;
+            if (owner->owner == DIRECT_OWNER_FIELD) {
+                if (phase == WC3_TOUCH_MOVE) {
+                    wc3_direct_touch_move(&g_direct_touch, pointer_id, x, y,
+                                          event_time_ms);
+                } else if (phase == WC3_TOUCH_UP) {
+                    wc3_direct_touch_up(&g_direct_touch, pointer_id, x, y,
+                                        event_time_ms);
+                    direct_owner_remove(pointer_id);
+                }
+                return 0;
+            }
+        }
     }
 
     uint64_t tick = engine_tick_from_ms(event_time_ms);
@@ -617,6 +842,7 @@ int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
     ELEMENTS_UNLOCK();
     TP_STATE_UNLOCK();
 
+    if (phase == WC3_TOUCH_UP) direct_owner_remove(pointer_id);
     g_last_engine_tick = tick;
     emit_actions(&result);
     return 0;
@@ -640,6 +866,8 @@ int controls_tick(uint64_t now_ms) {
     touch_processor_tick(&result, tick);
     TP_STATE_UNLOCK();
 
+    wc3_direct_touch_tick(&g_direct_touch, now_ms);
+
     g_last_engine_tick = tick;
     emit_actions(&result);
     return 0;
@@ -650,7 +878,7 @@ int controls_needs_tick(void) {
     TP_STATE_LOCK();
     int needed = touch_processor_needs_tick();
     TP_STATE_UNLOCK();
-    return needed;
+    return needed || wc3_direct_touch_next_deadline_ms(&g_direct_touch) != 0;
 }
 
 uint64_t controls_next_deadline_ms(uint64_t now_ms) {
@@ -661,13 +889,23 @@ uint64_t controls_next_deadline_ms(uint64_t now_ms) {
     int interval = g_timer_interval_ms > 0 ? g_timer_interval_ms : 16;
     TP_STATE_UNLOCK();
 
-    if (deadline_tick == TOUCH_PROCESSOR_DEADLINE_NONE) return 0;
-    uint64_t deadline_ms;
-    if (deadline_tick > UINT64_MAX / (uint64_t)interval)
-        deadline_ms = UINT64_MAX;
-    else
-        deadline_ms = deadline_tick * (uint64_t)interval;
+    uint64_t direct_deadline = 0;
+    const uint64_t direct_pending =
+        wc3_direct_touch_next_deadline_ms(&g_direct_touch);
+    if (direct_pending != 0) direct_deadline = direct_pending;
 
+    uint64_t deadline_ms = direct_deadline;
+    if (deadline_tick != TOUCH_PROCESSOR_DEADLINE_NONE) {
+        uint64_t vendor_deadline;
+        if (deadline_tick > UINT64_MAX / (uint64_t)interval)
+            vendor_deadline = UINT64_MAX;
+        else
+            vendor_deadline = deadline_tick * (uint64_t)interval;
+        if (deadline_ms == 0 || vendor_deadline < deadline_ms)
+            deadline_ms = vendor_deadline;
+    }
+
+    if (deadline_ms == 0) return 0;
     // A due deadline must still be a real wake request: 0 is the API's
     // "no deadline" sentinel, not "now".
     if (deadline_ms <= now_ms) return now_ms != 0 ? now_ms : 1;
@@ -676,6 +914,9 @@ uint64_t controls_next_deadline_ms(uint64_t now_ms) {
 
 void controls_cancel_all(void) {
     if (!g_initialized) return;
+
+    wc3_direct_touch_reset(&g_direct_touch);
+    direct_owners_clear();
 
     TouchActionResult result;
     memset(&result, 0, sizeof(result));
@@ -690,6 +931,7 @@ void controls_cancel_all(void) {
 
 int controls_switch_safe(void) {
     if (!g_initialized) return 0;
+    if (wc3_direct_touch_active_count(&g_direct_touch) != 0) return 0;
 
     TP_STATE_LOCK();
     int safe = g_state.active_finger_count == 0 &&
@@ -790,6 +1032,8 @@ int controls_resize(int width, int height) {
         set_error("resize profile apply failed");
         return -1;
     }
+    /* controls_apply_profile() already re-initialised the direct recognizer
+     * with the new size after cancelling input. */
     return 0;
 }
 

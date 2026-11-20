@@ -387,6 +387,7 @@ configure=(
     "-DWC3_RELIFTED_CORPUS_ROOT=$corpus_abs"
     -DWC3_W3L_COMPAT=ON -DWC3_W3L_PROFILE=rubattle -DWC3_W3L_LATENCY=100
     -DWC3_SELECTION=ON
+    -DWC3_PATCH_PIPELINE=ON
     -DWC3_CORPUS_WERROR=OFF
     "-DWC3_CORPUS_JOBS=$jobs"
     -DWC3_CORPUS_RETRIES=5
@@ -424,6 +425,7 @@ echo "[app] linker  ${ld_path:-$bin/ld.lld (NDK default)}"
 echo "[app] variant $variant output $artifact_variant pgo $pgo kind $pgo_kind"
 echo "[app] debug_tags '$debug_tags'"
 echo "[app] corpus  $corpus_abs"
+echo "[app] patch   registry pipeline (default ON; --cmake-args can override)"
 echo "[app] jobs    $jobs"
 echo "[app] opt     $opt_level corpus $corpus_opt_level lto $lto polly $polly"
 "$cmake" "${configure[@]}" || { echo '[app] configure failed' >&2; exit 1; }

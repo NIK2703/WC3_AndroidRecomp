@@ -125,6 +125,18 @@ void     hle_guest_free(uint32_t addr);
 uint32_t hle_guest_strdup(const char *s);
 uint32_t hle_guest_strdup_w(const uint16_t *s);
 
+/* Call a guest function from a message-pump-boundary service.  This is the
+ * same contract as the private u_call_guest(): it preserves the caller's
+ * ebx/esi/edi/ebp/esp, sets the return slot, and returns eax.  It does not
+ * preserve ecx/edx/xmm, so a __thiscall caller must set c->ecx immediately
+ * before each call.  Only call it where caller-saved registers are dead. */
+uint32_t wc3_hle_call_guest(CPU *c, uint32_t fn, int argc,
+                            const uint32_t *args);
+
+/* Wake a blocking GetMessageA when the Android input thread has published a
+ * direct-touch event.  Safe to call with no locks held. */
+void wc3_android_request_direct_touch(void);
+
 /* Number of distinct imports that fell through to the generic stub. */
 int         hle_missing_count(void);
 const char *hle_missing_at(int i);

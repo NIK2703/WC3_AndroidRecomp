@@ -54,7 +54,7 @@ and reserved future stages:
   "id": "wc3-build-patches",
   "stages": [
     "atomiccheck.json",
-    "save_list_display.json",
+    {"manifest": "save_list_display.json", "enabled": false},
     {"manifest": "return_address_elide_index.json", "enabled": false},
     {"manifest": "devirtualize.json", "enabled": false},
     {"manifest": "return_address_elide.json", "enabled": false},
@@ -221,10 +221,18 @@ the existing stages on the full 263-chunk corpus:
 
 ## Build integration
 
-`WC3_PATCH_PIPELINE` is an opt-in CMake switch, default `OFF`
-(`-DWC3_PATCH_PIPELINE=ON`).  With it on,
-`cmake/Wc3ReliftedCorpus.cmake` keeps `splitcorpus` and the pre-split save pass,
-skips the old per-chunk and post-loop transform ladder, and runs:
+`WC3_PATCH_PIPELINE` is the default for a relifted corpus.  Pass
+`-DWC3_PATCH_PIPELINE=OFF` to use the old per-stage fallback.  The existing
+`tools/android/build_app.ps1` and `tools/android/build_app.sh` select the
+pipeline internally, so their command line, parameters and output artifact are
+unchanged; callers do not need a new entry point.  An explicit
+`-CMakeArgs '-DWC3_PATCH_PIPELINE=OFF'` (PowerShell) or
+`--cmake-args "-DWC3_PATCH_PIPELINE=OFF"` (bash) remains the A/B fallback.  The
+pipeline needs `python3` 3.10 or newer; CMake fails closed with a clear error
+if it is missing.  With the pipeline on,
+`cmake/Wc3ReliftedCorpus.cmake` keeps `splitcorpus` and the pre-split save
+pass, skips the old raw atomiccheck/index, per-chunk and post-loop transform
+ladder, and runs:
 
 1. `patch_pipeline.py index` over `build/<variant>/cmake/relifted`.
 2. `patch_pipeline.py apply` with stages selected from the existing CMake flags
@@ -247,9 +255,11 @@ after `xmm_local`, `xmm_lane` and `w3l_compat`; a base that already contains
 those passes may omit them.  The stage always emits the fixed 40-entry
 layout; the runtime cap selects 12, 24 or 40 without a second corpus.
 
-The switch is not exercised by a configure or product build yet.  The old path
-remains the default until that check is run explicitly; the pipeline itself is
-proven byte-for-byte on the full 263-chunk corpus (see above).
+The switch is the default path and was exercised by a debug configure and
+product build on 2026-11-20: 11 stages over 263 chunks, the native build
+compiled only `patch-overlay` sources, and the generated APK was installed.
+The old path remains the explicit `-DWC3_PATCH_PIPELINE=OFF` fallback; the
+pipeline is also proven byte-for-byte on the full 263-chunk corpus (see above).
 
 ## Provenance
 

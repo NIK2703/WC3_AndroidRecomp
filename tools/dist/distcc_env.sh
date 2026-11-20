@@ -250,9 +250,9 @@ wc3_dist_enable() {
     export WC3_DIST_TRANSPORT=distcc
     export WC3_DIST_LOCAL_SLOTS=$local_slots
     export WC3_DIST_JOBS_EFFECTIVE=$jobs
-    export WC3_DIST_ALLOW_LTO=0
-    export WC3_DIST_ALLOW_PGO=0
-    export WC3_DIST_PGO_PROFILE_READY=0
+    export WC3_DIST_ALLOW_LTO=1
+    export WC3_DIST_ALLOW_PGO=1
+    export WC3_DIST_PGO_PROFILE_READY=1
     export WC3_DISTCC_EXE=$distcc
     export WC3_DIST_REMOTE_BASENAME=1
     export WC3_DIST_REMOTE_NDK=${worker_ndks[0]:-}

@@ -617,11 +617,17 @@ if(WC3_RELIFTED_CORPUS_ROOT AND WC3_BUILD_APP AND
 else()
     set(WC3_SELECTION_DEFAULT OFF)
 endif()
-# Opt-in cutover: the old per-stage blocks stay the default until this path is
-# checked by an explicit configure and product build.
+# Registry-driven cutover: the relifted corpus uses the pipeline by default.
+# The old per-stage blocks remain as an explicit OFF fallback until a configure
+# and product build are compared.
+if(WC3_RELIFTED_CORPUS_ROOT)
+    set(WC3_PATCH_PIPELINE_DEFAULT ON)
+else()
+    set(WC3_PATCH_PIPELINE_DEFAULT OFF)
+endif()
 option(WC3_PATCH_PIPELINE
        "Run the registry-driven build-time patch pipeline over the relifted corpus"
-       OFF)
+       ${WC3_PATCH_PIPELINE_DEFAULT})
 if(WC3_PATCH_PIPELINE AND NOT WC3_RELIFTED_CORPUS_ROOT)
     message(FATAL_ERROR
         "WC3_PATCH_PIPELINE=ON requires WC3_RELIFTED_CORPUS_ROOT")
@@ -650,6 +656,19 @@ if(WC3_SELECTION)
     message(STATUS
         "selection: 12/24/40 runtime cap, fixed 40-entry layout, "
         "6x2 for <=12, 8x3 for 13..24, 10x4 for 25..40")
+endif()
+
+# MSVC /GS guard specialization is a measured static candidate: three guard
+# functions, 24 651 call sites, default-off until a PM-19 device A/B confirms
+# the helper redirect is not a runtime regression.  It is a leaf_call stage
+# parameter, not a corpus/target change; the legacy prebuilt path cannot apply
+# it.
+option(WC3_LEAF_GS_COOKIE
+       "Enable leaf_call MSVC /GS guard specialization (requires device A/B)"
+       OFF)
+if(WC3_LEAF_GS_COOKIE AND NOT WC3_PATCH_PIPELINE)
+    message(FATAL_ERROR
+        "WC3_LEAF_GS_COOKIE=ON requires WC3_PATCH_PIPELINE=ON")
 endif()
 
 # Optional post-lift parallel raycast.  The pass rewrites exactly one call to
@@ -720,6 +739,7 @@ add_library(wc3_platform STATIC
     "${WC3_ROOT}/runtime/platform/android/net_android.c"
     "${WC3_ROOT}/runtime/platform/android/platform_android.c"
     "${WC3_ROOT}/runtime/platform/android/present_target.c"
+    "${WC3_ROOT}/runtime/ipc/direct_touch_event.c"
     "${WC3_ROOT}/runtime/ipc/game_state.c")
 target_include_directories(wc3_platform PUBLIC
     "${WC3_ROOT}/runtime/cpu"
@@ -738,6 +758,7 @@ endif()
 add_library(wc3_guest STATIC
     "${WC3_ROOT}/runtime/guest/guest_memory.c"
     "${WC3_ROOT}/runtime/guest/guest_modules.c"
+    "${WC3_ROOT}/runtime/guest/gs_cookie_call.c"
     "${WC3_ROOT}/runtime/guest/pe.c")
 target_include_directories(wc3_guest PUBLIC ${WC3_INCLUDES})
 target_link_libraries(wc3_guest PUBLIC wc3_platform)
@@ -813,6 +834,7 @@ if(WC3_BUILD_APP)
     # the action bridge (runtime/app) is the only file that reaches the shim.
     add_library(wc3_overlay STATIC
         "${WC3_ROOT}/runtime/platform/android/controls/controls.c"
+        "${WC3_ROOT}/runtime/platform/android/controls/direct_touch.c"
         "${WC3_ROOT}/runtime/platform/android/controls/haptics_android.c"
         "${WC3_ROOT}/runtime/platform/android/controls/input_adapter.c"
         "${WC3_ROOT}/runtime/platform/android/controls/input_ring.c"

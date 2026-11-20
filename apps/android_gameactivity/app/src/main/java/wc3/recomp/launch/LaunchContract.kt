@@ -19,6 +19,11 @@ object LaunchContract {
     const val KEY_DXVK_VERSION = "dxvk_version"
     const val KEY_DXVK_CONFIG = "dxvk_config"
     const val KEY_DOUBLE_TAP_GESTURES = "double_tap_gestures"
+    /* The third variant.  False keeps the authored overlay path; true also
+     * requires the native guest sink, otherwise the controls layer falls back
+     * to the legacy path for every touch. */
+    const val KEY_DIRECT_TOUCH_ENABLED = "direct_touch_enabled"
+    const val DEFAULT_DIRECT_TOUCH_ENABLED = false
     const val KEY_DOUBLE_TAP_TIMEOUT_MS = "double_tap_timeout_ms"
     const val KEY_LONG_PRESS_TIMEOUT_MS = "long_press_timeout_ms"
     const val KEY_TAP_CLICK_DELAY_MS = "tap_click_delay_ms"

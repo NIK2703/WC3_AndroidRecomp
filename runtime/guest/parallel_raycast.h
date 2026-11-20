@@ -13,15 +13,19 @@
  *     ->
  *   wc3_parallel_raycast(c, L_6F749F90);
  *
- * The original function still runs on private worker CPU contexts, once per
- * contiguous candidate range.  Results are merged in increasing range order
- * with the original strict `best_distance > candidate_distance` comparison, so
- * the first hit wins ties exactly as it does on the sequential path.
+ * The original function still runs on private CPU contexts, once per
+ * contiguous candidate range.  The caller executes the last range in that
+ * range's private context; the pool wakes only the preceding workers.
+ * Results are merged in increasing range order with the original strict
+ * `best_distance > candidate_distance` comparison, so the first hit wins ties
+ * exactly as it does on the sequential path.
  *
  * WC3_PARALLEL_RAYCAST=0 disables the fast path at runtime.  The compile-time
- * option only controls whether the lift pass rewrites the call site.  A NULL
- * function pointer, an unavailable pool, a small candidate count or a nested
- * call all fall back to the original function on the caller's CPU.
+ * option only controls whether the lift pass rewrites the call site.  A
+ * product launch with one selected core sets WC3_PARALLEL_GAMEPLAY=0, so the
+ * pool is never initialized and the wrapper calls the original function.  A
+ * NULL function pointer, an unavailable pool, a small candidate count or a
+ * nested call all fall back to the original function on the caller's CPU.
  *
  * The default threshold is max(2 * min_chunk, 2 * workers) candidates and the
  * split keeps at least min_chunk (default 8) candidates per chunk.  With the
@@ -35,6 +39,18 @@
  * parallel batch and compares the hit flag, distance bits and position bits.
  * The sequential result wins on mismatch, the parallel path is disabled for
  * the rest of the process, and the mismatch is logged.
+ *
+ * Debug HLE/PERF builds expose the layout experiments without changing the
+ * product: WC3_MAIN_LAST=0 restores the all-worker baseline,
+ * WC3_RAY_SPLIT_CEIL=1 selects ceil splitting, WC3_WEIGHTED_SPLIT=1 uses the
+ * measured per-core chunk cost for contiguous weighted ranges, and
+ * WC3_REJECT_SLOW=1 drops a core measured more than four times slower than
+ * the best.  WC3_WORKER_ORDER_REVERSE=1 reverses the product list to
+ * reproduce the old slowest-first active prefix.  The pool is ordered
+ * fastest-to-slowest with the caller's core last; the active set is its
+ * prefix.  A rejected trailing chunk leaves the active set and merge skips
+ * zero-length chunks.  WC3_PERF_NOTES=0 removes per-call PERF counters from
+ * an A/B run.  Release compiles the main-last, equal-floor layout only.
  */
 #ifndef WC3_PARALLEL_RAYCAST_H
 #define WC3_PARALLEL_RAYCAST_H

@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "direct_touch_event.h"
 #include "overlay.h"
 #include "overlay_mode.h"
 #include "core/types/touch_action.h"
@@ -30,6 +31,16 @@ typedef enum {
 
 typedef void (*Wc3ActionSink)(const TouchAction *actions, int count,
                               void *user);
+
+/*
+ * Semantic direct touch is an additional input variant.  It is disabled by
+ * default: the host enables it only when the user selected it and a guest
+ * sink is installed.  With no sink the controls layer keeps every touch on
+ * the legacy vendor path instead of silently dropping field input.
+ * Wc3DirectTouchSink is defined by direct_touch_event.h.
+ */
+void controls_set_direct_touch_enabled(bool enabled);
+void controls_set_direct_touch_sink(Wc3DirectTouchSink sink, void *user);
 
 /* Profile JSON must stay valid only for the duration of this call. */
 int controls_init(const char *profile_json, int width, int height);

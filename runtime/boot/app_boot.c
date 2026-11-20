@@ -198,10 +198,62 @@ static void apply_debug_verify_markers(const char *state_dir)
             setenv(markers[i].env, "1", 1);
     }
 }
-#else
-static void apply_debug_verify_markers(const char *state_dir)
+
+static int debug_env_key_ok(const char *key)
 {
-    (void)state_dir;
+    if (strncmp(key, "WC3_", 4) != 0 || key[4] == '\0')
+        return 0;
+    for (; *key; key++) {
+        char c = *key;
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+    }
+    return 1;
+}
+
+/* Generic debug-only environment input.  A marker per A/B switch would need
+ * one file and one code path per switch; this file lets a run set any WC3_*
+ * variable before the guest and the pool start.  Values are never logged, the
+ * file is app-private, and release compiles the whole path out.  The verify
+ * markers above run first, so this file can explicitly turn one off. */
+static void apply_debug_env_file(const char *state_dir)
+{
+    char path[1200];
+    int n = snprintf(path, sizeof path, "%s/wc3_debug_env", state_dir);
+    if (n <= 0 || (size_t)n >= sizeof path)
+        return;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    char line[256];
+    unsigned applied = 0;
+    while (fgets(line, sizeof line, f)) {
+        char *key = line;
+        while (*key == ' ' || *key == '\t')
+            key++;
+        if (*key == '#' || *key == '\n' || *key == '\r' || *key == '\0')
+            continue;
+        char *eq = strchr(key, '=');
+        if (!eq)
+            continue;
+        *eq = '\0';
+        char *value = eq + 1;
+        while (*value == ' ' || *value == '\t')
+            value++;
+        char *end = key + strlen(key);
+        while (end > key && (end[-1] == ' ' || end[-1] == '\t'))
+            *--end = '\0';
+        end = value + strlen(value);
+        while (end > value && (end[-1] == '\n' || end[-1] == '\r' ||
+                               end[-1] == ' ' || end[-1] == '\t'))
+            *--end = '\0';
+        if (!debug_env_key_ok(key))
+            continue;
+        if (setenv(key, value, 1) == 0)
+            applied++;
+    }
+    fclose(f);
+    LOGI("debug env: %u WC3_* variable(s) from %s", applied, path);
 }
 #endif
 
@@ -247,7 +299,10 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
     start_report_thread(state_dir);
     set_game_args(roc);
     write_game_mode_marker(state_dir, roc);
+#if WC3_DEBUG && WC3_DEBUG_BOOT
     apply_debug_verify_markers(state_dir);
+    apply_debug_env_file(state_dir);
+#endif
 
     /* These are the product defaults, not diagnostics: the shipped APK has no
      * shell to pass arguments and must load the game and use DXVK.  Sound is

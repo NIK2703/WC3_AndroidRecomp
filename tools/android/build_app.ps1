@@ -718,6 +718,10 @@ $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
 $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
 $configure += "-DWC3_SELECTION=$selectionValue"
+# The product build always uses the registry pipeline.  Callers keep the
+# existing build command; the explicit -CMakeArgs override below can still
+# select the old fallback for an A/B check.
+$configure += '-DWC3_PATCH_PIPELINE=ON'
 $configure += '-DWC3_CORPUS_WERROR=OFF'
 # Release is the optimized product.  The final release build (PGO use and the
 # explicit -Pgo off A/B mode) uses ThinLTO; the internal training pass skips LTO
@@ -812,6 +816,7 @@ Write-Host "[app] lift_p0_1/2/6 unconditional"
 Write-Host "[app] thin_skip_writeonly_copyin $($thinSkipCopyinValue -eq 'ON')"
 Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"
 Write-Host "[app] selection $selectionValue"
+Write-Host "[app] patch   registry pipeline (default ON; -CMakeArgs can override)"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
 Write-Host "[app] lto   $ltoValue"
 Write-Host "[app] pgo   $Pgo kind $effectivePgoKind"

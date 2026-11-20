@@ -34,7 +34,30 @@ if(WC3_PATCH_PIPELINE)
         message(FATAL_ERROR
             "WC3_PATCH_PIPELINE=ON needs python3 (or python) on PATH")
     endif()
+    execute_process(
+        COMMAND "${WC3_PYTHON3}" -c
+                "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"
+        RESULT_VARIABLE _patch_py_rc)
+    if(NOT _patch_py_rc EQUAL 0)
+        message(FATAL_ERROR
+            "WC3_PATCH_PIPELINE=ON needs Python 3.10 or newer, got "
+            "${WC3_PYTHON3}")
+    endif()
 endif()
+
+# The old per-stage path checks that every pass binary is newer than its
+# source.  Keep that guard on the pipeline path too; the pipeline hashes the
+# binary, but it cannot know that the binary was built from the current C file.
+function(wc3_require_fresh_pass exe src)
+    if(NOT EXISTS "${exe}")
+        message(FATAL_ERROR "patch pass missing: ${exe}")
+    endif()
+    if(EXISTS "${src}" AND "${src}" IS_NEWER_THAN "${exe}")
+        message(FATAL_ERROR
+            "${exe} is older than ${src}; run "
+            "tools/lift/build_tools.ps1 -Force before configuring")
+    endif()
+endfunction()
 
 find_program(WC3_MANIFEST_TOOL
     NAMES manifest manifest.exe
@@ -178,7 +201,10 @@ endif()
 # still looked structurally valid.  Check the generated source before the split
 # and before compilation, so the bad corpus cannot become a product.  The
 # checker reads the guest instruction comments and rejects any memory xchg or
-# lock-prefixed RMW that was lowered through plain rd32/wr32.
+# lock-prefixed RMW that was lowered through plain rd32/wr32.  The pipeline
+# gates the post-save chunks itself, so the raw pre-split scan is only the
+# fallback path.
+if(NOT WC3_PATCH_PIPELINE)
 set(_wc3_atomic_args)
 set(_wc3_atomic_sources)
 foreach(_mi RANGE 0 ${_wc3_last_mod})
@@ -250,8 +276,9 @@ if(WC3_CORPUS_TIMING)
     endif()
 endif()
 message(STATUS "${_wc3_atomic_out}")
+endif()
 
-if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
+if(WC3_RETURN_ADDRESS_ELIDE_P0_6 AND NOT WC3_PATCH_PIPELINE)
     # P0-6 needs a *global* function summary: after splitcorpus a callee
     # usually lives in another chunk, so a per-chunk index cannot prove safety
     # and the pass degenerates to a no-op (2.5k elisions instead of ~44k on the
@@ -436,8 +463,8 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
         if(NOT _chunks)
             message(FATAL_ERROR "splitcorpus produced no chunks for ${_src}")
         endif()
-        # Old per-stage path.  It stays the default until the opt-in pipeline
-        # is checked by an explicit configure and product build.
+        # Legacy per-stage path.  It runs only when the registry pipeline is
+        # explicitly disabled for an A/B fallback.
         if(NOT WC3_PATCH_PIPELINE)
         if(WC3_DEVIRTUALIZE_P0_1)
             # P0-1 LiftPass runs after splitcorpus, so every chunk receives the
@@ -757,6 +784,38 @@ if(WC3_PATCH_PIPELINE)
     set(_patch_index "${CMAKE_CURRENT_BINARY_DIR}/patch-index.tsv")
     set(_patch_out "${CMAKE_CURRENT_BINARY_DIR}/patch-overlay")
     set(_patch_engine_dir "${WC3_ROOT}/build/lift-tools")
+    wc3_require_fresh_pass("${WC3_ATOMICCHECK_EXE}"
+        "${WC3_ROOT}/tools/lift/csrc_local/atomiccheck.c")
+    wc3_require_fresh_pass("${WC3_XMM_LOCAL_EXE}"
+        "${WC3_ROOT}/tools/lift/csrc_local/xmm_local.c")
+    wc3_require_fresh_pass("${WC3_XMM_LANE_EXE}"
+        "${WC3_ROOT}/tools/lift/csrc_local/xmm_lane.c")
+    wc3_require_fresh_pass("${WC3_LEAF_CALL_EXE}"
+        "${WC3_ROOT}/tools/lift/csrc_local/leaf_call.c")
+    if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
+        wc3_require_fresh_pass("${WC3_RETURN_ADDRESS_ELIDE_EXE}"
+            "${WC3_ROOT}/tools/lift/csrc_local/return_address_elide.c")
+    endif()
+    if(WC3_DEVIRTUALIZE_P0_1)
+        wc3_require_fresh_pass("${WC3_DEVIRTUALIZE_EXE}"
+            "${WC3_ROOT}/tools/lift/csrc_local/devirtualize.c")
+    endif()
+    if(WC3_DEAD_FLAGS_P0_2)
+        wc3_require_fresh_pass("${WC3_DEAD_FLAGS_EXE}"
+            "${WC3_ROOT}/tools/lift/csrc_local/dead_flags.c")
+    endif()
+    if(WC3_W3L_COMPAT)
+        wc3_require_fresh_pass("${WC3_W3L_PASS}"
+            "${WC3_ROOT}/tools/lift/csrc_local/w3l_compat.c")
+    endif()
+    if(WC3_SELECTION)
+        wc3_require_fresh_pass("${WC3_SELECTION_EXE}"
+            "${WC3_ROOT}/tools/lift/csrc_local/selection.c")
+    endif()
+    if(WC3_PARALLEL_RAYCAST)
+        wc3_require_fresh_pass("${WC3_PARALLEL_RAYCAST_EXE}"
+            "${WC3_ROOT}/tools/lift/csrc_local/parallel_raycast.c")
+    endif()
     set(_patch_stage_args)
     list(APPEND _patch_stage_args --patch atomiccheck)
     if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
@@ -784,6 +843,11 @@ if(WC3_PATCH_PIPELINE)
     set(_patch_param_args)
     file(SHA256 "${WC3_ROOT}/tools/lift/patch_pipeline.py" _patch_pipeline_sha)
     list(APPEND _patch_param_args --param "pipeline_sha=${_patch_pipeline_sha}")
+    if(WC3_LEAF_GS_COOKIE)
+        list(APPEND _patch_param_args --param "gs_cookie=1")
+    else()
+        list(APPEND _patch_param_args --param "gs_cookie=0")
+    endif()
     if(WC3_W3L_COMPAT)
         list(APPEND _patch_param_args
              --param "profile=${WC3_W3L_PROFILE}"
@@ -804,6 +868,10 @@ if(WC3_PATCH_PIPELINE)
             "patch pipeline index failed (rc=${_patch_index_rc}):\n"
             "${_patch_index_out}\n${_patch_index_err}")
     endif()
+    string(STRIP "${_patch_index_out}" _patch_index_out)
+    if(_patch_index_out)
+        message(STATUS "${_patch_index_out}")
+    endif()
     execute_process(
         COMMAND "${WC3_PYTHON3}" "${WC3_ROOT}/tools/lift/patch_pipeline.py"
                 apply --base "${_patch_base}" --index "${_patch_index}"
@@ -817,6 +885,10 @@ if(WC3_PATCH_PIPELINE)
         message(FATAL_ERROR
             "patch pipeline apply failed (rc=${_patch_rc}):\n"
             "${_patch_out_log}\n${_patch_err_log}")
+    endif()
+    string(STRIP "${_patch_out_log}" _patch_out_log)
+    if(_patch_out_log)
+        message(STATUS "${_patch_out_log}")
     endif()
     file(READ "${_patch_out}/overlay.json" _patch_manifest)
     string(JSON _patch_nchunks LENGTH "${_patch_manifest}" chunks)

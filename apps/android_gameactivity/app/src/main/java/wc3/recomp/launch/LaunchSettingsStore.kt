@@ -48,6 +48,18 @@ class LaunchSettingsStore(context: Context) {
         } else {
             LaunchContract.DEFAULT_SELECTION_CAP
         }
+        /* Three mutually exclusive schemes.  Direct touch is a new key; the
+         * legacy boolean still distinguishes the two overlay variants, so a
+         * settings file written by an older build migrates without a reset. */
+        val gestureMode = when {
+            prefs.getBoolean(
+                KEY_DIRECT_TOUCH_ENABLED,
+                LaunchContract.DEFAULT_DIRECT_TOUCH_ENABLED
+            ) -> GestureMode.DIRECT_TOUCH
+            prefs.getBoolean(KEY_DOUBLE_TAP_GESTURES, true) ->
+                GestureMode.DOUBLE_TAP
+            else -> GestureMode.SINGLE_TAP
+        }
         return LaunchSettings(
             mode = mode,
             gameDir = prefs.getString(KEY_GAME_DIR, "").orEmpty().trim(),
@@ -67,7 +79,7 @@ class LaunchSettingsStore(context: Context) {
             dxvkConfig = prefs.getString(KEY_DXVK_CONFIG, null)
                 ?: LaunchContract.DEFAULT_DXVK_CONFIG,
             /* An absent preference is the existing double-tap scheme. */
-            doubleTapGestures = prefs.getBoolean(KEY_DOUBLE_TAP_GESTURES, true),
+            gestureMode = gestureMode,
             doubleTapTimeoutMs = prefs.getInt(
                 KEY_DOUBLE_TAP_TIMEOUT_MS,
                 LaunchContract.DEFAULT_DOUBLE_TAP_TIMEOUT_MS
@@ -185,7 +197,14 @@ class LaunchSettingsStore(context: Context) {
             .putString(KEY_DRIVER_ID, settings.driverId)
             .putString(KEY_DXVK_VERSION, settings.dxvkVersion)
             .putString(KEY_DXVK_CONFIG, settings.dxvkConfig)
-            .putBoolean(KEY_DOUBLE_TAP_GESTURES, settings.doubleTapGestures)
+            .putBoolean(
+                KEY_DOUBLE_TAP_GESTURES,
+                settings.gestureMode.doubleTapGestures
+            )
+            .putBoolean(
+                KEY_DIRECT_TOUCH_ENABLED,
+                settings.gestureMode.directTouch
+            )
             .putInt(KEY_DOUBLE_TAP_TIMEOUT_MS, settings.doubleTapTimeoutMs)
             .putInt(KEY_LONG_PRESS_TIMEOUT_MS, settings.longPressTimeoutMs)
             .putInt(
@@ -250,6 +269,7 @@ class LaunchSettingsStore(context: Context) {
         const val KEY_DXVK_VERSION = "dxvk_version"
         const val KEY_DXVK_CONFIG = "dxvk_config"
         const val KEY_DOUBLE_TAP_GESTURES = "double_tap_gestures"
+        const val KEY_DIRECT_TOUCH_ENABLED = "direct_touch_enabled"
         const val KEY_DOUBLE_TAP_TIMEOUT_MS = "double_tap_timeout_ms"
         const val KEY_LONG_PRESS_TIMEOUT_MS = "long_press_timeout_ms"
         const val KEY_TAP_CLICK_DELAY_MS = "tap_click_delay_ms"

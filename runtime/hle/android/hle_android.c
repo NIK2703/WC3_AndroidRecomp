@@ -43,6 +43,7 @@
 
 #include "host.h"
 #include "hle_android.h"
+#include "hle_direct_touch.h"
 #include "hle_input_state.h"
 #include "hle_registry.h"
 #include "dyn_x86.h"
@@ -7676,6 +7677,15 @@ static uint32_t u_call_guest(CPU *c, uint32_t fn, int argc, const uint32_t *args
     return r;
 }
 
+/* Same contract as u_call_guest(), exported for the direct-touch executor
+ * that lives in its own translation unit.  The caller must be at the message
+ * pump boundary and must set ecx immediately before a __thiscall. */
+uint32_t wc3_hle_call_guest(CPU *c, uint32_t fn, int argc,
+                            const uint32_t *args)
+{
+    return u_call_guest(c, fn, argc, args);
+}
+
 /* The game writes its preference store only when the options dialog is
  * applied or when it exits through its own quit path.  Android can pause or
  * finish the activity without either path, so the host asks for one save at
@@ -7692,6 +7702,17 @@ void wc3_hle_registry_end_batch(void);
 void wc3_android_request_settings_save(void)
 {
     g_settings_save_requested = 1;
+}
+
+/* The producer has already published a direct-touch event.  Wake a blocking
+ * GetMessageA so the next iteration reaches the service before the idle
+ * timeout; the queue remains the source of truth, so a lost broadcast is only
+ * an extra ten milliseconds of latency, not a lost event. */
+void wc3_android_request_direct_touch(void)
+{
+    pthread_mutex_lock(&g_uq_lock);
+    pthread_cond_broadcast(&g_uq_cond);
+    pthread_mutex_unlock(&g_uq_lock);
 }
 
 static void service_settings_save(CPU *c)
@@ -7741,12 +7762,13 @@ static void u_get_message(CPU *c)
 
     for (;;) {
         service_settings_save(c);
+        wc3_hle_direct_touch_service(c, g_win_w, g_win_h);
         keyboard_service();
 
         int got;
         pthread_mutex_lock(&g_uq_lock);
         got = u_msg_take_locked(out, hwnd, lo, hi, 1);
-        if (!got) {
+        if (!got && wc3_direct_touch_pending() == 0) {
             /* Real GetMessage blocks until a message arrives.  The movie
              * window's own pump depends on that: a zero return means WM_QUIT,
              * and returning it for an empty queue made the pump exit before
@@ -7789,6 +7811,7 @@ static void u_peek_message(CPU *c)
     int remove = (arg32(c, 4) & 1) != 0;             /* PM_REMOVE */
     WC3_TRACE_SCOPE("wc3.msg.peek");
     service_settings_save(c);
+    wc3_hle_direct_touch_service(c, g_win_w, g_win_h);
     keyboard_service();
     c->eax = (uint32_t)u_msg_take(out, hwnd, lo, hi, remove);
 #if WC3_DEBUG
@@ -10902,6 +10925,8 @@ void hle_android_start(const char *exe_path, const char *cmdline)
         for (unsigned i = 0; i < sizeof g_arenas / sizeof g_arenas[0]; i++)
             guest_range_add(g_arenas[i].lo, g_arenas[i].hi - g_arenas[i].lo);
     }
+
+    wc3_hle_direct_touch_start();
 
     if (exe_path && *exe_path) g_exe_path = exe_path;
     /* The launcher takes its data directory from its own image path, so that

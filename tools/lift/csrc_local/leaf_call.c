@@ -35,11 +35,21 @@
  * pending; a leaf-tail rewrite is also rejected unless the containing body
  * passes the same pending-safety check.
  *
+ * With --gs-cookie, the exact MSVC /GS cookie guard body
+ * (`flags_sub(ecx,cookie); if (!zf) tail(fail); esp += 4`) is replaced by a
+ * specialized clean-frame helper.  A generated call site must have the form
+ * `push32(ret); [xmm spill;] WC3_DIRECT_CALL[_CLEAN](guard, c)`.  The helper
+ * is shared (external) below 20 guard sites in a TU and static above that
+ * threshold, where constant propagation amortizes its body.  The switch is
+ * default-off until a PM-19 device A/B confirms the redirect is not a runtime
+ * regression.
+ *
  * This pass runs once over all final relifted chunks, after every other
  * corpus text pass.  Its sets are global because splitcorpus can place a
  * caller and its callee in different translation units.
  *
  *   leaf_call --inputs FILE --out-dir DIR [--report JSON] [--quiet]
+ *             [--gs-cookie[=0|1]]
  *   leaf_call --self-test
  *
  * `--inputs` is a text file with one final chunk path per line.  Output files
@@ -65,9 +75,11 @@
 #define CALL_LEAF CALL_MACRO "_LEAF"
 #define CALL_DEPTH CALL_MACRO "_DEPTH"
 #define CALL_CLEAN CALL_MACRO "_CLEAN"
+#define CALL_CLEAN_LEN (sizeof(CALL_CLEAN) - 1u)
 #define TAIL_MACRO "WC3_DIRECT_TAIL"
 #define TAIL_MACRO_LEN (sizeof(TAIL_MACRO) - 1u)
 #define TAIL_LEAF TAIL_MACRO "_LEAF"
+#define GS_STATIC_MIN_SITES 20u
 
 typedef struct {
     char *p;
@@ -80,6 +92,18 @@ typedef struct {
     size_t n;
     size_t cap;
 } VaVec;
+
+typedef struct {
+    uint32_t target;
+    uint32_t cookie;
+    uint32_t fail;
+} Guard;
+
+typedef struct {
+    Guard *p;
+    size_t n;
+    size_t cap;
+} GuardVec;
 
 typedef struct {
     char **p;
@@ -155,6 +179,19 @@ static void vec_push(VaVec *v, uint32_t x)
         v->p = (uint32_t *)xrealloc(v->p, v->cap * sizeof *v->p);
     }
     v->p[v->n++] = x;
+}
+
+static void guard_push(GuardVec *v, uint32_t target, uint32_t cookie,
+                       uint32_t fail)
+{
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2u : 16u;
+        v->p = (Guard *)xrealloc(v->p, v->cap * sizeof *v->p);
+    }
+    v->p[v->n].target = target;
+    v->p[v->n].cookie = cookie;
+    v->p[v->n].fail = fail;
+    v->n++;
 }
 
 static void path_push(PathVec *v, char *x)
@@ -368,6 +405,43 @@ static int body_is_ret_leaf(const char *s)
     return i == sizeof(pattern) - 1u;
 }
 
+/* Exact MSVC /GS cookie guard body:
+ *
+ *   flags_sub(c, c->ecx, rd32((GVA(cookie))), 4);
+ *   if (!c->zf) { WC3_DIRECT_TAIL(L_fail, c); return; }
+ *   c->esp += 4; return;
+ *
+ * The call site form is `push32(ret); WC3_DIRECT_CALL[_CLEAN](L_guard, c);`.
+ * Only this exact body is eligible for the shared guard helper: a different
+ * register, extra instruction, or a non-tail failure path stays on the generic
+ * direct-call frame. */
+static int parse_gs_cookie_guard(const char *s, uint32_t *cookie,
+                                 uint32_t *fail)
+{
+    size_t n = strlen(s);
+    char *compact = (char *)xmalloc(n + 1u);
+    size_t i;
+    size_t j = 0;
+    unsigned ck = 0, fl = 0;
+    int used = 0;
+    int r;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!isspace(c)) compact[j++] = (char)c;
+    }
+    compact[j] = 0;
+    r = sscanf(compact,
+               "{flags_sub(c,c->ecx,rd32((GVA(0x%8x))),4);"
+               "if(!c->zf){WC3_DIRECT_TAIL(L_%8x,c);return;}"
+               "c->esp+=4;return;}%n",
+               &ck, &fl, &used);
+    free(compact);
+    if (r != 2 || used != (int)j) return 0;
+    *cookie = (uint32_t)ck;
+    *fail = (uint32_t)fl;
+    return 1;
+}
+
 /* Count tail macros in a function body.  D4c is limited to one-tail bodies:
  * in a mixed body the direct form changes the compiler's tail/merge decisions
  * and can grow the caller even when every individual leaf is harmless. */
@@ -452,13 +526,14 @@ static int body_pending_safe(const char *s)
     return 1;
 }
 
-static int call_target(const char *masked, size_t n, size_t pos, uint32_t *out)
+static int call_target_from(const char *masked, size_t n, size_t pos,
+                            size_t macro_len, int reject_suffix, uint32_t *out)
 {
-    size_t p = pos + CALL_MACRO_LEN;
+    size_t p = pos + macro_len;
     uint32_t v = 0;
     size_t i;
     if (pos > 0 && word_char((unsigned char)masked[pos - 1u])) return 0;
-    if (p < n && masked[p] == '_') return 0;   /* already _LEAF */
+    if (reject_suffix && p < n && masked[p] == '_') return 0;
     while (p < n && (masked[p] == ' ' || masked[p] == '\t')) p++;
     if (p >= n || masked[p] != '(') return 0;
     p++;
@@ -477,6 +552,117 @@ static int call_target(const char *masked, size_t n, size_t pos, uint32_t *out)
     if (p + 8u < n && word_char((unsigned char)masked[p + 8u])) return 0;
     *out = v;
     return 1;
+}
+
+static int call_target(const char *masked, size_t n, size_t pos, uint32_t *out)
+{
+    return call_target_from(masked, n, pos, CALL_MACRO_LEN, 1, out);
+}
+
+static int clean_call_target(const char *masked, size_t n, size_t pos,
+                             uint32_t *out)
+{
+    return call_target_from(masked, n, pos, CALL_CLEAN_LEN, 0, out);
+}
+
+/* End of a macro invocation, including the closing ')'.  The arguments are
+ * simple generated tokens but scan parentheses so a future argument expression
+ * cannot silently truncate the replacement. */
+static size_t call_invocation_end(const char *masked, size_t n, size_t pos,
+                                  size_t macro_len)
+{
+    size_t p = pos + macro_len;
+    size_t depth = 0;
+    while (p < n && (masked[p] == ' ' || masked[p] == '\t')) p++;
+    if (p >= n || masked[p] != '(') return SIZE_MAX;
+    for (; p < n; p++) {
+        if (masked[p] == '(') {
+            depth++;
+        } else if (masked[p] == ')') {
+            depth--;
+            if (!depth) return p + 1u;
+        }
+    }
+    return SIZE_MAX;
+}
+
+static int skip_index(const char *s, size_t end, size_t *p,
+                      const char *prefix, char close)
+{
+    size_t len = strlen(prefix);
+    size_t digits;
+    if (*p + len > end || strncmp(s + *p, prefix, len) != 0) return 0;
+    *p += len;
+    digits = *p;
+    while (*p < end && isdigit((unsigned char)s[*p])) (*p)++;
+    if (*p == digits || *p >= end || s[*p] != close) return 0;
+    (*p)++;
+    return 1;
+}
+
+/* The post-P0 xmm pass can insert register spills between push32 and the
+ * guard call on the same generated line.  Those stores cannot change esp or
+ * the guest return address, so they do not invalidate the guard frame.  Accept
+ * only the two exact spill forms emitted by that pass; any other intervening
+ * statement keeps the generic clean frame. */
+static int statement_is_xmm_spill(const char *s, size_t start, size_t end)
+{
+    size_t p = start;
+    size_t len;
+    while (p < end && isspace((unsigned char)s[p])) p++;
+
+    len = strlen("xmm_store_full(");
+    if (p + len <= end && strncmp(s + p, "xmm_store_full(", len) == 0) {
+        p += len;
+        if (p >= end || s[p] != '&') return 0;
+        p++;
+        if (!skip_index(s, end, &p, "c->xmm[", ']')) return 0;
+        while (p < end && isspace((unsigned char)s[p])) p++;
+        if (p >= end || s[p] != ',') return 0;
+        p++;
+        while (p < end && isspace((unsigned char)s[p])) p++;
+        if (p >= end || s[p] != '&') return 0;
+        p++;
+        if (!skip_index(s, end, &p, "_wc3_xmm_local[", ']')) return 0;
+        while (p < end && isspace((unsigned char)s[p])) p++;
+        if (p >= end || s[p] != ')') return 0;
+        p++;
+        while (p < end && isspace((unsigned char)s[p])) p++;
+        return p == end;
+    }
+
+    if (!skip_index(s, end, &p, "c->xmm[", ']')) return 0;
+    while (p < end && isspace((unsigned char)s[p])) p++;
+    if (p >= end || s[p] != '=') return 0;
+    p++;
+    while (p < end && isspace((unsigned char)s[p])) p++;
+    if (!skip_index(s, end, &p, "_wc3_xmm_local[", ']')) return 0;
+    while (p < end && isspace((unsigned char)s[p])) p++;
+    return p == end;
+}
+
+/* The guard helper owns the callee's return-address pop, so the call site must
+ * be the generated `push32(ret); [xmm spill;] WC3_DIRECT_CALL...` sequence.
+ * Check backwards over exact XMM spill statements instead of assuming that
+ * push32 is the immediately preceding token. */
+static int call_has_push32(const char *masked, size_t pos)
+{
+    size_t p = pos;
+    for (;;) {
+        size_t end;
+        size_t start;
+        while (p > 0 && isspace((unsigned char)masked[p - 1u])) p--;
+        if (p == 0 || masked[p - 1u] != ';') return 0;
+        end = p - 1u;
+        while (end > 0 && isspace((unsigned char)masked[end - 1u])) end--;
+        start = end;
+        while (start > 0 && masked[start - 1u] != ';' &&
+               masked[start - 1u] != '{' && masked[start - 1u] != '}') start--;
+        while (start < end && isspace((unsigned char)masked[start])) start++;
+        if (word_at(masked, end, start, "push32")) return 1;
+        if (!statement_is_xmm_spill(masked, start, end)) return 0;
+        p = start;
+    }
 }
 
 static int tail_target(const char *masked, size_t n, size_t pos, uint32_t *out)
@@ -513,6 +699,85 @@ static int cmp_u32(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
+static int cmp_guard(const void *a, const void *b)
+{
+    uint32_t x = ((const Guard *)a)->target;
+    uint32_t y = ((const Guard *)b)->target;
+    return (x > y) - (x < y);
+}
+
+static const Guard *guard_find(const GuardVec *v, uint32_t target)
+{
+    Guard key;
+    if (!v || !v->n) return NULL;
+    key.target = target;
+    key.cookie = 0;
+    key.fail = 0;
+    return (const Guard *)bsearch(&key, v->p, v->n, sizeof *v->p, cmp_guard);
+}
+
+static void sort_guards(GuardVec *v)
+{
+    if (v->n > 1u) qsort(v->p, v->n, sizeof *v->p, cmp_guard);
+}
+
+/* Structural count used only to choose the static or shared helper.  The
+ * rewrite itself repeats the pending-safety proof per function; this count is
+ * deliberately independent of that proof because both helper variants have
+ * identical semantics. */
+static size_t count_guard_sites(const char *masked, size_t n,
+                                const GuardVec *guards)
+{
+    size_t scan = 0;
+    size_t count = 0;
+    while (scan + DIRECT_PREFIX_LEN <= n) {
+        const char *hit = strstr(masked + scan, DIRECT_PREFIX);
+        size_t pos;
+        size_t end;
+        uint32_t va;
+        if (!hit) break;
+        pos = (size_t)(hit - masked);
+        if (pos + DIRECT_PREFIX_LEN > n) break;
+        if (!strncmp(hit, CALL_CLEAN, CALL_CLEAN_LEN)) {
+            if (clean_call_target(masked, n, pos, &va) &&
+                guard_find(guards, va) != NULL && call_has_push32(masked, pos) &&
+                (end = call_invocation_end(masked, n, pos, CALL_CLEAN_LEN)) !=
+                    SIZE_MAX) {
+                count++;
+                scan = end;
+                continue;
+            }
+            scan = pos + CALL_CLEAN_LEN;
+            continue;
+        }
+        if (!strncmp(hit, CALL_MACRO, CALL_MACRO_LEN)) {
+            if (pos + CALL_MACRO_LEN > n) break;
+            if (masked[pos + CALL_MACRO_LEN] == '_') {
+                scan = pos + CALL_MACRO_LEN;
+                continue;
+            }
+            if (call_target(masked, n, pos, &va) &&
+                guard_find(guards, va) != NULL && call_has_push32(masked, pos) &&
+                (end = call_invocation_end(masked, n, pos, CALL_MACRO_LEN)) !=
+                    SIZE_MAX) {
+                count++;
+                scan = end;
+                continue;
+            }
+            scan = pos + CALL_MACRO_LEN;
+            continue;
+        }
+        scan = pos + DIRECT_PREFIX_LEN;
+    }
+    return count;
+}
+
+static const char *gs_include_name(size_t sites)
+{
+    return sites >= GS_STATIC_MIN_SITES ? "gs_cookie_call_static.h"
+                                        : "gs_cookie_call.h";
+}
+
 static int va_contains(const VaVec *v, uint32_t x)
 {
     if (!v->n) return 0;
@@ -535,7 +800,7 @@ static const char *path_base(const char *path)
 
 static void collect_sets(const char *path, VaVec *leafs, VaVec *ret_leafs,
                          VaVec *depths, VaVec *known, VaVec *unsafe,
-                         size_t *funcs)
+                         GuardVec *guards, size_t *funcs)
 {
     size_t n;
     char *text = read_file(path, &n);
@@ -547,6 +812,7 @@ static void collect_sets(const char *path, VaVec *leafs, VaVec *ret_leafs,
         const char *nl;
         size_t open, close;
         uint32_t va;
+        uint32_t cookie, fail;
         char saved;
         if (hdr == SIZE_MAX) break;
         nl = (const char *)memchr(masked + hdr, '\n', n - hdr);
@@ -568,6 +834,8 @@ static void collect_sets(const char *path, VaVec *leafs, VaVec *ret_leafs,
             if (body_is_ret_leaf(masked + open)) vec_push(ret_leafs, va);
             if (body_is_tail_free(masked + open)) vec_push(depths, va);
             if (!body_pending_safe(masked + open)) vec_push(unsafe, va);
+            if (parse_gs_cookie_guard(masked + open, &cookie, &fail))
+                guard_push(guards, va, cookie, fail);
             masked[close + 1u] = saved;
         }
         scan = close + 1u;
@@ -581,10 +849,11 @@ static void rewrite_calls(const char *text, const char *masked,
                           int single_tail,
                           const VaVec *leafs, const VaVec *ret_leafs,
                           const VaVec *depths,
-                          const VaVec *known, Buf *out,
+                          const VaVec *known, const GuardVec *guards, Buf *out,
                           size_t *calls, size_t *leaf_rw,
                           size_t *depth_rw, size_t *clean_rw,
-                          size_t *tails, size_t *tail_leaf_rw)
+                          size_t *tails, size_t *tail_leaf_rw,
+                          size_t *gs_rw)
 {
     size_t scan = begin;
     size_t last = begin;
@@ -593,6 +862,9 @@ static void rewrite_calls(const char *text, const char *masked,
         size_t pos;
         uint32_t va;
         const char *repl = NULL;
+        const Guard *guard = NULL;
+        size_t call_end;
+        char guard_call[96];
         if (!hit) break;
         pos = (size_t)(hit - masked);
         if (pos + DIRECT_PREFIX_LEN > end) break;
@@ -620,6 +892,29 @@ static void rewrite_calls(const char *text, const char *masked,
             continue;
         }
 
+        /* The leaf_call pass has already produced the clean form on a normal
+         * rerun.  Rewrite a guard call from either the raw or the clean form;
+         * keep the exact body/push32 proof for both. */
+        if (!strncmp(hit, CALL_CLEAN, CALL_CLEAN_LEN)) {
+            if (pending_safe && clean_call_target(masked, end, pos, &va) &&
+                (guard = guard_find(guards, va)) != NULL &&
+                call_has_push32(masked, pos) &&
+                (call_end = call_invocation_end(masked, end, pos,
+                                                CALL_CLEAN_LEN)) != SIZE_MAX) {
+                snprintf(guard_call, sizeof guard_call,
+                         "WC3_CALL_GS_COOKIE(c, 0x%08Xu, L_%08X)",
+                         (unsigned)guard->cookie, (unsigned)guard->fail);
+                buf_add(out, text + last, pos - last);
+                buf_str(out, guard_call);
+                last = call_end;
+                scan = call_end;
+                (*gs_rw)++;
+                continue;
+            }
+            scan = pos + CALL_CLEAN_LEN;
+            continue;
+        }
+
         if (!strncmp(hit, CALL_MACRO, CALL_MACRO_LEN)) {
             if (pos + CALL_MACRO_LEN > end) break;
             if (hit[CALL_MACRO_LEN] == '_') {
@@ -628,6 +923,21 @@ static void rewrite_calls(const char *text, const char *masked,
             }
             if (call_target(masked, end, pos, &va)) {
                 (*calls)++;
+                if (pending_safe && (guard = guard_find(guards, va)) != NULL &&
+                    call_has_push32(masked, pos) &&
+                    (call_end = call_invocation_end(masked, end, pos,
+                                                    CALL_MACRO_LEN)) !=
+                        SIZE_MAX) {
+                    snprintf(guard_call, sizeof guard_call,
+                             "WC3_CALL_GS_COOKIE(c, 0x%08Xu, L_%08X)",
+                             (unsigned)guard->cookie, (unsigned)guard->fail);
+                    buf_add(out, text + last, pos - last);
+                    buf_str(out, guard_call);
+                    last = call_end;
+                    scan = call_end;
+                    (*gs_rw)++;
+                    continue;
+                }
                 if (va_contains(leafs, va)) {
                     repl = CALL_LEAF;
                     (*leaf_rw)++;
@@ -656,20 +966,95 @@ static void rewrite_calls(const char *text, const char *masked,
     buf_add(out, text + last, end - last);
 }
 
+static void buf_insert_after_line(Buf *out, const char *needle, const char *text,
+                                  size_t text_len)
+{
+    const char *hit;
+    size_t at;
+    if (!out->p || !text_len) return;
+    hit = strstr(out->p, needle);
+    if (!hit) return;
+    at = (size_t)(hit - out->p) + strlen(needle);
+    while (at < out->n && out->p[at] != '\n') at++;
+    if (at < out->n) at++;
+    buf_reserve(out, text_len);
+    memmove(out->p + at + text_len, out->p + at, out->n - at + 1u);
+    memcpy(out->p + at, text, text_len);
+    out->n += text_len;
+}
+
+/* Add the guard declaration only to a translation unit that actually received
+ * a guard rewrite.  The helper itself is one external function in wc3_guest,
+ * but an unused include would still add a needless source dependency. */
+static void buf_insert_gs_include(Buf *out, const char *header)
+{
+    const char *direct;
+    char line[96];
+    int written;
+    if (!out->p) return;
+    if (strstr(out->p, "#include \"gs_cookie_call.h\"") ||
+        strstr(out->p, "#include \"gs_cookie_call_static.h\""))
+        return;
+    direct = strstr(out->p, "#include \"direct_call.h\"");
+    if (!direct) return;
+    written = snprintf(line, sizeof line, "#include \"%s\"\n", header);
+    if (written <= 0 || (size_t)written >= sizeof line) return;
+    buf_insert_after_line(out, "#include \"direct_call.h\"", line,
+                          (size_t)written);
+}
+
+/* The helper passes the fail function directly, so a caller TU needs the fail
+ * symbol declared.  Insert only the guards this TU actually calls; the other
+ * two guard definitions may live in a different module.  Duplicate compatible
+ * declarations are legal; this also keeps a rerun idempotent. */
+static void buf_insert_guard_decls(Buf *out, const GuardVec *guards,
+                                   const char *header)
+{
+    char decls[768];
+    char needle[96];
+    size_t len = 0;
+    size_t i;
+    if (!out->p || !guards->n) return;
+    if (snprintf(needle, sizeof needle, "#include \"%s\"", header) <= 0) return;
+    for (i = 0; i < guards->n; i++) {
+        char call[96];
+        char line[64];
+        int call_written;
+        int written;
+        call_written = snprintf(
+            call, sizeof call, "WC3_CALL_GS_COOKIE(c, 0x%08Xu, L_%08X)",
+            (unsigned)guards->p[i].cookie, (unsigned)guards->p[i].fail);
+        if (call_written <= 0 || (size_t)call_written >= sizeof call) return;
+        if (!strstr(out->p, call)) continue;
+        written = snprintf(line, sizeof line, "void L_%08X(CPU *c);\n",
+                           (unsigned)guards->p[i].fail);
+        if (written <= 0 || (size_t)written >= sizeof line) return;
+        if (strstr(out->p, line)) continue;
+        if (len + (size_t)written >= sizeof decls) return;
+        memcpy(decls + len, line, (size_t)written);
+        len += (size_t)written;
+    }
+    buf_insert_after_line(out, needle, decls, len);
+}
+
 static void rewrite_file(const char *path, const char *out_dir,
                          const VaVec *leafs, const VaVec *ret_leafs,
                          const VaVec *depths,
                          const VaVec *known, const VaVec *unsafe,
+                         const GuardVec *guards,
                          size_t *calls, size_t *leaf_rw,
                          size_t *depth_rw, size_t *clean_rw,
-                         size_t *tails, size_t *tail_leaf_rw)
+                         size_t *tails, size_t *tail_leaf_rw,
+                         size_t *gs_rw)
 {
     size_t n;
     char *text = read_file(path, &n);
     char *masked = (char *)xmalloc(n + 1u);
     Buf out = {0};
     size_t scan = 0;
-    size_t last = 0;
+    size_t last;
+    size_t file_gs = 0;
+    const char *gs_header;
     const char *base = path_base(path);
     char *out_path;
     size_t out_len = strlen(out_dir);
@@ -682,6 +1067,7 @@ static void rewrite_file(const char *path, const char *out_dir,
     memcpy(out_path + out_len, base, base_len + 1u);
 
     mask_code(text, n, masked);
+    last = 0;
     while (scan < n) {
         size_t hdr = find_func(masked, n, scan);
         const char *nl;
@@ -709,13 +1095,21 @@ static void rewrite_file(const char *path, const char *out_dir,
         masked[close + 1u] = saved;
         buf_add(&out, text + last, open - last);
         rewrite_calls(text, masked, open, close + 1u, allow_clean,
-                      single_tail, leafs, ret_leafs, depths, known, &out,
+                      single_tail, leafs, ret_leafs, depths, known, guards, &out,
                       calls, leaf_rw, depth_rw, clean_rw, tails,
-                      tail_leaf_rw);
+                      tail_leaf_rw, &file_gs);
         last = close + 1u;
         scan = close + 1u;
     }
     buf_add(&out, text + last, n - last);
+    *gs_rw += file_gs;
+    if (file_gs) {
+        /* Same rule as the batch path: pay for a static helper only when this
+         * file actually received enough rewritten sites. */
+        gs_header = gs_include_name(file_gs);
+        buf_insert_gs_include(&out, gs_header);
+        buf_insert_guard_decls(&out, guards, gs_header);
+    }
     write_file(out_path, out.p ? out.p : "", out.n);
     free(out.p);
     free(out_path);
@@ -769,6 +1163,7 @@ typedef struct {
     VaVec *depths;
     VaVec *known;
     VaVec *unsafe;
+    GuardVec *guards;
     size_t *funcs;
 #if defined(_WIN32)
     CRITICAL_SECTION lock;
@@ -795,7 +1190,7 @@ static void collect_worker_body(CollectCtx *c, size_t id)
         if (i >= c->paths->n) break;
         collect_sets(c->paths->p[i], &c->leafs[id], &c->ret_leafs[id],
                      &c->depths[id], &c->known[id], &c->unsafe[id],
-                     &c->funcs[id]);
+                     &c->guards[id], &c->funcs[id]);
     }
 }
 
@@ -810,7 +1205,8 @@ static DWORD WINAPI collect_worker(LPVOID arg)
 
 static void collect_parallel(const PathVec *paths, unsigned jobs,
                              VaVec *leafs, VaVec *ret_leafs, VaVec *depths,
-                             VaVec *known, VaVec *unsafe, size_t *funcs)
+                             VaVec *known, VaVec *unsafe, GuardVec *guards,
+                             size_t *funcs)
 {
     CollectCtx c;
     VaVec *local_leafs;
@@ -818,6 +1214,7 @@ static void collect_parallel(const PathVec *paths, unsigned jobs,
     VaVec *local_depths;
     VaVec *local_known;
     VaVec *local_unsafe;
+    GuardVec *local_guards;
     size_t *local_funcs;
     size_t i, w;
 #if defined(_WIN32)
@@ -833,18 +1230,21 @@ static void collect_parallel(const PathVec *paths, unsigned jobs,
     local_depths = (VaVec *)xmalloc((size_t)jobs * sizeof(*local_depths));
     local_known = (VaVec *)xmalloc((size_t)jobs * sizeof(*local_known));
     local_unsafe = (VaVec *)xmalloc((size_t)jobs * sizeof(*local_unsafe));
+    local_guards = (GuardVec *)xmalloc((size_t)jobs * sizeof(*local_guards));
     local_funcs = (size_t *)xmalloc((size_t)jobs * sizeof(*local_funcs));
     memset(local_leafs, 0, (size_t)jobs * sizeof(*local_leafs));
     memset(local_ret_leafs, 0, (size_t)jobs * sizeof(*local_ret_leafs));
     memset(local_depths, 0, (size_t)jobs * sizeof(*local_depths));
     memset(local_known, 0, (size_t)jobs * sizeof(*local_known));
     memset(local_unsafe, 0, (size_t)jobs * sizeof(*local_unsafe));
+    memset(local_guards, 0, (size_t)jobs * sizeof(*local_guards));
     memset(local_funcs, 0, (size_t)jobs * sizeof(*local_funcs));
     c.leafs = local_leafs;
     c.ret_leafs = local_ret_leafs;
     c.depths = local_depths;
     c.known = local_known;
     c.unsafe = local_unsafe;
+    c.guards = local_guards;
     c.funcs = local_funcs;
 #if defined(_WIN32)
     InitializeCriticalSection(&c.lock);
@@ -877,18 +1277,24 @@ static void collect_parallel(const PathVec *paths, unsigned jobs,
             vec_push(known, local_known[w].p[i]);
         for (i = 0; i < local_unsafe[w].n; i++)
             vec_push(unsafe, local_unsafe[w].p[i]);
+        for (i = 0; i < local_guards[w].n; i++)
+            guard_push(guards, local_guards[w].p[i].target,
+                       local_guards[w].p[i].cookie,
+                       local_guards[w].p[i].fail);
         *funcs += local_funcs[w];
         free(local_leafs[w].p);
         free(local_ret_leafs[w].p);
         free(local_depths[w].p);
         free(local_known[w].p);
         free(local_unsafe[w].p);
+        free(local_guards[w].p);
     }
     free(local_leafs);
     free(local_ret_leafs);
     free(local_depths);
     free(local_known);
     free(local_unsafe);
+    free(local_guards);
     free(local_funcs);
 }
 
@@ -897,6 +1303,7 @@ typedef struct {
     size_t leaf_rw;
     size_t depth_rw;
     size_t clean_rw;
+    size_t gs_rw;
     size_t tails;
     size_t tail_leaf_rw;
 } LeafStats;
@@ -910,6 +1317,7 @@ typedef struct {
     const VaVec *depths;
     const VaVec *known;
     const VaVec *unsafe;
+    const GuardVec *guards;
     LeafStats *stats;
 #if defined(_WIN32)
     CRITICAL_SECTION lock;
@@ -936,9 +1344,9 @@ static void rewrite_worker_body(RewriteCtx *c, size_t id)
 #endif
         if (i >= c->paths->n) break;
         rewrite_file(c->paths->p[i], c->out_dir, c->leafs, c->ret_leafs,
-                     c->depths, c->known, c->unsafe, &s->calls, &s->leaf_rw,
-                     &s->depth_rw, &s->clean_rw, &s->tails,
-                     &s->tail_leaf_rw);
+                     c->depths, c->known, c->unsafe, c->guards, &s->calls,
+                     &s->leaf_rw, &s->depth_rw, &s->clean_rw, &s->tails,
+                     &s->tail_leaf_rw, &s->gs_rw);
     }
 }
 
@@ -955,9 +1363,10 @@ static void rewrite_parallel(const PathVec *paths, unsigned jobs,
                              const char *out_dir, const VaVec *leafs,
                              const VaVec *ret_leafs, const VaVec *depths,
                              const VaVec *known, const VaVec *unsafe,
+                             const GuardVec *guards,
                              size_t *calls, size_t *leaf_rw,
                              size_t *depth_rw, size_t *clean_rw, size_t *tails,
-                             size_t *tail_leaf_rw)
+                             size_t *tail_leaf_rw, size_t *gs_rw)
 {
     RewriteCtx c;
     LeafStats *stats;
@@ -976,6 +1385,7 @@ static void rewrite_parallel(const PathVec *paths, unsigned jobs,
     c.depths = depths;
     c.known = known;
     c.unsafe = unsafe;
+    c.guards = guards;
     stats = (LeafStats *)xmalloc((size_t)jobs * sizeof(*stats));
     memset(stats, 0, (size_t)jobs * sizeof(*stats));
     c.stats = stats;
@@ -1004,6 +1414,7 @@ static void rewrite_parallel(const PathVec *paths, unsigned jobs,
         *leaf_rw += stats[i].leaf_rw;
         *depth_rw += stats[i].depth_rw;
         *clean_rw += stats[i].clean_rw;
+        *gs_rw += stats[i].gs_rw;
         *tails += stats[i].tails;
         *tail_leaf_rw += stats[i].tail_leaf_rw;
     }
@@ -1013,6 +1424,8 @@ static void rewrite_parallel(const PathVec *paths, unsigned jobs,
 static int self_test(void)
 {
     static const char *src =
+        "#include \"cpu.h\"\n"
+        "#include \"direct_call.h\"\n"
         "/* void L_00000007(CPU *restrict c)\n"
         "{\n"
         "    WC3_DIRECT_CALL(L_00000001, c);\n"
@@ -1100,15 +1513,30 @@ static int self_test(void)
         "{\n"
         "    WC3_DIRECT_TAIL(L_00000001, c); return;\n"
         "    WC3_DIRECT_TAIL(L_00000001, c); return;\n"
+        "}\n"
+        "void L_00000014(CPU *restrict c)\n"
+        "{\n"
+        "    flags_sub(c, c->ecx, rd32((GVA(0x12345678))), 4);\n"
+        "    if (!c->zf) { WC3_DIRECT_TAIL(L_00000001, c); return; }\n"
+        "    c->esp += 4; return;\n"
+        "}\n"
+        "void L_00000015(CPU *restrict c)\n"
+        "{\n"
+        "    push32(c, 0u); xmm_store_full(&c->xmm[0], &_wc3_xmm_local[0]);\n"
+        "    WC3_DIRECT_CALL(L_00000014, c);\n"
         "}\n";
     size_t n = strlen(src);
     char *text = (char *)xmalloc(n + 1u);
     char *masked = (char *)xmalloc(n + 1u);
     VaVec leafs = {0}, ret_leafs = {0}, depths = {0}, known = {0}, unsafe = {0};
+    GuardVec guards = {0};
     size_t scan = 0, funcs = 0;
     Buf out = {0};
     size_t last = 0;
     size_t calls = 0, leaf_rw = 0, depth_rw = 0, clean_rw = 0;
+    size_t gs_rw = 0;
+    size_t gs_sites;
+    const char *gs_header;
     size_t tails = 0, tail_leaf_rw = 0;
     memcpy(text, src, n + 1u);
     mask_code(text, n, masked);
@@ -1117,6 +1545,7 @@ static int self_test(void)
         const char *nl;
         size_t open, close;
         uint32_t va;
+        uint32_t cookie, fail;
         char saved;
         if (hdr == SIZE_MAX) break;
         nl = (const char *)memchr(masked + hdr, '\n', n - hdr);
@@ -1134,6 +1563,8 @@ static int self_test(void)
             if (body_is_ret_leaf(masked + open)) vec_push(&ret_leafs, va);
             if (body_is_tail_free(masked + open)) vec_push(&depths, va);
             if (!body_pending_safe(masked + open)) vec_push(&unsafe, va);
+            if (parse_gs_cookie_guard(masked + open, &cookie, &fail))
+                guard_push(&guards, va, cookie, fail);
             masked[close + 1u] = saved;
         }
         scan = close + 1u;
@@ -1143,6 +1574,8 @@ static int self_test(void)
     sort_vas(&depths);
     sort_vas(&known);
     sort_vas(&unsafe);
+    sort_guards(&guards);
+    gs_sites = count_guard_sites(masked, n, &guards);
     scan = 0;
     last = 0;
     while (scan < n) {
@@ -1168,19 +1601,34 @@ static int self_test(void)
         masked[close + 1u] = saved;
         buf_add(&out, text + last, open - last);
         rewrite_calls(text, masked, open, close + 1u, allow_clean,
-                      single_tail, &leafs, &ret_leafs, &depths, &known, &out,
-                      &calls, &leaf_rw, &depth_rw, &clean_rw,
-                      &tails, &tail_leaf_rw);
+                      single_tail, &leafs, &ret_leafs, &depths, &known,
+                      &guards, &out, &calls, &leaf_rw, &depth_rw, &clean_rw,
+                      &tails, &tail_leaf_rw, &gs_rw);
         last = close + 1u;
         scan = close + 1u;
     }
     buf_add(&out, text + last, n - last);
-    if (funcs != 19u || leafs.n != 1u || leafs.p[0] != 1u ||
+    /* Choose the helper from the sites that actually passed pending_safe and
+     * were rewritten.  The candidate count is useful for the report, but an
+     * unsafe caller must not amortize a static helper it never uses. */
+    gs_header = gs_include_name(gs_rw);
+    if (gs_rw) {
+        buf_insert_gs_include(&out, gs_header);
+        buf_insert_guard_decls(&out, &guards, gs_header);
+    }
+    if (funcs != 21u || leafs.n != 1u || leafs.p[0] != 1u ||
         ret_leafs.n != 1u || ret_leafs.p[0] != 1u ||
-        depths.n != 14u || known.n != 19u || unsafe.n != 2u ||
+        depths.n != 15u || known.n != 21u || unsafe.n != 2u ||
+        guards.n != 1u || guards.p[0].target != 0x14u ||
         !va_contains(&unsafe, 7u) || !va_contains(&unsafe, 8u) ||
-        calls != 11u || leaf_rw != 2u || depth_rw != 5u ||
-        clean_rw != 2u || tails != 5u || tail_leaf_rw != 1u ||
+        calls != 12u || leaf_rw != 2u || depth_rw != 5u ||
+        clean_rw != 2u || gs_rw != 1u || gs_sites != 1u || tails != 6u ||
+        tail_leaf_rw != 2u ||
+        strcmp(gs_include_name(1u), "gs_cookie_call.h") != 0 ||
+        strcmp(gs_include_name(20u), "gs_cookie_call_static.h") != 0 ||
+        !strstr(out.p, "#include \"gs_cookie_call.h\"") ||
+        !strstr(out.p, "void L_00000001(CPU *c);") ||
+        !strstr(out.p, "WC3_CALL_GS_COOKIE(c, 0x12345678u, L_00000001);") ||
         !strstr(out.p, "WC3_DIRECT_CALL_LEAF(L_00000001, c);") ||
         !strstr(out.p, "WC3_DIRECT_CALL_DEPTH(L_00000003, c);") ||
         !strstr(out.p, "WC3_DIRECT_CALL_DEPTH(L_00000009, c);") ||
@@ -1206,11 +1654,12 @@ static int self_test(void)
         strstr(out.p, "WC3_DIRECT_CALL_LEAF(L_0000000B") ||
         strstr(out.p, "WC3_DIRECT_TAIL_LEAF(L_00000003")) {
         fprintf(stderr, "leaf_call self-test failed: funcs=%zu leafs=%zu "
-                        "ret_leafs=%zu depths=%zu known=%zu unsafe=%zu calls=%zu "
-                        "tails=%zu leaf_rw=%zu depth_rw=%zu clean_rw=%zu "
-                        "tail_leaf_rw=%zu\n",
-                funcs, leafs.n, ret_leafs.n, depths.n, known.n, unsafe.n, calls,
-                tails, leaf_rw, depth_rw, clean_rw, tail_leaf_rw);
+                        "ret_leafs=%zu depths=%zu known=%zu unsafe=%zu guards=%zu "
+                        "calls=%zu tails=%zu leaf_rw=%zu depth_rw=%zu clean_rw=%zu "
+                        "gs_rw=%zu tail_leaf_rw=%zu\n",
+                funcs, leafs.n, ret_leafs.n, depths.n, known.n, unsafe.n,
+                guards.n, calls, tails, leaf_rw, depth_rw, clean_rw, gs_rw,
+                tail_leaf_rw);
         return 1;
     }
     puts("leaf_call self-test: OK");
@@ -1222,6 +1671,7 @@ static int self_test(void)
     free(depths.p);
     free(known.p);
     free(unsafe.p);
+    free(guards.p);
     return 0;
 }
 
@@ -1231,10 +1681,13 @@ int main(int argc, char **argv)
     const char *out_dir = NULL;
     const char *report = NULL;
     int quiet = 0;
+    int gs_cookie = 0;
     PathVec paths = {0};
     VaVec leafs = {0}, ret_leafs = {0}, depths = {0}, known = {0}, unsafe = {0};
+    GuardVec guards = {0};
     size_t funcs = 0, rewrites = 0;
     size_t calls = 0, leaf_rw = 0, depth_rw = 0, clean_rw = 0;
+    size_t gs_rw = 0;
     size_t tails = 0, tail_leaf_rw = 0;
     size_t calls_rw = 0;
     unsigned jobs;
@@ -1250,6 +1703,17 @@ int main(int argc, char **argv)
             report = argv[++i];
         } else if (!strcmp(argv[i], "--quiet")) {
             quiet = 1;
+        } else if (!strcmp(argv[i], "--gs-cookie")) {
+            gs_cookie = 1;
+        } else if (!strncmp(argv[i], "--gs-cookie=", 12)) {
+            const char *value = argv[i] + 12;
+            if (!strcmp(value, "0")) {
+                gs_cookie = 0;
+            } else if (!strcmp(value, "1")) {
+                gs_cookie = 1;
+            } else {
+                die("invalid --gs-cookie value: %s", value);
+            }
         } else {
             die("unknown argument: %s", argv[i]);
         }
@@ -1259,18 +1723,20 @@ int main(int argc, char **argv)
     read_paths(inputs, &paths);
     jobs = leaf_worker_count(paths.n);
     collect_parallel(&paths, jobs, &leafs, &ret_leafs, &depths, &known,
-                     &unsafe, &funcs);
+                     &unsafe, &guards, &funcs);
     if (!funcs) die("no canonical functions parsed from %zu inputs", paths.n);
     sort_vas(&leafs);
     sort_vas(&ret_leafs);
     sort_vas(&depths);
     sort_vas(&known);
     sort_vas(&unsafe);
+    sort_guards(&guards);
     rewrite_parallel(&paths, jobs, out_dir, &leafs, &ret_leafs, &depths,
-                     &known, &unsafe, &calls, &leaf_rw, &depth_rw, &clean_rw,
-                     &tails, &tail_leaf_rw);
-    rewrites = leaf_rw + depth_rw + clean_rw + tail_leaf_rw;
-    calls_rw = leaf_rw + depth_rw + clean_rw;
+                     &known, &unsafe, gs_cookie ? &guards : NULL, &calls,
+                     &leaf_rw, &depth_rw, &clean_rw, &tails, &tail_leaf_rw,
+                     &gs_rw);
+    rewrites = leaf_rw + depth_rw + clean_rw + tail_leaf_rw + gs_rw;
+    calls_rw = leaf_rw + depth_rw + clean_rw + gs_rw;
 
     if (report) {
         FILE *f = fopen(report, "wb");
@@ -1285,27 +1751,31 @@ int main(int argc, char **argv)
                 "  \"tail_free_functions\": %zu,\n"
                 "  \"known_functions\": %zu,\n"
                 "  \"unsafe_callers\": %zu,\n"
+                "  \"gs_cookie_guards\": %zu,\n"
+                "  \"gs_cookie_enabled\": %d,\n"
                 "  \"calls_seen\": %zu,\n"
                 "  \"calls_rewritten\": %zu,\n"
                 "  \"calls_leaf_rewritten\": %zu,\n"
                 "  \"calls_depth_rewritten\": %zu,\n"
                 "  \"calls_clean_rewritten\": %zu,\n"
+                "  \"calls_gs_cookie_rewritten\": %zu,\n"
                 "  \"tails_seen\": %zu,\n"
                 "  \"tails_leaf_rewritten\": %zu,\n"
                 "  \"rewrites_total\": %zu,\n"
                 "  \"verdict\": \"pass\"\n"
                 "}\n",
                 paths.n, funcs, leafs.n, ret_leafs.n, depths.n, known.n,
-                unsafe.n, calls, calls_rw, leaf_rw, depth_rw, clean_rw,
-                tails, tail_leaf_rw, rewrites);
+                unsafe.n, guards.n, gs_cookie ? 1 : 0, calls, calls_rw,
+                leaf_rw, depth_rw, clean_rw, gs_rw, tails, tail_leaf_rw,
+                rewrites);
         if (fclose(f) != 0) die("cannot close report %s", report);
     }
     if (!quiet)
         printf("leaf_call: %zu inputs, %zu functions, %zu leafs, "
-               "%zu tail-free, %zu calls, %zu tails, %zu rewritten "
-               "(leaf %zu, depth %zu, clean %zu, tail-leaf %zu)\n",
-               paths.n, funcs, leafs.n, depths.n, calls, tails, rewrites,
-               leaf_rw, depth_rw, clean_rw, tail_leaf_rw);
+               "%zu tail-free, %zu guards, %zu calls, %zu tails, %zu rewritten "
+               "(leaf %zu, depth %zu, clean %zu, gs-cookie %zu, tail-leaf %zu)\n",
+               paths.n, funcs, leafs.n, depths.n, guards.n, calls, tails,
+               rewrites, leaf_rw, depth_rw, clean_rw, gs_rw, tail_leaf_rw);
 
     for (i = 0; i < paths.n; i++) free(paths.p[i]);
     free(paths.p);
@@ -1314,5 +1784,6 @@ int main(int argc, char **argv)
     free(depths.p);
     free(known.p);
     free(unsafe.p);
+    free(guards.p);
     return 0;
 }

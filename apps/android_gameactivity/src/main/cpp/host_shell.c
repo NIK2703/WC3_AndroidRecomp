@@ -50,6 +50,13 @@
 #include "wc3_crash.h"
 #include "wc3_debug.h"
 #include "wc3_trace.h"
+
+#if WC3_WITH_ASBUILT_HLE
+/* The direct-touch sink is owned by the HLE archive.  The host shell only
+ * connects it to the controls layer; the event type comes from controls.h. */
+void wc3_hle_direct_touch_enqueue(const Wc3DirectTouchEvent *event,
+                                  void *user);
+#endif
 #include "window_settle.h"
 
 #if WC3_WITH_ASBUILT_HLE
@@ -502,6 +509,9 @@ static char g_vulkan_driver_hook_dir[1024];
 /* Settings default.  A direct diagnostic launch keeps the authored profile;
  * zero here means "do not override the .icp timer". */
 static int g_double_tap_gestures = 1;
+/* Semantic direct touch is opt-in.  The controls layer additionally requires
+ * a guest sink; without one every touch stays on the legacy path. */
+static int g_direct_touch_enabled;
 static int g_double_tap_timeout_ms;
 static int g_long_press_timeout_ms;
 /* Zero means "use the controls-layer default" for a direct diagnostic launch. */
@@ -1428,7 +1438,8 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     JNIEnv *env, jclass clazz, jstring game_dir, jint width, jint height,
     jboolean sound, jstring extra_args, jstring driver_id, jstring driver_root,
     jstring hook_dir, jstring dxvk_version, jstring dxvk_config_path,
-    jboolean double_tap_gestures, jint double_tap_timeout_ms,
+    jboolean double_tap_gestures, jboolean direct_touch_enabled,
+    jint double_tap_timeout_ms,
     jint long_press_timeout_ms, jint tap_click_delay_ms,
     jint selection_cap, jboolean hide_cursor, jboolean parallel_execution,
     jint overlay_opacity_percent, jboolean grid_enabled,
@@ -1438,8 +1449,8 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
 {
     /* JNI has no type checking between two jstring parameters.  Keep this
      * order identical to Wc3GameActivity.nativeApplyLaunchSettings: id before
-     * root, DXVK version and config path, then the gesture flag and timers,
-     * the SIMPLE tap delay, the selection cap (12/24/40), the hideCursor
+     * root, DXVK version and config path, then the two gesture flags and
+     * timers, the SIMPLE tap delay, the selection cap (12/24/40), the hideCursor
      * toggle, the derived parallelExecution flag, the overlay opacity percent,
      * then
      * the grid toggle, darken percent and cycle seconds, the presentation
@@ -1451,6 +1462,7 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     grid_android_configure(grid_enabled ? 1 : 0, (int)grid_darken_percent,
                            (int)grid_cycle_seconds);
     g_double_tap_gestures = double_tap_gestures ? 1 : 0;
+    g_direct_touch_enabled = direct_touch_enabled ? 1 : 0;
     g_double_tap_timeout_ms = (int)double_tap_timeout_ms;
     g_long_press_timeout_ms = (int)long_press_timeout_ms;
     g_tap_click_delay_ms = (int)tap_click_delay_ms;
@@ -1479,12 +1491,13 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
      * run. */
     setenv("WC3_PARALLEL_GAMEPLAY", parallel_execution ? "1" : "0", 1);
     /* The product core table: one worker per listed CPU, pinned to that CPU.
-     * An empty list removes the previous worker list; the pool itself is
-     * disabled above when parallel_execution is false. */
+     * A single selected core is the sequential product path, so it must not
+     * publish a worker list at all.  This also removes a stale list from a
+     * previous launch; WC3_PARALLEL_GAMEPLAY=0 is the primary switch. */
     const char *worker_cpu_list = NULL;
     if (worker_cpus)
         worker_cpu_list = (*env)->GetStringUTFChars(env, worker_cpus, NULL);
-    if (worker_cpu_list && worker_cpu_list[0])
+    if (parallel_execution && worker_cpu_list && worker_cpu_list[0])
         setenv("WC3_PARALLEL_WORKER_CPUS", worker_cpu_list, 1);
     else
         unsetenv("WC3_PARALLEL_WORKER_CPUS");
@@ -2361,8 +2374,10 @@ static int overlay_input_start(int width, int height)
     overlay_actions_init(width, height);
     overlay_actions_set_haptic_sink(host_haptic_sink, NULL);
     controls_set_action_sink(overlay_actions_handle, NULL);
+    controls_set_direct_touch_sink(wc3_hle_direct_touch_enqueue, NULL);
 #else
     controls_set_action_sink(NULL, NULL);
+    controls_set_direct_touch_sink(NULL, NULL);
 #endif
 
     /* A surface resize must not throw away the current FULL/SIMPLE/SIMPLE_ESC
@@ -2382,6 +2397,7 @@ static int overlay_input_start(int width, int height)
         if (!profile) {
             OVERLAY_LOGE("controls profile missing; using the one-finger fallback");
             controls_set_action_sink(NULL, NULL);
+            controls_set_direct_touch_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
             overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
@@ -2395,6 +2411,7 @@ static int overlay_input_start(int width, int height)
             OVERLAY_LOGE("controls init failed: %s", controls_last_error());
             free(profile);
             controls_set_action_sink(NULL, NULL);
+            controls_set_direct_touch_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
             overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
@@ -2407,6 +2424,7 @@ static int overlay_input_start(int width, int height)
      * is applied to the controls layer after the profile is parsed and before
      * the first overlay snapshot is built. */
     controls_set_opacity_percent(g_overlay_opacity_percent);
+    controls_set_direct_touch_enabled(g_direct_touch_enabled != 0);
 
     /* The first published overlay must already match the exact current guest
      * state; otherwise a menu would flash the gameplay profile. */
@@ -2424,6 +2442,7 @@ static int overlay_input_start(int width, int height)
         overlay_actions_release_all();
 #endif
         controls_set_action_sink(NULL, NULL);
+        controls_set_direct_touch_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
         overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
@@ -2446,6 +2465,7 @@ static int overlay_input_start(int width, int height)
         overlay_actions_release_all();
 #endif
         controls_set_action_sink(NULL, NULL);
+        controls_set_direct_touch_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
         overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
@@ -2480,6 +2500,7 @@ static void overlay_input_stop(void)
     overlay_actions_release_all();
 #endif
     controls_set_action_sink(NULL, NULL);
+    controls_set_direct_touch_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
     overlay_actions_set_haptic_sink(NULL, NULL);
 #endif

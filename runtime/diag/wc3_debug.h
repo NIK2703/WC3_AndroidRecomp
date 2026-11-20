@@ -101,6 +101,9 @@
 #if !defined(WC3_DEBUG_PERF)
 #define WC3_DEBUG_PERF 0
 #endif
+#if !defined(WC3_DEBUG_PARALLEL)
+#define WC3_DEBUG_PARALLEL 0
+#endif
 
 /*
  * BV-5.3: a release build must not activate any tag.  The guard expression
@@ -119,7 +122,8 @@
     WC3_DEBUG_AUDIO || WC3_DEBUG_MOVIE || \
     WC3_DEBUG_INPUT || WC3_DEBUG_SAVE || WC3_DEBUG_JASS || \
     WC3_DEBUG_SELECTION || \
-    WC3_DEBUG_JNI || WC3_DEBUG_CRASH || WC3_DEBUG_PERF)
+    WC3_DEBUG_JNI || WC3_DEBUG_CRASH || WC3_DEBUG_PERF || \
+    WC3_DEBUG_PARALLEL)
 #error "WC3_DEBUG=0 but a WC3_DEBUG_<TAG> is enabled; see BV-5.3"
 #endif
 

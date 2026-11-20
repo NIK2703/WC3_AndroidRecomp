@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "id": "leaf_call",
-  "rev": 1,
+  "rev": 2,
   "description": "Whole-corpus batch transform; consumes the current work tree as an input list.",
   "engine": "leaf_call",
   "kind": "transform",
@@ -12,6 +12,9 @@
     "selection"
   ],
   "output_layout": "flat",
+  "params": {
+    "gs_cookie": "0"
+  },
   "command": {
     "args": [
       "--inputs",
@@ -20,7 +23,8 @@
       "{out_dir}",
       "--report",
       "{report}",
-      "--quiet"
+      "--quiet",
+      "--gs-cookie={gs_cookie}"
     ]
   },
   "assertions": [
@@ -38,6 +42,11 @@
       "kind": "field_equals",
       "path": "unsafe_callers",
       "equals": 0
+    },
+    {
+      "kind": "field_equals",
+      "path": "gs_cookie_enabled",
+      "equals_param": "gs_cookie"
     }
   ]
 }

@@ -107,6 +107,27 @@ static inline void wc3_guest_drain(CPU *c)
     c->disp_draining = 0u;
 }
 
+/* WC3_OUTLINE_CLEAN_DRAIN: measured in §26.9 of
+ * docs/CODEGEN_EXPANSION_ANALYSIS_2026-11-20.md.  The inline clean frame
+ * spends most of its code on the drain loop; one noinline copy per
+ * translation unit cuts the game-chunk instruction count by 14.86% while
+ * keeping the direct callee call.  Default off until a PM-19 device A/B
+ * proves the extra host call is not a runtime regression. */
+#ifndef WC3_OUTLINE_CLEAN_DRAIN
+#define WC3_OUTLINE_CLEAN_DRAIN 0
+#endif
+
+#if WC3_OUTLINE_CLEAN_DRAIN
+static __attribute__((noinline, unused)) void
+wc3_guest_drain_outlined(CPU *c)
+{
+    wc3_guest_drain(c);
+}
+#define WC3_CLEAN_DRAIN(c) wc3_guest_drain_outlined(c)
+#else
+#define WC3_CLEAN_DRAIN(c) wc3_guest_drain(c)
+#endif
+
 static inline void wc3_guest_enter(CPU *c, Wc3DispFrame *saved)
 {
     saved->depth = c->disp_depth;
@@ -180,7 +201,7 @@ static inline void wc3_guest_leave(CPU *c, const Wc3DispFrame *saved)
         (c)->disp_draining = 0u;                                             \
         (fn)(c);                                                             \
         (c)->disp_depth = wc3_saved_depth_;                                  \
-        wc3_guest_drain(c);                                                  \
+        WC3_CLEAN_DRAIN(c);                                                  \
         (c)->disp_depth = wc3_saved_depth_;                                  \
         (c)->disp_draining = wc3_saved_draining_;                            \
     } while (0)

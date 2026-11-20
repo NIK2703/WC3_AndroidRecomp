@@ -8,11 +8,13 @@
  * arrays and the ray context - is only read.
  *
  * The wrapper therefore keeps the original lifted function as the single
- * source of truth and runs it on private worker CPUs over disjoint contiguous
- * ranges of top-level candidates.  Each worker gets its own container copy
+ * source of truth and runs it on private CPU contexts over disjoint contiguous
+ * ranges of top-level candidates.  Each range gets its own container copy
  * (the object loop itself is untouched), its own guest stack and TEB, and its
- * own output words.  The main CPU is blocked in this wrapper for the whole
- * batch, so the shared reads cannot race with a game-state writer.
+ * own output words.  The caller executes the last range in that range's private
+ * context and the pool workers execute the preceding ranges.  The caller
+ * remains inside this wrapper for the whole batch, so the shared reads cannot
+ * race with a game-state writer.
  *
  * Merge rules are the original ones: ranges are visited in increasing order,
  * a hit is taken when it is the first hit, and a later distance only replaces
@@ -22,7 +24,23 @@
  * Workers that ran the preceding job park on one shared futex, so a batch with
  * the same or fewer chunks needs one wakeup instead of one sem_post per
  * worker.  A growing batch sem_posts only the newly active workers.  Workers
- * outside the active set never read the stack RayJob.
+ * outside the active set never read the stack RayJob.  The context used by the
+ * caller for its last chunk is always outside that active set.
+ *
+ * In a debug HLE/PERF build the layout and split can be measured without
+ * changing the product: `WC3_MAIN_LAST=0` restores the all-worker layout,
+ * `WC3_RAY_SPLIT_CEIL`, `WC3_VERTEX_SPLIT_CEIL` and
+ * `WC3_TRIANGLE_SPLIT_CEIL` enable ceil split per path,
+ * `WC3_WEIGHTED_SPLIT=1` uses measured per-core chunk timing for contiguous
+ * weighted ranges, `WC3_REJECT_SLOW=1` drops a core measured over four times
+ * slower than the best, and `WC3_MAIN_SPIN_ADAPTIVE=1` adjusts the caller's
+ * completion-spin budget.  `WC3_WORKER_ORDER_REVERSE=1` reverses the product
+ * fastest-to-slowest list to reproduce the old slowest-first active prefix.
+ * A rejected trailing chunk leaves the active set, so
+ * it is not woken or waited for; merge skips every zero-length chunk.
+ * `WC3_PERF_NOTES=0` removes the per-call PERF counters from an A/B run.
+ * Release always runs the main-last layout, equal floor split and fixed spin
+ * budget; the last caller-only context does not create a worker thread.
  *
  * The dispatcher has an optional diagnostic text file:
  *
@@ -45,8 +63,10 @@
  *   enabled=0|1             soft disable; keeps the pool alive
  *   threshold=auto|N        minimum top-level candidates for the pool;
  *                           `auto` is max(2*min_chunk, chunks*2)
- *   chunks=auto|N           active workers for a batch (1..pool size);
- *                           `auto` uses min(pool size, candidate count)
+ *   chunks=auto|N           chunk count for a batch (1..pool size); the
+ *                           caller runs the last chunk, so the pool wakes
+ *                           chunks-1 workers.  `auto` uses min(pool size,
+ *                           candidate count)
  *   min_chunk=N             minimum candidate count per split chunk
  *   stack_zero=N            bytes of worker stack cleared per chunk
  *                           (default 256; 4096 remains the diagnostic ceiling)
@@ -90,6 +110,16 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+
+/* The measured layout (main-last, weighted split, per-chunk timing, spin
+ * budget) is one debug facility.  PARALLEL is a superset of HLE/PERF for it:
+ * the live tuner needs the same switches even in a build without those tags,
+ * and release still compiles none of it. */
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF || WC3_DEBUG_PARALLEL)
+# define WC3_PAR_LAYOUT_DEBUG 1
+#else
+# define WC3_PAR_LAYOUT_DEBUG 0
+#endif
 
 #define RAY_CONTAINER_COPY       0x200u
 #define RAY_CONTAINER_MIN_COPY   0x150u
@@ -163,13 +193,12 @@
  * pool for this call: the outer raycast job holds g_submit_lock, so
  * run_triangle_batch fails the trylock and returns to the sequential loop.
  *
- * A split always leaves at least one worker on the critical path.  The caller
- * cannot run a chunk in its own frame and then continue: L_6F125924 ends with
- * the caller-frame epilogue, so a caller chunk needs its own copied frame and
- * CPU state.  Giving the caller a private chunk (or an uneven split) avoids
- * one worker, not the wake the remaining worker still pays.  The copies are
- * about 1 KiB; they cannot by themselves explain a 32-triangle loss, but the
- * split still has a wake that the sequential path does not.  A debug-only
+ * The caller executes the last chunk in that chunk's private context, so
+ * a split wakes only chunks-1 workers.  A two-chunk split still pays one wake
+ * and one copied frame: caller participation removes the second worker, not
+ * the wake the remaining worker still pays.  The copies are about 1 KiB; they
+ * cannot by themselves explain a 32-triangle loss, but the split still has a
+ * wake that the sequential path does not.  A debug-only
  * one-shot probe (`[triangle] ab`) measures this exact batch sequentially and
  * over the pool with 16-triangle chunks, so the gate can be checked on device
  * before it is changed.  The probe does not alter the normal path.  The only
@@ -196,6 +225,14 @@
 # ifndef WC3_TRIANGLE_VERIFY_DEFAULT
 #  define WC3_TRIANGLE_VERIFY_DEFAULT 0
 # endif
+/* The A/B probe suppresses the shared oracle for its nested call.  The
+ * parameter exists only in a validation build, so release has no debug-only
+ * argument in the dispatcher signature. */
+# define WC3_TRIANGLE_VERIFY_PARAM , int allow_verify
+# define WC3_TRIANGLE_VERIFY_ARG(v) , (v)
+#else
+# define WC3_TRIANGLE_VERIFY_PARAM
+# define WC3_TRIANGLE_VERIFY_ARG(v)
 #endif
 
 /* The candidate loop reads at most [container+0x14C].  The copy covers the
@@ -211,13 +248,15 @@ typedef struct RayTuning {
     _Atomic unsigned min_chunk;
     _Atomic unsigned stack_zero;
     _Atomic unsigned container_copy;
+#if WC3_PAR_LAYOUT_DEBUG
     _Atomic int verify;
     _Atomic int stats;
     _Atomic int timing;
+    _Atomic unsigned stats_every;
+#endif
     _Atomic unsigned spin_us;
     _Atomic unsigned main_spin_us;
     _Atomic unsigned worker_cpu_mask;
-    _Atomic unsigned stats_every;
 } RayTuning;
 
 typedef enum RayJobKind {
@@ -238,10 +277,13 @@ typedef struct RayJob {
     uint32_t in2;
     uint32_t user_ctx;
     /* Split total into contiguous chunks without a division in each worker.
-     * Chunk i gets chunk_base + (i < chunk_rem) items and starts at
-     * i * chunk_base + min(i, chunk_rem). */
+     * The equal split uses chunk_base/chunk_rem; the measured weighted split
+     * fills chunk_start/chunk_len directly.  Both representations keep the
+     * ranges contiguous and ordered. */
     uint32_t chunk_base;
     uint32_t chunk_rem;
+    uint32_t chunk_start[WC3_PARALLEL_MAX_WORKERS];
+    uint32_t chunk_len[WC3_PARALLEL_MAX_WORKERS];
     unsigned stack_zero;
     unsigned container_copy;
 
@@ -262,13 +304,120 @@ typedef struct RayJob {
 } RayJob;
 
 /* One division per job instead of two per worker.  The split is contiguous and
- * balanced: the first chunk_rem chunks carry one extra item. */
+ * balanced: the first chunk_rem chunks carry one extra item.  The pool is
+ * ordered fastest-to-slowest with the caller's core last, so the extra item
+ * lands on a faster core and the slowest active core gets the base size. */
 static inline void job_set_chunk_split(RayJob *job, uint32_t total,
                                        unsigned chunks)
 {
     job->chunk_base = total / chunks;
     job->chunk_rem = total % chunks;
+    for (unsigned i = 0; i < chunks; i++) {
+        uint32_t extra = i < job->chunk_rem ? i : job->chunk_rem;
+        job->chunk_start[i] = i * job->chunk_base + extra;
+        job->chunk_len[i] = job->chunk_base + (i < job->chunk_rem ? 1u : 0u);
+    }
 }
+
+/* Measured weighted split.  Weights are relative speed units: the fastest
+ * selected core gets the largest share.  Largest-remainder allocation keeps
+ * the sizes integral and contiguous.  This is diagnostic-only; release keeps
+ * the equal split. */
+#if WC3_PAR_LAYOUT_DEBUG
+static void job_set_weighted_split(RayJob *job, uint32_t total,
+                                   unsigned chunks, const uint64_t *weights)
+{
+    uint64_t sum = 0;
+    uint64_t assigned = 0;
+    uint64_t frac[WC3_PARALLEL_MAX_WORKERS];
+
+    for (unsigned i = 0; i < chunks; i++) {
+        sum += weights[i];
+    }
+    if (!sum) {
+        /* All weights were rejected or unmeasured: fall back to equal. */
+        for (unsigned i = 0; i < chunks; i++) {
+            job->chunk_len[i] = (uint32_t)(total / chunks);
+            assigned += job->chunk_len[i];
+        }
+        for (unsigned j = 0; j < total % chunks; j++) {
+            job->chunk_len[j]++;
+            assigned++;
+        }
+    } else {
+        for (unsigned i = 0; i < chunks; i++) {
+            uint64_t w = weights[i];
+            if (!w) {
+                job->chunk_len[i] = 0;
+                frac[i] = 0;
+                continue;
+            }
+            uint64_t raw = (uint64_t)total * w / sum;
+            if (raw > total) raw = total;
+            job->chunk_len[i] = (uint32_t)raw;
+            assigned += raw;
+            frac[i] = (uint64_t)total * w % sum;
+        }
+        /* Distribute the rounding remainder by largest fractional part among
+         * chunks that are allowed to receive work. */
+        while (assigned < total) {
+            unsigned best = 0;
+            int have = 0;
+            for (unsigned i = 0; i < chunks; i++) {
+                if (!weights[i]) continue;
+                if (!have || frac[i] > frac[best]) {
+                    best = i;
+                    have = 1;
+                }
+            }
+            if (!have || frac[best] == 0) {
+                for (unsigned i = 0; i < chunks && assigned < total; i++) {
+                    if (!weights[i]) continue;
+                    job->chunk_len[i]++;
+                    assigned++;
+                }
+                break;
+            }
+            job->chunk_len[best]++;
+            assigned++;
+            frac[best] = 0;
+        }
+    }
+
+    /* The last chunk owns the vertex/triangle caller-frame epilogue.  It must
+     * execute at least one item whenever the batch is non-empty, otherwise
+     * its XMM state would be stale.  Move one item from an earlier chunk; a
+     * rejected slow core is never allowed to starve the epilogue chunk. */
+    if (total && job->chunk_len[chunks - 1u] == 0) {
+        for (unsigned i = chunks - 1u; i-- > 0;) {
+            if (job->chunk_len[i] > 1u) {
+                job->chunk_len[i]--;
+                job->chunk_len[chunks - 1u]++;
+                break;
+            }
+        }
+        if (job->chunk_len[chunks - 1u] == 0) {
+            for (unsigned i = 0; i + 1u < chunks; i++) {
+                if (job->chunk_len[i]) {
+                    job->chunk_len[i]--;
+                    job->chunk_len[chunks - 1u]++;
+                    break;
+                }
+            }
+        }
+    }
+
+    uint32_t start = 0;
+    for (unsigned i = 0; i < chunks; i++) {
+        job->chunk_start[i] = start;
+        start += job->chunk_len[i];
+    }
+    /* Keep the equal-split fields consistent for callers that still use them
+     * in diagnostics or merge fallbacks. */
+    job->chunk_base = total / chunks;
+    job->chunk_rem = total % chunks;
+}
+#endif
 
 typedef struct RayCtx {
     CPU cpu;
@@ -294,9 +443,10 @@ typedef struct RayCtx {
     XMM vertex_xmm1;
     int vertex_failed;
 
-    /* Triangle jobs keep the worker's private best bits and local triangle
-     * index.  The private words live in the copied frame at the offsets above
-     * so the guest loop can write them through ordinary pointers. */
+    /* Triangle jobs keep the chunk context's private best bits and local
+     * triangle index.  The private words live in the copied frame at the
+     * offsets above so the guest loop can write them through ordinary
+     * pointers. */
     uint32_t triangle_best;
     uint32_t triangle_index;
     uint32_t triangle_best_addr;
@@ -314,6 +464,19 @@ typedef struct RayCtx {
      * the diagnostic worker_cpu_mask path. */
     int assigned_cpu;
     unsigned long long applied_cpu_mask;
+#if WC3_PAR_LAYOUT_DEBUG
+    /* Measured chunk timing.  The worker writes its own context after the
+     * chunk; the caller reads it only after done_seq publishes the result.
+     * These fields feed the debug weighted-split policy, never the product
+     * equal split. */
+    uint64_t chunk_ns;
+    uint32_t chunk_count;
+    uint64_t ns_per_item;
+    /* Time spent inside the lifted call only.  The weighted split uses this
+     * instead of the whole-chunk time so the per-chunk CPU copy, container
+     * copy and stack clear do not look like candidate work. */
+    uint64_t call_ns;
+#endif
     uint64_t seen_seq;
     /* Published by the worker after it finishes the job sequence.  The caller
      * scans only the active workers; no shared locked counter is needed. */
@@ -371,14 +534,127 @@ static _Atomic int g_triangle_ab_state;        /* main A/B: 0 idle, 1 running, 2
 static _Atomic int g_triangle_ab_nested_state; /* nested:  0 idle, 1 running, 2 done */
 static _Atomic int g_triangle_ab_ctx_busy;
 #endif
-static unsigned g_vertex_threshold = VERTEX_DEFAULT_THRESHOLD;
-static unsigned g_vertex_chunks;      /* 0 = one chunk per worker */
-static unsigned g_vertex_min_chunk = VERTEX_DEFAULT_MIN_CHUNK;
-static unsigned g_triangle_threshold = TRIANGLE_DEFAULT_THRESHOLD;
-static unsigned g_triangle_chunks;    /* 0 = one chunk per worker */
-static unsigned g_triangle_min_chunk = TRIANGLE_MIN_CHUNK;
+/* Live-tunable path gates.  The debug tuner rewrites them while the hot path
+ * reads a relaxed value; release keeps the constants and never sees a store. */
+static _Atomic unsigned g_vertex_threshold = VERTEX_DEFAULT_THRESHOLD;
+static _Atomic unsigned g_vertex_chunks;      /* 0 = one chunk per worker */
+static _Atomic unsigned g_vertex_min_chunk = VERTEX_DEFAULT_MIN_CHUNK;
+static _Atomic unsigned g_triangle_threshold = TRIANGLE_DEFAULT_THRESHOLD;
+static _Atomic unsigned g_triangle_chunks;    /* 0 = one chunk per worker */
+static _Atomic unsigned g_triangle_min_chunk = TRIANGLE_MIN_CHUNK;
+static inline unsigned par_gate_u(const _Atomic unsigned *p)
+{
+    return atomic_load_explicit(p, memory_order_relaxed);
+}
+static inline void par_gate_set_u(_Atomic unsigned *p, unsigned v)
+{
+    atomic_store_explicit(p, v, memory_order_relaxed);
+}
 static unsigned g_workers;
 static RayCtx *g_worker;
+
+static inline int parallel_main_last(void);
+#if WC3_PAR_LAYOUT_DEBUG
+static inline int parallel_weighted_split(void);
+static inline int parallel_reject_slow(void);
+#endif
+
+#if WC3_PAR_LAYOUT_DEBUG
+/* The caller executes the last chunk on the main core.  Its cost is measured
+ * separately from the context it borrows: the same context may be a worker in
+ * another split and then carries that core's timing. */
+static uint64_t g_main_ns_per_item;
+
+/* Build relative speed weights from the measured per-item cost of each
+ * execution slot.  A missing sample gets a conservative mid weight instead of
+ * being treated as fast as the best measured core; the first weighted job then
+ * falls back to an equal split and later jobs use real samples.  A sample
+ * slower than four times the best can be rejected by the debug policy.  The
+ * weights are only a ratio, not a predicted absolute time. */
+static uint64_t chunk_ns_per_item(unsigned i, unsigned chunks)
+{
+    if (parallel_main_last() && i + 1u == chunks)
+        return g_main_ns_per_item;
+    return g_worker[i].ns_per_item;
+}
+
+static void parallel_chunk_weights(uint64_t *weights, unsigned chunks)
+{
+    uint64_t best = 0;
+    int have_best = 0;
+
+    for (unsigned i = 0; i < chunks; i++) {
+        uint64_t est = chunk_ns_per_item(i, chunks);
+        if (est && (!have_best || est < best)) {
+            best = est;
+            have_best = 1;
+        }
+    }
+
+    for (unsigned i = 0; i < chunks; i++) {
+        uint64_t est = chunk_ns_per_item(i, chunks);
+        if (!have_best || !est) {
+            weights[i] = 50;
+            continue;
+        }
+        if (parallel_reject_slow() && i + 1u != chunks &&
+            est > best * 4u) {
+            weights[i] = 0;
+            continue;
+        }
+        uint64_t w = best * 100u / est;
+        if (w > 100u) w = 100u;
+        if (w < 10u) w = 10u;
+        weights[i] = w;
+    }
+}
+
+static void parallel_apply_split(RayJob *job, uint32_t total,
+                                 unsigned chunks)
+{
+    if (!parallel_weighted_split()) {
+        job_set_chunk_split(job, total, chunks);
+        return;
+    }
+    uint64_t weights[WC3_PARALLEL_MAX_WORKERS];
+    parallel_chunk_weights(weights, chunks);
+    job_set_weighted_split(job, total, chunks, weights);
+
+    static unsigned logged;
+    if (logged < 8u) {
+        fprintf(stderr, "[parallel] weighted split total=%u chunks=%u len=",
+                total, chunks);
+        for (unsigned i = 0; i < chunks; i++)
+            fprintf(stderr, "%s%u", i ? "," : "", job->chunk_len[i]);
+        fprintf(stderr, " weight=");
+        for (unsigned i = 0; i < chunks; i++)
+            fprintf(stderr, "%s%llu", i ? "," : "",
+                    (unsigned long long)weights[i]);
+        fprintf(stderr, "\n");
+        logged++;
+    }
+}
+#else
+static void parallel_apply_split(RayJob *job, uint32_t total,
+                                 unsigned chunks)
+{
+    job_set_chunk_split(job, total, chunks);
+}
+#endif
+
+/* Chunk count from a minimum-chunk budget.  The debug ceil policy may use one
+ * extra chunk when the floor would leave selected cores idle; release keeps
+ * the floor.  The overflow-safe form avoids total + min_chunk wrapping. */
+static unsigned chunk_count_by_min(uint32_t total, unsigned min_chunk,
+                                   int use_ceil)
+{
+    if (!min_chunk) return total;
+    unsigned by_count = total / min_chunk;
+    if (use_ceil && (uint64_t)by_count * min_chunk < total)
+        by_count++;
+    if (by_count == 0u && total != 0u) by_count = 1u;
+    return by_count;
+}
 #if WC3_DEBUG && WC3_DEBUG_PERF
 /* The triangle wrapper is also entered from a raycast/vertex worker.  Pointer
  * identity is enough here; the pool owns these CPU objects for the process. */
@@ -396,11 +672,74 @@ static int triangle_ab_cpu_is_worker(const CPU *c)
  * and a one-core affinity for each worker. */
 static int g_worker_cpu[WC3_PARALLEL_MAX_WORKERS];
 static unsigned g_worker_cpu_count;
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
 static RayCtx g_verify_ctx;
 #endif
 
 static RayTuning g_tune;
+#if WC3_PAR_LAYOUT_DEBUG
+/* A/B switches for the parallel layout.  They are diagnostic only: release
+ * always runs the main-last layout, the equal floor split and the fixed
+ * main-spin budget.  The four live-tunable ones are atomics: the debug tuner
+ * thread rewrites them while the hot path reads a relaxed value. */
+static int g_worker_order_reverse;
+static int g_ray_split_ceil;
+static int g_vertex_split_ceil;
+static int g_triangle_split_ceil;
+static _Atomic int g_main_last = 1;
+static _Atomic int g_weighted_split;
+static _Atomic int g_reject_slow;
+static _Atomic int g_main_spin_adaptive;
+#endif
+
+static inline int parallel_main_last(void)
+{
+#if WC3_PAR_LAYOUT_DEBUG
+    return atomic_load_explicit(&g_main_last, memory_order_relaxed);
+#else
+    return 1;
+#endif
+}
+
+static inline int parallel_ray_split_ceil(void)
+{
+#if WC3_PAR_LAYOUT_DEBUG
+    return g_ray_split_ceil;
+#else
+    return 0;
+#endif
+}
+
+static inline int parallel_vertex_split_ceil(void)
+{
+#if WC3_PAR_LAYOUT_DEBUG
+    return g_vertex_split_ceil;
+#else
+    return 0;
+#endif
+}
+
+static inline int parallel_triangle_split_ceil(void)
+{
+#if WC3_PAR_LAYOUT_DEBUG
+    return g_triangle_split_ceil;
+#else
+    return 0;
+#endif
+}
+
+#if WC3_PAR_LAYOUT_DEBUG
+static inline int parallel_weighted_split(void)
+{
+    return atomic_load_explicit(&g_weighted_split, memory_order_relaxed);
+}
+
+static inline int parallel_reject_slow(void)
+{
+    return atomic_load_explicit(&g_reject_slow, memory_order_relaxed);
+}
+#endif
+
 #if WC3_DEBUG && WC3_DEBUG_HLE
 static int g_threshold_auto;
 static int g_tune_file_enabled;
@@ -423,7 +762,8 @@ static _Atomic(uintptr_t) g_job_addr;
  * result would look like an already-finished first job.  Only the submit-lock
  * holder writes this counter. */
 static _Atomic uint64_t g_job_seq;
-/* High 32 bits: sequence tag; low 32 bits: number of active chunks.  Tagging
+/* High 32 bits: sequence tag; low 32 bits: number of active workers.  The
+ * caller executes the last chunk itself and is not part of this set.  Tagging
  * the active set prevents a delayed worker from combining a new active count
  * with an old stack job. */
 static _Atomic uint64_t g_active_seq;
@@ -449,7 +789,7 @@ static int g_shared_wake;
 static pthread_mutex_t g_submit_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local int t_ray_active;
 
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
 static unsigned long long g_calls;
 #endif
 #if WC3_DEBUG && WC3_DEBUG_PERF
@@ -499,7 +839,7 @@ typedef struct KindPerf {
 } KindPerf;
 static KindPerf g_kind_perf[KIND_PERF_COUNT];
 #endif
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
 static unsigned long long g_verify_calls;
 static unsigned long long g_verify_failures;
 #endif
@@ -510,6 +850,46 @@ static uint64_t now_ns(void)
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+
+#if WC3_PAR_LAYOUT_DEBUG
+/* Record the measured per-item cost of one chunk.  The caller supplies the
+ * start timestamp; the context's count is the number of candidates that this
+ * chunk actually processed.  `call_ns` excludes the fixed preparation cost,
+ * so a small chunk does not look artificially slow.  A smoothed value keeps
+ * one noisy chunk from dominating the weighted split. */
+static void record_chunk_timing(RayCtx *ctx, uint64_t t0)
+{
+    uint64_t ns = now_ns() - t0;
+    uint64_t work = ctx->call_ns ? ctx->call_ns : ns;
+    ctx->chunk_ns = ns;
+    ctx->chunk_count = ctx->count;
+    if (ctx->count) {
+        uint64_t per = work / ctx->count;
+        if (!ctx->ns_per_item)
+            ctx->ns_per_item = per;
+        else
+            ctx->ns_per_item = (ctx->ns_per_item * 3u + per) / 4u;
+    }
+}
+
+/* The caller's chunk is measured on the main core, not on the borrowed
+ * context's assigned core.  Keep it separate so a context that later returns
+ * to the worker set still has its worker-core estimate. */
+static void record_main_timing(RayCtx *ctx, uint64_t t0)
+{
+    uint64_t ns = now_ns() - t0;
+    uint64_t work = ctx->call_ns ? ctx->call_ns : ns;
+    ctx->chunk_ns = ns;
+    ctx->chunk_count = ctx->count;
+    if (ctx->count) {
+        uint64_t per = work / ctx->count;
+        if (!g_main_ns_per_item)
+            g_main_ns_per_item = per;
+        else
+            g_main_ns_per_item = (g_main_ns_per_item * 3u + per) / 4u;
+    }
+}
+#endif
 
 static inline void cpu_relax(void)
 {
@@ -569,7 +949,7 @@ static void tune_set_uint(_Atomic unsigned *p, unsigned v)
     atomic_store_explicit(p, v, memory_order_relaxed);
 }
 
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
 static unsigned env_u(const char *name, unsigned fallback, unsigned maximum)
 {
     const char *s = getenv(name);
@@ -591,12 +971,30 @@ static int env_off(const char *name)
     return 0;
 }
 
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
 static int env_on(const char *name)
 {
     const char *s = getenv(name);
     if (!s || !*s) return 0;
     return !env_off(name);
+}
+#endif
+
+#if WC3_DEBUG && WC3_DEBUG_PERF
+/* Per-call diagnostic counters read guest memory and add a branch to every
+ * vertex/triangle batch.  They are useful for coverage, but they also perturb
+ * an A/B run.  WC3_PERF_NOTES=0 removes them without changing the parallel
+ * path; the default stays on so an existing PERF run keeps its coverage
+ * lines. */
+static int g_perf_notes = 1;
+static int g_perf_notes_env_ready;
+static int perf_notes_enabled(void)
+{
+    if (!g_perf_notes_env_ready) {
+        g_perf_notes_env_ready = 1;
+        g_perf_notes = !env_off("WC3_PERF_NOTES");
+    }
+    return g_perf_notes;
 }
 #endif
 
@@ -690,6 +1088,45 @@ static unsigned parse_worker_cpu_list(const char *text, int *out, unsigned max)
     return count;
 }
 
+/* The active set is a prefix of the pool, so the product list must be ordered
+ * fastest-to-slowest: the fastest selected cores run the worker chunks and the
+ * slowest active core, not the slowest selected core, owns the critical path.
+ * The caller's core is last and outside the active set.  If an external list
+ * did not put WC3_MAIN_CPU last, move it there without disturbing the relative
+ * order of the remaining cores.  A main CPU outside the worker list needs no
+ * change because no worker is pinned to it. */
+static void reserve_main_cpu_last(void)
+{
+    if (g_worker_cpu_count < 2u) return;
+    const char *value = getenv("WC3_MAIN_CPU");
+    if (!value || !*value) return;
+
+    char *end = NULL;
+    long cpu = strtol(value, &end, 10);
+    if (!end || end == value || *end != '\0' || cpu < 0 || cpu >= 64)
+        return;
+
+    unsigned pos = g_worker_cpu_count;
+    for (unsigned i = 0; i < g_worker_cpu_count; i++) {
+        if (g_worker_cpu[i] == (int)cpu) {
+            pos = i;
+            break;
+        }
+    }
+    if (pos >= g_worker_cpu_count || pos == g_worker_cpu_count - 1u)
+        return;
+
+    int main_cpu = g_worker_cpu[pos];
+    for (unsigned i = pos; i + 1u < g_worker_cpu_count; i++)
+        g_worker_cpu[i] = g_worker_cpu[i + 1u];
+    g_worker_cpu[g_worker_cpu_count - 1u] = main_cpu;
+#if WC3_PAR_LAYOUT_DEBUG
+    fprintf(stderr,
+            "[parallel] main cpu %ld moved to the last pool slot; "
+            "the last pool slot is never in the active set\n", cpu);
+#endif
+}
+
 #if WC3_DEBUG && WC3_DEBUG_PERF
 static unsigned perf_batch_bucket(uint32_t total)
 {
@@ -719,6 +1156,7 @@ static unsigned ray_total_bucket(uint32_t total)
 
 static void ray_note_total(uint32_t total)
 {
+    if (!perf_notes_enabled()) return;
     /* One in four calls is enough for a stable shape and keeps the sampled
      * overhead below the normal stats cadence. */
     if ((g_calls & 3u) != 0u) return;
@@ -772,6 +1210,7 @@ static void maybe_print_kind_stats(unsigned kind)
 static void perf_note_kind(unsigned kind, uint32_t total, unsigned chunks,
                            int pooled, uint64_t elapsed_ns)
 {
+    if (!perf_notes_enabled()) return;
     KindPerf *p = &g_kind_perf[kind];
     p->calls++;
     if (pooled) {
@@ -838,6 +1277,7 @@ static int g_vertex_guard_env_ready;
 
 static void vertex_guard_note(unsigned reason)
 {
+    if (!perf_notes_enabled()) return;
     if (!g_vertex_guard_env_ready) {
         g_vertex_guard_env_ready = 1;
         const char *s = getenv("WC3_VERTEX_STATS");
@@ -862,7 +1302,7 @@ static void vertex_guard_note(unsigned reason)
             "dummy=%llu alias=%llu span=%llu out_frame=%llu overlap=%llu "
             "chunks=%llu chunks_one=%llu run=%llu\n",
             g_vertex_guard_calls,
-            g_vertex_threshold, g_vertex_min_chunk,
+            par_gate_u(&g_vertex_threshold), par_gate_u(&g_vertex_min_chunk),
             g_vertex_guard[VG_LOW], g_vertex_guard[VG_HIGH],
             g_vertex_guard[VG_BYPASS], g_vertex_guard[VG_DISABLED],
             g_vertex_guard[VG_BAD_KIND], g_vertex_guard[VG_INIT_ACTIVE],
@@ -968,6 +1408,7 @@ void wc3_vertex_dispatch_note(const CPU *c)
     uint32_t stride0, stride1, stride3, index_stride;
     unsigned bucket;
 
+    if (!perf_notes_enabled()) return;
     if (!c) return;
     dispatch_load_env();
 
@@ -1086,7 +1527,7 @@ static int parse_bool(const char *s, int *out)
 }
 #endif
 
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
 static int parse_uint(const char *s, unsigned *out)
 {
     if (!s || !*s) return 0;
@@ -1329,6 +1770,570 @@ static void maybe_reload_tuning(void)
 }
 #endif
 
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+/* ------------------------------------------------------------------ */
+/* Live parallel tuner (debug-only).                                   */
+/*                                                                     */
+/* A detached thread polls <dir>/parallel.cfg, applies key=value pairs  */
+/* to the atomic layout gates, and writes <dir>/parallel.metrics with   */
+/* the efficiency snapshot.  It never takes g_submit_lock and never     */
+/* touches a guest CPU, so the lock invariant is unchanged.  Release    */
+/* compiles none of this.                                               */
+/* ------------------------------------------------------------------ */
+
+#define PAR_TUNE_PATH_MAX RAY_TUNE_PATH_MAX
+#define PAR_REPORT_POLLS 10u   /* stderr [parallel-eff] cadence at 200 ms */
+
+typedef struct ParEff {
+    _Atomic unsigned long long main_wait_ns;
+    _Atomic unsigned long long worker_busy_ns;
+    _Atomic unsigned long long par_calls;
+    _Atomic unsigned long long par_items;
+    _Atomic unsigned long long par_ns;
+    _Atomic unsigned long long seq_calls;
+    _Atomic unsigned long long seq_items;
+    _Atomic unsigned long long seq_ns;
+    _Atomic unsigned long long ray_par_calls;
+    _Atomic unsigned long long ray_par_items;
+    _Atomic unsigned long long ray_par_ns;
+    _Atomic unsigned long long chunks_sum;
+} ParEff;
+
+static ParEff g_eff;
+
+static _Atomic int g_par_report = 1;
+static _Atomic int g_par_dump;
+static _Atomic unsigned g_par_poll_ms = 200;
+static _Atomic int g_par_ab;
+static _Atomic unsigned g_par_ab_frames = 10;
+
+static char g_par_cfg_path[PAR_TUNE_PATH_MAX];
+static char g_par_alt_path[PAR_TUNE_PATH_MAX];
+static char g_par_metrics_path[PAR_TUNE_PATH_MAX];
+static int g_par_paths_ready;
+static uint32_t g_par_cfg_hash;
+static uint32_t g_par_alt_hash;
+static int g_par_tuner_started;
+
+/* Plain snapshot for the A/B baselines. */
+typedef struct ParEffSnap {
+    unsigned long long main_wait_ns;
+    unsigned long long worker_busy_ns;
+    unsigned long long par_calls;
+    unsigned long long par_items;
+    unsigned long long par_ns;
+    unsigned long long seq_calls;
+    unsigned long long seq_items;
+    unsigned long long seq_ns;
+    unsigned long long ray_par_calls;
+    unsigned long long ray_par_items;
+    unsigned long long ray_par_ns;
+    unsigned long long chunks_sum;
+} ParEffSnap;
+
+static void par_eff_snapshot(ParEffSnap *o)
+{
+    o->main_wait_ns =
+        atomic_load_explicit(&g_eff.main_wait_ns, memory_order_relaxed);
+    o->worker_busy_ns =
+        atomic_load_explicit(&g_eff.worker_busy_ns, memory_order_relaxed);
+    o->par_calls =
+        atomic_load_explicit(&g_eff.par_calls, memory_order_relaxed);
+    o->par_items =
+        atomic_load_explicit(&g_eff.par_items, memory_order_relaxed);
+    o->par_ns = atomic_load_explicit(&g_eff.par_ns, memory_order_relaxed);
+    o->seq_calls =
+        atomic_load_explicit(&g_eff.seq_calls, memory_order_relaxed);
+    o->seq_items =
+        atomic_load_explicit(&g_eff.seq_items, memory_order_relaxed);
+    o->seq_ns = atomic_load_explicit(&g_eff.seq_ns, memory_order_relaxed);
+    o->ray_par_calls =
+        atomic_load_explicit(&g_eff.ray_par_calls, memory_order_relaxed);
+    o->ray_par_items =
+        atomic_load_explicit(&g_eff.ray_par_items, memory_order_relaxed);
+    o->ray_par_ns =
+        atomic_load_explicit(&g_eff.ray_par_ns, memory_order_relaxed);
+    o->chunks_sum =
+        atomic_load_explicit(&g_eff.chunks_sum, memory_order_relaxed);
+}
+
+static void par_note_wait(unsigned long long ns)
+{
+    atomic_fetch_add_explicit(&g_eff.main_wait_ns, ns, memory_order_relaxed);
+}
+
+static void par_note_busy(unsigned long long ns)
+{
+    atomic_fetch_add_explicit(&g_eff.worker_busy_ns, ns, memory_order_relaxed);
+}
+
+static void par_note_par(unsigned long long items, unsigned long long ns,
+                         unsigned chunks)
+{
+    atomic_fetch_add_explicit(&g_eff.par_items, items, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.par_ns, ns, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.par_calls, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.chunks_sum, chunks, memory_order_relaxed);
+}
+
+/* Raycast-only parallel counters: the sequential baseline is measured only
+ * on the raycast fallback, so the speedup must not mix in vertex/triangle. */
+static void par_note_par_ray(unsigned long long items, unsigned long long ns,
+                             unsigned chunks)
+{
+    par_note_par(items, ns, chunks);
+    atomic_fetch_add_explicit(&g_eff.ray_par_items, items,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.ray_par_ns, ns, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.ray_par_calls, 1, memory_order_relaxed);
+}
+
+static void par_note_seq(unsigned long long items, unsigned long long ns)
+{
+    atomic_fetch_add_explicit(&g_eff.seq_items, items, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.seq_ns, ns, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.seq_calls, 1, memory_order_relaxed);
+}
+
+static unsigned par_clamp_u(unsigned v, unsigned lo, unsigned hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static int par_parse_bool(const char *s, int *out)
+{
+    if (!s) return 0;
+    if (!strcmp(s, "1") || !strcmp(s, "on") || !strcmp(s, "true") ||
+        !strcmp(s, "ON") || !strcmp(s, "TRUE")) {
+        *out = 1;
+        return 1;
+    }
+    if (!strcmp(s, "0") || !strcmp(s, "off") || !strcmp(s, "false") ||
+        !strcmp(s, "OFF") || !strcmp(s, "FALSE")) {
+        *out = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static uint32_t par_hash_text(const char *text)
+{
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        h ^= (uint32_t)*p;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+/* Apply one live key.  Unknown keys are reported once per reload. */
+static void par_apply_key(const char *key, const char *value)
+{
+    unsigned u;
+    int b;
+
+    if (!strcmp(key, "ray_threshold")) {
+        if (!strcmp(value, "auto")) {
+#if WC3_DEBUG && WC3_DEBUG_HLE
+            g_threshold_auto = 1;
+            recompute_auto_threshold();
+#endif
+            return;
+        }
+        if (parse_uint(value, &u) && u <= RAY_MAX_THRESHOLD) {
+            tune_set_uint(&g_tune.threshold, u);
+#if WC3_DEBUG && WC3_DEBUG_HLE
+            g_threshold_auto = 0;
+#endif
+        }
+        return;
+    }
+    if (!strcmp(key, "ray_chunks")) {
+        if (parse_uint(value, &u)) {
+            if (u == 0) {
+                tune_set_uint(&g_tune.chunk_limit, 0);
+            } else if (g_workers && u > g_workers) {
+                tune_set_uint(&g_tune.chunk_limit, g_workers);
+            } else {
+                tune_set_uint(&g_tune.chunk_limit, u);
+            }
+        }
+        return;
+    }
+    if (!strcmp(key, "min_chunk")) {
+        if (parse_uint(value, &u))
+            tune_set_uint(&g_tune.min_chunk, par_clamp_u(u, 1u, 4096u));
+        return;
+    }
+    if (!strcmp(key, "stack_zero")) {
+        if (parse_uint(value, &u))
+            tune_set_uint(&g_tune.stack_zero,
+                          par_clamp_u(u, RAY_STACK_ZERO_MIN,
+                                      RAY_STACK_ZERO_MAX));
+        return;
+    }
+    if (!strcmp(key, "container_copy")) {
+        if (parse_uint(value, &u))
+            tune_set_uint(&g_tune.container_copy,
+                          par_clamp_u(u, RAY_CONTAINER_MIN_COPY,
+                                      RAY_CONTAINER_COPY));
+        return;
+    }
+    if (!strcmp(key, "vertex_threshold")) {
+        if (parse_uint(value, &u))
+            par_gate_set_u(&g_vertex_threshold,
+                           par_clamp_u(u, 1u, VERTEX_MAX_COUNT));
+        return;
+    }
+    if (!strcmp(key, "vertex_chunks")) {
+        if (parse_uint(value, &u))
+            par_gate_set_u(&g_vertex_chunks,
+                           g_workers ? par_clamp_u(u, 0u, g_workers) : u);
+        return;
+    }
+    if (!strcmp(key, "vertex_min_chunk")) {
+        if (parse_uint(value, &u))
+            par_gate_set_u(&g_vertex_min_chunk,
+                           par_clamp_u(u, 0u, VERTEX_MAX_COUNT));
+        return;
+    }
+    if (!strcmp(key, "triangle_threshold")) {
+        if (parse_uint(value, &u))
+            par_gate_set_u(&g_triangle_threshold,
+                           par_clamp_u(u, 1u, TRIANGLE_MAX_COUNT));
+        return;
+    }
+    if (!strcmp(key, "triangle_chunks")) {
+        if (parse_uint(value, &u))
+            par_gate_set_u(&g_triangle_chunks,
+                           g_workers ? par_clamp_u(u, 0u, g_workers) : u);
+        return;
+    }
+    if (!strcmp(key, "triangle_min_chunk")) {
+        if (parse_uint(value, &u))
+            par_gate_set_u(&g_triangle_min_chunk,
+                           par_clamp_u(u, 0u, TRIANGLE_MAX_COUNT));
+        return;
+    }
+    if (!strcmp(key, "main_last")) {
+        if (par_parse_bool(value, &b))
+            atomic_store_explicit(&g_main_last, b, memory_order_relaxed);
+        return;
+    }
+    if (!strcmp(key, "weighted_split")) {
+        if (par_parse_bool(value, &b))
+            atomic_store_explicit(&g_weighted_split, b, memory_order_relaxed);
+        return;
+    }
+    if (!strcmp(key, "reject_slow")) {
+        if (par_parse_bool(value, &b))
+            atomic_store_explicit(&g_reject_slow, b, memory_order_relaxed);
+        return;
+    }
+    if (!strcmp(key, "adaptive")) {
+        if (par_parse_bool(value, &b))
+            atomic_store_explicit(&g_main_spin_adaptive, b,
+                                  memory_order_relaxed);
+        return;
+    }
+    if (!strcmp(key, "main_spin_us")) {
+        if (parse_uint(value, &u))
+            tune_set_uint(&g_tune.main_spin_us, par_clamp_u(u, 0u, 1000000u));
+        return;
+    }
+    if (!strcmp(key, "worker_spin_us")) {
+        if (parse_uint(value, &u))
+            tune_set_uint(&g_tune.spin_us, par_clamp_u(u, 0u, 10000u));
+        return;
+    }
+    if (!strcmp(key, "worker_cpu_mask")) {
+        if (parse_uint(value, &u))
+            tune_set_uint(&g_tune.worker_cpu_mask, u);
+        return;
+    }
+    if (!strcmp(key, "stats_every")) {
+        if (parse_uint(value, &u))
+            tune_set_uint(&g_tune.stats_every,
+                          par_clamp_u(u, 1u, RAY_STATS_EVERY_MAX));
+        return;
+    }
+    if (!strcmp(key, "report")) {
+        if (par_parse_bool(value, &b))
+            atomic_store_explicit(&g_par_report, b, memory_order_relaxed);
+        return;
+    }
+    if (!strcmp(key, "dump")) {
+        /* Any non-zero value requests one snapshot.  Incrementing the value
+         * (dump=1, dump=2, ...) changes the file hash and requests another. */
+        if (parse_uint(value, &u))
+            atomic_store_explicit(&g_par_dump, u != 0u, memory_order_relaxed);
+        return;
+    }
+    if (!strcmp(key, "tune_poll_ms")) {
+        if (parse_uint(value, &u))
+            atomic_store_explicit(&g_par_poll_ms,
+                                  par_clamp_u(u, 1u, 5000u),
+                                  memory_order_relaxed);
+        return;
+    }
+    if (!strcmp(key, "ab")) {
+        if (par_parse_bool(value, &b))
+            atomic_store_explicit(&g_par_ab, b, memory_order_relaxed);
+        return;
+    }
+    if (!strcmp(key, "ab_frames")) {
+        if (parse_uint(value, &u))
+            atomic_store_explicit(&g_par_ab_frames,
+                                  par_clamp_u(u, 1u, 100000u),
+                                  memory_order_relaxed);
+        return;
+    }
+    fprintf(stderr, "[parallel-tune] unknown key '%s'\n", key);
+}
+
+static void par_parse_text(const char *text)
+{
+    const char *p = text;
+    while (p && *p) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (!*p) break;
+        if (*p == '#' || *p == ';') {
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+
+        char key[64];
+        size_t kn = 0;
+        while (*p && *p != '=' && *p != ' ' && *p != '\t' &&
+               *p != '\r' && *p != '\n') {
+            if (kn + 1u < sizeof key) key[kn++] = *p;
+            p++;
+        }
+        key[kn] = '\0';
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '=') {
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+
+        char value[64];
+        size_t vn = 0;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') {
+            if (vn + 1u < sizeof value) value[vn++] = *p;
+            p++;
+        }
+        value[vn] = '\0';
+        if (kn)
+            par_apply_key(key, value);
+    }
+#if WC3_DEBUG && WC3_DEBUG_HLE
+    /* The HLE tune file owns the `auto` threshold.  Keep it consistent if a
+     * live min_chunk/chunks change arrived through the PARALLEL file. */
+    recompute_auto_threshold();
+#endif
+}
+
+static int par_read_file(const char *path, char *buf, size_t cap,
+                         uint32_t *hash)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, cap - 1u, f);
+    fclose(f);
+    buf[n] = '\0';
+    uint32_t h = par_hash_text(buf);
+    if (hash && *hash == h) return 0;
+    if (hash) *hash = h;
+    return 1;
+}
+
+static void par_tuner_init_paths(void)
+{
+    const char *dir = getenv("WC3_DATA_DIR");
+    if (dir && *dir) {
+        snprintf(g_par_cfg_path, sizeof g_par_cfg_path, "%s/parallel.cfg", dir);
+        snprintf(g_par_alt_path, sizeof g_par_alt_path,
+                 "%s/parallel_alt.cfg", dir);
+        snprintf(g_par_metrics_path, sizeof g_par_metrics_path,
+                 "%s/parallel.metrics", dir);
+    } else {
+        snprintf(g_par_cfg_path, sizeof g_par_cfg_path, "parallel.cfg");
+        snprintf(g_par_alt_path, sizeof g_par_alt_path, "parallel_alt.cfg");
+        snprintf(g_par_metrics_path, sizeof g_par_metrics_path,
+                 "parallel.metrics");
+    }
+    g_par_paths_ready = 1;
+}
+
+static void par_format_metrics(char *buf, size_t cap,
+                               const ParEffSnap *cur,
+                               const ParEffSnap *base,
+                               unsigned long long interval_ns, int side)
+{
+    unsigned long long d_wait = cur->main_wait_ns - base->main_wait_ns;
+    unsigned long long d_busy = cur->worker_busy_ns - base->worker_busy_ns;
+    unsigned long long d_par_calls = cur->par_calls - base->par_calls;
+    unsigned long long d_par_items = cur->par_items - base->par_items;
+    unsigned long long d_par_ns = cur->par_ns - base->par_ns;
+    unsigned long long d_seq_calls = cur->seq_calls - base->seq_calls;
+    unsigned long long d_seq_items = cur->seq_items - base->seq_items;
+    unsigned long long d_seq_ns = cur->seq_ns - base->seq_ns;
+    unsigned long long d_ray_calls = cur->ray_par_calls - base->ray_par_calls;
+    unsigned long long d_ray_items = cur->ray_par_items - base->ray_par_items;
+    unsigned long long d_ray_ns = cur->ray_par_ns - base->ray_par_ns;
+    unsigned long long d_chunks = cur->chunks_sum - base->chunks_sum;
+
+    double wait_pct = interval_ns
+        ? (double)d_wait * 100.0 / (double)interval_ns : 0.0;
+    unsigned workers = g_workers ? g_workers : 1u;
+    double util_pct = interval_ns
+        ? (double)d_busy * 100.0 / ((double)workers * (double)interval_ns)
+        : 0.0;
+    unsigned long long par_per_item =
+        d_par_items ? d_par_ns / d_par_items : 0ull;
+    unsigned long long ray_par_per_item =
+        d_ray_items ? d_ray_ns / d_ray_items : 0ull;
+    unsigned long long seq_per_item =
+        d_seq_items ? d_seq_ns / d_seq_items : 0ull;
+    unsigned long long speedup_x100 =
+        (ray_par_per_item && seq_per_item)
+        ? seq_per_item * 100ull / ray_par_per_item : 0ull;
+    double par_avg_us = d_par_calls ? (double)d_par_ns / (double)d_par_calls /
+                                      1000.0 : 0.0;
+    double ray_avg_us = d_ray_calls ? (double)d_ray_ns / (double)d_ray_calls /
+                                      1000.0 : 0.0;
+    double seq_avg_us = d_seq_calls ? (double)d_seq_ns / (double)d_seq_calls /
+                                      1000.0 : 0.0;
+    double chunks_avg = d_par_calls ? (double)d_chunks / (double)d_par_calls
+        : 0.0;
+
+    snprintf(buf, cap,
+             "side=%c interval_ms=%llu "
+             "main_wait_pct=%.1f worker_util_pct=%.1f "
+             "par_calls=%llu par_items=%llu par_avg_us=%.1f "
+             "par_ns_per_item=%llu chunks_avg=%.2f "
+             "ray_par_calls=%llu ray_par_items=%llu ray_par_avg_us=%.1f "
+             "ray_par_ns_per_item=%llu "
+             "ray_seq_calls=%llu ray_seq_items=%llu ray_seq_avg_us=%.1f "
+             "ray_seq_ns_per_item=%llu ray_speedup_x100=%llu",
+             side ? 'B' : 'A', interval_ns / 1000000ull,
+             wait_pct, util_pct,
+             d_par_calls, d_par_items, par_avg_us, par_per_item, chunks_avg,
+             d_ray_calls, d_ray_items, ray_avg_us, ray_par_per_item,
+             d_seq_calls, d_seq_items, seq_avg_us, seq_per_item,
+             speedup_x100);
+}
+
+static void par_emit_metrics(const ParEffSnap *cur, const ParEffSnap *base,
+                             unsigned long long interval_ns, int side)
+{
+    char line[512];
+    par_format_metrics(line, sizeof line, cur, base, interval_ns, side);
+
+    FILE *f = fopen(g_par_metrics_path, "w");
+    if (f) {
+        fprintf(f, "%s\n", line);
+        fclose(f);
+    }
+    if (atomic_load_explicit(&g_par_report, memory_order_relaxed))
+        fprintf(stderr, "[parallel-eff] %s\n", line);
+}
+
+static void *par_tuner_main(void *arg)
+{
+    (void)arg;
+    char buf[4096];
+    unsigned polls = 0;
+    int side = 0;
+    ParEffSnap report_base, cur;
+    unsigned long long report_t0;
+
+    par_tuner_init_paths();
+    par_eff_snapshot(&report_base);
+    report_t0 = now_ns();
+
+    for (;;) {
+        unsigned ms = atomic_load_explicit(&g_par_poll_ms,
+                                           memory_order_relaxed);
+        if (ms < 1u) ms = 1u;
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = (long)ms * 1000000L;
+        (void)nanosleep(&ts, NULL);
+        polls++;
+
+        int ab = atomic_load_explicit(&g_par_ab, memory_order_relaxed);
+        unsigned long long now = now_ns();
+        int old_side = side;
+        int side_changed = 0;
+        if (ab) {
+            unsigned frames = atomic_load_explicit(&g_par_ab_frames,
+                                                   memory_order_relaxed);
+            if (frames < 1u) frames = 1u;
+            if ((polls % frames) == 0u) {
+                side ^= 1;
+                side_changed = 1;
+            }
+        } else if (side != 0) {
+            side = 0;
+            side_changed = 1;
+        }
+        if (side_changed) {
+            /* Close the window of the side that just ended, then start the
+             * new side from the current counter values. */
+            par_eff_snapshot(&cur);
+            par_emit_metrics(&cur, &report_base, now - report_t0, old_side);
+            par_eff_snapshot(&report_base);
+            report_t0 = now;
+        }
+
+        int active_side = ab ? side : 0;
+        const char *path = active_side ? g_par_alt_path : g_par_cfg_path;
+        uint32_t *hash = active_side ? &g_par_alt_hash : &g_par_cfg_hash;
+        if (par_read_file(path, buf, sizeof buf, hash)) {
+            par_parse_text(buf);
+            fprintf(stderr, "[parallel-tune] applied %s\n", path);
+        }
+
+        int dump = atomic_load_explicit(&g_par_dump, memory_order_relaxed);
+        int periodic = (polls % PAR_REPORT_POLLS) == 0u &&
+                       now - report_t0 >= 1000000000ull;
+        if (dump || periodic) {
+            if (dump)
+                atomic_store_explicit(&g_par_dump, 0, memory_order_relaxed);
+            par_eff_snapshot(&cur);
+            par_emit_metrics(&cur, &report_base, now - report_t0,
+                             active_side);
+            report_base = cur;
+            report_t0 = now;
+        }
+    }
+    return NULL;
+}
+
+static void par_tuner_start(void)
+{
+    if (g_par_tuner_started) return;
+    if (!g_par_paths_ready) par_tuner_init_paths();
+    pthread_t th;
+    if (pthread_create(&th, NULL, par_tuner_main, NULL) != 0) {
+        fprintf(stderr, "[parallel-tune] cannot start tuner thread\n");
+        return;
+    }
+    pthread_detach(th);
+    g_par_tuner_started = 1;
+    fprintf(stderr,
+            "[parallel-tune] live tuner started: cfg=%s alt=%s metrics=%s "
+            "poll_ms=%u\n",
+            g_par_cfg_path, g_par_alt_path, g_par_metrics_path,
+            atomic_load_explicit(&g_par_poll_ms, memory_order_relaxed));
+}
+#endif
+
 static void set_tuning_defaults(void)
 {
     unsigned workers = g_workers ? g_workers : auto_worker_count();
@@ -1347,7 +2352,7 @@ static void set_tuning_defaults(void)
 #if WC3_DEBUG && WC3_DEBUG_HLE
     int threshold_auto = 1;
 #endif
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
     const char *s = getenv("WC3_PARALLEL_RAYCAST_THRESHOLD");
     if (s && *s) {
         unsigned u;
@@ -1366,7 +2371,7 @@ static void set_tuning_defaults(void)
     tune_set_uint(&g_tune.min_chunk, RAY_MIN_CHUNK);
     tune_set_uint(&g_tune.stack_zero, RAY_STACK_ZERO);
     tune_set_uint(&g_tune.container_copy, RAY_CONTAINER_DEFAULT);
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
     tune_set_int(&g_tune.verify, env_on("WC3_RAY_VERIFY"));
 #endif
 #if WC3_DEBUG && WC3_DEBUG_PERF
@@ -1386,13 +2391,26 @@ static void set_tuning_defaults(void)
     tune_set_uint(&g_tune.spin_us, 0u);
     tune_set_uint(&g_tune.main_spin_us, 1000u);
     tune_set_uint(&g_tune.worker_cpu_mask, 0u);
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
     tune_set_uint(&g_tune.spin_us,
                   env_u("WC3_RAY_SPIN_US", 0u, 10000u));
     tune_set_uint(&g_tune.main_spin_us,
                   env_u("WC3_RAY_MAIN_SPIN_US", 1000u, 1000000u));
     tune_set_uint(&g_tune.worker_cpu_mask,
                   env_u("WC3_RAY_WORKER_CPU_MASK", 0u, UINT_MAX));
+    g_main_last = !env_off("WC3_MAIN_LAST");
+    g_ray_split_ceil = env_on("WC3_RAY_SPLIT_CEIL");
+    g_vertex_split_ceil = env_on("WC3_VERTEX_SPLIT_CEIL");
+    g_triangle_split_ceil = env_on("WC3_TRIANGLE_SPLIT_CEIL");
+    g_weighted_split = env_on("WC3_WEIGHTED_SPLIT");
+    g_reject_slow = env_on("WC3_REJECT_SLOW");
+    g_main_spin_adaptive = env_on("WC3_MAIN_SPIN_ADAPTIVE");
+    fprintf(stderr,
+            "[parallel] main_last=%d ray_ceil=%d vertex_ceil=%d "
+            "triangle_ceil=%d weighted=%d reject_slow=%d spin_adaptive=%d\n",
+            g_main_last, g_ray_split_ceil, g_vertex_split_ceil,
+            g_triangle_split_ceil, g_weighted_split, g_reject_slow,
+            g_main_spin_adaptive);
 #endif
 #if WC3_DEBUG && WC3_DEBUG_HLE
     g_threshold_auto = threshold_auto;
@@ -1507,6 +2525,9 @@ static void run_chunk(RayCtx *ctx, const RayJob *job)
     ctx->hit = 0;
     ctx->dist_bits = 0;
     ctx->pos[0] = ctx->pos[1] = ctx->pos[2] = 0;
+#if WC3_PAR_LAYOUT_DEBUG
+    ctx->call_ns = 0;
+#endif
     if (count == 0) return;
 
     /* A private copy is required: the hit path reads container+0x14c and the
@@ -1538,7 +2559,13 @@ static void run_chunk(RayCtx *ctx, const RayJob *job)
     push_arg(w, job->in1);
     push_arg(w, RAY_SENTINEL);
 
+#if WC3_PAR_LAYOUT_DEBUG
+    uint64_t call_t0 = parallel_weighted_split() ? now_ns() : 0;
+#endif
     WC3_DIRECT_CALL_CLEAN(job->fn, w);
+#if WC3_PAR_LAYOUT_DEBUG
+    if (call_t0) ctx->call_ns = now_ns() - call_t0;
+#endif
 
     ctx->hit = (w->eax != 0) ? 1u : 0u;
     if (ctx->hit) {
@@ -1553,11 +2580,11 @@ static void run_chunk(RayCtx *ctx, const RayJob *job)
  *
  * The two lifted loops are called as tail jumps from their setup blocks, so
  * their frame is the caller's frame: [ebp-0x30..ebp+0x10] holds locals, the
- * saved edi/esi/ebx and the destination delta.  A worker copies that window
- * verbatim to its private stack, runs the original loop with a short count and
- * a private 13-dword global block, then lets the original epilogue pop the
- * saved registers.  Main merges the private global block and repeats the
- * epilogue once.
+ * saved edi/esi/ebx and the destination delta.  A chunk copies that window
+ * verbatim to its private stack, runs the original loop with a short count
+ * and a private 13-dword global block, then lets the original epilogue pop the
+ * saved registers.  The caller executes the last chunk and merges the private
+ * state into the real globals once all chunks are complete.
  */
 
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
@@ -1649,6 +2676,9 @@ static void run_vertex_chunk(RayCtx *ctx, const RayJob *job)
     CPU *w = &ctx->cpu;
 
     ctx->vertex_failed = 0;
+#if WC3_PAR_LAYOUT_DEBUG
+    ctx->call_ns = 0;
+#endif
     if (!count) return;
 
     for (unsigned i = 0; i < WC3_VERTEX_GLOBAL_WORDS; i++)
@@ -1686,7 +2716,13 @@ static void run_vertex_chunk(RayCtx *ctx, const RayJob *job)
      * L_6F1419D4 loads the same field itself.  Both get the private copy. */
     w->ecx = rd32(base + 0x04u);
 
+#if WC3_PAR_LAYOUT_DEBUG
+    uint64_t call_t0 = parallel_weighted_split() ? now_ns() : 0;
+#endif
     WC3_DIRECT_CALL_CLEAN(job->fn, w);
+#if WC3_PAR_LAYOUT_DEBUG
+    if (call_t0) ctx->call_ns = now_ns() - call_t0;
+#endif
     ctx->vertex_xmm0 = w->xmm[0];
     ctx->vertex_xmm1 = w->xmm[1];
 }
@@ -1700,7 +2736,7 @@ static void run_vertex_chunk(RayCtx *ctx, const RayJob *job)
  * The loop writes only the best distance through ESI and the hit index through
  * [ebp+0x20], always with a strict "best > new" comparison.
  *
- * A worker copies the caller's frame, points ESI and [ebp+0x20] at two private
+ * A chunk copies the caller's frame, points ESI and [ebp+0x20] at two private
  * words above the argument area, and sets [ebp+0x14] to count*3 and
  * [ebp+0x18] to indices + start*6.  The function converts the index count back
  * to `count` triangles and lets its own epilogue pop the copied frame.  The
@@ -1840,19 +2876,99 @@ static void run_triangle_chunk(RayCtx *ctx, const RayJob *job)
     ctx->triangle_failed = 0;
     ctx->triangle_best = job->triangle_orig_best;
     ctx->triangle_index = 0;
+#if WC3_PAR_LAYOUT_DEBUG
+    ctx->call_ns = 0;
+#endif
     if (!ctx->count) return;
     if (!prepare_triangle_ctx(ctx, job, 1)) {
         ctx->triangle_failed = 1;
         return;
     }
+#if WC3_PAR_LAYOUT_DEBUG
+    uint64_t call_t0 = parallel_weighted_split() ? now_ns() : 0;
+#endif
     WC3_DIRECT_CALL_CLEAN(job->fn, &ctx->cpu);
+#if WC3_PAR_LAYOUT_DEBUG
+    if (call_t0) ctx->call_ns = now_ns() - call_t0;
+#endif
     ctx->triangle_best = rd32(ctx->triangle_best_addr);
     ctx->triangle_index = rd32(ctx->triangle_index_addr);
 }
 
+/* The caller executes the last chunk in that chunk's private context.  That
+ * context is kept outside the published active set, so it never runs a chunk
+ * concurrently with the caller; the context's CPU, stack, TEB, private frame
+ * and output words are therefore safe to borrow.  Keeping the caller on the
+ * last chunk also leaves the final chunk state in the context the vertex and
+ * triangle epilogues already use. */
+static inline void job_chunk_range(RayCtx *ctx, const RayJob *job,
+                                   unsigned idx)
+{
+    ctx->start = job->chunk_start[idx];
+    ctx->count = job->chunk_len[idx];
+}
+
+/* The measured weighted split can zero a rejected chunk.  Worker index still
+ * equals chunk index, so a zero chunk in the middle runs and returns at once;
+ * a trailing run of zero chunks is outside the active prefix and must not be
+ * woken or waited for.  Merge loops skip every zero-length chunk so a skipped
+ * context cannot contribute a stale result. */
+static unsigned job_active_chunks(const RayJob *job, unsigned chunks,
+                                  int main_last)
+{
+    unsigned active = main_last ? chunks - 1u : chunks;
+    while (active > 0u && job->chunk_len[active - 1u] == 0u)
+        active--;
+    return active;
+}
+
+static inline void run_job_chunk(RayCtx *ctx, const RayJob *job)
+{
+    if (job->kind == RAY_JOB_VERTEX)
+        run_vertex_chunk(ctx, job);
+    else if (job->kind == RAY_JOB_TRIANGLE)
+        run_triangle_chunk(ctx, job);
+    else
+        run_chunk(ctx, job);
+}
+
+#if WC3_PAR_LAYOUT_DEBUG
+/* Per-chunk clocks exist only for the measured weighted split and for the
+ * PARALLEL worker-utilization counters.  A debug HLE/PERF build with the
+ * product equal split reads no clock per chunk; PARALLEL reads two per worker
+ * chunk.  Release does not compile this function at all. */
+static inline void run_job_chunk_timed(RayCtx *ctx, const RayJob *job,
+                                       int main_chunk)
+{
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    uint64_t busy_t0 = now_ns();
+#endif
+    if (parallel_weighted_split()) {
+        uint64_t t0 = now_ns();
+        run_job_chunk(ctx, job);
+        if (main_chunk)
+            record_main_timing(ctx, t0);
+        else
+            record_chunk_timing(ctx, t0);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+        if (!main_chunk) par_note_busy(now_ns() - busy_t0);
+#endif
+        return;
+    }
+    run_job_chunk(ctx, job);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    if (!main_chunk) par_note_busy(now_ns() - busy_t0);
+#endif
+}
+#define RUN_JOB_CHUNK(ctx, job, main_chunk) \
+    run_job_chunk_timed((ctx), (job), (main_chunk))
+#else
+#define RUN_JOB_CHUNK(ctx, job, main_chunk) run_job_chunk((ctx), (job))
+#endif
+
 static unsigned triangle_chunk_limit(void)
 {
-    unsigned limit = g_triangle_chunks;
+    unsigned limit = par_gate_u(&g_triangle_chunks);
     if (limit == 0 || limit > g_workers) limit = g_workers;
     return limit;
 }
@@ -1863,7 +2979,7 @@ static unsigned triangle_chunk_limit(void)
  * creates exactly one worker per selected core. */
 static unsigned vertex_chunk_limit(void)
 {
-    unsigned limit = g_vertex_chunks;
+    unsigned limit = par_gate_u(&g_vertex_chunks);
     if (limit == 0 || limit > g_workers) limit = g_workers;
     return limit;
 }
@@ -1910,7 +3026,7 @@ static void apply_worker_affinity(RayCtx *ctx)
     }
     long rc = syscall(__NR_sched_setaffinity, 0, sizeof kernel_mask,
                       kernel_mask);
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
     if (rc != 0) {
         fprintf(stderr,
                 "[raycast] worker %d: affinity mask 0x%llX failed: %s\n",
@@ -1921,7 +3037,7 @@ static void apply_worker_affinity(RayCtx *ctx)
 #endif
 #else
     (void)set;
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
     fprintf(stderr,
             "[raycast] worker %d: affinity unavailable, mask 0x%llX ignored\n",
             ctx->index, (unsigned long long)set);
@@ -2072,17 +3188,8 @@ static void *worker_main(void *arg)
             continue;
         }
 
-        uint32_t base = job->chunk_base;
-        uint32_t rem = job->chunk_rem;
-        uint32_t extra = idx < rem ? idx : rem;
-        ctx->start = idx * base + extra;
-        ctx->count = base + (idx < rem);
-        if (job->kind == RAY_JOB_VERTEX)
-            run_vertex_chunk(ctx, job);
-        else if (job->kind == RAY_JOB_TRIANGLE)
-            run_triangle_chunk(ctx, job);
-        else
-            run_chunk(ctx, job);
+        job_chunk_range(ctx, job, idx);
+        RUN_JOB_CHUNK(ctx, job, 0);
         /* Only workers in the published active set report.  The caller waits
          * for exactly those chunks, so no inactive worker can read the stack
          * RayJob after the dispatch returns. */
@@ -2095,7 +3202,7 @@ static void prewarm_one(uint32_t target, uint32_t sentinel)
 {
     wc3_lifted_fn fn = wc3_dispatch_resolve(target);
     if (!fn) {
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
         fprintf(stderr, "[raycast] prewarm: no lifted function at %08X\n",
                 target);
 #endif
@@ -2127,7 +3234,7 @@ static void init_once(void)
         g_raycast_enabled = 0;
         g_vertex_enabled = 0;
         g_triangle_enabled = 0;
-#if WC3_DEBUG && WC3_DEBUG_HLE
+#if WC3_PAR_LAYOUT_DEBUG
         fprintf(stderr, "[parallel] disabled by WC3_PARALLEL_GAMEPLAY\n");
 #endif
         atomic_store_explicit(&g_init_ok, 1, memory_order_release);
@@ -2137,27 +3244,32 @@ static void init_once(void)
     g_vertex_enabled = !env_off("WC3_VERTEX");
     g_triangle_enabled = !env_off("WC3_TRIANGLE");
     if (!g_raycast_enabled && !g_vertex_enabled && !g_triangle_enabled) {
-#if WC3_DEBUG && WC3_DEBUG_HLE
+#if WC3_PAR_LAYOUT_DEBUG
         fprintf(stderr, "[parallel] all guest paths disabled\n");
 #endif
         atomic_store_explicit(&g_init_ok, 1, memory_order_release);
         return;
     }
 
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
-    g_vertex_threshold = env_u("WC3_VERTEX_THRESHOLD",
-                               VERTEX_DEFAULT_THRESHOLD, VERTEX_MAX_COUNT);
-    g_vertex_chunks = env_u("WC3_VERTEX_CHUNKS", 0, UINT_MAX);
-    g_vertex_min_chunk = env_u("WC3_VERTEX_MIN_CHUNK",
-                               VERTEX_DEFAULT_MIN_CHUNK, VERTEX_MAX_COUNT);
-    g_triangle_threshold = env_u("WC3_TRIANGLE_THRESHOLD",
-                                 TRIANGLE_DEFAULT_THRESHOLD,
-                                 TRIANGLE_MAX_COUNT);
-    g_triangle_chunks = env_u("WC3_TRIANGLE_CHUNKS", 0, UINT_MAX);
-    g_triangle_min_chunk = env_u("WC3_TRIANGLE_MIN_CHUNK", TRIANGLE_MIN_CHUNK,
-                                 TRIANGLE_MAX_COUNT);
+#if WC3_PAR_LAYOUT_DEBUG
+    par_gate_set_u(&g_vertex_threshold,
+                   env_u("WC3_VERTEX_THRESHOLD",
+                         VERTEX_DEFAULT_THRESHOLD, VERTEX_MAX_COUNT));
+    par_gate_set_u(&g_vertex_chunks, env_u("WC3_VERTEX_CHUNKS", 0, UINT_MAX));
+    par_gate_set_u(&g_vertex_min_chunk,
+                   env_u("WC3_VERTEX_MIN_CHUNK",
+                         VERTEX_DEFAULT_MIN_CHUNK, VERTEX_MAX_COUNT));
+    par_gate_set_u(&g_triangle_threshold,
+                   env_u("WC3_TRIANGLE_THRESHOLD",
+                         TRIANGLE_DEFAULT_THRESHOLD, TRIANGLE_MAX_COUNT));
+    par_gate_set_u(&g_triangle_chunks,
+                   env_u("WC3_TRIANGLE_CHUNKS", 0, UINT_MAX));
+    par_gate_set_u(&g_triangle_min_chunk,
+                   env_u("WC3_TRIANGLE_MIN_CHUNK", TRIANGLE_MIN_CHUNK,
+                         TRIANGLE_MAX_COUNT));
 #endif
-    if (g_vertex_min_chunk && g_vertex_min_chunk < 4u) g_vertex_min_chunk = 4u;
+    if (par_gate_u(&g_vertex_min_chunk) && par_gate_u(&g_vertex_min_chunk) < 4u)
+        par_gate_set_u(&g_vertex_min_chunk, 4u);
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     g_triangle_ab_enabled = !env_off("WC3_TRIANGLE_AB");
 #endif
@@ -2170,8 +3282,25 @@ static void init_once(void)
         unsigned parsed = parse_worker_cpu_list(
             worker_cpu_env, g_worker_cpu, WC3_PARALLEL_MAX_WORKERS);
         g_worker_cpu_count = parsed;
-        if (g_worker_cpu_count) g_workers = g_worker_cpu_count;
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+        if (g_worker_cpu_count) {
+            g_workers = g_worker_cpu_count;
+#if WC3_PAR_LAYOUT_DEBUG
+            /* A/B only: the product list is fastest-to-slowest.  Reversing it
+             * restores the old slowest-first active prefix without changing
+             * the selected set or the merge order. */
+            if (env_on("WC3_WORKER_ORDER_REVERSE")) {
+                g_worker_order_reverse = 1;
+                for (unsigned i = 0; i < g_worker_cpu_count / 2u; i++) {
+                    int tmp = g_worker_cpu[i];
+                    g_worker_cpu[i] =
+                        g_worker_cpu[g_worker_cpu_count - 1u - i];
+                    g_worker_cpu[g_worker_cpu_count - 1u - i] = tmp;
+                }
+            }
+#endif
+            reserve_main_cpu_last();
+        }
+#if WC3_PAR_LAYOUT_DEBUG
         if (parsed == 0) {
             fprintf(stderr,
                     "[parallel] worker core list '%s' is empty; using auto\n",
@@ -2181,23 +3310,55 @@ static void init_once(void)
             fprintf(stderr, "[parallel] worker cores:");
             for (unsigned i = 0; i < g_worker_cpu_count; i++)
                 fprintf(stderr, " %d", g_worker_cpu[i]);
-            fprintf(stderr, " (%u worker(s))\n", g_workers);
+            fprintf(stderr, " (%u worker(s), order_reverse=%d)\n", g_workers,
+                    g_worker_order_reverse);
         } else {
             fprintf(stderr,
                     "[parallel] worker core list is empty; using auto\n");
         }
 #endif
     }
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
     if (!g_workers)
         g_workers = env_u("WC3_PARALLEL_RAYCAST_THREADS", 0, UINT_MAX);
 #endif
     if (!g_workers) g_workers = auto_worker_count();
     if (g_workers < 1u) g_workers = 1u;
-    if (g_vertex_chunks == 0 || g_vertex_chunks > g_workers)
-        g_vertex_chunks = g_workers;
-    if (g_triangle_chunks == 0 || g_triangle_chunks > g_workers)
-        g_triangle_chunks = g_workers;
+    /* RayJob stores one start/length pair per chunk in a fixed array.  The
+     * product list parser and auto count cannot exceed this bound, but the
+     * debug WC3_PARALLEL_RAYCAST_THREADS override can; cap it here before any
+     * allocation or chunk split. */
+    if (g_workers > WC3_PARALLEL_MAX_WORKERS) {
+        g_workers = WC3_PARALLEL_MAX_WORKERS;
+#if WC3_PAR_LAYOUT_DEBUG
+        fprintf(stderr, "[parallel] worker count capped at %u\n",
+                WC3_PARALLEL_MAX_WORKERS);
+#endif
+    }
+    /* A pool with one slot cannot split a batch: every caller requires at
+     * least two chunks.  Treat it exactly like the product single-core path
+     * and return before allocating contexts, probing futexes, reading tuning
+     * files or creating the idle worker thread.  This is also the safety net
+     * for a stale environment that still says WC3_PARALLEL_GAMEPLAY=1 while
+     * the selected core table has one entry. */
+    if (g_workers < 2u) {
+        g_raycast_enabled = 0;
+        g_vertex_enabled = 0;
+        g_triangle_enabled = 0;
+        g_parallel_ok = 0;
+#if WC3_PAR_LAYOUT_DEBUG
+        fprintf(stderr,
+                "[parallel] one pool slot; all guest paths stay sequential\n");
+#endif
+        atomic_store_explicit(&g_init_ok, 1, memory_order_release);
+        return;
+    }
+    if (par_gate_u(&g_vertex_chunks) == 0 ||
+        par_gate_u(&g_vertex_chunks) > g_workers)
+        par_gate_set_u(&g_vertex_chunks, g_workers);
+    if (par_gate_u(&g_triangle_chunks) == 0 ||
+        par_gate_u(&g_triangle_chunks) > g_workers)
+        par_gate_set_u(&g_triangle_chunks, g_workers);
 
     set_tuning_defaults();
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
@@ -2225,7 +3386,7 @@ static void init_once(void)
 
     g_worker = calloc((size_t)g_workers, sizeof *g_worker);
     if (!g_worker) {
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
         fprintf(stderr, "[raycast] cannot allocate %u worker context(s)\n",
                 g_workers);
 #endif
@@ -2233,7 +3394,7 @@ static void init_once(void)
         return;
     }
 
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
     if (!alloc_ctx(&g_verify_ctx, g_workers)) {
         fprintf(stderr, "[raycast] cannot allocate verification context\n");
         free(g_worker);
@@ -2254,7 +3415,7 @@ static void init_once(void)
 
     for (unsigned i = 0; i < g_workers; i++) {
         if (!alloc_ctx(&g_worker[i], i)) {
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
             fprintf(stderr, "[raycast] cannot allocate worker %u context\n", i);
 #endif
             goto fail;
@@ -2272,13 +3433,31 @@ static void init_once(void)
     prewarm_one(0x6F78E810u, 0x6F78D9F7u);
     g_pool_init_active = 0;
 
+    /* The main-last layout never publishes the last context in the active
+     * set: the caller uses it for the last chunk.  Its worker thread is
+     * therefore pure overhead.  Keep the context (the caller needs the CPU,
+     * stack and TEB) but skip the pthread.  The debug all-worker A/B layout
+     * still creates every thread because chunks may equal g_workers there. */
+    unsigned thread_count = g_workers;
+    if (parallel_main_last() && g_workers >= 2u)
+        thread_count = g_workers - 1u;
+#if WC3_PAR_LAYOUT_DEBUG
+    if (thread_count != g_workers) {
+        fprintf(stderr,
+                "[parallel] last pool slot is caller-only; created %u of %u "
+                "worker threads\n", thread_count, g_workers);
+    }
+#endif
+
     for (unsigned i = 0; i < g_workers; i++) {
         g_worker[i].index = (int)i;
         if (i < g_worker_cpu_count)
             g_worker[i].assigned_cpu = g_worker_cpu[i];
+    }
+    for (unsigned i = 0; i < thread_count; i++) {
         if (pthread_create(&g_worker[i].thread, NULL, worker_main,
                            &g_worker[i]) != 0) {
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
             fprintf(stderr, "[raycast] cannot create worker %u\n", i);
 #endif
             goto fail;
@@ -2288,6 +3467,9 @@ static void init_once(void)
 
     g_parallel_ok = 1;
     atomic_store_explicit(&g_init_ok, 1, memory_order_release);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    par_tuner_start();
+#endif
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     fprintf(stderr, "[triangle] sequential oracle %s\n",
             g_triangle_verify ? "on" : "off (set WC3_TRIANGLE_VERIFY=1)");
@@ -2318,16 +3500,18 @@ static void init_once(void)
 #endif
 #if WC3_DEBUG && WC3_DEBUG_HLE
     fprintf(stderr,
-            "[parallel] pool: %u worker(s), %u selected core(s), "
-            "%ld online CPU(s), "
+            "[parallel] pool: %u context(s), %u thread(s), "
+            "%u selected core(s), %ld online CPU(s), "
             "ray threshold %u, ray min_chunk %u, vertex threshold %u, "
             "vertex chunks %u, vertex min_chunk %u, triangle threshold %u, "
             "triangle chunks %u, triangle min_chunk %u, verify %s\n",
-            g_workers, g_worker_cpu_count, sysconf(_SC_NPROCESSORS_ONLN),
+            g_workers, thread_count, g_worker_cpu_count,
+            sysconf(_SC_NPROCESSORS_ONLN),
             tune_uint(&g_tune.threshold), tune_uint(&g_tune.min_chunk),
-            g_vertex_threshold,
-            g_vertex_chunks, g_vertex_min_chunk, g_triangle_threshold,
-            g_triangle_chunks, g_triangle_min_chunk,
+            par_gate_u(&g_vertex_threshold),
+            par_gate_u(&g_vertex_chunks), par_gate_u(&g_vertex_min_chunk),
+            par_gate_u(&g_triangle_threshold),
+            par_gate_u(&g_triangle_chunks), par_gate_u(&g_triangle_min_chunk),
             tune_int(&g_tune.verify) ? "on" : "off");
     fprintf(stderr, "[raycast] tune file: %s (%s)\n", g_tune_path,
             g_tune_file_enabled
@@ -2357,7 +3541,7 @@ fail:
             g_worker[i].wake_init = 0;
         }
     }
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
     if (g_verify_ctx.wake_init) {
         sem_destroy(&g_verify_ctx.wake);
         g_verify_ctx.wake_init = 0;
@@ -2393,7 +3577,7 @@ static float bits_float(uint32_t bits)
     return f;
 }
 
-static void merge_results(RayCtx *out, unsigned n)
+static void merge_results(RayCtx *out, const RayJob *job, unsigned n)
 {
     unsigned i;
     out->hit = 0;
@@ -2401,6 +3585,7 @@ static void merge_results(RayCtx *out, unsigned n)
     out->pos[0] = out->pos[1] = out->pos[2] = 0;
 
     for (i = 0; i < n; i++) {
+        if (!job->chunk_len[i]) continue;
         RayCtx *r = &g_worker[i];
         if (!r->hit) continue;
         if (!out->hit) {
@@ -2423,7 +3608,7 @@ static void merge_results(RayCtx *out, unsigned n)
 /* Run the original function once on its own CPU and private stack.  The
  * caller's container and arrays are used directly, so this is exactly the
  * sequential call. */
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
 static void run_verify(CPU *caller, wc3_lifted_fn fn, uint32_t container,
                        uint32_t in1, uint32_t in2, uint32_t out_pos,
                        uint32_t out_dist, uint32_t user_ctx, RayCtx *out)
@@ -2556,10 +3741,14 @@ static int workers_done(unsigned workers, uint64_t seq)
 /* The old path blocked in sem_wait and paid a kernel wakeup on every ray.  A
  * short arrival poll covers the normal case; the sleep loop is only a safety
  * net for a worker that was descheduled or is waiting on an unrelated lock. */
-static void wait_for_workers(unsigned workers, uint64_t seq,
-                             unsigned main_spin_us)
+static int wait_for_workers(unsigned workers, uint64_t seq,
+                            unsigned main_spin_us)
 {
-    if (!workers) return;
+    if (!workers) return 0;
+
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    uint64_t t0 = now_ns();
+#endif
 
     if (main_spin_us) {
         uint64_t deadline = now_ns() + (uint64_t)main_spin_us * 1000ull;
@@ -2567,6 +3756,12 @@ static void wait_for_workers(unsigned workers, uint64_t seq,
         while (!workers_done(workers, seq)) {
             if ((++loops & 0x7Fu) == 0 && now_ns() >= deadline) break;
             cpu_relax();
+        }
+        if (workers_done(workers, seq)) {
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+            par_note_wait(now_ns() - t0);
+#endif
+            return 0;
         }
     }
 
@@ -2576,7 +3771,36 @@ static void wait_for_workers(unsigned workers, uint64_t seq,
         ts.tv_nsec = RAY_WAIT_SLEEP_NS;
         (void)nanosleep(&ts, NULL);
     }
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    par_note_wait(now_ns() - t0);
+#endif
+    return 1;
 }
+
+/* Debug-only adaptive main-spin budget.  A wait that finished inside the
+ * spin did not need the whole budget; a wait that fell back to sleeping paid
+ * a wakeup and should try a little longer next time.  This is a measured
+ * control loop, not a per-scene prediction. */
+#if WC3_PAR_LAYOUT_DEBUG
+static void note_main_wait(unsigned workers, int slept)
+{
+    if (!workers || !atomic_load_explicit(&g_main_spin_adaptive,
+                                          memory_order_relaxed)) return;
+    unsigned cur = tune_uint(&g_tune.main_spin_us);
+    if (slept) {
+        if (cur < 2000u) cur *= 2u;
+    } else {
+        if (cur > 50u) cur = cur * 3u / 4u;
+    }
+    tune_set_uint(&g_tune.main_spin_us, cur);
+}
+#else
+static void note_main_wait(unsigned workers, int slept)
+{
+    (void)workers;
+    (void)slept;
+}
+#endif
 
 /* Release exactly the workers that need to see the published job.  Common
  * repeated batches have the same active count: one shared futex wake covers
@@ -2624,6 +3848,7 @@ static int run_vertex_batch(CPU *c, wc3_lifted_fn fn, unsigned kind,
                             uint32_t total, unsigned chunks,
                             const uint32_t *vg)
 {
+    if (chunks < 2u || chunks > g_workers) return 0;
     if (pthread_mutex_trylock(&g_submit_lock) != 0) return 0;
     if (t_ray_active || c->parallel_vertex_bypass) {
         pthread_mutex_unlock(&g_submit_lock);
@@ -2636,19 +3861,30 @@ static int run_vertex_batch(CPU *c, wc3_lifted_fn fn, unsigned kind,
     job.vertex_kind = kind;
     job.fn = fn;
     job.cpu = c;
-    job_set_chunk_split(&job, total, chunks);
+    parallel_apply_split(&job, total, chunks);
     memcpy(job.vertex_globals, vg, sizeof job.vertex_globals);
 
-    uint64_t seq = publish_job((uintptr_t)&job, chunks);
-    /* Wake only the workers that execute a chunk.  Inactive workers sleep on
-     * their own semaphore and never read the stack RayJob. */
-    wake_workers(chunks);
+    unsigned active = job_active_chunks(&job, chunks,
+                                        parallel_main_last());
+    uint64_t seq = publish_job((uintptr_t)&job, active);
+    /* In the product layout the caller runs the last chunk in
+     * g_worker[chunks-1] and that worker stays outside the active set.  The
+     * debug A/B mode can restore the old all-worker layout for measurement. */
+    wake_workers(active);
 
-    wait_for_workers(chunks, seq, tune_uint(&g_tune.main_spin_us));
+    if (parallel_main_last()) {
+        RayCtx *main_ctx = &g_worker[chunks - 1u];
+        job_chunk_range(main_ctx, &job, chunks - 1u);
+        RUN_JOB_CHUNK(main_ctx, &job, 1);
+    }
+
+    note_main_wait(active, wait_for_workers(active, seq,
+                                            tune_uint(&g_tune.main_spin_us)));
     atomic_store_explicit(&g_job_addr, 0, memory_order_release);
 
     int failed = 0;
     for (unsigned i = 0; i < chunks; i++) {
+        if (!job.chunk_len[i]) continue;
         if (g_worker[i].vertex_failed) {
             failed = 1;
             break;
@@ -2656,10 +3892,10 @@ static int run_vertex_batch(CPU *c, wc3_lifted_fn fn, unsigned kind,
     }
 
     if (failed) {
-        /* A worker could not copy its private frame after all.  The real
-         * globals and the caller's frame are still untouched; run the original
-         * function once on the caller.  The entry guard is told to stay out of
-         * this recovery call. */
+        /* A chunk context could not copy its private frame after all.  The
+         * real globals and the caller's frame are still untouched; run the
+         * original function once on the caller.  The entry guard is told to
+         * stay out of this recovery call. */
         uint32_t saved_bypass = c->parallel_vertex_bypass;
         c->parallel_vertex_bypass = 1;
         WC3_DIRECT_CALL_CLEAN(fn, c);
@@ -2680,6 +3916,8 @@ static int run_vertex_batch(CPU *c, wc3_lifted_fn fn, unsigned kind,
     wr32(GVA(0x6FD5395Cu), vg[9] + total * vg[11]);
     wr32(GVA(0x6FD53960u), vg[10] + total * vg[12]);
 
+    /* The last chunk ran in this context: the caller in the product layout,
+     * or worker chunks-1 in the debug all-worker A/B layout. */
     RayCtx *last = &g_worker[chunks - 1u];
     c->xmm[0] = last->vertex_xmm0;
     c->xmm[1] = last->vertex_xmm1;
@@ -2977,7 +4215,8 @@ int wc3_parallel_vertex_try_impl(CPU *c, wc3_lifted_fn fn, unsigned kind)
     if (g_pool_init_active) WC3_VERTEX_GUARD_FAIL(VG_INIT_ACTIVE);
 
     uint32_t count = rd32(GVA(WC3_VERTEX_GLOBAL_FIRST));
-    if (count < g_vertex_threshold) WC3_VERTEX_GUARD_FAIL(VG_LOW);
+    if (count < par_gate_u(&g_vertex_threshold))
+        WC3_VERTEX_GUARD_FAIL(VG_LOW);
     if (count > VERTEX_MAX_COUNT) WC3_VERTEX_GUARD_FAIL(VG_HIGH);
     return vertex_try_slow(c, fn, kind, count);
 }
@@ -3010,7 +4249,8 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
      * thresholds.  Recheck the values it may have changed before validating. */
     if (!ready()) WC3_VERTEX_GUARD_FAIL(VG_READY);
     if (!g_vertex_enabled) WC3_VERTEX_GUARD_FAIL(VG_SLOW_DISABLED);
-    if (count < g_vertex_threshold) WC3_VERTEX_GUARD_FAIL(VG_LOW);
+    if (count < par_gate_u(&g_vertex_threshold))
+        WC3_VERTEX_GUARD_FAIL(VG_LOW);
     if (count > VERTEX_MAX_COUNT) WC3_VERTEX_GUARD_FAIL(VG_HIGH);
 
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE
@@ -3035,7 +4275,8 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
         if (trace < 64u) {
             fprintf(stderr,
                     "[vertex] try kind=%u count=%u threshold=%u ebp=%08X esp=%08X\n",
-                    kind, count, g_vertex_threshold, c->ebp, c->esp);
+                    kind, count, par_gate_u(&g_vertex_threshold),
+                    c->ebp, c->esp);
             trace++;
         }
     }
@@ -3193,8 +4434,10 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
     unsigned chunks = vertex_chunk_limit();
     if (!chunks) WC3_VERTEX_GUARD_FAIL(VG_CHUNKS);
     if (chunks > count) chunks = count;
-    if (g_vertex_min_chunk) {
-        unsigned by_count = count / g_vertex_min_chunk;
+    if (par_gate_u(&g_vertex_min_chunk)) {
+        unsigned by_count = chunk_count_by_min(count,
+                                              par_gate_u(&g_vertex_min_chunk),
+                                               parallel_vertex_split_ceil());
         if (chunks > by_count) chunks = by_count;
     }
     if (chunks < 2u) WC3_VERTEX_GUARD_FAIL(VG_CHUNKS_ONE);
@@ -3221,12 +4464,18 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
     }
 #endif
 #if WC3_DEBUG && WC3_DEBUG_PERF
-    uint64_t perf_t0 = now_ns();
+    uint64_t perf_t0 = tune_int(&g_tune.timing) ? now_ns() : 0;
+#endif
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    uint64_t par_t0 = now_ns();
 #endif
     int pooled = run_vertex_batch(c, fn, kind, count, chunks, vg);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    if (pooled) par_note_par(count, now_ns() - par_t0, chunks);
+#endif
 #if WC3_DEBUG && WC3_DEBUG_PERF
     perf_note_kind(KIND_PERF_VERTEX, count, chunks, pooled,
-                   now_ns() - perf_t0);
+                   perf_t0 ? now_ns() - perf_t0 : 0);
     if (pooled) {
         static unsigned seen;
         unsigned bit = 1u << (kind & 1u);
@@ -3317,7 +4566,7 @@ static void log_triangle_mismatch(const char *where, uint32_t total,
 
 /* Dispatch a triangle batch.  All ranges were validated by the caller.  The
  * caller's frame, best word and index word are untouched until the merge
- * succeeds; a worker failure or a validation mismatch simply returns 0 so the
+ * succeeds; a chunk failure or a validation mismatch simply returns 0 so the
  * generated function runs the original loop on the caller.  On 1 the frame has
  * already been advanced exactly like the sequential epilogue.  `allow_verify`
  * lets the debug A/B probe skip the shared g_verify_ctx oracle without
@@ -3325,23 +4574,21 @@ static void log_triangle_mismatch(const char *where, uint32_t total,
 static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
                               unsigned chunks, uint32_t indices,
                               uint32_t best_ptr, uint32_t index_ptr,
-                              uint32_t orig_best, int allow_verify)
+                              uint32_t orig_best WC3_TRIANGLE_VERIFY_PARAM)
 {
+    if (chunks < 2u || chunks > g_workers) return 0;
     if (pthread_mutex_trylock(&g_submit_lock) != 0) return 0;
     if (t_ray_active || c->parallel_vertex_bypass) {
         pthread_mutex_unlock(&g_submit_lock);
         return 0;
     }
     t_ray_active = 1;
-#if !(WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE)
-    (void)allow_verify;
-#endif
 
     RayJob job;
     job.kind = RAY_JOB_TRIANGLE;
     job.fn = fn;
     job.cpu = c;
-    job_set_chunk_split(&job, total, chunks);
+    parallel_apply_split(&job, total, chunks);
     job.triangle_indices = indices;
     job.triangle_best_ptr = best_ptr;
     job.triangle_index_ptr = index_ptr;
@@ -3373,17 +4620,27 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
     }
 #endif
 
-    uint64_t seq = publish_job((uintptr_t)&job, chunks);
-    wake_workers(chunks);
+    unsigned active = job_active_chunks(&job, chunks,
+                                        parallel_main_last());
+    uint64_t seq = publish_job((uintptr_t)&job, active);
+    wake_workers(active);
 
-    wait_for_workers(chunks, seq, tune_uint(&g_tune.main_spin_us));
+    if (parallel_main_last()) {
+        RayCtx *main_ctx = &g_worker[chunks - 1u];
+        job_chunk_range(main_ctx, &job, chunks - 1u);
+        RUN_JOB_CHUNK(main_ctx, &job, 1);
+    }
+
+    note_main_wait(active, wait_for_workers(active, seq,
+                                            tune_uint(&g_tune.main_spin_us)));
     atomic_store_explicit(&g_job_addr, 0, memory_order_release);
 
     for (unsigned i = 0; i < chunks; i++) {
+        if (!job.chunk_len[i]) continue;
         if (g_worker[i].triangle_failed) {
-            /* Every worker wrote only its private frame words, and the oracle
-             * restored the real outputs.  The caller can run the original
-             * loop from the guard with no repair. */
+            /* Every chunk context wrote only its private frame words, and the
+             * oracle restored the real outputs.  The caller can run the
+             * original loop from the guard with no repair. */
             t_ray_active = 0;
             pthread_mutex_unlock(&g_submit_lock);
             return 0;
@@ -3397,21 +4654,22 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
     uint32_t merged_best = orig_best;
     uint32_t merged_index = 0;
     for (unsigned i = 0; i < chunks; i++) {
+        if (!job.chunk_len[i]) continue;
         uint32_t chunk_best = g_worker[i].triangle_best;
         if (bits_float(chunk_best) < bits_float(merged_best)) {
-            uint32_t extra = i < job.chunk_rem ? i : job.chunk_rem;
-            uint32_t begin = i * job.chunk_base + extra;
             merged_best = chunk_best;
-            merged_index = begin + g_worker[i].triangle_index;
+            merged_index = job.chunk_start[i] + g_worker[i].triangle_index;
         }
     }
 
+    /* The last chunk ran in this context: the caller in the product layout,
+     * or worker chunks-1 in the debug all-worker A/B layout. */
     RayCtx *last = &g_worker[chunks - 1u];
 
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     /* Compare everything the chunks produce before the epilogue pops the
-     * caller's frame.  XMM0 on a worker is its own chunk's best, so only
-     * XMM1..7 and ECX/EDX are comparable here. */
+     * caller's frame.  XMM0 in a chunk context is its own chunk's best, so
+     * only XMM1..7 and ECX/EDX are comparable here. */
     if (verify) {
         int ok = merged_best == expect.best && merged_index == expect.index &&
                  last->cpu.ecx == expect.ecx &&
@@ -3455,7 +4713,7 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
 
     /* The epilogue reads XMM0 from the merged best but leaves XMM1..7, ECX and
      * EDX from before the call.  The sequential loop leaves the last chunk's
-     * final iteration there, so copy it from the last worker. */
+     * final iteration there, so copy it from the caller's last-chunk context. */
     for (unsigned i = 1; i < 8u; i++) c->xmm[i] = last->cpu.xmm[i];
     c->ecx = last->cpu.ecx;
     c->edx = last->cpu.edx;
@@ -3559,8 +4817,9 @@ static __attribute__((noinline)) void triangle_ab_nested_probe(
 
     unsigned chunks = tri_count / TRIANGLE_AB_MIN_CHUNK;
     if (chunks > g_workers) chunks = g_workers;
-    if (g_triangle_chunks && chunks > g_triangle_chunks)
-        chunks = g_triangle_chunks;
+    if (par_gate_u(&g_triangle_chunks) &&
+        chunks > par_gate_u(&g_triangle_chunks))
+        chunks = par_gate_u(&g_triangle_chunks);
     if (chunks < 2u) goto abort;
 
     RayJob job;
@@ -3660,8 +4919,9 @@ static __attribute__((noinline)) void triangle_ab_probe(CPU *c,
 
     unsigned chunks = tri_count / TRIANGLE_AB_MIN_CHUNK;
     if (chunks > g_workers) chunks = g_workers;
-    if (g_triangle_chunks && chunks > g_triangle_chunks)
-        chunks = g_triangle_chunks;
+    if (par_gate_u(&g_triangle_chunks) &&
+        chunks > par_gate_u(&g_triangle_chunks))
+        chunks = par_gate_u(&g_triangle_chunks);
     if (chunks < 2u) goto abort;
 
     uint32_t orig_best = rd32(best_ptr);
@@ -3709,7 +4969,7 @@ static __attribute__((noinline)) void triangle_ab_probe(CPU *c,
         uint64_t par_t0 = now_ns();
         int pooled = run_triangle_batch(&v->cpu, fn, tri_count, chunks,
                                         indices, best_addr, index_addr,
-                                        orig_best, 0);
+                                        orig_best WC3_TRIANGLE_VERIFY_ARG(0));
         uint64_t par_t1 = now_ns();
         if (!pooled) goto abort;
         uint64_t par_dt = par_t1 >= par_t0 ? par_t1 - par_t0 : 0;
@@ -3784,8 +5044,8 @@ int wc3_parallel_triangle_try_impl(CPU *c, wc3_lifted_fn fn)
             fprintf(stderr,
                     "[triangle] dispatch raw=%u tris=%u threshold=%u minc=%u "
                     "ctx=%s pool=%u active=%u\n",
-                    raw_count, trace_tri, g_triangle_threshold,
-                    g_triangle_min_chunk, ctx,
+                    raw_count, trace_tri, par_gate_u(&g_triangle_threshold),
+                    par_gate_u(&g_triangle_min_chunk), ctx,
                     (unsigned)(atomic_load_explicit(&g_job_addr,
                                                     memory_order_acquire) != 0),
                     (unsigned)(t_ray_active != 0));
@@ -3803,10 +5063,11 @@ int wc3_parallel_triangle_try_impl(CPU *c, wc3_lifted_fn fn)
     /* The production gate keeps this batch sequential.  Sample it once in a
      * debug build so the log can say whether a 16-triangle split would win;
      * the probe itself never changes the path or the caller's outputs. */
-    if (tri_count >= 32u && tri_count < g_triangle_threshold)
+    if (tri_count >= 32u && tri_count < par_gate_u(&g_triangle_threshold))
         triangle_ab_probe(c, fn, raw_count, tri_count);
 #endif
-    if (tri_count < g_triangle_threshold || tri_count > TRIANGLE_MAX_COUNT)
+    if (tri_count < par_gate_u(&g_triangle_threshold) ||
+        tri_count > TRIANGLE_MAX_COUNT)
         return 0;
     return triangle_try_slow(c, fn, raw_count, tri_count);
 }
@@ -3832,8 +5093,10 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
     unsigned chunks = triangle_chunk_limit();
     if (!chunks) return 0;
     if (chunks > tri_count) chunks = tri_count;
-    if (g_triangle_min_chunk) {
-        unsigned by_count = tri_count / g_triangle_min_chunk;
+    if (par_gate_u(&g_triangle_min_chunk)) {
+        unsigned by_count = chunk_count_by_min(tri_count,
+                                              par_gate_u(&g_triangle_min_chunk),
+                                              parallel_triangle_split_ceil());
         if (chunks > by_count) chunks = by_count;
     }
     if (chunks < 2u) return 0;
@@ -3845,8 +5108,9 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
             fprintf(stderr,
                     "[triangle] run raw=%u tris=%u chunks=%u threshold=%u "
                     "minc=%u\n",
-                    raw_count, tri_count, chunks, g_triangle_threshold,
-                    g_triangle_min_chunk);
+                    raw_count, tri_count, chunks,
+                    par_gate_u(&g_triangle_threshold),
+                    par_gate_u(&g_triangle_min_chunk));
             trace++;
         }
     }
@@ -3859,7 +5123,8 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
             fprintf(stderr,
                     "[triangle] batch indices=%u tris=%u chunks=%u "
                     "threshold=%u best=%08X\n",
-                    raw_count, tri_count, chunks, g_triangle_threshold,
+                    raw_count, tri_count, chunks,
+                    par_gate_u(&g_triangle_threshold),
                     rd32(best_ptr));
             trace++;
         }
@@ -3867,21 +5132,28 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
 #endif
 
 #if WC3_DEBUG && WC3_DEBUG_PERF
-    uint64_t perf_t0 = now_ns();
+    uint64_t perf_t0 = tune_int(&g_tune.timing) ? now_ns() : 0;
+#endif
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    uint64_t par_t0 = now_ns();
 #endif
     int pooled = run_triangle_batch(c, fn, tri_count, chunks, indices,
-                                    best_ptr, index_ptr, rd32(best_ptr), 1);
+                                    best_ptr, index_ptr,
+                                    rd32(best_ptr) WC3_TRIANGLE_VERIFY_ARG(1));
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    if (pooled) par_note_par(tri_count, now_ns() - par_t0, chunks);
+#endif
 #if WC3_DEBUG && WC3_DEBUG_PERF
-    perf_note_kind(KIND_PERF_TRIANGLE, tri_count, chunks, pooled,
-                   now_ns() - perf_t0);
-    if (pooled) {
+    uint64_t perf_dt = perf_t0 ? now_ns() - perf_t0 : 0;
+    perf_note_kind(KIND_PERF_TRIANGLE, tri_count, chunks, pooled, perf_dt);
+    if (pooled && perf_t0) {
         static unsigned seen;
         if (!seen) {
             seen = 1;
             fprintf(stderr,
                     "[triangle] first pooled tris=%u chunks=%u wall_us=%llu\n",
                     tri_count, chunks,
-                    (unsigned long long)((now_ns() - perf_t0) / 1000u));
+                    (unsigned long long)(perf_dt / 1000u));
         }
     }
 #endif
@@ -3902,7 +5174,8 @@ static unsigned raycast_chunk_count(uint32_t total)
     if (limit > total) limit = total;
     unsigned min_chunk = tune_uint(&g_tune.min_chunk);
     if (min_chunk) {
-        unsigned by_count = total / min_chunk;
+        unsigned by_count = chunk_count_by_min(total, min_chunk,
+                                               parallel_ray_split_ceil());
         if (limit > by_count) limit = by_count;
     }
     return limit;
@@ -3913,7 +5186,7 @@ static int run_batch(CPU *c, wc3_lifted_fn fn, uint32_t container,
                      uint32_t in1, uint32_t in2, uint32_t out_pos,
                      uint32_t out_dist, uint32_t user_ctx, RayCtx *merged)
 {
-    if (limit < 2u) return 0;
+    if (limit < 2u || limit > g_workers) return 0;
     if (pthread_mutex_trylock(&g_submit_lock) != 0) return 0;
     if (t_ray_active) {
         pthread_mutex_unlock(&g_submit_lock);
@@ -3925,8 +5198,10 @@ static int run_batch(CPU *c, wc3_lifted_fn fn, uint32_t container,
     {
         static unsigned trace;
         if (trace < 16u) {
-            fprintf(stderr, "[raycast] batch total=%u chunks=%u\n",
-                    total, limit);
+            fprintf(stderr,
+                    "[raycast] batch total=%u chunks=%u main=%d ceil=%d\n",
+                    total, limit, parallel_main_last(),
+                    parallel_ray_split_ceil());
             trace++;
         }
     }
@@ -3941,25 +5216,34 @@ static int run_batch(CPU *c, wc3_lifted_fn fn, uint32_t container,
     job.in1 = in1;
     job.in2 = in2;
     job.user_ctx = user_ctx;
-    job_set_chunk_split(&job, total, limit);
+    parallel_apply_split(&job, total, limit);
     job.stack_zero = tune_uint(&g_tune.stack_zero);
     job.container_copy = tune_uint(&g_tune.container_copy);
 
-    uint64_t seq = publish_job((uintptr_t)&job, limit);
-    /* Wake only the active chunks.  Inactive workers stay asleep and never
-     * touch the stack RayJob. */
-    wake_workers(limit);
+    unsigned active = job_active_chunks(&job, limit,
+                                        parallel_main_last());
+    uint64_t seq = publish_job((uintptr_t)&job, active);
+    /* Product layout: the caller runs the last chunk in g_worker[limit-1],
+     * which stays outside the active set.  Debug A/B can use all workers. */
+    wake_workers(active);
 
-    wait_for_workers(limit, seq, tune_uint(&g_tune.main_spin_us));
+    if (parallel_main_last()) {
+        RayCtx *main_ctx = &g_worker[limit - 1u];
+        job_chunk_range(main_ctx, &job, limit - 1u);
+        RUN_JOB_CHUNK(main_ctx, &job, 1);
+    }
+
+    note_main_wait(active, wait_for_workers(active, seq,
+                                            tune_uint(&g_tune.main_spin_us)));
     atomic_store_explicit(&g_job_addr, 0, memory_order_release);
 
 #if WC3_DEBUG && WC3_DEBUG_PERF
     g_last_chunks = limit;
     g_last_total = total;
 #endif
-    merge_results(merged, limit);
+    merge_results(merged, &job, limit);
 
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
     if (tune_int(&g_tune.verify)) {
         RayCtx seq;
         run_verify(c, fn, container, in1, in2, out_pos, out_dist, user_ctx,
@@ -4020,9 +5304,15 @@ static __attribute__((noinline)) void raycast_try_slow(CPU *c,
                                                        uint32_t container,
                                                        uint32_t total)
 {
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    uint64_t par_t0 = now_ns();
+#endif
     unsigned ray_chunks = raycast_chunk_count(total);
     if (ray_chunks < 2u) {
         call_direct(c, fn);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+        par_note_seq(total, now_ns() - par_t0);
+#endif
         return;
     }
 
@@ -4055,6 +5345,9 @@ static __attribute__((noinline)) void raycast_try_slow(CPU *c,
         !hle_android_guest_ok(container, RAY_CONTAINER_COPY) ||
         !hle_android_guest_ok(array, (uint32_t)array_bytes)) {
         call_direct(c, fn);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+        par_note_seq(total, now_ns() - par_t0);
+#endif
         return;
     }
 
@@ -4062,9 +5355,15 @@ static __attribute__((noinline)) void raycast_try_slow(CPU *c,
     if (!run_batch(c, fn, container, total, ray_chunks, array, in1, in2,
                    out_pos, out_dist, user_ctx, &merged)) {
         call_direct(c, fn);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+        par_note_seq(total, now_ns() - par_t0);
+#endif
         return;
     }
 
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    par_note_par_ray(total, now_ns() - par_t0, ray_chunks);
+#endif
 #if WC3_DEBUG && WC3_DEBUG_PERF
     if (t0) g_parallel_ns += now_ns() - t0;
     g_parallel_calls++;
@@ -4122,9 +5421,7 @@ void wc3_parallel_raycast(CPU *c, wc3_lifted_fn fn)
 {
     if (!c || !fn) return;
 
-    uint32_t container = c->ecx;
-
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+#if WC3_PAR_LAYOUT_DEBUG
     g_calls++;
 #endif
 
@@ -4143,6 +5440,9 @@ void wc3_parallel_raycast(CPU *c, wc3_lifted_fn fn)
     }
 #endif
 
+    /* Read the container only after the sequential early-outs.  The disabled
+     * product path must not touch the guest CPU beyond the call itself. */
+    uint32_t container = c->ecx;
     if (!g_raycast_enabled || !tune_int(&g_tune.enabled) || container == 0) {
         call_direct(c, fn);
         return;

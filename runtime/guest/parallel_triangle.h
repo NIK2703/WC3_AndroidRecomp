@@ -19,14 +19,17 @@
  * strict "new distance < best distance" comparison.  A chunk therefore owns
  * a disjoint triangle range and a private pair of output words, and the
  * caller merges the results in increasing triangle order.  Ties keep the
- * lowest triangle index exactly like the sequential loop.
+ * lowest triangle index exactly like the sequential loop.  The pool is ordered
+ * fastest-to-slowest with the caller's core last, and the caller executes the
+ * last chunk in that chunk's private context, so the pool wakes only chunks-1
+ * workers.
  *
- * The guard is placed at the top of L_6F125924.  Worker chunks and the final
- * epilogue call set CPU.parallel_triangle_bypass, so they execute the original
- * body instead of re-entering the dispatcher.  The wrapper runs the epilogue
- * on the caller by setting [ebp+0x14] to zero and calling the function once;
- * that reproduces the original `ret 0x1c`, the register pops and the hit flag
- * in EAX.
+ * The guard is placed at the top of L_6F125924.  Worker chunks, the caller's
+ * last chunk and the final epilogue call set CPU.parallel_triangle_bypass, so
+ * they execute the original body instead of re-entering the dispatcher.  The
+ * wrapper runs the epilogue on the caller by setting [ebp+0x14] to zero and
+ * calling the function once; that reproduces the original `ret 0x1c`, the
+ * register pops and the hit flag in EAX.
  *
  * The triangle helper is reached from inside the outer raycast batch:
  * L_6F78D9B0 -> wc3_parallel_raycast(L_6F749F90) -> L_6F749DB0 ->
@@ -39,9 +42,12 @@
  *
  * WC3_PARALLEL_GAMEPLAY=0 disables this path together with the other pool
  * paths.  WC3_TRIANGLE=0 disables only this one.  A small batch, an invalid
- * range, a nested call or a worker setup failure runs the original loop on
- * the caller's CPU.  The wrapper's hot path is frameless: initialization,
- * validation and dispatch are out-of-line cold/slow functions.
+ * range, a nested call or a chunk setup failure runs the original loop on
+ * the caller's CPU.  Debug HLE/PERF builds can select ceil splitting with
+ * WC3_TRIANGLE_SPLIT_CEIL=1 and measured weighted ranges with
+ * WC3_WEIGHTED_SPLIT=1; release keeps the equal floor split.  The wrapper's
+ * hot path is frameless: initialization, validation and dispatch are
+ * out-of-line cold/slow functions.
  */
 #ifndef WC3_PARALLEL_TRIANGLE_H
 #define WC3_PARALLEL_TRIANGLE_H

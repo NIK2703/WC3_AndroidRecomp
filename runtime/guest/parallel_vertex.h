@@ -16,18 +16,24 @@
  *
  * The lift pass rewrites only the GVA() references inside those two function
  * bodies to wc3_vertex_global(c, address).  The helper adds a per-CPU delta:
- * zero on the caller and on normal CPUs, or private_block - FIRST on a pool
- * worker.  The generated loop keeps its exact instruction order while each
- * worker advances private pointers, and the common path pays one ADD per
- * global access instead of a load-and-branch.  The wrapper merges the private
- * blocks back into the real globals once all chunks are complete.
+ * zero on normal CPUs, or private_block - FIRST on a chunk context.  The
+ * generated loop keeps its exact instruction order while each chunk advances
+ * private pointers, and the common path pays one ADD per global access
+ * instead of a load-and-branch.  The wrapper merges the private state back
+ * into the real globals once all chunks are complete.
  *
  * A batch is split into at most one chunk per pool worker, and the pool
- * creates one worker per online CPU.  The default split needs at least 256
- * vertices and at least 128 vertices per chunk, so small batches stay on the
- * caller.  WC3_VERTEX_THRESHOLD, WC3_VERTEX_CHUNKS and WC3_VERTEX_MIN_CHUNK
- * are diagnostic overrides; the raycast `chunks` setting does not limit this
- * path.
+ * creates one worker per selected CPU.  The pool is ordered
+ * fastest-to-slowest with the caller's core last, so the active prefix uses
+ * the fastest cores.  The caller executes the last chunk in that chunk's
+ * private context, so the pool wakes only chunks-1 workers.
+ * The default split needs at least 256 vertices and at least 128 vertices per
+ * chunk, so small batches stay on the caller.  WC3_VERTEX_THRESHOLD,
+ * WC3_VERTEX_CHUNKS and WC3_VERTEX_MIN_CHUNK are diagnostic overrides;
+ * WC3_VERTEX_SPLIT_CEIL=1 additionally selects ceil splitting, and
+ * WC3_WEIGHTED_SPLIT=1 (shared with raycast) uses measured per-core chunk
+ * timing.  The raycast `chunks` setting does not limit this path.  Release
+ * keeps the equal floor split.
  *
  * WC3_PARALLEL_GAMEPLAY=0 disables this path together with the raycast pool.
  * A NULL function, a small batch, an invalid range or a nested call falls back
@@ -67,9 +73,9 @@ extern "C" {
 #endif
 
 /* The generated loop bodies call this with one of the addresses from the
- * 0x6FD53938..0x6FD53968 block.  The caller's delta is zero, so the expression
- * is identical to the original GVA(addr).  A worker's delta maps the same
- * address into its private block. */
+ * 0x6FD53938..0x6FD53968 block.  A normal CPU's delta is zero, so the
+ * expression is identical to the original GVA(addr).  A chunk context's delta
+ * maps the same address into its private block. */
 static inline uint32_t wc3_vertex_global(CPU *c, uint32_t addr)
 {
     return addr + c->parallel_vertex_delta;

@@ -71,18 +71,19 @@ public class Wc3GameActivity extends GameActivity {
 
     /* JNI matches by name only; host_shell.c must keep the same parameter
      * order (driver id before driver root, DXVK version and config path, then
-     * the gesture flag and timers, the SIMPLE tap delay, the selection cap
-     * (12/24/40), the hideCursor toggle, the derived parallelExecution flag, the
-     * overlay opacity percent, the grid toggle, darken percent and cycle
-     * seconds, the presentation scale string, the screen present mode string
-     * and buffering count, the comma-separated worker CPU list, and finally
-     * the main-thread CPU id).  Several values are strings, so a swap compiles
-     * and fails only at runtime. */
+     * the two gesture flags and timers, the SIMPLE tap delay, the selection
+     * cap (12/24/40), the hideCursor toggle, the derived parallelExecution
+     * flag, the overlay opacity percent, the grid toggle, darken percent and
+     * cycle seconds, the presentation scale string, the screen present mode
+     * string and buffering count, the comma-separated worker CPU list, and
+     * finally the main-thread CPU id).  Several values are strings, so a swap
+     * compiles and fails only at runtime. */
     private static native void nativeApplyLaunchSettings(
             String gameDir, int width, int height, boolean sound,
             String extraArgs, String driverId, String driverRoot,
             String hookDir, String dxvkVersion, String dxvkConfigPath,
-            boolean doubleTapGestures, int doubleTapTimeoutMs,
+            boolean doubleTapGestures, boolean directTouchEnabled,
+            int doubleTapTimeoutMs,
             int longPressTimeoutMs, int tapClickDelayMs,
             int selectionCap, boolean hideCursor, boolean parallelExecution,
             int overlayOpacityPercent, boolean gridEnabled,
@@ -369,6 +370,9 @@ public class Wc3GameActivity extends GameActivity {
                 driverId, driverRoot, hookDir, dxvkVersion, dxvkConfigPath,
                 settings.getBoolean(
                         LaunchContract.KEY_DOUBLE_TAP_GESTURES, true),
+                settings.getBoolean(
+                        LaunchContract.KEY_DIRECT_TOUCH_ENABLED,
+                        LaunchContract.DEFAULT_DIRECT_TOUCH_ENABLED),
                 settings.getInt(
                         LaunchContract.KEY_DOUBLE_TAP_TIMEOUT_MS,
                         LaunchContract.DEFAULT_DOUBLE_TAP_TIMEOUT_MS),

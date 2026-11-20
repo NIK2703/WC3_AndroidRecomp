@@ -1284,6 +1284,28 @@ def test_direct_call() -> int:
     return run([str(exe)])
 
 
+def test_gs_cookie_call() -> int:
+    """MSVC /GS helper: exact success, mismatch, depth and drain order."""
+    cc = gcc()
+    if not cc:
+        print("gs_cookie_call: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "gs_cookie_call_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        str(ROOT / "tests" / "gs_cookie_call_test.c"),
+        str(ROOT / "runtime" / "cpu" / "guest_host.c"),
+        str(ROOT / "runtime" / "guest" / "gs_cookie_call.c"),
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
 def test_devirtualize_pass() -> int:
     """P0-1/G-15 source check: only constant dispatch sites are rewritten."""
     return run_host_tool("devirtualize", ["--self-test"])
@@ -3500,6 +3522,40 @@ def test_controls_mode() -> int:
     return run([str(exe), str(profile)])
 
 
+def test_direct_touch() -> int:
+    """T0: direct-touch queue ordering/overflow and the host recognizer."""
+    cc = gcc()
+    if not cc:
+        print("direct_touch: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    controls = ROOT / "runtime" / "platform" / "android" / "controls"
+    sources = [
+        str(ROOT / "runtime" / "ipc" / "direct_touch_event.c"),
+        str(controls / "direct_touch.c"),
+        str(ROOT / "tests" / "direct_touch_test.c"),
+    ]
+    exe = BUILD / "direct_touch_test.exe"
+    rc = run([
+        cc,
+        "-std=gnu11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I" + str(controls),
+        "-I" + str(ROOT / "runtime" / "ipc"),
+        "-I" + str(ROOT / "runtime" / "hle" / "android"),
+        *sources,
+        "-lm",
+        "-o",
+        str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
 def test_input_adapter() -> int:
     """T0: the input adapter ticks on a batch/fault or a due deadline only."""
     cc = gcc()
@@ -3569,6 +3625,7 @@ TESTS = {
     "hle_abi": test_hle_abi,
     "direct_call": test_direct_call,
     "direct_call_multi_tu": test_direct_call_multi_tu,
+    "gs_cookie_call": test_gs_cookie_call,
     "devirtualize_pass": test_devirtualize_pass,
     "dead_flags_pass": test_dead_flags_pass,
     "patch_pipeline": test_patch_pipeline,
@@ -3641,6 +3698,7 @@ TESTS = {
     "pass4_build": test_pass4_build,
     "controls_idle": test_controls_idle,
     "controls_mode": test_controls_mode,
+    "direct_touch": test_direct_touch,
     "gesture_lifetime": test_gesture_lifetime,
     "gesture_button_swipe": test_gesture_button_swipe,
     "gesture_mode": test_gesture_mode,

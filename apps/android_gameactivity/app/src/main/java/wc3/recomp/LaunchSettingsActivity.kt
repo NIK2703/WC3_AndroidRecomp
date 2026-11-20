@@ -37,6 +37,7 @@ import wc3.recomp.launch.DxvkConfigOptions
 import wc3.recomp.launch.DxvkSuggestionAdapter
 import wc3.recomp.launch.GameFolderPicker
 import wc3.recomp.launch.GameMode
+import wc3.recomp.launch.GestureMode
 import wc3.recomp.launch.LaunchContract
 import wc3.recomp.launch.LaunchCoordinator
 import wc3.recomp.launch.LaunchSettings
@@ -167,14 +168,19 @@ class LaunchSettingsActivity : AppCompatActivity() {
         )
         gestureModeOptions = listOf(
             GestureModeOption(
-                doubleTap = true,
+                mode = GestureMode.DOUBLE_TAP,
                 label = getString(R.string.launch_gesture_mode_double),
                 hint = getString(R.string.launch_gesture_hint_double)
             ),
             GestureModeOption(
-                doubleTap = false,
+                mode = GestureMode.SINGLE_TAP,
                 label = getString(R.string.launch_gesture_mode_single),
                 hint = getString(R.string.launch_gesture_hint_single)
+            ),
+            GestureModeOption(
+                mode = GestureMode.DIRECT_TOUCH,
+                label = getString(R.string.launch_gesture_mode_direct),
+                hint = getString(R.string.launch_gesture_hint_direct)
             )
         )
         presentModeOptions = listOf(
@@ -393,7 +399,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
         updateGridOptions()
         gestureModeSpinner.setSelection(
             gestureModeOptions.indexOfFirst {
-                it.doubleTap == settings.doubleTapGestures
+                it.mode == settings.gestureMode
             }.coerceAtLeast(0),
             false
         )
@@ -571,7 +577,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
             ?: return
         gestureModeHint.text = option.hint
         doubleTapDelayGroup.visibility =
-            if (option.doubleTap) View.VISIBLE else View.GONE
+            if (option.mode == GestureMode.DOUBLE_TAP) View.VISIBLE else View.GONE
     }
 
     private fun wireListeners() {
@@ -1493,8 +1499,9 @@ class LaunchSettingsActivity : AppCompatActivity() {
             driverId = currentDriverId(),
             dxvkVersion = currentDxvkVersion(),
             dxvkConfig = readDxvkConfig(),
-            doubleTapGestures = gestureModeOptions
-                .getOrNull(gestureModeSpinner.selectedItemPosition)?.doubleTap ?: true,
+            gestureMode = gestureModeOptions
+                .getOrNull(gestureModeSpinner.selectedItemPosition)?.mode
+                ?: GestureMode.DOUBLE_TAP,
             doubleTapTimeoutMs = progressToDelay(doubleTapDelaySlider.progress),
             longPressTimeoutMs = progressToDelay(longPressDelaySlider.progress),
             tapClickDelayMs = tapClickDelayFromProgress(tapClickDelaySlider.progress),
@@ -1858,7 +1865,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
     )
 
     private data class GestureModeOption(
-        val doubleTap: Boolean,
+        val mode: GestureMode,
         val label: String,
         val hint: String
     )

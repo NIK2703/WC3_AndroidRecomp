@@ -85,8 +85,25 @@ struct ThinLockStats {
     unsigned long long reject_window;
     unsigned long long reject_high_ptr;
     unsigned long long reject_range;
+    /* Why a rect lock fell back to the staging copy.  Exactly one of these is
+     * incremented per fallback, so the periodic line separates partial locks
+     * from resources whose DXVK buffer does not survive UnlockRect. */
+    unsigned long long rect_fb_partial;
+    unsigned long long rect_fb_not_persist;
+    unsigned long long rect_fb_low_reject;
+    unsigned long long rect_fb_zero_bytes;
+    unsigned long long rect_fb_bpp0;
+    unsigned long long rect_fb_readonly;
+    unsigned long long rect_fb_default_backed;
+    /* Registry pressure: how many direct ranges the bridge handed to the
+     * validator, and how many slots the validator has claimed. */
+    unsigned long long range_reg_calls;
 };
 static ThinLockStats g_lk;
+
+#if WC3_DEBUG && WC3_DEBUG_PERF
+extern "C" int guest_range_dbg_count(void);
+#endif
 
 #define LK_INC(f) (++g_lk.f)
 #define LK_ADD(f, n) (g_lk.f += (unsigned long long)(n))
@@ -100,7 +117,10 @@ static void thin_lock_stats_dump(const char *why)
             "reject_window=%llu reject_high=%llu reject_range=%llu "
             "bouter=%llu router=%llu rnested=%llu bshadow=%llu rfallback=%llu "
             "bcopyin=%llu bcopyout=%llu rcopyin=%llu rcopyout=%llu "
-            "bdiscard=%llu rdiscard=%llu breadonly=%llu rreadonly=%llu\n",
+            "bdiscard=%llu rdiscard=%llu breadonly=%llu rreadonly=%llu "
+            "rfb_partial=%llu rfb_nopersist=%llu rfb_low=%llu "
+            "rfb_zero=%llu rfb_bpp0=%llu rfb_ro=%llu rfb_def=%llu "
+            "range_n=%d range_reg=%llu\n",
             why,
             g_lk.buffer_locks, g_lk.buffer_unlocks,
             g_lk.rect_locks, g_lk.rect_unlocks,
@@ -117,7 +137,24 @@ static void thin_lock_stats_dump(const char *why)
             g_lk.buffer_copy_in_bytes, g_lk.buffer_copy_out_bytes,
             g_lk.rect_copy_in_bytes, g_lk.rect_copy_out_bytes,
             g_lk.buffer_discard_locks, g_lk.rect_discard_locks,
-            g_lk.buffer_readonly_locks, g_lk.rect_readonly_locks);
+            g_lk.buffer_readonly_locks, g_lk.rect_readonly_locks,
+            g_lk.rect_fb_partial, g_lk.rect_fb_not_persist,
+            g_lk.rect_fb_low_reject, g_lk.rect_fb_zero_bytes,
+            g_lk.rect_fb_bpp0, g_lk.rect_fb_readonly,
+            g_lk.rect_fb_default_backed,
+            guest_range_dbg_count(), g_lk.range_reg_calls);
+
+#if WC3_DEBUG && WC3_DEBUG_PERF
+    /* The P0 placement counters live in the guest-window module and are
+     * otherwise unreachable because nothing calls its dump.  One line at the
+     * first periodic dump is enough: placement happens during device init,
+     * long before the first lock burst is complete. */
+    static int window_dumped;
+    if (!window_dumped) {
+        window_dumped = 1;
+        wc3_guest_window_dump();
+    }
+#endif
 }
 
 static void thin_lock_stats_maybe_dump(void)
@@ -448,6 +485,7 @@ static int low_buffer_usable(void *ptr, uint32_t off, uint32_t size,
         LK_INC(low_register_fail);
         return 0;
     }
+    LK_INC(range_reg_calls);
     return hle_android_guest_ok(gva, size);
 }
 
@@ -723,6 +761,20 @@ static int direct_persists(const ThinShadow *s)
     return (s->desc_usage & D3DUSAGE_DYNAMIC) != 0;
 }
 
+/* Whether a full-surface lock may receive the native DXVK pointer even when
+ * the resource does not survive UnlockRect.  A READONLY lock never writes to
+ * DXVK memory and the bridge already skips the copy-back, so for the duration
+ * of the lock the guest reads the same bytes the old shadow copied in.  The
+ * pointer is only valid until Unlock, which is exactly the D3D9 pBits
+ * contract.  Writable locks and partial rect/box keep the persistent shadow:
+ * the guest may write, and DXVK destroys the backing buffer at UnlockRect for
+ * those pools. */
+static int direct_allowed(const ThinShadow *s, uint32_t flags)
+{
+    if (direct_persists(s)) return 1;
+    return (flags & D3DLOCK_READONLY) != 0;
+}
+
 /* Descriptors are immutable per (object, subresource); the old layer asked
  * DXVK for them on every lock, which costs a COM call and a lock in DXVK. */
 static int surface_dims(ThinShadow *s, uint32_t *w, uint32_t *h, uint32_t *d,
@@ -960,18 +1012,51 @@ uint32_t thin_lock_rect(CPU *c, ThinObj *o, int kind, uint32_t sub,
     /* Full-surface textures are the common upload path.  If DXVK's placed
      * allocation is below 4 GB and survives Unlock, the guest can write the
      * same bytes the old shadow copied at Unlock, so skip both copies and both
-     * staging pages.  Partial locks, high mappings and resources whose DXVK
-     * buffer is destroyed on Unlock keep the shadow path.  The range stays
+     * staging pages.  Partial locks, high mappings and writable resources whose
+     * DXVK buffer is destroyed on Unlock keep the shadow path.  A READONLY
+     * full-surface lock does not write to DXVK memory, so a non-persistent
+     * DEFAULT resource may still hand out its native pointer for the duration
+     * of the lock.  The range stays
      * registered: a game may keep using pBits after Unlock, which is exactly
      * why removal is not done here. */
+#if WC3_DEBUG && WC3_DEBUG_PERF
+    int readonly = (flags & D3DLOCK_READONLY) != 0;
+    int persists = direct_persists(s);
+#endif
     int direct = 0;
-    if (full && !lock_off && lock_bytes && direct_persists(s)) {
+    if (full && !lock_off && lock_bytes && direct_allowed(s, flags)) {
         direct = low_cached(s, native, lock_bytes);
         if (!direct) {
             direct = low_buffer_usable(native, 0, lock_bytes, lock_bytes);
             if (direct) low_cache(s, native, lock_bytes);
         }
     }
+#if WC3_DEBUG && WC3_DEBUG_PERF
+    if (!direct) {
+        if (!full) LK_INC(rect_fb_partial);
+        else if (!lock_bytes) LK_INC(rect_fb_zero_bytes);
+        else if (!persists) LK_INC(rect_fb_not_persist);
+        else LK_INC(rect_fb_low_reject);
+        if (readonly) LK_INC(rect_fb_readonly);
+        if (!bpp) LK_INC(rect_fb_bpp0);
+        if (s->desc_pool == D3DPOOL_DEFAULT &&
+            !(s->desc_usage & D3DUSAGE_DYNAMIC))
+            LK_INC(rect_fb_default_backed);
+
+        static unsigned fb_log_n;
+        if (fb_log_n < 8) {
+            fb_log_n++;
+            fprintf(stderr,
+                    "[thin-lock] rect fallback n=%u box=%d kind=%d "
+                    "pool=%u usage=%u w=%u h=%u d=%u "
+                    "x=%u y=%u z=%u span=%u,%u,%u full=%d off=%u bytes=%u "
+                    "bpp=%u ro=%d native=%p\n",
+                    fb_log_n, is_box, s->kind, s->desc_pool, s->desc_usage,
+                    w, h, d, rx, ry, rz, rw, rh, rd, full, lock_off,
+                    lock_bytes, bpp, readonly, native);
+        }
+    }
+#endif
     if (direct) {
         LK_INC(direct_locks);
         ThinFrame *f = &s->frame[0];

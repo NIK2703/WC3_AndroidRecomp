@@ -27,10 +27,11 @@ data class LaunchSettings(
      * android_main; both 1.10.3 and 3.1.1 read that contract.  The default is
      * the 60 FPS cap; an explicitly empty string means "no DXVK overrides". */
     val dxvkConfig: String = LaunchContract.DEFAULT_DXVK_CONFIG,
-    /* True keeps the authored .icp double-tap actions.  False selects the
-     * direct RTS scheme: long press is the right click and a single tap fires
-     * on finger-up without waiting for a second tap. */
-    val doubleTapGestures: Boolean = true,
+    /* One of the three product schemes: authored double tap, single tap with
+     * no double-tap wait, or semantic direct touch.  The enum is the single
+     * discriminator; the bundle publishes the legacy overlay boolean and the
+     * direct-touch flag from it. */
+    val gestureMode: GestureMode = GestureMode.DOUBLE_TAP,
     /* Gesture timers in milliseconds.  The settings UI clamps them to
      * 50..200 in 10 ms steps; the native product helper repeats the clamp. */
     val doubleTapTimeoutMs: Int = LaunchContract.DEFAULT_DOUBLE_TAP_TIMEOUT_MS,
@@ -102,8 +103,23 @@ data class LaunchSettings(
             CpuTopology.availableCores()
         }
         val selectedCores = availableCores.filter { it.id in requestedCpus }
-        val launchCpus = selectedCores.map { it.id }
-        val effectiveParallel = launchCpus.size >= 2
+        /* The native pool runs the active prefix of this list and keeps the
+         * last slot outside the active set for the caller's last chunk.  Order
+         * the pool from the most to the least performant core so the prefix
+         * contains the fastest cores; appending the caller's core last then
+         * leaves the caller on the best core and the critical path on the
+         * slowest *active* core, not on the slowest selected core.  The order
+         * is topology data, not a predictive cost model. */
+        val useCapacity = selectedCores.all { (it.capacity ?: 0) > 0 }
+        val performanceOrder = if (useCapacity) {
+            compareByDescending<CpuCore> { it.capacity ?: 0 }
+                .thenByDescending { it.maxFrequencyMhz ?: -1 }
+                .thenBy { it.id }
+        } else {
+            compareByDescending<CpuCore> { it.maxFrequencyMhz ?: -1 }
+                .thenBy { it.id }
+        }
+        val orderedCores = selectedCores.sortedWith(performanceOrder)
         /* The game's main thread always runs on the most performant selected
          * core.  Capacity/frequency come from sysfs; if topology is hidden,
          * the highest selected id is the big-core fallback.  A stale selected
@@ -117,6 +133,16 @@ data class LaunchSettings(
                 ?: CpuTopology.pickBest(availableCores)?.id
                 ?: requestedCpus.last()
         }
+        val launchCores = buildList {
+            for (core in orderedCores) {
+                if (core.id != mainCpu) add(core)
+            }
+            if (mainCpu >= 0 && selectedCores.any { it.id == mainCpu }) {
+                add(orderedCores.first { it.id == mainCpu })
+            }
+        }
+        val launchCpus = launchCores.map { it.id }
+        val effectiveParallel = launchCpus.size >= 2
         putString(LaunchContract.KEY_GAME_DIR, gameDir)
         putInt(LaunchContract.KEY_WIDTH, width)
         putInt(LaunchContract.KEY_HEIGHT, height)
@@ -125,7 +151,14 @@ data class LaunchSettings(
         putString(LaunchContract.KEY_DRIVER_ID, driverId)
         putString(LaunchContract.KEY_DXVK_VERSION, dxvkVersion)
         putString(LaunchContract.KEY_DXVK_CONFIG, dxvkConfig)
-        putBoolean(LaunchContract.KEY_DOUBLE_TAP_GESTURES, doubleTapGestures)
+        putBoolean(
+            LaunchContract.KEY_DOUBLE_TAP_GESTURES,
+            gestureMode.doubleTapGestures
+        )
+        putBoolean(
+            LaunchContract.KEY_DIRECT_TOUCH_ENABLED,
+            gestureMode.directTouch
+        )
         putInt(LaunchContract.KEY_DOUBLE_TAP_TIMEOUT_MS, doubleTapTimeoutMs)
         putInt(LaunchContract.KEY_LONG_PRESS_TIMEOUT_MS, longPressTimeoutMs)
         putInt(LaunchContract.KEY_TAP_CLICK_DELAY_MS, tapClickDelayMs)
@@ -136,9 +169,11 @@ data class LaunchSettings(
         putBoolean(LaunchContract.KEY_HIDE_CURSOR, hideCursor)
         putInt(LaunchContract.KEY_OVERLAY_OPACITY_PERCENT, overlayOpacityPercent)
         putBoolean(LaunchContract.KEY_PARALLEL_EXECUTION, effectiveParallel)
+        /* One core is the sequential product path: publish no worker list,
+         * so the native side cannot mistake the caller's core for a pool. */
         putString(
             LaunchContract.KEY_WORKER_CPUS,
-            launchCpus.joinToString(",")
+            if (effectiveParallel) launchCpus.joinToString(",") else ""
         )
         putInt(LaunchContract.KEY_MAIN_CPU, mainCpu)
         putBoolean(LaunchContract.KEY_GRID_ENABLED, gridEnabled)

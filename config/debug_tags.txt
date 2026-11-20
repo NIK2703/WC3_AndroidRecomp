@@ -1,5 +1,5 @@
 # Debug build tags.  Read and validated by tools/android/build_app.sh and
-# build_app.ps1.  Only the selection-expansion trace and the parallel-execution
-# perf counters are enabled; release enables none.
-SELECTION
-PERF
+# build_app.ps1.  Only the parallel-execution counters and the live tuner are
+# enabled: the set is deliberately minimal so measurement runs do not spend
+# CPU on diagnostics.  Release enables none.
+PARALLEL

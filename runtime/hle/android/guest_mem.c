@@ -74,12 +74,34 @@ static int guest_extra_count(void)
     return n < GUEST_EXTRA_MAX ? n : GUEST_EXTRA_MAX;
 }
 
+/* Debug-only: the raw claimed-slot count, which may run past GUEST_EXTRA_MAX
+ * before the drop path marks pages only.  The thin bridge prints it next to
+ * its register counter so a long run can show whether the table is filling
+ * (TLO-04) instead of inferring it from a missing warning. */
+#if WC3_DEBUG && WC3_DEBUG_PERF
+int guest_range_dbg_count(void)
+{
+    return __atomic_load_n(&g_extra_n, __ATOMIC_RELAXED);
+}
+#endif
+
 void guest_range_add(uint32_t base, uint32_t size)
 {
     if (!base || !size) return;
     uint32_t hi = base + size;
     if (hi < base) return;                    /* wrapped: not a range */
     int n = guest_extra_count();
+#if WC3_DEBUG && WC3_DEBUG_PERF
+    if (n >= GUEST_EXTRA_MAX - 64) {
+        static int near_warned;
+        if (!near_warned) {
+            near_warned = 1;
+            fprintf(stderr,
+                    "[mem] range table near full: %d/%d slots\n",
+                    n, GUEST_EXTRA_MAX);
+        }
+    }
+#endif
     /* Coalesce with an adjacent or overlapping entry: the staging arena is
      * committed one page-run at a time as locks come in, so consecutive calls
      * extend the previous range rather than adding a new one.  Check the most

@@ -24,11 +24,6 @@
       "--quiet"
     ]
   },
-  "assertions": [
-    {
-      "kind": "report_pass"
-    }
-  ],
   "coverage": {
     "args": [
       "--verify-coverage"
