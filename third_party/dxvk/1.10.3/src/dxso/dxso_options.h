@@ -57,6 +57,11 @@ namespace dxvk {
 
     /// Whether or not we can rely on robustness2 to handle oob constant access
     bool robustness2Supported;
+
+    /// Whether the device supports shader clip distances.  When false,
+    /// user clip planes are disabled and the VS must not declare the
+    /// ClipDistance capability.
+    bool supportsClipDistance = true;
   };
 
 }

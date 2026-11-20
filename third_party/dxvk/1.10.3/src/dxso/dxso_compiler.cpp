@@ -479,7 +479,8 @@ namespace dxvk {
 
 
   void DxsoCompiler::emitVsInit() {
-    m_module.enableCapability(spv::CapabilityClipDistance);
+    if (m_moduleInfo.options.supportsClipDistance)
+      m_module.enableCapability(spv::CapabilityClipDistance);
 
     // Only VS needs this, because PS has
     // non-indexable specialized output regs
@@ -3911,7 +3912,8 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       m_vs.functionId, 0, nullptr);
     this->emitLinkerOutputSetup();
 
-    this->emitVsClipping();
+    if (m_moduleInfo.options.supportsClipDistance)
+      this->emitVsClipping();
 
     this->emitFunctionEnd();
   }

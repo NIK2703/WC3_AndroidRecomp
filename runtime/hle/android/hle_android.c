@@ -4401,6 +4401,7 @@ static void h_load_library(CPU *c)
             printf("android boot probe: reached LoadLibraryA(\"game.dll\")\n");
             fflush(stdout);
 #endif
+            wc3_crash_export_log();
             _exit(0);
         }
     }
@@ -6511,6 +6512,9 @@ static void cr_exit(CPU *c)
 {
     fprintf(stderr, "[hle] exit(%d)\n", (int)arg32(c, 0));
     hle_android_report();
+    /* The CRT exit is the normal path after the game shuts down.  Paths that
+     * call wc3_crash_emit() already include the log in their report. */
+    wc3_crash_export_log();
     _exit(0);
 }
 
@@ -6521,6 +6525,7 @@ static void cr_amsg_exit(CPU *c)
 {
     fprintf(stderr, "[hle] _amsg_exit(%u)\n", arg32(c, 0));
     hle_android_report();
+    wc3_crash_export_log();
     _exit(4);
 }
 static void cr_purecall(CPU *c)
@@ -6532,6 +6537,7 @@ static void cr_invoke_watson(CPU *c)
 {
     fprintf(stderr, "[hle] _invoke_watson at ra=%08X\n", rd32g(c->esp));
     hle_android_report();
+    wc3_crash_export_log();
     _exit(5);
 }
 
@@ -10234,6 +10240,8 @@ static void h_exit_process(CPU *c)
     fflush(NULL);
     if (code)
         wc3_crash_emit("ExitProcess", code, NULL, 0);
+    else
+        wc3_crash_export_log();
     _exit((int)code);
 }
 
@@ -12635,5 +12643,6 @@ void wc3_lift_todo(unsigned va, const char *text, unsigned eip, unsigned esp,
     fprintf(stderr, "[lift] UNIMPLEMENTED %08X %s eip=%08X esp=%08X ebp=%08X eax=%08X\n",
             va, text ? text : "?", eip, esp, ebp, eax);
     hle_android_report();
+    wc3_crash_export_log();
     _exit(6);
 }

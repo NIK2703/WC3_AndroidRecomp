@@ -195,6 +195,25 @@ namespace dxvk {
   }
 
 
+  void DxvkCommandList::resetQuery(
+          VkQueryPool             queryPool,
+          uint32_t                queryId) {
+    /* WC3: VK_EXT_host_query_reset is optional.  If the device does not
+     * expose the feature, reset the query on the GPU timeline instead of
+     * calling a potentially null extension entry point. */
+    if (m_device->extensions().extHostQueryReset
+     && m_device->features().extHostQueryReset.hostQueryReset) {
+      m_vkd->vkResetQueryPoolEXT(
+        m_vkd->device(), queryPool, queryId, 1);
+    } else {
+      if (Logger::logLevel() <= LogLevel::Debug)
+        Logger::debug("[DXVK_DEBUG] WC3 DXVK: hostQueryReset missing; resetting query with vkCmdResetQueryPool");
+      m_vkd->vkCmdResetQueryPool(
+        m_execBuffer, queryPool, queryId, 1);
+    }
+  }
+
+
   VkResult DxvkCommandList::submitToQueue(
           VkQueue               queue,
           VkFence               fence,

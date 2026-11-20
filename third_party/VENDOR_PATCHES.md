@@ -123,8 +123,30 @@ revision, the patch snapshot and the reason.
     fixed-function view/light cache as 3.1.1, adapted to this tree's
     `D3D9Light` construction and `enabledLightIndices` list.  This is the
     active backend in the measured configuration.
-* No WC3 feature-requirement change; 1.10.3 remains the fallback path, now
-  also carrying the low-memory placed and Android present patches.
+  * `third_party/dxvk/patches/dxvk-1.10.3-wc3-d3d9.patch` — makes every
+    feature requested by `D3D9DeviceEx::GetDeviceFeatures()` come from
+    adapter support instead of forcing `VK_TRUE`, and gates the dependent
+    D3D9 paths.  See below.
+* WC3 optional-feature compatibility: the original Mali-G57 MC2 log (driver
+  32.1.0, Vulkan 1.1.177) reached `DxvkAdapter::createDevice` and failed with
+  `VK_ERROR_FEATURE_NOT_PRESENT` because 1.10.3 forced `fillModeNonSolid`,
+  `multiViewport`, `textureCompressionBC`, `shaderClipDistance` and
+  `shaderCullDistance`, all false on that device.  The patch does not replace
+  1.10.3 and does not hide a fundamental requirement: it copies all requested
+  features from the adapter, degrades the corresponding `GetDeviceCaps`
+  values, clamps fill mode to `VK_POLYGON_MODE_FILL`, returns zero user clip
+  planes and omits the `ClipDistance` capability from FF/dxso shaders,
+  rejects BC formats in `CheckDeviceFormat` and texture creation, clamps
+  anisotropy to 1, reuses the cube dummy view when `imageCubeArray` is
+  absent, falls back to `vkCmdResetQueryPool` without host query reset, and
+  refuses precise occlusion or pipeline-statistics queries the device cannot
+  execute.
+  3.1.1 remains the Vulkan 1.3 path; 1.10.3 is the fallback that this device
+  actually selects.  The patch also carries runtime-gated `[DXVK_DEBUG]`
+  stage markers for `CreateDeviceEx`, `InitialReset`, swapchain/presenter and
+  `vkCreateDevice`; they appear only when the debug build sets
+  `DXVK_LOG_LEVEL=debug`, and the Vulkan boundary tracer remains primary
+  (GB-4.8).
 
 ## dxvk_win32 shim
 

@@ -1,24 +1,25 @@
-# Build the release_optimized Android product.
+# Build the optimized release Android product.
 #
-# This target is release plus ThinLTO, PGO and corpus Polly.  PGO is a real
-# two-stage flow:
-#   1. build release_optimized_pgo with -fprofile-generate (IRPGO by default;
-#      -PgoKind instr keeps the historical front-end profile);
-#   2. install and launch it on the test device, then pull the .profraw files;
+# release is the only optimized product variant.  PGO is an internal mode of
+# that variant, not a third public variant:
+#   1. build release with -Pgo generate (IRPGO by default; -PgoKind instr keeps
+#      the historical front-end profile) into build/android_app/release-pgo;
+#   2. install and launch the training APK on the test device, then pull the
+#      .profraw files;
 #   3. keep one complete cumulative snapshot per PID, merge them with
-#      llvm-profdata, verify the instrumentation kind, and build
-#      release_optimized with -fprofile-use and -flto=thin.
+#      llvm-profdata, verify the instrumentation kind, and build release with
+#      -Pgo use plus ThinLTO.
 #
 # The final APK has applicationId wc3.recomp and uses the release Gradle build
-# type.  Only the native build directory and compiler profile flags differ from
-# wc3-release.apk.  The training APK is built with the same release inputs, but
-# is deliberately not LTO and is replaced/restored after collection.
+# type.  Only the native build directory, compiler profile flags and artifact
+# name differ from the training pass.  The training APK is deliberately not LTO
+# and is replaced/restored after collection.
 #
 # Usage:
-#   powershell -File tools/android/build_release_optimized.ps1
-#   powershell -File tools/android/build_release_optimized.ps1 -Install
-#   powershell -File tools/android/build_release_optimized.ps1 -RefreshProfile
-#   powershell -File tools/android/build_release_optimized.ps1 -NoPolly
+#   powershell -File tools/android/build_release.ps1
+#   powershell -File tools/android/build_release.ps1 -Install
+#   powershell -File tools/android/build_release.ps1 -RefreshProfile
+#   powershell -File tools/android/build_release.ps1 -NoPolly
 #
 # The test-device address is never stored here.  It is resolved from the active
 # IPv4 DNS server and connected as <dns-ipv4>:5555 on every fresh profile run.
@@ -31,8 +32,8 @@ param(
     [string]$PgoKind = 'ir',
     [ValidateRange(30, 3600)]
     [int]$ProfileSeconds = 120,
-    # Polly is part of the release_optimized default.  This switch keeps the
-    # A/B path available without falling back to build_app/build_apk directly.
+    # Polly is part of the release default.  This switch keeps the A/B path
+    # available without falling back to build_app/build_apk directly.
     [switch]$NoPolly,
     [switch]$RefreshProfile,
     [switch]$Install,
@@ -44,13 +45,14 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $apkScript = Join-Path $PSScriptRoot 'build_apk.ps1'
 $outDir = Join-Path $root 'build\android_app'
 $releaseApk = Join-Path $outDir 'wc3-release.apk'
-$optimizedApk = Join-Path $outDir 'wc3-release_optimized.apk'
+$trainingApk = Join-Path $outDir 'wc3-release-pgo.apk'
 $profilePath = if ([IO.Path]::IsPathRooted($PgoProfile)) {
     $PgoProfile
 } else {
     Join-Path $root $PgoProfile
 }
 $profileDir = Split-Path -Parent $profilePath
+if (-not $profileDir) { $profileDir = $root }
 $rawOutDir = Join-Path $profileDir 'raw'
 New-Item -ItemType Directory -Force $profileDir | Out-Null
 New-Item -ItemType Directory -Force $rawOutDir | Out-Null
@@ -138,13 +140,12 @@ function Resolve-TestSerial {
 
 function Invoke-BuildApk {
     param(
-        [string]$Variant,
         [string]$Pgo,
         [string]$Serial,
         [switch]$ForceInstall
     )
     $apkArgs = @{
-        Variant = $Variant
+        Variant = 'release'
         Pgo = $Pgo
         PgoKind = $PgoKind
         PgoProfile = $PgoProfile
@@ -155,8 +156,8 @@ function Invoke-BuildApk {
     if ($Install -or $ForceInstall) { $apkArgs['Install'] = $true }
     $logDir = Join-Path $root 'build\tmp'
     New-Item -ItemType Directory -Force $logDir | Out-Null
-    $log = Join-Path $logDir ("pgo_{0}.log" -f $Variant)
-    Write-Host "[pgo] build $Variant (PGO $Pgo), log $log"
+    $log = Join-Path $logDir ("pgo_{0}.log" -f $Pgo)
+    Write-Host "[pgo] build release (PGO $Pgo), log $log"
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     & $apkScript @apkArgs 2>&1 |
@@ -164,7 +165,7 @@ function Invoke-BuildApk {
         ForEach-Object { Write-Host $_ }
     $rc = $LASTEXITCODE
     $ErrorActionPreference = $old
-    if ($rc -ne 0) { throw "APK build failed for $Variant (exit $rc)" }
+    if ($rc -ne 0) { throw "APK build failed for release (PGO $Pgo, exit $rc)" }
 }
 
 function Invoke-AdbShell {
@@ -202,8 +203,7 @@ if ($needProfile) {
         Write-Host '[pgo] profile missing or unreadable; training'
     }
     $serial = Resolve-TestSerial -Requested $Serial
-    Invoke-BuildApk -Variant 'release_optimized_pgo' -Pgo 'generate' `
-        -Serial $serial -ForceInstall
+    Invoke-BuildApk -Pgo 'generate' -Serial $serial -ForceInstall
     $profileBuildInstalled = $true
 
     # The release package is not debuggable, but the test device is rooted.
@@ -311,11 +311,12 @@ if ($needProfile) {
 }
 
 $finalSerial = if ($Install) { Resolve-TestSerial -Requested $Serial } else { '' }
-Invoke-BuildApk -Variant 'release_optimized' -Pgo 'use' -Serial $finalSerial
+Invoke-BuildApk -Pgo 'use' -Serial $finalSerial
 
-# Do not leave the instrumented training build installed unless the caller
-# explicitly asked for the optimized APK.  Restore the already-built release
-# artifact, which is the package state the user had before this run.
+# A training build installs the instrumented APK.  If the caller did not
+# request installation, the final release build is not installed by
+# build_apk.ps1, so install the release artifact here.  With -Install the final
+# build already replaced the training package.
 if (-not $Install -and $profileBuildInstalled -and (Test-Path -LiteralPath $releaseApk)) {
     $serial = Resolve-TestSerial -Requested $Serial
     Write-Host '[pgo] restoring installed release APK'
@@ -323,7 +324,10 @@ if (-not $Install -and $profileBuildInstalled -and (Test-Path -LiteralPath $rele
     if ($LASTEXITCODE -ne 0) { throw 'restoring release APK failed' }
 }
 
-if (-not (Test-Path -LiteralPath $optimizedApk)) {
-    throw "optimized APK missing: $optimizedApk"
+if (-not (Test-Path -LiteralPath $releaseApk)) {
+    throw "release APK missing: $releaseApk"
 }
-Write-Host "[pgo] built $optimizedApk ($((Get-Item $optimizedApk).Length) bytes)"
+if ($profileBuildInstalled -and -not (Test-Path -LiteralPath $trainingApk)) {
+    throw "training APK missing after generation: $trainingApk"
+}
+Write-Host "[pgo] built $releaseApk ($((Get-Item $releaseApk).Length) bytes)"

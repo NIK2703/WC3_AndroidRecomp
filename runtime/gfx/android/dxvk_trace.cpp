@@ -394,6 +394,12 @@ VkPhysicalDevice g_queue_logged[4] = {};
 VkPhysicalDevice g_memory_logged[4] = {};
 VkPhysicalDevice g_ext_logged[4] = {};
 
+struct SupportedCoreRecord {
+    VkPhysicalDevice device;
+    VkPhysicalDeviceFeatures features;
+};
+SupportedCoreRecord g_supported_core[4] = {};
+
 PFN_vkGetInstanceProcAddr g_real_gipa = nullptr;
 PFN_vkGetDeviceProcAddr g_real_gdpa = nullptr;
 
@@ -504,6 +510,81 @@ void log_core_features(const char *prefix, const VkPhysicalDeviceFeatures &f)
               f.shaderImageGatherExtended, f.shaderInt16, f.shaderInt64,
               f.shaderSampledImageArrayDynamicIndexing,
               f.textureCompressionBC);
+}
+
+void store_supported_core(VkPhysicalDevice device,
+                          const VkPhysicalDeviceFeatures &features)
+{
+    std::lock_guard<std::mutex> lock(g_state_mutex);
+
+    for (auto &entry : g_supported_core) {
+        if (entry.device == device) {
+            entry.features = features;
+            return;
+        }
+    }
+    for (auto &entry : g_supported_core) {
+        if (entry.device == VK_NULL_HANDLE) {
+            entry.device = device;
+            entry.features = features;
+            return;
+        }
+    }
+}
+
+void log_unsupported_core_features(VkPhysicalDevice device,
+                                   const VkPhysicalDeviceFeatures &requested)
+{
+    VkPhysicalDeviceFeatures supported = {};
+    bool known = false;
+    {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        for (const auto &entry : g_supported_core) {
+            if (entry.device == device) {
+                supported = entry.features;
+                known = true;
+                break;
+            }
+        }
+    }
+
+    if (!known) {
+        trace_log("  requested core feature diff unavailable: "
+                  "vkGetPhysicalDeviceFeatures was not observed");
+        return;
+    }
+
+#define WC3_CHECK_CORE_FEATURE(name) \
+    if (requested.name && !supported.name) \
+        trace_log("  requested core feature unsupported: " #name)
+    WC3_CHECK_CORE_FEATURE(robustBufferAccess);
+    WC3_CHECK_CORE_FEATURE(geometryShader);
+    WC3_CHECK_CORE_FEATURE(vertexPipelineStoresAndAtomics);
+    WC3_CHECK_CORE_FEATURE(shaderStorageImageWriteWithoutFormat);
+    WC3_CHECK_CORE_FEATURE(imageCubeArray);
+    WC3_CHECK_CORE_FEATURE(depthClamp);
+    WC3_CHECK_CORE_FEATURE(depthBiasClamp);
+    WC3_CHECK_CORE_FEATURE(fillModeNonSolid);
+    WC3_CHECK_CORE_FEATURE(pipelineStatisticsQuery);
+    WC3_CHECK_CORE_FEATURE(sampleRateShading);
+    WC3_CHECK_CORE_FEATURE(samplerAnisotropy);
+    WC3_CHECK_CORE_FEATURE(shaderClipDistance);
+    WC3_CHECK_CORE_FEATURE(shaderCullDistance);
+    WC3_CHECK_CORE_FEATURE(textureCompressionBC);
+    WC3_CHECK_CORE_FEATURE(occlusionQueryPrecise);
+    WC3_CHECK_CORE_FEATURE(multiViewport);
+    WC3_CHECK_CORE_FEATURE(independentBlend);
+    WC3_CHECK_CORE_FEATURE(fullDrawIndexUint32);
+    WC3_CHECK_CORE_FEATURE(depthBounds);
+    WC3_CHECK_CORE_FEATURE(shaderStorageImageExtendedFormats);
+    WC3_CHECK_CORE_FEATURE(shaderStorageImageReadWithoutFormat);
+    WC3_CHECK_CORE_FEATURE(fragmentStoresAndAtomics);
+    WC3_CHECK_CORE_FEATURE(shaderImageGatherExtended);
+    WC3_CHECK_CORE_FEATURE(shaderUniformBufferArrayDynamicIndexing);
+    WC3_CHECK_CORE_FEATURE(shaderSampledImageArrayDynamicIndexing);
+    WC3_CHECK_CORE_FEATURE(shaderStorageBufferArrayDynamicIndexing);
+    WC3_CHECK_CORE_FEATURE(shaderStorageImageArrayDynamicIndexing);
+#undef WC3_CHECK_CORE_FEATURE
 }
 
 void log_vulkan11_features(const VkPhysicalDeviceVulkan11Features &f)
@@ -1118,7 +1199,10 @@ static VKAPI_ATTR void VKAPI_CALL trace_vkGetPhysicalDeviceFeatures(
     VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures *pFeatures)
 {
     g_real_vkGetPhysicalDeviceFeatures(physicalDevice, pFeatures);
-    if (pFeatures && mark_device(physicalDevice, g_features_logged, 4))
+    if (!pFeatures)
+        return;
+    store_supported_core(physicalDevice, *pFeatures);
+    if (mark_device(physicalDevice, g_features_logged, 4))
         log_core_features("supported", *pFeatures);
 }
 
@@ -1128,6 +1212,7 @@ static VKAPI_ATTR void VKAPI_CALL trace_vkGetPhysicalDeviceFeatures2(
     g_real_vkGetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
     if (!pFeatures)
         return;
+    store_supported_core(physicalDevice, pFeatures->features);
     if (mark_device(physicalDevice, g_features_logged, 4)) {
         log_core_features("supported", pFeatures->features);
         log_feature_chain("supported", pFeatures->pNext);
@@ -1360,9 +1445,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL trace_vkCreateDevice(
         for (i = 0; i < pCreateInfo->enabledLayerCount; ++i)
             trace_log("  requested device layer: %s",
                       pCreateInfo->ppEnabledLayerNames[i]);
-        if (pCreateInfo->pEnabledFeatures)
+        if (pCreateInfo->pEnabledFeatures) {
             log_core_features("device requested",
                               *pCreateInfo->pEnabledFeatures);
+            log_unsupported_core_features(physicalDevice,
+                                          *pCreateInfo->pEnabledFeatures);
+        }
         log_feature_chain("device requested", pCreateInfo->pNext);
         log_missing_device_extensions(physicalDevice, pCreateInfo);
     }

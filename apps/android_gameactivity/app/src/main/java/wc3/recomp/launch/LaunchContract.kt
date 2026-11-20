@@ -30,6 +30,14 @@ object LaunchContract {
     const val KEY_HIDE_CURSOR = "hide_cursor"
     const val KEY_OVERLAY_OPACITY_PERCENT = "overlay_opacity_percent"
     const val KEY_PARALLEL_EXECUTION = "parallel_execution"
+    /* Comma-separated CPU ids selected for the parallel worker pool.  The
+     * worker count equals the number of ids.  An empty value means no pool;
+     * the product settings screen always keeps at least one core selected. */
+    const val KEY_WORKER_CPUS = "worker_cpus"
+    /* Derived best selected core for the game's main thread.  -1 means no
+     * selected core; if the topology is hidden, the highest requested id is
+     * the fallback pin. */
+    const val KEY_MAIN_CPU = "main_cpu"
     const val KEY_GRID_ENABLED = "grid_enabled"
     const val KEY_GRID_DARKEN_PERCENT = "grid_darken_percent"
     const val KEY_GRID_CYCLE_SECONDS = "grid_cycle_seconds"
@@ -129,10 +137,11 @@ object LaunchContract {
     const val MIN_PRESENT_BUFFERS = 0
     const val MAX_PRESENT_BUFFERS = 2
 
-    /* Parallel guest gameplay loops are opt-in.  The default keeps the
-     * original sequential functions (WC3_PARALLEL_GAMEPLAY=0) for every
-     * build; the switch enables the deterministic multi-core paths for the
-     * next launch. */
+    /* Parallel guest gameplay loops are derived from the CPU-core table, not
+     * a separate switch: two or more selected cores enable the deterministic
+     * multi-core paths for the next launch; one core keeps every wrapper on
+     * the original sequential function (WC3_PARALLEL_GAMEPLAY=0).  The
+     * product default is one core, the most performant available CPU. */
     const val DEFAULT_PARALLEL_EXECUTION = false
 
     /* The product default is DXVK 1.10.3 ("1").  An empty version is the

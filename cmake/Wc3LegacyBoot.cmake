@@ -178,9 +178,6 @@ target_compile_definitions(wc3_boot PRIVATE
 if(WC3_DEBUG)
     target_compile_definitions(wc3_boot PRIVATE WC3_DEBUG=1)
 endif()
-if(WC3_LOG_TO_DOWNLOADS)
-    target_compile_definitions(wc3_boot PRIVATE WC3_LOG_TO_DOWNLOADS=1)
-endif()
 target_compile_options(wc3_boot PRIVATE
     -fno-strict-aliasing
     -fwrapv
@@ -489,7 +486,7 @@ set_source_files_properties("${WC3_ROOT}/runtime/gfx/android/present_pass.cpp"
     PROPERTIES COMPILE_DEFINITIONS "VK_USE_PLATFORM_ANDROID_KHR=1")
 set_target_properties(wc3_dxvk_entry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# Apply the release_optimized code-generation profile to every first-party
+# Apply the release code-generation profile to every first-party
 # product target, not only to the final DSO.  The exactness flags above
 # (-fno-strict-aliasing, -fwrapv, -ffp-contract=off) stay in effect; the
 # profile only appends optimization/visibility options.  Vendor archives and

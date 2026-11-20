@@ -44,6 +44,19 @@ struct IDirect3D9;
 #define DX_LOG(...) ((void)0)
 #endif
 
+#if WC3_DEBUG && WC3_DEBUG_DXVK_DEBUG
+/* DXVK's Logger reads DXVK_LOG_LEVEL in its static constructor.  The app
+ * loads this library before wc3_dxvk_prepare() runs, so setting the variable
+ * there is too late for Logger::m_minLevel.  This constructor runs at
+ * priority 101, before default-priority static constructors such as
+ * dxvk::Logger::s_instance.  Keep an explicit developer value if present. */
+__attribute__((constructor(101)))
+static void wc3_dxvk_debug_log_level(void)
+{
+    setenv("DXVK_LOG_LEVEL", "debug", 0);
+}
+#endif
+
 extern "C" void wc3_dxvk1_dxvk_set_vulkan_get_instance_proc_addr(void *fn);
 extern "C" void wc3_dxvk3_dxvk_set_vulkan_get_instance_proc_addr(void *fn);
 extern "C" void wc3_dxvkll_dxvk_set_vulkan_get_instance_proc_addr(void *fn);
@@ -102,8 +115,15 @@ extern "C" void wc3_dxvk_prepare(void)
 #if WC3_DEBUG && WC3_DEBUG_DXVK_DEBUG
     /* The boundary trace is the reliable channel: DXVK's own logger may not
      * find a writable path on Android.  Keep an explicit env value if the
-     * developer already set one. */
-    setenv("DXVK_LOG_LEVEL", "debug", 0);
+     * developer already set one, but print the effective value so a missing
+     * debug block in the log is explained. */
+    {
+        const char *level = getenv("DXVK_LOG_LEVEL");
+        DX_LOG("prepare DXVK_LOG_LEVEL before=%s", level ? level : "(unset)");
+        setenv("DXVK_LOG_LEVEL", "debug", 0);
+        level = getenv("DXVK_LOG_LEVEL");
+        DX_LOG("prepare DXVK_LOG_LEVEL effective=%s", level ? level : "(unset)");
+    }
     gipa = (void *)wc3_dxvk_trace_wrap_gipa(
         (PFN_vkGetInstanceProcAddr)gipa);
     wc3_dxvk_trace_mark("prepare: traced gipa installed");

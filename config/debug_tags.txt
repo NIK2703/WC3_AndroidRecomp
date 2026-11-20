@@ -5,3 +5,11 @@ BOOT
 CRASH
 SELECT24
 PERF
+# Vulkan/D3D9 startup diagnostics for the Mali vkCreateDevice failure.
+# DXVK_DEBUG turns on the Vulkan boundary trace and DXVK's debug log level;
+# GPU_DRIVERS records which loader/ICD was selected; GRAPHICS enables the
+# project-owned thin D3D9 bridge logs (CreateDevice stage/HRESULT and native
+# caps).  Remove these three lines once the startup path is understood.
+DXVK_DEBUG
+GPU_DRIVERS
+GRAPHICS

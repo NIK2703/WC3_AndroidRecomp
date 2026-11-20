@@ -156,6 +156,19 @@ namespace dxvk {
     if (mapping.FormatColor == VK_FORMAT_UNDEFINED)
       return D3DERR_NOTAVAILABLE;
 
+    /* WC3: BC formats are usable only when the device exposes
+     * textureCompressionBC.  Without this check a game that ignores the
+     * failed format query can ask DXVK to create an image the driver
+     * cannot sample. */
+    if (!m_adapter->features().core.features.textureCompressionBC) {
+      const DxvkFormatInfo* formatInfo = imageFormatInfo(mapping.FormatColor);
+      if (formatInfo != nullptr && formatInfo->blockSize.width > 1) {
+        Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: rejecting block-compressed format ",
+          CheckFormat, ": textureCompressionBC missing"));
+        return D3DERR_NOTAVAILABLE;
+      }
+    }
+
     if (mapping.FormatSrgb  == VK_FORMAT_UNDEFINED && srgb)
       return D3DERR_NOTAVAILABLE;
 
@@ -349,7 +362,6 @@ namespace dxvk {
                                     | D3DPRASTERCAPS_MIPMAPLODBIAS
                                  /* | D3DPRASTERCAPS_ZBUFFERLESSHSR */
                                     | D3DPRASTERCAPS_FOGRANGE
-                                    | D3DPRASTERCAPS_ANISOTROPY
                                  /* | D3DPRASTERCAPS_WBUFFER */
                                     | D3DPRASTERCAPS_WFOG
                                     | D3DPRASTERCAPS_ZFOG
@@ -358,6 +370,11 @@ namespace dxvk {
                                     | D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS
                                     | D3DPRASTERCAPS_DEPTHBIAS
                                     | D3DPRASTERCAPS_MULTISAMPLE_TOGGLE; // <-- TODO! (but difficult in Vk)
+
+    /* WC3: only advertise anisotropy when the Vulkan device can create
+     * anisotropic samplers. */
+    if (m_adapter->features().core.features.samplerAnisotropy)
+      pCaps->RasterCaps |= D3DPRASTERCAPS_ANISOTROPY;
     // Z Comparison Caps
     pCaps->ZCmpCaps                 = D3DPCMPCAPS_NEVER
                                     | D3DPCMPCAPS_LESS
@@ -455,7 +472,8 @@ namespace dxvk {
     // Max Texture Aspect Ratio
     pCaps->MaxTextureAspectRatio    = 8192;
     // Max Anisotropy
-    pCaps->MaxAnisotropy            = 16;
+    pCaps->MaxAnisotropy            = m_adapter->features().core.features.samplerAnisotropy
+                                    ? 16 : 1;
     // Max Vertex W
     pCaps->MaxVertexW               = 1e10f;
     // Guard Bands
@@ -522,7 +540,12 @@ namespace dxvk {
     // Max Active Lights
     pCaps->MaxActiveLights           = caps::MaxEnabledLights;
     // Max User Clip Planes
-    pCaps->MaxUserClipPlanes         = MaxClipPlanes;
+    pCaps->MaxUserClipPlanes         = m_adapter->features().core.features.shaderClipDistance
+                                     ? MaxClipPlanes : 0;
+    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: caps MaxUserClipPlanes=", pCaps->MaxUserClipPlanes,
+      " MaxAnisotropy=", pCaps->MaxAnisotropy,
+      " fillModeNonSolid=", m_adapter->features().core.features.fillModeNonSolid ? 1 : 0,
+      " textureCompressionBC=", m_adapter->features().core.features.textureCompressionBC ? 1 : 0));
     // Max Vertex Blend Matrices
     pCaps->MaxVertexBlendMatrices    = 4;
     // Max Vertex Blend Matrix Index

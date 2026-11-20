@@ -127,6 +127,7 @@ for p in "$dxvk1" "$dxvk3" "$dxvk_ll" "$shim" \
          "$dxvk_root/patches/dxvk-3.1.1-wc3-d3d9.patch" \
          "$dxvk_root/patches/dxvk-3.1.1-lowmem-placed.patch" \
          "$dxvk_root/patches/dxvk-1.10.3-lowmem-placed.patch" \
+         "$dxvk_root/patches/dxvk-1.10.3-wc3-d3d9.patch" \
          "$shim/wc3_lowmem.h" "$shim/wc3_vulkan_lowmem.h" \
          "$probe" "$isolate"; do
     [ -e "$p" ] || { echo "[dxvk] vendored input missing: $p" >&2; exit 1; }
@@ -137,6 +138,13 @@ fail() { echo "[dxvk] source pin check failed: $*" >&2; exit 1; }
 need() { grep -Fq -- "$2" "$1" || fail "missing '$2' in $1"; }
 forbid() { ! grep -Fq -- "$2" "$1" || fail "unexpected '$2' in $1"; }
 need_re() { grep -Eq -- "$2" "$1" || fail "missing /$2/ in $1"; }
+need_archive() {
+    grep -a -q -F -- "$2" "$1" || {
+        echo "[dxvk] archive verification failed: $1 lacks '$2'" >&2
+        echo "[dxvk] DXVK archive is stale; rerun with --full" >&2
+        exit 1
+    }
+}
 
 feature=$dxvk3/src/dxvk/dxvk_device_info.cpp
 cmdlist=$dxvk3/src/dxvk/dxvk_cmdlist.h
@@ -200,6 +208,42 @@ need "$dxvk1/src/dxvk/dxvk_options.cpp" 'lowMemoryPlaced'
 need "$dxvk1/src/util/util_fps_limiter.cpp" 'clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME'
 need "$dxvk1/src/d3d9/d3d9_swapchain.cpp" 'if (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR)'
 need "$dxvk1/src/d3d9/d3d9_swapchain.cpp" 'the frame was displayed, so that result must not destroy'
+
+# DXVK 1.10.3 optional-feature compatibility.  Every forced VkPhysicalDeviceFeatures
+# flag must come from adapter support, and the dependent paths must stay gated.
+need "$dxvk1/src/d3d9/d3d9_device.cpp" 'enabled.core.features.fillModeNonSolid = supported.core.features.fillModeNonSolid'
+need "$dxvk1/src/d3d9/d3d9_device.cpp" 'enabled.core.features.shaderClipDistance = supported.core.features.shaderClipDistance'
+need "$dxvk1/src/d3d9/d3d9_device.cpp" 'enabled.core.features.textureCompressionBC = supported.core.features.textureCompressionBC'
+need "$dxvk1/src/d3d9/d3d9_device.cpp" 'enabled.extHostQueryReset.hostQueryReset = supported.extHostQueryReset.hostQueryReset'
+need "$dxvk1/src/d3d9/d3d9_device.cpp" 'if (!m_dxvkDevice->features().core.features.fillModeNonSolid)'
+need "$dxvk1/src/d3d9/d3d9_device.cpp" 'if (!m_dxvkDevice->features().core.features.samplerAnisotropy)'
+need "$dxvk1/src/d3d9/d3d9_device.cpp" 'supported.extCustomBorderColor.customBorderColors'
+need "$dxvk1/src/d3d9/d3d9_device.cpp" 'enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor'
+need "$dxvk1/src/d3d9/d3d9_device.h" 'GetMaxClipPlanes'
+need "$dxvk1/src/d3d9/d3d9_adapter.cpp" 'core.features.shaderClipDistance'
+need "$dxvk1/src/d3d9/d3d9_adapter.cpp" 'textureCompressionBC'
+need "$dxvk1/src/d3d9/d3d9_adapter.cpp" 'D3DPRASTERCAPS_ANISOTROPY'
+need "$dxvk1/src/d3d9/d3d9_adapter.cpp" 'MaxAnisotropy'
+need "$dxvk1/src/d3d9/d3d9_common_texture.cpp" 'textureCompressionBC'
+need "$dxvk1/src/d3d9/d3d9_query.cpp" 'occlusionQueryPrecise'
+need "$dxvk1/src/d3d9/d3d9_query.cpp" 'pipelineStatisticsQuery'
+need "$dxvk1/src/d3d9/d3d9_fixed_function.cpp" 'if (m_vsKey.Data.Contents.VertexClipping)'
+need "$dxvk1/src/dxso/dxso_options.h" 'supportsClipDistance'
+need "$dxvk1/src/dxso/dxso_compiler.cpp" 'm_moduleInfo.options.supportsClipDistance'
+need "$dxvk1/src/dxvk/dxvk_cmdlist.cpp" 'extHostQueryReset'
+need "$dxvk1/src/dxvk/dxvk_cmdlist.cpp" 'vkResetQueryPoolEXT'
+need "$dxvk1/src/dxvk/dxvk_cmdlist.cpp" 'vkCmdResetQueryPool'
+need "$dxvk1/src/dxvk/dxvk_unbound.cpp" 'core.features.imageCubeArray'
+
+# DXVK 1.10.3 startup diagnostics.  These are debug-level vendor log lines
+# activated by DXVK_LOG_LEVEL=debug (ELF constructor before dxvk::Logger,
+# repeated in wc3_dxvk_prepare()); they name the device-creation stage and
+# the exact optional features that were dropped.
+need "$dxvk1/src/d3d9/d3d9_interface.cpp" 'WC3 D3D9: CreateDeviceEx'
+need "$dxvk1/src/d3d9/d3d9_device.cpp" 'WC3 D3D9: missing adapter core features'
+need "$dxvk1/src/d3d9/d3d9_device.cpp" 'WC3 D3D9: InitialReset: ResetSwapChain begin'
+need "$dxvk1/src/d3d9/d3d9_swapchain.cpp" 'WC3 D3D9: Presenter extent='
+need "$dxvk1/src/dxvk/dxvk_adapter.cpp" 'WC3 DXVK: vkCreateDevice result='
 
 # Low-latency fork: the same patch set replayed on DXVK 3.1.1 plus upstream's
 # frame pacer.  The loader setter and the Android futex path are required here
@@ -363,6 +407,11 @@ export OBJCOPY=$(wc3_ndk_tool "$ndk" llvm-objcopy)
 export TMPDIR=$build_root/tmp
 echo '[dxvk] isolating 1.10.3 symbols'
 "$isolate" wc3_dxvk1_ "$iso1" "$archive1"
+echo '[dxvk] verifying WC3 markers in 1.10.3 archive'
+need_archive "$iso1" 'WC3 DXVK: createDevice begin'
+need_archive "$iso1" 'WC3 DXVK: vkCreateDevice result='
+need_archive "$iso1" 'WC3 D3D9: InitialReset'
+need_archive "$iso1" 'WC3 D3D9: missing adapter core features'
 echo '[dxvk] isolating 3.1.1 symbols'
 "$isolate" wc3_dxvk3_ "$iso3" "$archive3"
 echo '[dxvk] isolating low-latency symbols'

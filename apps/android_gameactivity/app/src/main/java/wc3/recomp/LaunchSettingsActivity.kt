@@ -11,6 +11,7 @@ import android.text.Editable
 import android.text.InputFilter
 import android.text.TextWatcher
 import android.util.DisplayMetrics
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.widget.AdapterView
@@ -18,6 +19,7 @@ import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
 import android.widget.Button
 import android.widget.EditText
+import android.widget.GridLayout
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.Spinner
@@ -29,6 +31,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import wc3.recomp.launch.CpuCore
+import wc3.recomp.launch.CpuTopology
 import wc3.recomp.launch.DxvkConfigOptions
 import wc3.recomp.launch.DxvkSuggestionAdapter
 import wc3.recomp.launch.GameFolderPicker
@@ -80,7 +84,10 @@ class LaunchSettingsActivity : AppCompatActivity() {
         LaunchContract.SELECTION_CAP_40
     )
     private lateinit var hideCursorSwitch: SwitchCompat
-    private lateinit var parallelExecutionSwitch: SwitchCompat
+    private lateinit var parallelCpuGrid: GridLayout
+    private lateinit var parallelCpuHint: TextView
+    private var availableCpuCores: List<CpuCore> = emptyList()
+    private val cpuCoreCells = mutableListOf<TextView>()
     private lateinit var gridOptionsGroup: LinearLayout
     private lateinit var gridDarkenSlider: SeekBar
     private lateinit var gridDarkenValue: TextView
@@ -203,6 +210,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
             )
         )
         val settings = store.load(mode)
+        availableCpuCores = CpuTopology.availableCores()
         resolutionOptions = buildResolutionOptions(settings)
         bindViews()
         bindSettings(settings)
@@ -269,7 +277,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         dxvkConfigImportButton = findViewById(R.id.dxvk_config_import)
         selectionCapSpinner = findViewById(R.id.selection_cap_spinner)
         hideCursorSwitch = findViewById(R.id.hide_cursor_switch)
-        parallelExecutionSwitch = findViewById(R.id.parallel_execution_switch)
+        parallelCpuGrid = findViewById(R.id.parallel_cpu_grid)
+        parallelCpuHint = findViewById(R.id.parallel_cpu_hint)
         gridOptionsGroup = findViewById(R.id.grid_options_group)
         gridDarkenSlider = findViewById(R.id.grid_darken_slider)
         gridDarkenValue = findViewById(R.id.grid_darken_value)
@@ -378,7 +387,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
             false
         )
         hideCursorSwitch.isChecked = settings.hideCursor
-        parallelExecutionSwitch.isChecked = settings.parallelExecution
+        bindCpuCores(settings.workerCpus)
         bindGridDarkenSlider(settings.gridDarkenPercent)
         bindGridCycleSlider(settings.gridCycleSeconds)
         updateGridOptions()
@@ -434,6 +443,112 @@ class LaunchSettingsActivity : AppCompatActivity() {
         updateGestureModeHint()
     }
 
+    /* The core table is the only parallel control.  Two or more selected
+     * cells enable the worker pool; one selected cell keeps the guest
+     * sequential.  The default is the most performant allowed CPU, so a fresh
+     * install starts without parallelism and pins the main thread there. */
+    private fun bindCpuCores(saved: List<Int>) {
+        parallelCpuGrid.removeAllViews()
+        cpuCoreCells.clear()
+
+        val availableIds = availableCpuCores.map { it.id }.toSet()
+        val savedIds = saved.filter { it in availableIds }.toSet()
+        val selected = if (savedIds.isEmpty()) {
+            CpuTopology.pickBest(availableCpuCores)
+                ?.let { setOf(it.id) }
+                .orEmpty()
+        } else {
+            savedIds
+        }
+
+        for (core in availableCpuCores) {
+            val cell = TextView(this).apply {
+                tag = core.id
+                text = core.id.toString()
+                isSelected = core.id in selected
+                gravity = Gravity.CENTER
+                textSize = 16f
+                minHeight = dp(48)
+                ContextCompat.getColorStateList(
+                    this@LaunchSettingsActivity,
+                    R.color.cpu_cell_text
+                )?.let { setTextColor(it) }
+                setBackgroundResource(R.drawable.bg_cpu_cell)
+                contentDescription = this@LaunchSettingsActivity.getString(
+                    R.string.launch_cpu_core_description,
+                    core.id
+                )
+                tooltipText = core.label
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { toggleCpuCore(this@apply) }
+            }
+            val params = GridLayout.LayoutParams().apply {
+                width = 0
+                height = dp(48)
+                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                rowSpec = GridLayout.spec(GridLayout.UNDEFINED)
+                setMargins(dp(4), dp(4), dp(4), dp(4))
+            }
+            parallelCpuGrid.addView(cell, params)
+            cpuCoreCells.add(cell)
+        }
+        updateParallelCpuHint()
+    }
+
+    private fun toggleCpuCore(cell: TextView) {
+        if (cell.isSelected) {
+            if (selectedCpuCores().size <= 1) {
+                Toast.makeText(
+                    this,
+                    R.string.launch_cpu_cores_required,
+                    Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+            cell.isSelected = false
+        } else {
+            cell.isSelected = true
+        }
+        updateParallelCpuHint()
+        refreshValidation()
+        saveIfValid()
+    }
+
+    private fun selectedCpuCores(): List<Int> =
+        cpuCoreCells
+            .filter { it.isSelected }
+            .mapNotNull { it.tag as? Int }
+            .sorted()
+
+    private fun updateParallelCpuHint() {
+        if (availableCpuCores.isEmpty()) {
+            parallelCpuHint.text = getString(R.string.launch_cpu_cores_unavailable)
+            return
+        }
+        val selected = selectedCpuCores()
+        if (selected.isEmpty()) {
+            parallelCpuHint.text = getString(R.string.launch_cpu_cores_required)
+            return
+        }
+        val mainCpu = CpuTopology.pickBest(
+            availableCpuCores.filter { it.id in selected }
+        )?.id ?: selected.maxOrNull() ?: return
+        parallelCpuHint.text = if (selected.size <= 1) {
+            getString(R.string.launch_cpu_cores_single, mainCpu)
+        } else {
+            getString(
+                R.string.launch_cpu_cores_hint,
+                selected.size,
+                availableCpuCores.size,
+                mainCpu
+            )
+        }
+    }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
     private fun updateGestureModeHint() {
         val option = gestureModeOptions.getOrNull(gestureModeSpinner.selectedItemPosition)
             ?: return
@@ -474,13 +589,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
             }
 
         hideCursorSwitch.setOnCheckedChangeListener { _, _ ->
-            if (!binding) {
-                refreshValidation()
-                saveIfValid()
-            }
-        }
-
-        parallelExecutionSwitch.setOnCheckedChangeListener { _, _ ->
             if (!binding) {
                 refreshValidation()
                 saveIfValid()
@@ -1356,6 +1464,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
         val resolution = currentResolutionOption()
             ?: resolutionOptions.lastOrNull()
             ?: ResolutionOption(0, 0, "")
+        val workerCpus = selectedCpuCores()
 
         return LaunchSettings(
             mode = mode,
@@ -1382,7 +1491,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
             overlayOpacityPercent = overlayOpacityFromProgress(
                 overlayOpacitySlider.progress
             ),
-            parallelExecution = parallelExecutionSwitch.isChecked,
+            parallelExecution = workerCpus.size >= 2,
+            workerCpus = workerCpus,
             gridEnabled = resolution.grid,
             gridDarkenPercent =
                 LaunchContract.MIN_GRID_DARKEN_PERCENT +

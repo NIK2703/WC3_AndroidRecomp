@@ -153,7 +153,17 @@ namespace dxvk {
     result.view2D      = createImageView(dev, m_image2D, format, VK_IMAGE_VIEW_TYPE_2D,         1);
     result.view2DArr   = createImageView(dev, m_image2D, format, VK_IMAGE_VIEW_TYPE_2D_ARRAY,   1);
     result.viewCube    = createImageView(dev, m_image2D, format, VK_IMAGE_VIEW_TYPE_CUBE,       6);
-    result.viewCubeArr = createImageView(dev, m_image2D, format, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY, 6);
+
+    /* WC3: imageCubeArray is optional.  A device without it cannot create a
+     * cube-array view, so reuse the plain cube view for the dummy descriptor.
+     * D3D9 has no cube-array resource type, so this view is never selected by
+     * the D3D9 frontend. */
+    if (!dev->features().core.features.imageCubeArray)
+      Logger::debug("[DXVK_DEBUG] WC3 DXVK: imageCubeArray missing; reusing cube view for the cube-array dummy");
+    result.viewCubeArr = dev->features().core.features.imageCubeArray
+      ? createImageView(dev, m_image2D, format, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY, 6)
+      : result.viewCube;
+
     result.view3D      = createImageView(dev, m_image3D, format, VK_IMAGE_VIEW_TYPE_3D,         1);
     return result;
   }

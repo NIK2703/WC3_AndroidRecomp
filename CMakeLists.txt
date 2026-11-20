@@ -85,49 +85,23 @@ option(WC3_HOST_HARDENING
 # Variant identity.  WC3_VARIANT is the label passed by build_app.ps1; it is
 # not the master switch (WC3_DEBUG is), but an unknown value is rejected so a
 # typo cannot silently produce a differently named artifact with the wrong
-# profile.  userdebug is the diagnostic build of the debug package: same
-# applicationId and Gradle build type, WC3_DEBUG=1, reduced tag set, Download
-# log and gameplay experiments off by default.
+# profile.  There are exactly two variants: release is the optimized product
+# and debug is the diagnostic build with conservative O2 code generation,
+# WC3_DEBUG=1, a reduced tag set, and no LTO/PGO.
 set(WC3_VARIANT "" CACHE STRING "Build variant label")
-set_property(CACHE WC3_VARIANT PROPERTY STRINGS
-    release debug userdebug release_optimized release_optimized_pgo)
-if(WC3_VARIANT AND NOT WC3_VARIANT MATCHES
-   "^(release|debug|userdebug|release_optimized|release_optimized_pgo)$")
+set_property(CACHE WC3_VARIANT PROPERTY STRINGS release debug)
+if(WC3_VARIANT AND NOT WC3_VARIANT MATCHES "^(release|debug)$")
     message(FATAL_ERROR
         "WC3_VARIANT='${WC3_VARIANT}' is not a known build variant")
 endif()
 # The crash report carries the same label so a file pulled from Download
 # identifies the build that produced it.  The check above restricts the value
-# to [a-z_]+, so it is safe inside a C string literal and a file name.
+# to release/debug, so it is safe inside a C string literal and a file name.
 set(WC3_BUILD_VARIANT "${WC3_VARIANT}")
 if(NOT WC3_BUILD_VARIANT)
     set(WC3_BUILD_VARIANT "release")
 endif()
 option(WC3_DEBUG "Build with debug-only diagnostics" OFF)
-# The userdebug boot log belongs in the public Download folder so it can be
-# pulled with a normal file manager/adb pull without run-as.  The variant-tagged
-# name keeps release/debug/optimized reports apart.  app_boot.c falls back to
-# the app-private state dir when Download is not writable yet.
-set(_wc3_log_to_downloads_default OFF)
-if(WC3_VARIANT STREQUAL "userdebug")
-    set(_wc3_log_to_downloads_default ON)
-endif()
-option(WC3_LOG_TO_DOWNLOADS
-       "Write the boot log to /storage/emulated/0/Download/wc3_log_<variant>.txt"
-       ${_wc3_log_to_downloads_default})
-if(WC3_VARIANT STREQUAL "userdebug" AND NOT WC3_DEBUG)
-    message(FATAL_ERROR
-        "WC3_VARIANT=userdebug requires WC3_DEBUG=ON; it is the diagnostic "
-        "profile of the debug package.")
-endif()
-if(WC3_LOG_TO_DOWNLOADS AND NOT WC3_DEBUG)
-    message(FATAL_ERROR
-        "WC3_LOG_TO_DOWNLOADS=ON is a debug diagnostic; keep WC3_DEBUG=ON or "
-        "leave the option OFF in a release build.")
-endif()
-if(WC3_VARIANT STREQUAL "userdebug")
-    message(STATUS "userdebug: diagnostic profile, Download boot log")
-endif()
 # Phase 2 of docs/THIN_D3D9_COPY_PLAN.md.  D3DUSAGE_WRITEONLY promises the
 # application will not read the resource, so the copy-in from DXVK's mapping
 # into the low shadow is not observable.  This is part of the normal Android
@@ -215,8 +189,8 @@ set_property(CACHE WC3_PACK_DYN_RELOCS_MODE PROPERTY STRINGS
 # table so an on-device crash report resolves L_<va> and wc3_* names through
 # dladdr().  The unstripped .symtab remains the offline fallback.  Hiding the
 # table saved ~12 MB of loaded metadata but made release crash logs unreadable
-# without a matching build artifact.  release_optimized still hides internal
-# names through -fvisibility=hidden.
+# without a matching build artifact.  The optimized release profile hides
+# internal names through -fvisibility=hidden.
 # O-64: lld can fold byte-identical function bodies.  Safe mode is the product
 # default: it refuses bodies whose address is significant and is the only mode
 # that may be reached through the guest dispatcher.  ICF changes artifact
@@ -265,14 +239,14 @@ else()
     set(WC3_DEBUG_DEFINE 0)
 endif()
 
-# Experimental release_optimized native profile.  It is the same Android
-# release product as WC3_VARIANT=release (same app id, Gradle release build
-# type, corpus, HLE, graphics and hardening) with a compiler-profile delta:
-# O3 code generation, ThinLTO across the product link graph, PGO, corpus Polly
-# and optional profile-guided layout.  The profile-generation build is intentionally not
-# LTO: it collects counters, while the final build applies profile-use and
-# -flto=thin.  Every new switch is dormant in release/debug: the build scripts
-# pass release values only for release_optimized and its training variant.
+# Optimized release native profile.  It is the Android release product (same
+# app id, Gradle release build type, corpus, HLE, graphics and hardening) with
+# a compiler-profile delta: O3 code generation, ThinLTO across the product link
+# graph, PGO, corpus Polly and optional profile-guided layout.  The
+# profile-generation pass is intentionally not LTO: it collects counters, while
+# the final build applies profile-use and -flto=thin.  Every new switch is
+# dormant unless the build scripts pass it; build_app.ps1 does so for release
+# and its internal training mode, while debug keeps the conservative defaults.
 set(WC3_LTO "OFF" CACHE STRING
     "Interprocedural optimization: OFF or THIN (ThinLTO)")
 set_property(CACHE WC3_LTO PROPERTY STRINGS OFF THIN)
@@ -298,7 +272,7 @@ set(WC3_MTUNE "" CACHE STRING
 option(WC3_OMIT_FRAME_POINTER
     "Omit the AArch64 frame pointer in product/corpus code" OFF)
 option(WC3_SPLIT_MACHINE_FUNCTIONS
-    "Use -fsplit-machine-functions with profile-use (release_optimized only)" OFF)
+    "Use -fsplit-machine-functions with profile-use (release only)" OFF)
 set(WC3_CALL_GRAPH_SORT "none" CACHE STRING
     "LLD call-graph layout: none, hfsort, or cdsort")
 set_property(CACHE WC3_CALL_GRAPH_SORT PROPERTY STRINGS none hfsort cdsort)
@@ -314,8 +288,8 @@ set(WC3_THINLTO_CACHE_DIR "" CACHE PATH
 option(WC3_EMIT_RELOCS
     "Keep relocations in the product .so for a future post-link optimizer" OFF)
 # The CMake default stays OFF so a direct release configure cannot inherit the
-# experiment.  build_app.ps1 passes ON by default for release_optimized and
-# explicitly passes OFF for release/debug; -Polly:$false disables it for an A/B.
+# experiment.  build_app.ps1 passes ON by default for release and explicitly
+# passes OFF for debug; -Polly:$false disables it for an A/B.
 option(WC3_POLLY
     "Enable Polly for the generated corpus (exactness-sensitive experiment)" OFF)
 option(WC3_HIDDEN_VISIBILITY
@@ -327,7 +301,7 @@ set(WC3_SYMBOL_ORDER_FILE "" CACHE FILEPATH
 
 string(TOUPPER "${WC3_LTO}" _wc3_lto_upper)
 if(_wc3_lto_upper STREQUAL "THIN")
-    message(STATUS "release_optimized: ThinLTO enabled")
+    message(STATUS "release: ThinLTO enabled")
     add_compile_options(-flto=thin)
     add_link_options(-flto=thin)
 elseif(NOT _wc3_lto_upper STREQUAL "OFF")
@@ -402,10 +376,10 @@ if(WC3_SYMBOL_ORDER_FILE AND NOT EXISTS "${WC3_SYMBOL_ORDER_FILE}")
 endif()
 
 # Product compile options are target-local so vendor archives and the DXVK
-# shim keep their own policy.  Release/debug leave every new option at its
-# historical default; only release_optimized enables this list.  -O2 is not
-# repeated: the release build type already provides it, and repeating it in a
-# debug configure would silently override the debug optimization level.
+# shim keep their own policy.  Debug leaves every new option at its historical
+# default; the release build script enables this list.  -O2 is not repeated:
+# the release build type already provides it, and repeating it in a debug
+# configure would silently override the debug optimization level.
 set(WC3_PRODUCT_COMPILE_OPTIONS)
 if(NOT _wc3_opt_upper STREQUAL "O2")
     list(APPEND WC3_PRODUCT_COMPILE_OPTIONS "-${_wc3_opt_upper}")
@@ -463,17 +437,17 @@ if(WC3_SYMBOL_ORDER_FILE)
 endif()
 if(WC3_PRODUCT_COMPILE_OPTIONS)
     message(STATUS
-        "release_optimized: product flags ${WC3_PRODUCT_COMPILE_OPTIONS}")
+        "release: product flags ${WC3_PRODUCT_COMPILE_OPTIONS}")
 endif()
 if(WC3_PRODUCT_LINK_OPTIONS)
     message(STATUS
-        "release_optimized: link flags ${WC3_PRODUCT_LINK_OPTIONS}")
+        "release: link flags ${WC3_PRODUCT_LINK_OPTIONS}")
 endif()
 
 # Corpus options mirror the product profile but keep the exactness constraints
 # that already live in Wc3ReliftedCorpus.cmake.  Polly and machine-function
-# splitting are experiments: release/debug scripts pass OFF, release_optimized
-# enables Polly by default (split-MF remains profile/warning-gated).
+# splitting are experiments: debug passes OFF, release enables Polly by default
+# (split-MF remains profile/warning-gated).
 set(WC3_CORPUS_COMPILE_OPTIONS "-${WC3_CORPUS_OPT_LEVEL_EFFECTIVE}")
 if(WC3_MTUNE)
     list(APPEND WC3_CORPUS_COMPILE_OPTIONS "-mtune=${WC3_MTUNE}")
@@ -501,7 +475,7 @@ if(NOT _wc3_corpus_opt_upper STREQUAL "O2" OR
    WC3_NO_SEMANTIC_INTERPOSITION OR WC3_HIDDEN_VISIBILITY OR
    WC3_SPLIT_MACHINE_FUNCTIONS OR WC3_SYMBOL_ORDER_FILE OR WC3_POLLY)
     message(STATUS
-        "release_optimized: corpus flags ${WC3_CORPUS_COMPILE_OPTIONS}")
+        "release: corpus flags ${WC3_CORPUS_COMPILE_OPTIONS}")
 endif()
 
 string(TOLOWER "${WC3_PGO_MODE}" _wc3_pgo_lower)
@@ -515,7 +489,7 @@ if(_wc3_pgo_lower STREQUAL "generate")
         # processes and reruns do not overwrite one another's counters.
         set(_wc3_profraw_file "${WC3_PGO_RAW_DIR}/wc3-%p.profraw")
         message(STATUS
-            "release_optimized: front-end PGO generate -> ${_wc3_profraw_file}")
+            "release: front-end PGO generate -> ${_wc3_profraw_file}")
         add_compile_options(
             "-fprofile-instr-generate=${_wc3_profraw_file}")
         add_link_options(
@@ -526,7 +500,7 @@ if(_wc3_pgo_lower STREQUAL "generate")
         # device path before every snapshot, so this is only the runtime
         # default and never the file that the training flow consumes.
         message(STATUS
-            "release_optimized: IRPGO generate -> ${WC3_PGO_RAW_DIR}")
+            "release: IRPGO generate -> ${WC3_PGO_RAW_DIR}")
         add_compile_options("-fprofile-generate=${WC3_PGO_RAW_DIR}")
         add_link_options("-fprofile-generate=${WC3_PGO_RAW_DIR}")
     endif()
@@ -540,7 +514,7 @@ elseif(_wc3_pgo_lower STREQUAL "use")
             "(got '${WC3_PGO_PROFILE}')")
     endif()
     message(STATUS
-        "release_optimized: ${WC3_PGO_KIND} PGO use <- ${WC3_PGO_PROFILE}")
+        "release: ${WC3_PGO_KIND} PGO use <- ${WC3_PGO_PROFILE}")
     if(_wc3_pgo_kind_lower STREQUAL "instr")
         add_compile_options(
             "-fprofile-instr-use=${WC3_PGO_PROFILE}")
@@ -877,7 +851,7 @@ if(WC3_BUILD_APP)
         string(REPLACE "\"" "\\\"" _wc3_pgo_dir_for_c
             "${_wc3_pgo_dir_for_c}")
         file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/wc3_pgo_config.h"
-            "/* Generated by CMake for the release_optimized training writer. */\n"
+            "/* Generated by CMake for the release training writer. */\n"
             "#pragma once\n"
             "#define WC3_PGO_DIR \"${_wc3_pgo_dir_for_c}\"\n"
             "#define WC3_PGO_INTERVAL_SEC ${WC3_PGO_INTERVAL_SEC}\n")
@@ -886,9 +860,12 @@ if(WC3_BUILD_APP)
     endif()
     target_include_directories(wc3gameactivity PRIVATE
         ${WC3_INCLUDES}
+        "${WC3_ROOT}/runtime/diag"
         "${CMAKE_CURRENT_BINARY_DIR}"
         "${WC3_ROOT}/runtime/app"
         "${WC3_FFMPEG_ROOT}/include")
+    target_compile_definitions(wc3gameactivity PRIVATE
+        "WC3_BUILD_VARIANT=\"${WC3_BUILD_VARIANT}\"")
     # Link every FFmpeg archive the movie module uses directly: static link
     # order is avformat -> avcodec -> swscale -> avutil, and an archive that
     # only arrives transitively is easy to miss.
@@ -910,6 +887,11 @@ if(WC3_BUILD_APP)
         -Wl,-z,max-page-size=16384
         -Wl,-Bsymbolic
         -Wl,-u,JNI_OnLoad
+        # The game main thread is pinned to one selected core; Linux makes new
+        # threads inherit affinity, so every pthread created by this library
+        # (guest, host and vendored DXVK) passes through the host-shell
+        # trampoline that restores the process cpuset.
+        -Wl,--wrap=pthread_create
         ${WC3_PRODUCT_LINK_OPTIONS})
     if(WC3_PACK_DYN_RELOCS)
         if(NOT ANDROID)

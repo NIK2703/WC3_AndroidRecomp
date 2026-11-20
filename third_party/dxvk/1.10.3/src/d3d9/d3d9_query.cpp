@@ -21,9 +21,12 @@ namespace dxvk {
         break;
 
       case D3DQUERYTYPE_OCCLUSION:
+        if (!dxvkDevice->features().core.features.occlusionQueryPrecise)
+          Logger::debug("[DXVK_DEBUG] WC3 D3D9: occlusionQueryPrecise missing; using imprecise occlusion query");
         m_query[0] = dxvkDevice->createGpuQuery(
           VK_QUERY_TYPE_OCCLUSION,
-          VK_QUERY_CONTROL_PRECISE_BIT, 0);
+          dxvkDevice->features().core.features.occlusionQueryPrecise
+            ? VK_QUERY_CONTROL_PRECISE_BIT : 0, 0);
         break;
 
       case D3DQUERYTYPE_TIMESTAMP:
@@ -327,7 +330,15 @@ namespace dxvk {
       case D3DQUERYTYPE_TIMESTAMP:
       case D3DQUERYTYPE_TIMESTAMPDISJOINT:
       case D3DQUERYTYPE_TIMESTAMPFREQ:
+        return D3D_OK;
+
       case D3DQUERYTYPE_VERTEXSTATS:
+        /* WC3: pipeline statistics queries need the Vulkan feature.  Do not
+         * create a query pool the device cannot use. */
+        if (!pDevice->GetDXVKDevice()->features().core.features.pipelineStatisticsQuery) {
+          Logger::debug("[DXVK_DEBUG] WC3 D3D9: pipelineStatisticsQuery missing; VERTEXSTATS unavailable");
+          return D3DERR_NOTAVAILABLE;
+        }
         return D3D_OK;
 
       default:

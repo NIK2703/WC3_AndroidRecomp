@@ -217,13 +217,25 @@ namespace dxvk {
     m_presentParams = *pPresentParams;
     m_window = m_presentParams.hDeviceWindow;
 
-    UpdatePresentRegion(nullptr, nullptr);
-    if (m_window && !pDevice->GetOptions()->deferSurfaceCreation)
-      CreatePresenter();
+    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: swapchain ctor extent=",
+      m_presentParams.BackBufferWidth, "x", m_presentParams.BackBufferHeight,
+      " backbuffers=", m_presentParams.BackBufferCount,
+      " format=", m_presentParams.BackBufferFormat,
+      " windowed=", m_presentParams.Windowed ? 1 : 0));
 
+    UpdatePresentRegion(nullptr, nullptr);
+    if (m_window && !pDevice->GetOptions()->deferSurfaceCreation) {
+      Logger::debug("[DXVK_DEBUG] WC3 D3D9: swapchain CreatePresenter begin");
+      CreatePresenter();
+      Logger::debug("[DXVK_DEBUG] WC3 D3D9: swapchain CreatePresenter done");
+    }
+
+    Logger::debug("[DXVK_DEBUG] WC3 D3D9: swapchain CreateBackBuffers begin");
     CreateBackBuffers(m_presentParams.BackBufferCount);
+    Logger::debug("[DXVK_DEBUG] WC3 D3D9: swapchain CreateBackBuffers done");
     CreateBlitter();
     CreateHud();
+    Logger::debug("[DXVK_DEBUG] WC3 D3D9: swapchain ctor done");
 
     InitRamp();
 
@@ -1015,16 +1027,24 @@ namespace dxvk {
     presenterDesc.numPresentModes = PickPresentModes(false, presenterDesc.presentModes);
     presenterDesc.fullScreenExclusive = PickFullscreenMode();
 
+    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: Presenter extent=",
+      presenterDesc.imageExtent.width, "x", presenterDesc.imageExtent.height,
+      " images=", presenterDesc.imageCount,
+      " formats=", presenterDesc.numFormats,
+      " presentModes=", presenterDesc.numPresentModes));
+
     m_presenter = new vk::Presenter(m_window,
       m_device->adapter()->vki(),
       m_device->vkd(),
       presenterDevice,
       presenterDesc);
+    Logger::debug("[DXVK_DEBUG] WC3 D3D9: Presenter created");
 
     m_presenter->setFrameRateLimit(m_parent->GetOptions()->maxFrameRate);
     m_presenter->setFrameRateLimiterRefreshRate(m_displayRefreshRate);
 
     CreateRenderTargetViews();
+    Logger::debug("[DXVK_DEBUG] WC3 D3D9: Presenter render target views created");
   }
 
 

@@ -265,6 +265,7 @@ namespace dxvk {
   Rc<DxvkDevice> DxvkAdapter::createDevice(
     const Rc<DxvkInstance>&   instance,
           DxvkDeviceFeatures  enabledFeatures) {
+    Logger::debug("[DXVK_DEBUG] WC3 DXVK: createDevice begin");
     DxvkDeviceExtensions devExtensions;
 
     std::array<DxvkExt*, 34> devExtensionList = {{
@@ -331,6 +332,13 @@ namespace dxvk {
     // Enable additional extensions if necessary
     extensionsEnabled.merge(m_extraExtensions);
     DxvkNameList extensionNameList = extensionsEnabled.toNameList();
+
+    for (DxvkExt* ext : devExtensionList) {
+      if (ext->mode() != DxvkExtMode::Disabled
+       && !m_deviceExtensions.supports(ext->name()))
+        Logger::debug(str::format("[DXVK_DEBUG] WC3 DXVK: device extension unavailable: ", ext->name()));
+    }
+    Logger::debug(str::format("[DXVK_DEBUG] WC3 DXVK: createDevice extensions=", extensionNameList.count()));
 
     // Enable additional device features if supported
     enabledFeatures.extExtendedDynamicState.extendedDynamicState = m_deviceFeatures.extExtendedDynamicState.extendedDynamicState;
@@ -475,13 +483,16 @@ namespace dxvk {
       overallocInfo.pNext = std::exchange(info.pNext, &overallocInfo);
     
     VkDevice device = VK_NULL_HANDLE;
+    Logger::debug(str::format("[DXVK_DEBUG] WC3 DXVK: vkCreateDevice queues=", info.queueCreateInfoCount,
+      " extensions=", info.enabledExtensionCount));
     VkResult vr = m_vki->vkCreateDevice(m_handle, &info, nullptr, &device);
+    Logger::debug(str::format("[DXVK_DEBUG] WC3 DXVK: vkCreateDevice result=", int32_t(vr)));
 
     if (vr != VK_SUCCESS && enableCudaInterop) {
       // Enabling certain Vulkan extensions can cause device creation to fail on
       // Nvidia drivers if a certain kernel module isn't loaded, but we cannot know
       // that in advance since the extensions are reported as supported anyway.
-      Logger::err("DxvkAdapter: Failed to create device, retrying without CUDA interop extensions");
+      Logger::err(str::format("DxvkAdapter: Failed to create device, retrying without CUDA interop extensions (VkResult ", int32_t(vr), ")"));
 
       extensionsEnabled.disableExtension(devExtensions.khrBufferDeviceAddress);
       extensionsEnabled.disableExtension(devExtensions.nvxBinaryImport);
@@ -500,12 +511,14 @@ namespace dxvk {
     }
 
     if (vr != VK_SUCCESS)
-      throw DxvkError("DxvkAdapter: Failed to create device");
+      throw DxvkError(str::format("DxvkAdapter: Failed to create device (VkResult ", int32_t(vr), ")"));
     
+    Logger::debug("[DXVK_DEBUG] WC3 DXVK: vkCreateDevice succeeded; initResources begin");
     Rc<DxvkDevice> result = new DxvkDevice(instance, this,
       new vk::DeviceFn(true, m_vki->instance(), device),
       devExtensions, enabledFeatures);
     result->initResources();
+    Logger::debug("[DXVK_DEBUG] WC3 DXVK: initResources done");
     return result;
   }
   

@@ -149,6 +149,33 @@ void wc3_crash_set_log_path(const char *path)
     copy_text(g_log_path, sizeof g_log_path, path);
 }
 
+void wc3_crash_export_log(void)
+{
+    int in;
+    int out;
+
+    if (!g_log_path[0] || g_emitting ||
+        !strcmp(g_log_path, WC3_CRASH_DOWNLOAD_LOG))
+        return;
+
+    /* The boot log writer is line-buffered.  Drain it before copying so the
+     * normal-exit file includes the last line. */
+    fflush(NULL);
+    /* Probe the source first: a missing app-private log must not truncate an
+     * older Download copy. */
+    in = open(g_log_path, O_RDONLY);
+    if (in < 0)
+        return;
+    close(in);
+
+    out = open_download(0);
+    if (out < 0)
+        return;
+    copy_log_to(out, g_log_path);
+    (void)fsync(out);
+    close(out);
+}
+
 void wc3_crash_note_message_box(const char *text, const char *caption,
                                 unsigned type, uint32_t caller)
 {

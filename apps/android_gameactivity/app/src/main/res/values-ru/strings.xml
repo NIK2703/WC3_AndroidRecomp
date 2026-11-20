@@ -17,7 +17,12 @@
     <string name="launch_selection_24">24 юнита</string>
     <string name="launch_selection_40">40 юнитов</string>
     <string name="launch_hide_cursor_label">Скрыть игровой курсор</string>
-    <string name="launch_parallel_label">Параллельные игровые циклы</string>
+    <string name="launch_cpu_cores_label">Ядра CPU</string>
+    <string name="launch_cpu_cores_hint">Выбрано %1$d из %2$d ядер · основной поток: CPU %3$d · параллелизм включён, воркеров: %1$d · применится при следующем запуске</string>
+    <string name="launch_cpu_cores_single">Выбрано одно ядро · основной поток: CPU %1$d · параллелизм выключен · выберите два и более ядра для воркеров · применится при следующем запуске</string>
+    <string name="launch_cpu_cores_unavailable">Не удалось определить доступные ядра · параллелизм выключен</string>
+    <string name="launch_cpu_cores_required">Выберите хотя бы одно ядро.</string>
+    <string name="launch_cpu_core_description">Ядро CPU %1$d</string>
     <string name="launch_gesture_mode_label">Жесты тачскрин управления</string>
     <string name="launch_gesture_mode_double">Двойное касание, одиночное с задержкой</string>
     <string name="launch_gesture_mode_single">Без двойного касания, одиночное без задержки</string>

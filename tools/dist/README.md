@@ -1,18 +1,18 @@
 # Distributed C/C++ compilation on IDEAPAD and the hotspot phone
 
-Accelerator for the canonical Android build. Every native variant
-(`release`, `debug`, `release_optimized`, `release_optimized_pgo`) automatically
-uses whichever workers are reachable: IDEAPAD, the local-network hotspot phone
-(POCO F5, Termux), or both. Either worker is optional; with neither one the
-build is a plain local build. The `release` and `debug` variants use both; the
-optimized variants use IDEAPAD by default and exclude the phone unless opted
-in. `build_dist.ps1` remains the explicit entry point for transport, capacity
-and diagnostic overrides. `ccache` remains the compiler launcher. On a cache
-miss `wc3_dist_cc.py` either hands the command to a remote `distccd` through a
-persistent TCP-over-SSH tunnel (default), or uses the original SSH helper
-protocol in `compile_one.py` (IDEAPAD only). If the phone's `sshd` is down,
-`phone_tunnel.ps1` first tries to start it through wireless adb and the phone's
-root `su`; the phone stays optional either way.
+Accelerator for the canonical Android build. Every native build (`release` or
+`debug`) automatically uses whichever workers are reachable: IDEAPAD, the
+local-network hotspot phone (POCO F5, Termux), or both. Either worker is
+optional; with neither one the build is a plain local build. `debug` uses both;
+`release` uses IDEAPAD by default and excludes the phone unless opted in. The
+internal PGO training pass is `-Variant release -Pgo generate`, not a third
+variant. `build_dist.ps1` remains the explicit entry point for transport,
+capacity and diagnostic overrides. `ccache` remains the compiler launcher. On a
+cache miss `wc3_dist_cc.py` either hands the command to a remote `distccd`
+through a persistent TCP-over-SSH tunnel (default), or uses the original SSH
+helper protocol in `compile_one.py` (IDEAPAD only). If the phone's `sshd` is
+down, `phone_tunnel.ps1` first tries to start it through wireless adb and the
+phone's root `su`; the phone stays optional either way.
 
 The same scripts also run in the opposite direction: a Termux phone can use the
 ideapad laptop, the ideacentre desktop, or both as its distcc workers. The
@@ -64,23 +64,23 @@ same four local slots. The custom `ssh` transport uses a counted local-slot
 file semaphore for the same cap.
 
 ThinLTO and PGO commands are distributable only when the automatic helper or
-`build_dist.ps1` enables them for an optimized variant. The eligibility rules
-are explicit: `-flto*` needs `WC3_DIST_ALLOW_LTO=1`; profile-generate needs
+`build_dist.ps1` enables them for `release`. The eligibility rules are explicit:
+`-flto*` needs `WC3_DIST_ALLOW_LTO=1`; profile-generate needs
 `WC3_DIST_ALLOW_PGO=1`; profile-use additionally needs
-`WC3_DIST_PGO_PROFILE_READY=1`. A final `release_optimized` build copies its
-merged profile to the same absolute path on IDEAPAD before the first compile,
-so the local preprocessor and the remote compiler both see a real profile.
-Without that copy, or without IDEAPAD, profile-use commands stay local instead
-of failing. The phone is excluded from both optimized variants by default: it
-has no merged PGO profile. Set `WC3_DIST_PHONE_OPTIMIZED=1` to include it; the
-LTO-only variant is the supported opt-in. PGO profile-use jobs will fall back
-locally on the phone because the profile is not copied there. If IDEAPAD is
-disabled and the phone is not opted in, an optimized build is simply local.
+`WC3_DIST_PGO_PROFILE_READY=1`. A final `release` build copies its merged
+profile to the same absolute path on IDEAPAD before the first compile, so the
+local preprocessor and the remote compiler both see a real profile. Without
+that copy, or without IDEAPAD, profile-use commands stay local instead of
+failing. The phone is excluded from `release` by default because it has no
+merged PGO profile. Set `WC3_DIST_PHONE_OPTIMIZED=1` to include it; LTO commands
+may then use the phone, while profile-use jobs fall back locally because the
+profile is not copied there. If IDEAPAD is disabled and the phone is not opted
+in, a release build is simply local.
 
 `-LocalSlots`, `-RemoteSlots`, `-PhoneSlots` and `-Jobs` override the detected
 values. The default `Jobs` is the local slot count plus every available
-worker's slots (IDEAPAD and/or phone); an optimized variant counts IDEAPAD by
-default and the phone only when `WC3_DIST_PHONE_OPTIMIZED=1`. Debug corpus
+worker's slots (IDEAPAD and/or phone); `release` counts IDEAPAD by default and
+the phone only when `WC3_DIST_PHONE_OPTIMIZED=1`. Debug corpus
 objects end in `-g0` and are distributable; commands whose final state keeps
 debug info use the localhost-only distcc host list and stay capped by
 `LocalSlots`. `-Jobs` only changes how many commands Ninja starts; it does not
@@ -183,26 +183,37 @@ connected serial, and `WC3_PHONE_UID` to skip UID detection.
 ## Usage
 
 ```powershell
-# normal release build: both workers are used when reachable
+# Release examples assume build/pgo/wc3.profdata exists.  Run
+# tools\android\build_release.ps1 (or the training pass below) first, or add
+# -Pgo off for the explicit optimized A/B.
+
+# final release build (requires build/pgo/wc3.profdata from the training pass)
 .\tools\android\build_app.ps1 -Variant release
 .\tools\android\build_apk.ps1 -Release
+
+# explicit optimized A/B without PGO
+.\tools\android\build_apk.ps1 -Release -Pgo off
+
+# debug build: both workers are used when reachable
+.\tools\android\build_app.ps1 -Variant debug
 
 # IDEAPAD only
 $env:WC3_DIST_PHONE = '0'
 .\tools\android\build_app.ps1 -Variant release
 
-# phone only (IDEAPAD disabled); the phone is still resolved every start
+# phone only (IDEAPAD disabled); debug uses the phone by default, release
+# needs WC3_DIST_PHONE_OPTIMIZED=1
 $env:WC3_DIST_IDEAPAD = '0'
-.\tools\android\build_app.ps1 -Variant release
+.\tools\android\build_app.ps1 -Variant debug
 # or, for one explicit run:
-.\tools\dist\build_dist.ps1 -Variant release -NoIdeapad
+.\tools\dist\build_dist.ps1 -Variant debug -NoIdeapad
 
 # neither worker: the same canonical build runs locally
 .\tools\dist\build_dist.ps1 -Variant release -NoIdeapad -NoPhone
 
-# include the phone in an optimized build (LTO is the supported case)
+# include the phone in a release build (LTO commands may use it)
 $env:WC3_DIST_PHONE_OPTIMIZED = '1'
-.\tools\dist\build_dist.ps1 -Variant release_optimized
+.\tools\dist\build_dist.ps1 -Variant release
 
 # force a local build for one invocation
 $env:WC3_DIST_AUTO = '0'
@@ -211,9 +222,12 @@ $env:WC3_DIST_AUTO = '0'
 # explicit transport entry point (distcc is the default)
 .\tools\dist\build_dist.ps1 -Variant release
 
-# final optimized build: copy the merged profile before compiling
-.\tools\dist\build_dist.ps1 -Variant release_optimized `
+# final release build: copy the merged profile before compiling
+.\tools\dist\build_dist.ps1 -Variant release -Pgo use `
     -PgoProfile build/pgo/wc3.profdata
+
+# internal PGO training pass (not a public variant)
+.\tools\dist\build_dist.ps1 -Variant release -Pgo generate
 
 # validate resolution, tunnel and environment without starting a build
 .\tools\dist\build_dist.ps1 -Variant release -DryRun
@@ -237,16 +251,16 @@ least one worker is reachable, the helper starts its tunnel and re-runs the
 same script with `WC3_DIST_ACTIVE=1`; the original script body executes
 unchanged in the child scope, and the helper stops the tunnels in `finally`
 after the child exits. No `try/finally` wraps the build body, so ordinary local
-builds keep the same code path. Automatic mode covers all four native
-variants. Ordinary variants use `Jobs=local+every available worker`: the debug
-corpus objects are `-g0` and run remotely, while `-g` commands stay on this
-machine through the localhost-only distcc path and remain capped by the local
-slots. `release_optimized_pgo` distributes the profile-generate training
-objects to IDEAPAD when it is available. `release_optimized` distributes
-ThinLTO and profile-use objects after the merged profile has been copied to
-IDEAPAD; if that copy fails, or IDEAPAD is absent, only profile-use commands
-stay local. The phone is left out of both optimized variants by default; set
-`WC3_DIST_PHONE_OPTIMIZED=1` to include it for the LTO-only case. Set
+builds keep the same code path. Automatic mode covers both variants and the
+internal release training pass. Debug and ordinary release builds use
+`Jobs=local+every available worker`: the debug corpus objects are `-g0` and run
+remotely, while `-g` commands stay on this machine through the localhost-only
+distcc path and remain capped by the local slots. A `release` training build
+distributes the profile-generate objects to IDEAPAD when it is available. A
+final `release` distributes ThinLTO and profile-use objects after the merged
+profile has been copied to IDEAPAD; if that copy fails, or IDEAPAD is absent,
+only profile-use commands stay local. The phone is left out of `release` by
+default; set `WC3_DIST_PHONE_OPTIMIZED=1` to include it for LTO commands. Set
 `WC3_DIST_IDEAPAD=0` for phone only, `WC3_DIST_PHONE=0` for IDEAPAD only (set
 both for local), and `WC3_DIST_JOBS=N` to override the detected Ninja
 concurrency for the automatic path. `build_dist.ps1` owns its tunnels
@@ -413,7 +427,7 @@ path has been validated by the dry run, the 16-job mixed compile, and the phone
 link/run test above. The independent paths are covered by the four dry runs and
 the phone-only transport probe; a full app link and install using
 phone-produced objects has not been run yet, and a full phone-only app build
-has not been run. A full `release_optimized` build with the new PGO/LTO
+has not been run. A full `release` build with the new PGO/LTO
 transport has not completed yet; the probes above establish object identity for
 the affected command shapes. The automatic path also covers the DXVK probe
 compiles when they are stale, but DXVK object identity under distcc has not yet
@@ -446,9 +460,9 @@ not start a project build by themselves.
   not obtain the top-app cpuset and reports the smaller `nproc` slot count
   (usually 3). The supervised `sv up` path keeps the normal app context and the
   6-8 slot boost.
-* The optimized variants use IDEAPAD by default. With IDEAPAD disabled and the
-  phone not opted in they are local; `WC3_DIST_PHONE_OPTIMIZED=1` enables the
-  phone-only LTO path. PGO profile-use remains local on the phone.
+* `release` uses IDEAPAD by default. With IDEAPAD disabled and the phone not
+  opted in it runs locally; `WC3_DIST_PHONE_OPTIMIZED=1` enables the phone-only
+  LTO path. PGO profile-use remains local on the phone.
 
 ## Termux client to worker machines
 
@@ -577,20 +591,20 @@ workers.
   `distccd` to `top-app` and reports the daemon's effective
   `Cpus_allowed_list` (6-8 CPUs here). Without root it reports `nproc`, usually
   3. The count is re-measured on every start, so it can change between builds.
-* The phone is excluded from `release_optimized` and `release_optimized_pgo`
-  by default. `WC3_DIST_PHONE_OPTIMIZED=1` opts in; the PGO profile is copied
-  only to IDEAPAD, so profile-use jobs on the phone fall back locally. With
-  IDEAPAD disabled, an optimized build is local unless the phone is opted in;
-  the LTO-only variant is the supported opt-in.
+* The phone is excluded from `release` by default. `WC3_DIST_PHONE_OPTIMIZED=1`
+  opts in; the PGO profile is copied only to IDEAPAD, so profile-use jobs on
+  the phone fall back locally. With IDEAPAD disabled, a release build is local
+  unless the phone is opted in for LTO commands.
 * Network cost is per translation unit. Large files with long compile times
   benefit most; small files can be slower than a local compile.
-* Automatic distribution covers all four native variants and every available
-  worker. Debug-info commands still run locally through the local-only path;
-  an explicit `build_dist.ps1 -Variant debug` follows the same rule. Optimized
-  variants distribute ThinLTO and profile-generate commands; profile-use needs
-  a successful profile copy to the same absolute path on IDEAPAD. The custom
-  `ssh` transport leaves profile-use local because it has no profile copy step,
-  and it does not use the phone; with IDEAPAD disabled it builds locally.
+* Automatic distribution covers both variants and the internal release
+  training pass, and every available worker. Debug-info commands still run
+  locally through the local-only path; an explicit `build_dist.ps1 -Variant
+  debug` follows the same rule. Release distributes ThinLTO and
+  profile-generate commands; profile-use needs a successful profile copy to
+  the same absolute path on IDEAPAD. The custom `ssh` transport leaves
+  profile-use local because it has no profile copy step, and it does not use
+  the phone; with IDEAPAD disabled it builds locally.
 * If the phone disappears mid-build, distcc retries those commands locally;
   the IDEAPAD tunnel is unaffected. If IDEAPAD disappears, its commands retry
   locally and the phone tunnel remains usable. The main state records whichever

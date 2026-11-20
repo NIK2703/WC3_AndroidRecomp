@@ -18,6 +18,20 @@ class LaunchSettingsStore(context: Context) {
         val gridEnabled = prefs.getBoolean(
             KEY_GRID_ENABLED, LaunchContract.DEFAULT_GRID_ENABLED
         )
+        /* The product default is the most performant available core: one core
+         * keeps the guest sequential, the main thread is pinned to it, and the
+         * table never starts with every CPU active.  An absent, empty or fully
+         * invalid saved list falls back to it. */
+        val availableCores = CpuTopology.availableCores()
+        val availableIds = availableCores.map { it.id }.toSet()
+        val savedWorkerCpus = parseWorkerCpus(
+            prefs.getString(KEY_WORKER_CPUS, null)
+        ).filter { it in availableIds }
+        val workerCpus = savedWorkerCpus.ifEmpty {
+            CpuTopology.pickBest(availableCores)
+                ?.let { listOf(it.id) }
+                .orEmpty()
+        }
         /* The new key is an integer 12/24/40.  A preference saved by a build
          * that only had the boolean switch is migrated once: true was the
          * 24-unit mode, false was the original 12.  An unknown integer falls
@@ -94,12 +108,16 @@ class LaunchSettingsStore(context: Context) {
                     LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT
                 }
             },
-            /* An absent preference keeps the parallel guest paths disabled; the
-             * switch is opt-in. */
-            parallelExecution = prefs.getBoolean(
-                KEY_PARALLEL_EXECUTION,
-                LaunchContract.DEFAULT_PARALLEL_EXECUTION
-            ),
+            /* There is no separate switch: two or more selected cores enable
+             * the parallel paths, one core keeps them sequential.  This also
+             * overrides an old preference that still contains the removed
+             * switch value. */
+            parallelExecution = workerCpus.size >= 2,
+            /* The default is the most performant allowed core.  A saved list
+             * is intersected with the CPUs this process is allowed to use;
+             * the settings screen repeats the intersection when it builds the
+             * table. */
+            workerCpus = workerCpus,
             /* The grid layer is opt-in.  The darken percent is clamped to the
              * slider range; an absent or negative cycle is the OLED-aware auto
              * default, resolved once here so the intent bundle carries a concrete
@@ -154,8 +172,11 @@ class LaunchSettingsStore(context: Context) {
         )
     }
 
-    fun save(settings: LaunchSettings): Boolean =
-        prefs.edit()
+    fun save(settings: LaunchSettings): Boolean {
+        val workerCpus = normalizedWorkerCpus(settings.workerCpus)
+        val selectionCap =
+            LaunchContract.normalizeSelectionCap(settings.selectionCap)
+        return prefs.edit()
             .putString(KEY_GAME_DIR, settings.gameDir)
             .putInt(KEY_WIDTH, settings.width)
             .putInt(KEY_HEIGHT, settings.height)
@@ -174,13 +195,11 @@ class LaunchSettingsStore(context: Context) {
                     LaunchContract.MAX_TAP_CLICK_DELAY_MS
                 )
             )
-            .putInt(
-                KEY_SELECTION_CAP,
-                LaunchContract.normalizeSelectionCap(settings.selectionCap)
-            )
+            .putInt(KEY_SELECTION_CAP, selectionCap)
             .remove(LEGACY_KEY_SELECTION_24)
             .putBoolean(KEY_HIDE_CURSOR, settings.hideCursor)
-            .putBoolean(KEY_PARALLEL_EXECUTION, settings.parallelExecution)
+            .putBoolean(KEY_PARALLEL_EXECUTION, workerCpus.size >= 2)
+            .putString(KEY_WORKER_CPUS, workerCpus.joinToString(","))
             .putBoolean(KEY_GRID_ENABLED, settings.gridEnabled)
             .putInt(
                 KEY_GRID_DARKEN_PERCENT,
@@ -218,6 +237,7 @@ class LaunchSettingsStore(context: Context) {
                 )
             )
             .commit()
+    }
 
     private companion object {
         const val PREFS_NAME = "wc3_launch"
@@ -238,10 +258,23 @@ class LaunchSettingsStore(context: Context) {
         const val KEY_HIDE_CURSOR = "hide_cursor"
         const val KEY_OVERLAY_OPACITY_PERCENT = "overlay_opacity_percent"
         const val KEY_PARALLEL_EXECUTION = "parallel_execution"
+        const val KEY_WORKER_CPUS = "worker_cpus"
         const val KEY_GRID_ENABLED = "grid_enabled"
         const val KEY_GRID_DARKEN_PERCENT = "grid_darken_percent"
         const val KEY_GRID_CYCLE_SECONDS = "grid_cycle_seconds"
         const val KEY_PRESENT_MODE = "present_mode"
         const val KEY_PRESENT_BUFFERS = "present_buffers"
+
+        private fun parseWorkerCpus(raw: String?): List<Int> =
+            normalizedWorkerCpus(
+                raw.orEmpty()
+                    .split(',')
+                    .mapNotNull { it.trim().toIntOrNull() }
+            )
+
+        private fun normalizedWorkerCpus(cpus: List<Int>): List<Int> =
+            cpus.filter { it in 0..CpuTopology.MAX_CPU_ID }
+                .distinct()
+                .sorted()
     }
 }

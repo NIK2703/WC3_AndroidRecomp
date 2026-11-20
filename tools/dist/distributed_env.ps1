@@ -20,11 +20,11 @@
 # normal local build, not an error.  IDEAPAD and the hotspot phone are
 # independent: either can be used alone, or both together.  If the phone's sshd
 # is down, phone_tunnel.ps1 tries to start it through wireless adb and root su
-# before declaring the phone unavailable.  release, debug and
-# userdebug distribute ordinary corpus compiles to every available worker.  The
-# optimized variants use IDEAPAD by default and exclude the phone because it
-# has no merged PGO profile and only the Windows NDK has proven LTO/PGO
-# output; set WC3_DIST_PHONE_OPTIMIZED=1 to include the phone there.
+# before declaring the phone unavailable.  release and debug distribute
+# ordinary corpus compiles to every available worker.  release is the optimized
+# product and uses IDEAPAD by default; it excludes the phone because the phone
+# has no merged PGO profile and only the Windows NDK has proven LTO/PGO output.
+# Set WC3_DIST_PHONE_OPTIMIZED=1 to include the phone there.
 #
 # Environment toggles:
 #   WC3_DIST_AUTO=0      force a local build
@@ -129,9 +129,9 @@ function Enable-Wc3DistributedBuild {
         [int]$LocalSlots = 0,
         [int]$RemoteSlots = 0,
         [int]$RemotePort = 3632,
-        # Merged PGO profile for the final release_optimized build.  The
-        # tunnel copies it to the same absolute path on IDEAPAD; an empty value
-        # leaves profile-use compiles on the local-only path.
+        # Merged PGO profile for the final release build.  The tunnel copies
+        # it to the same absolute path on IDEAPAD; an empty value leaves
+        # profile-use compiles on the local-only path.
         [string]$PgoProfile = '',
         # Either worker can be disabled independently; the other one is still
         # used if it is available.
@@ -147,17 +147,16 @@ function Enable-Wc3DistributedBuild {
     if ($env:WC3_DIST_AUTO -eq '0') {
         return $null
     }
-    if ($Variant -notin @('release', 'debug', 'userdebug',
-            'release_optimized', 'release_optimized_pgo')) {
+    if ($Variant -notin @('release', 'debug')) {
         return $null
     }
-    $allowPgo = $Variant -in @('release_optimized', 'release_optimized_pgo')
-    $allowLto = $Variant -eq 'release_optimized'
+    $allowPgo = $Variant -eq 'release'
+    $allowLto = $Variant -eq 'release'
     $useIdeapad = -not $NoIdeapad
     if ($env:WC3_DIST_IDEAPAD -eq '0') { $useIdeapad = $false }
     $usePhone = -not $NoPhone
     if ($env:WC3_DIST_PHONE -eq '0') { $usePhone = $false }
-    if ($Variant -in @('release_optimized', 'release_optimized_pgo') -and
+    if ($Variant -eq 'release' -and
         $env:WC3_DIST_PHONE_OPTIMIZED -ne '1') {
         $usePhone = $false
     }

@@ -1,0 +1,769 @@
+diff --git a/src/d3d9/d3d9_adapter.cpp b/src/d3d9/d3d9_adapter.cpp
+index 4e93fb1..25557af 100644
+--- a/src/d3d9/d3d9_adapter.cpp
++++ b/src/d3d9/d3d9_adapter.cpp
+@@ -156,6 +156,19 @@ namespace dxvk {
+     if (mapping.FormatColor == VK_FORMAT_UNDEFINED)
+       return D3DERR_NOTAVAILABLE;
+ 
++    /* WC3: BC formats are usable only when the device exposes
++     * textureCompressionBC.  Without this check a game that ignores the
++     * failed format query can ask DXVK to create an image the driver
++     * cannot sample. */
++    if (!m_adapter->features().core.features.textureCompressionBC) {
++      const DxvkFormatInfo* formatInfo = imageFormatInfo(mapping.FormatColor);
++      if (formatInfo != nullptr && formatInfo->blockSize.width > 1) {
++        Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: rejecting block-compressed format ",
++          CheckFormat, ": textureCompressionBC missing"));
++        return D3DERR_NOTAVAILABLE;
++      }
++    }
++
+     if (mapping.FormatSrgb  == VK_FORMAT_UNDEFINED && srgb)
+       return D3DERR_NOTAVAILABLE;
+ 
+@@ -349,7 +362,6 @@ namespace dxvk {
+                                     | D3DPRASTERCAPS_MIPMAPLODBIAS
+                                  /* | D3DPRASTERCAPS_ZBUFFERLESSHSR */
+                                     | D3DPRASTERCAPS_FOGRANGE
+-                                    | D3DPRASTERCAPS_ANISOTROPY
+                                  /* | D3DPRASTERCAPS_WBUFFER */
+                                     | D3DPRASTERCAPS_WFOG
+                                     | D3DPRASTERCAPS_ZFOG
+@@ -358,6 +370,11 @@ namespace dxvk {
+                                     | D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS
+                                     | D3DPRASTERCAPS_DEPTHBIAS
+                                     | D3DPRASTERCAPS_MULTISAMPLE_TOGGLE; // <-- TODO! (but difficult in Vk)
++
++    /* WC3: only advertise anisotropy when the Vulkan device can create
++     * anisotropic samplers. */
++    if (m_adapter->features().core.features.samplerAnisotropy)
++      pCaps->RasterCaps |= D3DPRASTERCAPS_ANISOTROPY;
+     // Z Comparison Caps
+     pCaps->ZCmpCaps                 = D3DPCMPCAPS_NEVER
+                                     | D3DPCMPCAPS_LESS
+@@ -455,7 +472,8 @@ namespace dxvk {
+     // Max Texture Aspect Ratio
+     pCaps->MaxTextureAspectRatio    = 8192;
+     // Max Anisotropy
+-    pCaps->MaxAnisotropy            = 16;
++    pCaps->MaxAnisotropy            = m_adapter->features().core.features.samplerAnisotropy
++                                    ? 16 : 1;
+     // Max Vertex W
+     pCaps->MaxVertexW               = 1e10f;
+     // Guard Bands
+@@ -522,7 +540,12 @@ namespace dxvk {
+     // Max Active Lights
+     pCaps->MaxActiveLights           = caps::MaxEnabledLights;
+     // Max User Clip Planes
+-    pCaps->MaxUserClipPlanes         = MaxClipPlanes;
++    pCaps->MaxUserClipPlanes         = m_adapter->features().core.features.shaderClipDistance
++                                     ? MaxClipPlanes : 0;
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: caps MaxUserClipPlanes=", pCaps->MaxUserClipPlanes,
++      " MaxAnisotropy=", pCaps->MaxAnisotropy,
++      " fillModeNonSolid=", m_adapter->features().core.features.fillModeNonSolid ? 1 : 0,
++      " textureCompressionBC=", m_adapter->features().core.features.textureCompressionBC ? 1 : 0));
+     // Max Vertex Blend Matrices
+     pCaps->MaxVertexBlendMatrices    = 4;
+     // Max Vertex Blend Matrix Index
+diff --git a/src/d3d9/d3d9_common_texture.cpp b/src/d3d9/d3d9_common_texture.cpp
+index 22bc37c..33a9577 100644
+--- a/src/d3d9/d3d9_common_texture.cpp
++++ b/src/d3d9/d3d9_common_texture.cpp
+@@ -128,6 +128,19 @@ namespace dxvk {
+         return D3DERR_INVALIDCALL;
+     }
+ 
++    /* WC3: a guest that ignores CheckDeviceFormat must not reach
++     * vkCreateImage with a block-compressed format on a device without
++     * textureCompressionBC. */
++    if (mapping.IsValid()
++     && !pDevice->GetDXVKDevice()->features().core.features.textureCompressionBC) {
++      const DxvkFormatInfo* formatInfo = imageFormatInfo(mapping.FormatColor);
++      if (formatInfo != nullptr && formatInfo->blockSize.width > 1) {
++        Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: rejecting block-compressed texture ",
++          pDesc->Format, ": textureCompressionBC missing"));
++        return D3DERR_INVALIDCALL;
++      }
++    }
++
+     ///////////////////
+     // Desc Validation
+ 
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index faf991c..cff70bc 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -26,6 +26,7 @@
+ 
+ #include <algorithm>
+ #include <cfloat>
++#include <string>
+ #ifdef MSC_VER
+ #pragma fenv_access (on)
+ #endif
+@@ -1750,7 +1751,7 @@ namespace dxvk {
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetClipPlane(DWORD Index, const float* pPlane) {
+     D3D9DeviceLock lock = LockDevice();
+ 
+-    if (unlikely(Index >= caps::MaxClipPlanes || !pPlane))
++    if (unlikely(Index >= GetMaxClipPlanes() || !pPlane))
+       return D3DERR_INVALIDCALL;
+ 
+     if (unlikely(ShouldRecord()))
+@@ -1776,7 +1777,7 @@ namespace dxvk {
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetClipPlane(DWORD Index, float* pPlane) {
+     D3D9DeviceLock lock = LockDevice();
+ 
+-    if (unlikely(Index >= caps::MaxClipPlanes || !pPlane))
++    if (unlikely(Index >= GetMaxClipPlanes() || !pPlane))
+       return D3DERR_INVALIDCALL;
+ 
+     for (uint32_t i = 0; i < 4; i++)
+@@ -2597,7 +2598,7 @@ namespace dxvk {
+       static bool s_errorShown = false;
+ 
+       if (!std::exchange(s_errorShown, true))
+-        Logger::err("D3D9DeviceEx::ProcessVertices: SWVP emu unsupported (vertexPipelineStoresAndAtomics)");
++        Logger::err("D3D9DeviceEx::ProcessVertices: SWVP emu unsupported (vertexPipelineStoresAndAtomics + geometryShader)");
+ 
+       return D3D_OK;
+     }
+@@ -3878,7 +3879,10 @@ namespace dxvk {
+ 
+ 
+   bool D3D9DeviceEx::SupportsSWVP() {
+-    return m_dxvkDevice->features().core.features.vertexPipelineStoresAndAtomics;
++    /* The software vertex-processing emulator writes vertices through a
++     * geometry shader, so both features are required. */
++    return m_dxvkDevice->features().core.features.vertexPipelineStoresAndAtomics
++        && m_dxvkDevice->features().core.features.geometryShader;
+   }
+ 
+ 
+@@ -3891,17 +3895,28 @@ namespace dxvk {
+     DxvkDeviceFeatures supported = adapter->features();
+     DxvkDeviceFeatures enabled = {};
+ 
++    /* WC3: never request a feature that the adapter does not expose.
++     * A missing feature must degrade a D3D9 capability instead of failing
++     * vkCreateDevice.  The affected paths are guarded in BindRasterizerState
++     * (fillModeNonSolid), IsClipPlaneEnabled() and the fixed-function/dxso
++     * shader compilers (shaderClipDistance), D3D9Adapter::CheckDeviceFormat
++     * (textureCompressionBC), BindSampler and GetDeviceCaps
++     * (samplerAnisotropy), D3D9Query (occlusionQueryPrecise and
++     * pipelineStatisticsQuery), and DxvkCommandList::resetQuery
++     * (hostQueryReset). */
+     // Geometry shaders are used for some meta ops
+-    enabled.core.features.geometryShader = VK_TRUE;
+-    enabled.core.features.robustBufferAccess = VK_TRUE;
+-    enabled.extRobustness2.robustBufferAccess2 = supported.extRobustness2.robustBufferAccess2;
++    enabled.core.features.geometryShader = supported.core.features.geometryShader;
++    enabled.core.features.robustBufferAccess = supported.core.features.robustBufferAccess;
++    enabled.extRobustness2.robustBufferAccess2 = supported.extRobustness2.robustBufferAccess2
++                                              && supported.core.features.robustBufferAccess;
+ 
+     enabled.extMemoryPriority.memoryPriority = supported.extMemoryPriority.memoryPriority;
+ 
+     enabled.extShaderDemoteToHelperInvocation.shaderDemoteToHelperInvocation = supported.extShaderDemoteToHelperInvocation.shaderDemoteToHelperInvocation;
+ 
+     enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor;
+-    enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor;
++    enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor
++                                                                           && supported.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor;
+ 
+     // Null Descriptors
+     enabled.extRobustness2.nullDescriptor = supported.extRobustness2.nullDescriptor;
+@@ -3910,45 +3925,115 @@ namespace dxvk {
+     enabled.core.features.vertexPipelineStoresAndAtomics = supported.core.features.vertexPipelineStoresAndAtomics;
+ 
+     // DXVK Meta
+-    enabled.core.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+-    enabled.core.features.imageCubeArray = VK_TRUE;
++    enabled.core.features.shaderStorageImageWriteWithoutFormat = supported.core.features.shaderStorageImageWriteWithoutFormat;
++    enabled.core.features.imageCubeArray = supported.core.features.imageCubeArray;
+ 
+     // SM1 level hardware
+-    enabled.core.features.depthClamp = VK_TRUE;
+-    enabled.core.features.depthBiasClamp = VK_TRUE;
+-    enabled.core.features.fillModeNonSolid = VK_TRUE;
++    enabled.core.features.depthClamp = supported.core.features.depthClamp;
++    enabled.core.features.depthBiasClamp = supported.core.features.depthBiasClamp;
++    enabled.core.features.fillModeNonSolid = supported.core.features.fillModeNonSolid;
+     enabled.core.features.pipelineStatisticsQuery = supported.core.features.pipelineStatisticsQuery;
+-    enabled.core.features.sampleRateShading = VK_TRUE;
++    enabled.core.features.sampleRateShading = supported.core.features.sampleRateShading;
+     enabled.core.features.samplerAnisotropy = supported.core.features.samplerAnisotropy;
+-    enabled.core.features.shaderClipDistance = VK_TRUE;
+-    enabled.core.features.shaderCullDistance = VK_TRUE;
++    enabled.core.features.shaderClipDistance = supported.core.features.shaderClipDistance;
++    enabled.core.features.shaderCullDistance = supported.core.features.shaderCullDistance;
+ 
+     // Ensure we support real BC formats and unofficial vendor ones.
+-    enabled.core.features.textureCompressionBC = VK_TRUE;
++    enabled.core.features.textureCompressionBC = supported.core.features.textureCompressionBC;
+ 
+     enabled.extDepthClipEnable.depthClipEnable = supported.extDepthClipEnable.depthClipEnable;
+-    enabled.extHostQueryReset.hostQueryReset = VK_TRUE;
++    enabled.extHostQueryReset.hostQueryReset = supported.extHostQueryReset.hostQueryReset;
+ 
+     // SM2 level hardware
+-    enabled.core.features.occlusionQueryPrecise = VK_TRUE;
++    enabled.core.features.occlusionQueryPrecise = supported.core.features.occlusionQueryPrecise;
+ 
+     // SM3 level hardware
+-    enabled.core.features.multiViewport = VK_TRUE;
+-    enabled.core.features.independentBlend = VK_TRUE;
++    enabled.core.features.multiViewport = supported.core.features.multiViewport;
++    enabled.core.features.independentBlend = supported.core.features.independentBlend;
+ 
+     // D3D10 level hardware supports this in D3D9 native.
+-    enabled.core.features.fullDrawIndexUint32 = VK_TRUE;
++    enabled.core.features.fullDrawIndexUint32 = supported.core.features.fullDrawIndexUint32;
+ 
+     // Enable depth bounds test if we support it.
+     enabled.core.features.depthBounds = supported.core.features.depthBounds;
+ 
+-    if (supported.extCustomBorderColor.customBorderColorWithoutFormat) {
+-      enabled.extCustomBorderColor.customBorderColors             = VK_TRUE;
+-      enabled.extCustomBorderColor.customBorderColorWithoutFormat = VK_TRUE;
+-    }
++    enabled.extCustomBorderColor.customBorderColors = supported.extCustomBorderColor.customBorderColors;
++    enabled.extCustomBorderColor.customBorderColorWithoutFormat = supported.extCustomBorderColor.customBorderColors
++                                                               && supported.extCustomBorderColor.customBorderColorWithoutFormat;
+ 
+     enabled.extNonSeamlessCubeMap.nonSeamlessCubeMap = supported.extNonSeamlessCubeMap.nonSeamlessCubeMap;
+ 
++    /* WC3 diagnostic: name the adapter features that are absent.  The
++     * requested set is copied from the adapter, so every name below is a
++     * degraded D3D9 capability, not a device-creation failure.  DXVK emits
++     * this only at debug level; the debug build sets DXVK_LOG_LEVEL=debug in
++     * an ELF constructor before dxvk::Logger and repeats it in
++     * wc3_dxvk_prepare(). */
++    std::string missing;
++    auto noteMissing = [&missing] (const char* name, VkBool32 value) {
++      if (!value) {
++        if (!missing.empty())
++          missing += ", ";
++        missing += name;
++      }
++    };
++
++    noteMissing("geometryShader", supported.core.features.geometryShader);
++    noteMissing("robustBufferAccess", supported.core.features.robustBufferAccess);
++    noteMissing("vertexPipelineStoresAndAtomics", supported.core.features.vertexPipelineStoresAndAtomics);
++    noteMissing("shaderStorageImageWriteWithoutFormat", supported.core.features.shaderStorageImageWriteWithoutFormat);
++    noteMissing("imageCubeArray", supported.core.features.imageCubeArray);
++    noteMissing("depthClamp", supported.core.features.depthClamp);
++    noteMissing("depthBiasClamp", supported.core.features.depthBiasClamp);
++    noteMissing("fillModeNonSolid", supported.core.features.fillModeNonSolid);
++    noteMissing("pipelineStatisticsQuery", supported.core.features.pipelineStatisticsQuery);
++    noteMissing("sampleRateShading", supported.core.features.sampleRateShading);
++    noteMissing("samplerAnisotropy", supported.core.features.samplerAnisotropy);
++    noteMissing("shaderClipDistance", supported.core.features.shaderClipDistance);
++    noteMissing("shaderCullDistance", supported.core.features.shaderCullDistance);
++    noteMissing("textureCompressionBC", supported.core.features.textureCompressionBC);
++    noteMissing("occlusionQueryPrecise", supported.core.features.occlusionQueryPrecise);
++    noteMissing("multiViewport", supported.core.features.multiViewport);
++    noteMissing("independentBlend", supported.core.features.independentBlend);
++    noteMissing("fullDrawIndexUint32", supported.core.features.fullDrawIndexUint32);
++    noteMissing("depthBounds", supported.core.features.depthBounds);
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: missing adapter core features: ",
++      missing.empty() ? "none" : missing.c_str()));
++
++    missing.clear();
++    noteMissing("shaderDrawParameters", supported.shaderDrawParameters.shaderDrawParameters);
++    noteMissing("formatA4B4G4R4", supported.ext4444Formats.formatA4B4G4R4);
++    noteMissing("formatA4R4G4B4", supported.ext4444Formats.formatA4R4G4B4);
++    noteMissing("customBorderColors", supported.extCustomBorderColor.customBorderColors);
++    noteMissing("customBorderColorWithoutFormat", supported.extCustomBorderColor.customBorderColorWithoutFormat);
++    noteMissing("depthClipEnable", supported.extDepthClipEnable.depthClipEnable);
++    noteMissing("extendedDynamicState", supported.extExtendedDynamicState.extendedDynamicState);
++    noteMissing("hostQueryReset", supported.extHostQueryReset.hostQueryReset);
++    noteMissing("memoryMapPlaced", supported.extMapMemoryPlaced.memoryMapPlaced);
++    noteMissing("memoryPriority", supported.extMemoryPriority.memoryPriority);
++    noteMissing("nonSeamlessCubeMap", supported.extNonSeamlessCubeMap.nonSeamlessCubeMap);
++    noteMissing("robustBufferAccess2", supported.extRobustness2.robustBufferAccess2);
++    noteMissing("nullDescriptor", supported.extRobustness2.nullDescriptor);
++    noteMissing("shaderDemoteToHelperInvocation", supported.extShaderDemoteToHelperInvocation.shaderDemoteToHelperInvocation);
++    noteMissing("vertexAttributeInstanceRateDivisor", supported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor);
++    noteMissing("vertexAttributeInstanceRateZeroDivisor", supported.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor);
++    noteMissing("bufferDeviceAddress", supported.khrBufferDeviceAddress.bufferDeviceAddress);
++    noteMissing("timelineSemaphore", supported.khrTimelineSemaphore.timelineSemaphore);
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: missing adapter extension features: ",
++      missing.empty() ? "none" : missing.c_str()));
++
++    if (supported.extRobustness2.robustBufferAccess2
++     && !supported.core.features.robustBufferAccess)
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: robustBufferAccess2 disabled because core robustBufferAccess is missing");
++
++    if (supported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor
++     && !supported.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor)
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: vertexAttributeInstanceRateZeroDivisor disabled because the divisor feature is missing");
++
++    if (supported.extCustomBorderColor.customBorderColors
++     && !supported.extCustomBorderColor.customBorderColorWithoutFormat)
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: customBorderColorWithoutFormat disabled because customBorderColors is missing");
++
+     return enabled;
+   }
+ 
+@@ -5835,6 +5920,18 @@ namespace dxvk {
+     state.depthClipEnable = true;
+     state.frontFace       = VK_FRONT_FACE_CLOCKWISE;
+     state.polygonMode     = DecodeFillMode(D3DFILLMODE(rs[D3DRS_FILLMODE]));
++
++    /* WC3: Mali and some other mobile devices do not expose
++     * fillModeNonSolid.  D3D9 hardware without point/wireframe fill
++     * ignores those states and rasterizes solid, so clamp instead of
++     * creating a pipeline the device cannot support. */
++    if (!m_dxvkDevice->features().core.features.fillModeNonSolid) {
++      if (state.polygonMode != VK_POLYGON_MODE_FILL
++       && Logger::logLevel() <= LogLevel::Debug)
++        Logger::debug("[DXVK_DEBUG] WC3 D3D9: fillModeNonSolid missing; clamping polygon mode to FILL");
++      state.polygonMode = VK_POLYGON_MODE_FILL;
++    }
++
+     state.conservativeMode = VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
+     state.sampleCount     = 0;
+ 
+@@ -5921,6 +6018,17 @@ namespace dxvk {
+ 
+     NormalizeSamplerKey(key);
+ 
++    /* WC3: samplerAnisotropy is optional.  Reporting MaxAnisotropy=1 in
++     * the caps is not enough because games may set the sampler state
++     * directly, so clamp here as well. */
++    if (!m_dxvkDevice->features().core.features.samplerAnisotropy) {
++      if (key.MaxAnisotropy > 1
++       && Logger::logLevel() <= LogLevel::Debug)
++        Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: samplerAnisotropy missing; clamping MaxAnisotropy ",
++          key.MaxAnisotropy, " to 1"));
++      key.MaxAnisotropy = 1;
++    }
++
+     auto samplerInfo = RemapStateSamplerShader(Sampler);
+ 
+     const uint32_t slot = computeResourceSlotId(
+@@ -7374,13 +7482,21 @@ namespace dxvk {
+     }
+ 
+     if (m_implicitSwapchain != nullptr) {
+-      if (FAILED(m_implicitSwapchain->Reset(pPresentationParameters, pFullscreenDisplayMode)))
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: ResetSwapChain: resetting implicit swapchain");
++      if (FAILED(m_implicitSwapchain->Reset(pPresentationParameters, pFullscreenDisplayMode))) {
++        Logger::debug("[DXVK_DEBUG] WC3 D3D9: ResetSwapChain: implicit swapchain reset failed");
+         return D3DERR_INVALIDCALL;
++      }
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: ResetSwapChain: implicit swapchain reset done");
+     }
+-    else
++    else {
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: ResetSwapChain: constructing implicit swapchain");
+       m_implicitSwapchain = new D3D9SwapChainEx(this, pPresentationParameters, pFullscreenDisplayMode);
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: ResetSwapChain: implicit swapchain constructed");
++    }
+ 
+     if (pPresentationParameters->EnableAutoDepthStencil) {
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: ResetSwapChain: creating auto depth-stencil");
+       D3D9_COMMON_TEXTURE_DESC desc;
+       desc.Width              = pPresentationParameters->BackBufferWidth;
+       desc.Height             = pPresentationParameters->BackBufferHeight;
+@@ -7396,12 +7512,15 @@ namespace dxvk {
+       desc.IsBackBuffer       = FALSE;
+       desc.IsAttachmentOnly   = TRUE;
+ 
+-      if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, &desc)))
++      if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, &desc))) {
++        Logger::debug("[DXVK_DEBUG] WC3 D3D9: ResetSwapChain: auto depth-stencil normalize failed");
+         return D3DERR_NOTAVAILABLE;
++      }
+ 
+       m_autoDepthStencil = new D3D9Surface(this, &desc, nullptr, nullptr);
+       m_initializer->InitTexture(m_autoDepthStencil->GetCommonTexture());
+       SetDepthStencilSurface(m_autoDepthStencil.ptr());
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: ResetSwapChain: auto depth-stencil ready");
+     }
+ 
+     SetRenderTarget(0, m_implicitSwapchain->GetBackBuffer(0));
+@@ -7409,21 +7528,28 @@ namespace dxvk {
+     // Force this if we end up binding the same RT to make scissor change go into effect.
+     BindViewportAndScissor();
+ 
++    Logger::debug("[DXVK_DEBUG] WC3 D3D9: ResetSwapChain: done");
+     return D3D_OK;
+   }
+ 
+ 
+   HRESULT D3D9DeviceEx::InitialReset(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode) {
++    Logger::debug("[DXVK_DEBUG] WC3 D3D9: InitialReset: ResetSwapChain begin");
+     HRESULT hr = ResetSwapChain(pPresentationParameters, pFullscreenDisplayMode);
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: InitialReset: ResetSwapChain hr=", int32_t(hr)));
+     if (FAILED(hr))
+       return hr;
+ 
++    Logger::debug("[DXVK_DEBUG] WC3 D3D9: InitialReset: ResetState begin");
+     hr = ResetState(pPresentationParameters);
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: InitialReset: ResetState hr=", int32_t(hr)));
+     if (FAILED(hr))
+       return hr;
+ 
++    Logger::debug("[DXVK_DEBUG] WC3 D3D9: InitialReset: Flush begin");
+     Flush();
+     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
++    Logger::debug("[DXVK_DEBUG] WC3 D3D9: InitialReset: done");
+ 
+     return D3D_OK;
+   }
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index 2134f29..d294fd6 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -803,8 +803,17 @@ namespace dxvk {
+       return m_state.renderStates[D3DRS_ZENABLE] && m_state.depthStencil != nullptr;
+     }
+ 
++    inline uint32_t GetMaxClipPlanes() const {
++      /* WC3: shaderClipDistance is optional.  Devices without it have no
++       * user clip planes, so report the same limit as real D3D9 hardware
++       * without the capability. */
++      return m_dxvkDevice->features().core.features.shaderClipDistance
++        ? caps::MaxClipPlanes : 0;
++    }
++
+     inline bool IsClipPlaneEnabled() {
+-      return m_state.renderStates[D3DRS_CLIPPLANEENABLE] != 0;
++      return GetMaxClipPlanes() != 0
++          && m_state.renderStates[D3DRS_CLIPPLANEENABLE] != 0;
+     }
+ 
+     void BindMultiSampleState();
+diff --git a/src/d3d9/d3d9_fixed_function.cpp b/src/d3d9/d3d9_fixed_function.cpp
+index 00d14ff..f3a9a22 100644
+--- a/src/d3d9/d3d9_fixed_function.cpp
++++ b/src/d3d9/d3d9_fixed_function.cpp
+@@ -1439,7 +1439,8 @@ namespace dxvk {
+     setupRenderStateInfo();
+ 
+     // VS Caps
+-    m_module.enableCapability(spv::CapabilityClipDistance);
++    if (m_vsKey.Data.Contents.VertexClipping)
++      m_module.enableCapability(spv::CapabilityClipDistance);
+ 
+     emitLightTypeDecl();
+     emitBaseBufferDecl();
+diff --git a/src/d3d9/d3d9_interface.cpp b/src/d3d9/d3d9_interface.cpp
+index 43f14e8..a5110fe 100644
+--- a/src/d3d9/d3d9_interface.cpp
++++ b/src/d3d9/d3d9_interface.cpp
+@@ -332,9 +332,15 @@ namespace dxvk {
+ 
+     auto dxvkAdapter = adapter->GetDXVKAdapter();
+ 
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: CreateDeviceEx adapter=", Adapter,
++      " type=", uint32_t(DeviceType), " flags=", BehaviorFlags));
++
+     try {
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: creating DXVK device");
+       auto dxvkDevice = dxvkAdapter->createDevice(m_instance, D3D9DeviceEx::GetDeviceFeatures(dxvkAdapter));
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: DXVK device created");
+ 
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: constructing D3D9DeviceEx");
+       auto* device = new D3D9DeviceEx(
+         this,
+         adapter,
+@@ -342,15 +348,20 @@ namespace dxvk {
+         hFocusWindow,
+         BehaviorFlags,
+         dxvkDevice);
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: D3D9DeviceEx constructed");
+ 
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: InitialReset begin");
+       HRESULT hr = device->InitialReset(pPresentationParameters, pFullscreenDisplayMode);
++      Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: InitialReset hr=", int32_t(hr)));
+ 
+       if (FAILED(hr))
+         return hr;
+ 
+       *ppReturnedDeviceInterface = ref(device);
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: CreateDeviceEx succeeded");
+     }
+     catch (const DxvkError& e) {
++      Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: CreateDeviceEx failed: ", e.message()));
+       Logger::err(e.message());
+       return D3DERR_NOTAVAILABLE;
+     }
+diff --git a/src/d3d9/d3d9_query.cpp b/src/d3d9/d3d9_query.cpp
+index 7ce47cf..60e8b79 100644
+--- a/src/d3d9/d3d9_query.cpp
++++ b/src/d3d9/d3d9_query.cpp
+@@ -21,9 +21,12 @@ namespace dxvk {
+         break;
+ 
+       case D3DQUERYTYPE_OCCLUSION:
++        if (!dxvkDevice->features().core.features.occlusionQueryPrecise)
++          Logger::debug("[DXVK_DEBUG] WC3 D3D9: occlusionQueryPrecise missing; using imprecise occlusion query");
+         m_query[0] = dxvkDevice->createGpuQuery(
+           VK_QUERY_TYPE_OCCLUSION,
+-          VK_QUERY_CONTROL_PRECISE_BIT, 0);
++          dxvkDevice->features().core.features.occlusionQueryPrecise
++            ? VK_QUERY_CONTROL_PRECISE_BIT : 0, 0);
+         break;
+ 
+       case D3DQUERYTYPE_TIMESTAMP:
+@@ -327,7 +330,15 @@ namespace dxvk {
+       case D3DQUERYTYPE_TIMESTAMP:
+       case D3DQUERYTYPE_TIMESTAMPDISJOINT:
+       case D3DQUERYTYPE_TIMESTAMPFREQ:
++        return D3D_OK;
++
+       case D3DQUERYTYPE_VERTEXSTATS:
++        /* WC3: pipeline statistics queries need the Vulkan feature.  Do not
++         * create a query pool the device cannot use. */
++        if (!pDevice->GetDXVKDevice()->features().core.features.pipelineStatisticsQuery) {
++          Logger::debug("[DXVK_DEBUG] WC3 D3D9: pipelineStatisticsQuery missing; VERTEXSTATS unavailable");
++          return D3DERR_NOTAVAILABLE;
++        }
+         return D3D_OK;
+ 
+       default:
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index d9c50c0..ae8628a 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -217,13 +217,25 @@ namespace dxvk {
+     m_presentParams = *pPresentParams;
+     m_window = m_presentParams.hDeviceWindow;
+ 
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: swapchain ctor extent=",
++      m_presentParams.BackBufferWidth, "x", m_presentParams.BackBufferHeight,
++      " backbuffers=", m_presentParams.BackBufferCount,
++      " format=", m_presentParams.BackBufferFormat,
++      " windowed=", m_presentParams.Windowed ? 1 : 0));
++
+     UpdatePresentRegion(nullptr, nullptr);
+-    if (m_window && !pDevice->GetOptions()->deferSurfaceCreation)
++    if (m_window && !pDevice->GetOptions()->deferSurfaceCreation) {
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: swapchain CreatePresenter begin");
+       CreatePresenter();
++      Logger::debug("[DXVK_DEBUG] WC3 D3D9: swapchain CreatePresenter done");
++    }
+ 
++    Logger::debug("[DXVK_DEBUG] WC3 D3D9: swapchain CreateBackBuffers begin");
+     CreateBackBuffers(m_presentParams.BackBufferCount);
++    Logger::debug("[DXVK_DEBUG] WC3 D3D9: swapchain CreateBackBuffers done");
+     CreateBlitter();
+     CreateHud();
++    Logger::debug("[DXVK_DEBUG] WC3 D3D9: swapchain ctor done");
+ 
+     InitRamp();
+ 
+@@ -1015,16 +1027,24 @@ namespace dxvk {
+     presenterDesc.numPresentModes = PickPresentModes(false, presenterDesc.presentModes);
+     presenterDesc.fullScreenExclusive = PickFullscreenMode();
+ 
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: Presenter extent=",
++      presenterDesc.imageExtent.width, "x", presenterDesc.imageExtent.height,
++      " images=", presenterDesc.imageCount,
++      " formats=", presenterDesc.numFormats,
++      " presentModes=", presenterDesc.numPresentModes));
++
+     m_presenter = new vk::Presenter(m_window,
+       m_device->adapter()->vki(),
+       m_device->vkd(),
+       presenterDevice,
+       presenterDesc);
++    Logger::debug("[DXVK_DEBUG] WC3 D3D9: Presenter created");
+ 
+     m_presenter->setFrameRateLimit(m_parent->GetOptions()->maxFrameRate);
+     m_presenter->setFrameRateLimiterRefreshRate(m_displayRefreshRate);
+ 
+     CreateRenderTargetViews();
++    Logger::debug("[DXVK_DEBUG] WC3 D3D9: Presenter render target views created");
+   }
+ 
+ 
+diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
+index b68608a..d0f220a 100644
+--- a/src/dxso/dxso_compiler.cpp
++++ b/src/dxso/dxso_compiler.cpp
+@@ -479,7 +479,8 @@ namespace dxvk {
+ 
+ 
+   void DxsoCompiler::emitVsInit() {
+-    m_module.enableCapability(spv::CapabilityClipDistance);
++    if (m_moduleInfo.options.supportsClipDistance)
++      m_module.enableCapability(spv::CapabilityClipDistance);
+ 
+     // Only VS needs this, because PS has
+     // non-indexable specialized output regs
+@@ -3911,7 +3912,8 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+       m_vs.functionId, 0, nullptr);
+     this->emitLinkerOutputSetup();
+ 
+-    this->emitVsClipping();
++    if (m_moduleInfo.options.supportsClipDistance)
++      this->emitVsClipping();
+ 
+     this->emitFunctionEnd();
+   }
+diff --git a/src/dxso/dxso_options.cpp b/src/dxso/dxso_options.cpp
+index 5e05ee6..7dd45cb 100644
+--- a/src/dxso/dxso_options.cpp
++++ b/src/dxso/dxso_options.cpp
+@@ -45,6 +45,8 @@ namespace dxvk {
+     alphaTestWiggleRoom = options.alphaTestWiggleRoom;
+ 
+     robustness2Supported = devFeatures.extRobustness2.robustBufferAccess2;
++
++    supportsClipDistance = devFeatures.core.features.shaderClipDistance;
+   }
+ 
+ }
+\ No newline at end of file
+diff --git a/src/dxso/dxso_options.h b/src/dxso/dxso_options.h
+index c977ce8..f945acd 100644
+--- a/src/dxso/dxso_options.h
++++ b/src/dxso/dxso_options.h
+@@ -57,6 +57,11 @@ namespace dxvk {
+ 
+     /// Whether or not we can rely on robustness2 to handle oob constant access
+     bool robustness2Supported;
++
++    /// Whether the device supports shader clip distances.  When false,
++    /// user clip planes are disabled and the VS must not declare the
++    /// ClipDistance capability.
++    bool supportsClipDistance = true;
+   };
+ 
+ }
+\ No newline at end of file
+diff --git a/src/dxvk/dxvk_adapter.cpp b/src/dxvk/dxvk_adapter.cpp
+index 8552118..7e50e6a 100644
+--- a/src/dxvk/dxvk_adapter.cpp
++++ b/src/dxvk/dxvk_adapter.cpp
+@@ -265,6 +265,7 @@ namespace dxvk {
+   Rc<DxvkDevice> DxvkAdapter::createDevice(
+     const Rc<DxvkInstance>&   instance,
+           DxvkDeviceFeatures  enabledFeatures) {
++    Logger::debug("[DXVK_DEBUG] WC3 DXVK: createDevice begin");
+     DxvkDeviceExtensions devExtensions;
+ 
+     std::array<DxvkExt*, 34> devExtensionList = {{
+@@ -332,6 +333,13 @@ namespace dxvk {
+     extensionsEnabled.merge(m_extraExtensions);
+     DxvkNameList extensionNameList = extensionsEnabled.toNameList();
+ 
++    for (DxvkExt* ext : devExtensionList) {
++      if (ext->mode() != DxvkExtMode::Disabled
++       && !m_deviceExtensions.supports(ext->name()))
++        Logger::debug(str::format("[DXVK_DEBUG] WC3 DXVK: device extension unavailable: ", ext->name()));
++    }
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 DXVK: createDevice extensions=", extensionNameList.count()));
++
+     // Enable additional device features if supported
+     enabledFeatures.extExtendedDynamicState.extendedDynamicState = m_deviceFeatures.extExtendedDynamicState.extendedDynamicState;
+ 
+@@ -475,13 +483,16 @@ namespace dxvk {
+       overallocInfo.pNext = std::exchange(info.pNext, &overallocInfo);
+     
+     VkDevice device = VK_NULL_HANDLE;
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 DXVK: vkCreateDevice queues=", info.queueCreateInfoCount,
++      " extensions=", info.enabledExtensionCount));
+     VkResult vr = m_vki->vkCreateDevice(m_handle, &info, nullptr, &device);
++    Logger::debug(str::format("[DXVK_DEBUG] WC3 DXVK: vkCreateDevice result=", int32_t(vr)));
+ 
+     if (vr != VK_SUCCESS && enableCudaInterop) {
+       // Enabling certain Vulkan extensions can cause device creation to fail on
+       // Nvidia drivers if a certain kernel module isn't loaded, but we cannot know
+       // that in advance since the extensions are reported as supported anyway.
+-      Logger::err("DxvkAdapter: Failed to create device, retrying without CUDA interop extensions");
++      Logger::err(str::format("DxvkAdapter: Failed to create device, retrying without CUDA interop extensions (VkResult ", int32_t(vr), ")"));
+ 
+       extensionsEnabled.disableExtension(devExtensions.khrBufferDeviceAddress);
+       extensionsEnabled.disableExtension(devExtensions.nvxBinaryImport);
+@@ -500,12 +511,14 @@ namespace dxvk {
+     }
+ 
+     if (vr != VK_SUCCESS)
+-      throw DxvkError("DxvkAdapter: Failed to create device");
++      throw DxvkError(str::format("DxvkAdapter: Failed to create device (VkResult ", int32_t(vr), ")"));
+     
++    Logger::debug("[DXVK_DEBUG] WC3 DXVK: vkCreateDevice succeeded; initResources begin");
+     Rc<DxvkDevice> result = new DxvkDevice(instance, this,
+       new vk::DeviceFn(true, m_vki->instance(), device),
+       devExtensions, enabledFeatures);
+     result->initResources();
++    Logger::debug("[DXVK_DEBUG] WC3 DXVK: initResources done");
+     return result;
+   }
+   
+diff --git a/src/dxvk/dxvk_cmdlist.cpp b/src/dxvk/dxvk_cmdlist.cpp
+index d9241cb..b3faf5e 100644
+--- a/src/dxvk/dxvk_cmdlist.cpp
++++ b/src/dxvk/dxvk_cmdlist.cpp
+@@ -195,6 +195,25 @@ namespace dxvk {
+   }
+ 
+ 
++  void DxvkCommandList::resetQuery(
++          VkQueryPool             queryPool,
++          uint32_t                queryId) {
++    /* WC3: VK_EXT_host_query_reset is optional.  If the device does not
++     * expose the feature, reset the query on the GPU timeline instead of
++     * calling a potentially null extension entry point. */
++    if (m_device->extensions().extHostQueryReset
++     && m_device->features().extHostQueryReset.hostQueryReset) {
++      m_vkd->vkResetQueryPoolEXT(
++        m_vkd->device(), queryPool, queryId, 1);
++    } else {
++      if (Logger::logLevel() <= LogLevel::Debug)
++        Logger::debug("[DXVK_DEBUG] WC3 DXVK: hostQueryReset missing; resetting query with vkCmdResetQueryPool");
++      m_vkd->vkCmdResetQueryPool(
++        m_execBuffer, queryPool, queryId, 1);
++    }
++  }
++
++
+   VkResult DxvkCommandList::submitToQueue(
+           VkQueue               queue,
+           VkFence               fence,
+diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
+index 02549df..2992b9f 100644
+--- a/src/dxvk/dxvk_cmdlist.h
++++ b/src/dxvk/dxvk_cmdlist.h
+@@ -784,10 +784,7 @@ namespace dxvk {
+ 
+     void resetQuery(
+             VkQueryPool             queryPool,
+-            uint32_t                queryId) {
+-      m_vkd->vkResetQueryPoolEXT(
+-        m_vkd->device(), queryPool, queryId, 1);
+-    }
++            uint32_t                queryId);
+ 
+   private:
+     
+diff --git a/src/dxvk/dxvk_unbound.cpp b/src/dxvk/dxvk_unbound.cpp
+index abb093b..7bddd62 100644
+--- a/src/dxvk/dxvk_unbound.cpp
++++ b/src/dxvk/dxvk_unbound.cpp
+@@ -153,7 +153,17 @@ namespace dxvk {
+     result.view2D      = createImageView(dev, m_image2D, format, VK_IMAGE_VIEW_TYPE_2D,         1);
+     result.view2DArr   = createImageView(dev, m_image2D, format, VK_IMAGE_VIEW_TYPE_2D_ARRAY,   1);
+     result.viewCube    = createImageView(dev, m_image2D, format, VK_IMAGE_VIEW_TYPE_CUBE,       6);
+-    result.viewCubeArr = createImageView(dev, m_image2D, format, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY, 6);
++
++    /* WC3: imageCubeArray is optional.  A device without it cannot create a
++     * cube-array view, so reuse the plain cube view for the dummy descriptor.
++     * D3D9 has no cube-array resource type, so this view is never selected by
++     * the D3D9 frontend. */
++    if (!dev->features().core.features.imageCubeArray)
++      Logger::debug("[DXVK_DEBUG] WC3 DXVK: imageCubeArray missing; reusing cube view for the cube-array dummy");
++    result.viewCubeArr = dev->features().core.features.imageCubeArray
++      ? createImageView(dev, m_image2D, format, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY, 6)
++      : result.viewCube;
++
+     result.view3D      = createImageView(dev, m_image3D, format, VK_IMAGE_VIEW_TYPE_3D,         1);
+     return result;
+   }

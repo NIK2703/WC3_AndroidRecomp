@@ -52,10 +52,17 @@ data class LaunchSettings(
      * exposes 10..50; the native controls layer clamps the same range and
      * replaces the authored per-element opacity. */
     val overlayOpacityPercent: Int = LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT,
-    /* True keeps the deterministic chunked raycast and vertex loops.  False
-     * makes both wrappers call the original sequential guest functions;
-     * applied on the next game launch. */
+    /* Derived from workerCpus: two or more selected cores enable the
+     * deterministic chunked raycast/vertex/triangle paths, one core keeps
+     * every wrapper on the original sequential guest function.  There is no
+     * separate switch in the product settings screen.  Applied on the next
+     * game launch. */
     val parallelExecution: Boolean = LaunchContract.DEFAULT_PARALLEL_EXECUTION,
+    /* CPU ids selected for the parallel worker pool.  The pool creates one
+     * worker per id and pins that worker to the same core.  Empty disables
+     * the pool; the product settings screen always keeps at least one core
+     * selected.  Applied on the next game launch. */
+    val workerCpus: List<Int> = emptyList(),
     /* Half-resolution grid presentation.  Off creates no extra SurfaceView
      * and no native renderer.  The darken percent follows the source slider
      * (0..100); the cycle moves the transparent pixel of every 2x2 cell and
@@ -74,6 +81,42 @@ data class LaunchSettings(
      * half-surface path; every other case stays on the compositor. */
 ) {
     fun toBundle(): Bundle = Bundle().apply {
+        /* The core table is the only parallel control: two or more selected
+         * cores enable the pool, one core keeps every guest path sequential.
+         * Normalise here as well as in the settings screen so every launch
+         * path, including a caller that constructs LaunchSettings directly,
+         * gets the same rule. */
+        val requestedCpus = workerCpus
+            .filter { it in 0..CpuTopology.MAX_CPU_ID }
+            .distinct()
+            .sorted()
+        /* The settings store and the core table already drop CPUs outside the
+         * process cpuset.  Repeat it here because a caller can construct
+         * LaunchSettings directly or the cpuset can change between the
+         * settings screen and the launch.  A saved core that is no longer
+         * allowed is dropped: with no cores left the pool stays off and the
+         * main thread still pins to the best available core. */
+        val availableCores: List<CpuCore> = if (requestedCpus.isEmpty()) {
+            emptyList()
+        } else {
+            CpuTopology.availableCores()
+        }
+        val selectedCores = availableCores.filter { it.id in requestedCpus }
+        val launchCpus = selectedCores.map { it.id }
+        val effectiveParallel = launchCpus.size >= 2
+        /* The game's main thread always runs on the most performant selected
+         * core.  Capacity/frequency come from sysfs; if topology is hidden,
+         * the highest selected id is the big-core fallback.  A stale selected
+         * id that the game process can no longer use falls back to the best
+         * currently available core instead of leaving the main thread
+         * unpinned. */
+        val mainCpu = if (requestedCpus.isEmpty()) {
+            -1
+        } else {
+            CpuTopology.pickBest(selectedCores)?.id
+                ?: CpuTopology.pickBest(availableCores)?.id
+                ?: requestedCpus.last()
+        }
         putString(LaunchContract.KEY_GAME_DIR, gameDir)
         putInt(LaunchContract.KEY_WIDTH, width)
         putInt(LaunchContract.KEY_HEIGHT, height)
@@ -92,7 +135,12 @@ data class LaunchSettings(
         )
         putBoolean(LaunchContract.KEY_HIDE_CURSOR, hideCursor)
         putInt(LaunchContract.KEY_OVERLAY_OPACITY_PERCENT, overlayOpacityPercent)
-        putBoolean(LaunchContract.KEY_PARALLEL_EXECUTION, parallelExecution)
+        putBoolean(LaunchContract.KEY_PARALLEL_EXECUTION, effectiveParallel)
+        putString(
+            LaunchContract.KEY_WORKER_CPUS,
+            launchCpus.joinToString(",")
+        )
+        putInt(LaunchContract.KEY_MAIN_CPU, mainCpu)
         putBoolean(LaunchContract.KEY_GRID_ENABLED, gridEnabled)
         putInt(LaunchContract.KEY_GRID_DARKEN_PERCENT, gridDarkenPercent)
         putInt(LaunchContract.KEY_GRID_CYCLE_SECONDS, gridCycleSeconds)

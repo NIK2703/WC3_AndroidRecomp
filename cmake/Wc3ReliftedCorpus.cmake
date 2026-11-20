@@ -1041,7 +1041,7 @@ target_compile_definitions(wc3_corpus_relifted PRIVATE
     WC3_FLAGS_FAST_PF_AF=${WC3_FLAGS_FAST_PF_AF_DEFINE}
     WC3_DEBUG=${WC3_DEBUG_DEFINE})
 # The relifted corpus is guest code with a frozen ABI.  Build it at the
-# configured corpus level (O2 by default, O3 only in the release_optimized
+# configured corpus level (O2 by default, O3 only in the optimized release
 # profile), not -O0: the header-only runtime (cpu.h, x87.h) must inline, and
 # generated bodies run once per guest instruction.  The stack protector and
 # _FORTIFY_SOURCE add host canary/check calls that the legacy guest-memory

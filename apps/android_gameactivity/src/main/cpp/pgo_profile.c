@@ -1,5 +1,5 @@
 /*
- * PGO training writer for the release_optimized profile-generation build.
+ * PGO training writer for the release profile-generation build.
  *
  * Android force-stop does not run atexit handlers, so the normal LLVM profile
  * runtime shutdown path cannot be relied on for a device training run.  This

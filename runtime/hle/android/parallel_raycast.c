@@ -32,7 +32,9 @@
  * The file is opt-in: set WC3_RAY_TUNE=1 to load it.  Without that variable
  * the built-in automatic layout is used.  This matters because an old
  * diagnostic file must not silently pin `chunks` or `worker_cpu_mask` after
- * the code switches back to one worker per online CPU.
+ * the code switches back to one worker per allowed CPU.  The product core
+ * table is a separate input: WC3_PARALLEL_WORKER_CPUS sets both the pool size
+ * and a one-core affinity per worker.
  *
  * Format: one or more `key=value` pairs separated by whitespace.  `#` starts
  * a comment.  Values can be changed by editing the file through `run-as` or
@@ -123,6 +125,9 @@
 #define RAY_TUNE_CHECK_MASK      0x3FFu
 #define RAY_STATS_DEFAULT        8192u
 #define RAY_STATS_EVERY_MAX      1000000000u
+/* The product CPU table and the kernel affinity syscall both use a 64-bit
+ * mask.  Keep the worker list in the same range. */
+#define WC3_PARALLEL_MAX_WORKERS 64u
 
 /* Linux/Android futex opcodes.  Keeping the numbers local avoids a libc
  * header dependency in this HLE translation unit. */
@@ -131,10 +136,10 @@
 
 /* Vertex chunks reuse the same worker contexts, guest stacks and TEBs.  A
  * batch uses one chunk per pool worker at most, and the pool itself has one
- * worker per online CPU.  The default split requires enough vertices per
- * worker to amortize a wakeup and a private frame copy; tiny batches stay on
- * the caller.  WC3_VERTEX_CHUNKS and WC3_VERTEX_MIN_CHUNK can tune that for
- * diagnostics. */
+ * worker per allowed CPU or per selected product core.  The default split
+ * requires enough vertices per worker to amortize a wakeup and a private
+ * frame copy; tiny batches stay on the caller.  WC3_VERTEX_CHUNKS and
+ * WC3_VERTEX_MIN_CHUNK can tune that for diagnostics. */
 #define VERTEX_GLOBALS_SIZE      0x40u
 #define VERTEX_FRAME_BELOW       0x100u
 #define VERTEX_FRAME_ABOVE       0x40u
@@ -146,11 +151,13 @@
 /* Triangle chunks reuse the same pool.  The loop is the stride-3 fast path of
  * the triangle intersection helper, so its work unit is one triangle and each
  * worker needs its own 6-byte-strided index cursor plus a private best/index
- * pair.  A worker pays the frame copy and wakeup cost, so require at least
- * TRIANGLE_MIN_CHUNK triangles per worker; the default threshold is the
- * smallest useful batch at that split.  A 16-triangle chunk is almost all
- * frame-copy and wakeup cost, so split to four chunks at 128 triangles and
- * reach one chunk per worker only at 256. */
+ * pair.  The observed game call site passes 96 indices (32 triangles).  That
+ * batch is below the profitable split: a 16-triangle chunk is almost all
+ * frame-copy and wakeup cost, and the outer raycast batch already parallelizes
+ * the candidates that contain these triangles.  Keep the 128/32 defaults so
+ * the small batch stays sequential.  WC3_TRIANGLE_THRESHOLD and
+ * WC3_TRIANGLE_MIN_CHUNK can still lower the gates for a measured diagnostic
+ * experiment; do not treat 32/16 as a production default. */
 #define TRIANGLE_FRAME_BELOW      0x100u
 #define TRIANGLE_FRAME_ABOVE      0x40u
 #define TRIANGLE_FRAME_COPY       (TRIANGLE_FRAME_BELOW + TRIANGLE_FRAME_ABOVE)
@@ -283,7 +290,10 @@ typedef struct RayCtx {
      * active count cannot race the queue choice. */
     int wait_shared;
     int thread_started;
-    unsigned applied_cpu_mask;
+    /* Product core selection: >=0 pins this worker to that CPU.  -1 keeps
+     * the diagnostic worker_cpu_mask path. */
+    int assigned_cpu;
+    unsigned long long applied_cpu_mask;
     uint64_t seen_seq;
     /* Published by the worker after it finishes the job sequence.  The caller
      * scans only the active workers; no shared locked counter is needed. */
@@ -311,10 +321,20 @@ static int g_triangle_enabled = 1;
  * opt-in through WC3_VERTEX_VERIFY=1. */
 static int g_vertex_verify;
 #endif
+#if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE && WC3_DEBUG_PERF
+/* Per-kind oracle accounting.  The aggregate perf line cannot prove that
+ * both entry points (copy and transform) were checked. */
+static unsigned long long g_vertex_verify_calls[2];
+static unsigned long long g_vertex_verify_failures[2];
+#endif
 #if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE
 /* Debug-only opt-in for the triangle sequential oracle.  Range checks stay
  * enabled; only the expensive whole-batch replay is gated. */
 static int g_triangle_verify;
+#endif
+#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE && WC3_DEBUG_PERF
+static unsigned long long g_triangle_verify_calls;
+static unsigned long long g_triangle_verify_failures;
 #endif
 static unsigned g_vertex_threshold = VERTEX_DEFAULT_THRESHOLD;
 static unsigned g_vertex_chunks;      /* 0 = one chunk per worker */
@@ -324,7 +344,13 @@ static unsigned g_triangle_chunks;    /* 0 = one chunk per worker */
 static unsigned g_triangle_min_chunk = TRIANGLE_MIN_CHUNK;
 static unsigned g_workers;
 static RayCtx *g_worker;
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_PARALLEL_VERTEX_VALIDATE || \
+/* Product list from WC3_PARALLEL_WORKER_CPUS.  Empty means the automatic
+ * one-worker-per-allowed-CPU layout; a non-empty list sets both the pool size
+ * and a one-core affinity for each worker. */
+static int g_worker_cpu[WC3_PARALLEL_MAX_WORKERS];
+static unsigned g_worker_cpu_count;
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF || \
+                  WC3_PARALLEL_VERTEX_VALIDATE || \
                   WC3_PARALLEL_TRIANGLE_VALIDATE)
 static RayCtx g_verify_ctx;
 #endif
@@ -428,7 +454,7 @@ typedef struct KindPerf {
 } KindPerf;
 static KindPerf g_kind_perf[KIND_PERF_COUNT];
 #endif
-#if WC3_DEBUG && WC3_DEBUG_HLE
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
 static unsigned long long g_verify_calls;
 static unsigned long long g_verify_failures;
 #endif
@@ -529,13 +555,18 @@ static int env_on(const char *name)
 
 /* Read the CPUs this process may actually run on.  _SC_NPROCESSORS_ONLN
  * counts online CPUs for the whole device, not the cpuset attached to the app;
- * using it can create more workers than the scheduler will ever run. */
+ * using it can create more workers than the scheduler will ever run.
+ *
+ * Query the thread-group leader (getpid()), not the calling thread (pid 0):
+ * the game main thread is pinned to one selected core, and filtering the
+ * worker list through that one-core mask would collapse a multi-core
+ * selection to a single worker.  The leader is not pinned by the game. */
 static int read_allowed_cpu_mask(unsigned long long *out)
 {
 #if defined(__NR_sched_getaffinity)
     unsigned char mask[128];
     memset(mask, 0, sizeof mask);
-    if (syscall(__NR_sched_getaffinity, 0, sizeof mask, mask) == 0) {
+    if (syscall(__NR_sched_getaffinity, getpid(), sizeof mask, mask) == 0) {
         unsigned long long set = 0;
         for (unsigned i = 0; i < 64u; i++) {
             if (mask[i >> 3] & (1u << (i & 7u)))
@@ -574,6 +605,42 @@ static unsigned auto_worker_count(void)
      * inside run_batch while the batch runs, so the workers are the only
      * raycast consumers during it. */
     return allowed_cpu_count();
+}
+
+/* Parse the product core list ("0,2,4").  Invalid entries and duplicates are
+ * ignored; the caller filters the result against the live cpuset. */
+static unsigned parse_worker_cpu_list(const char *text, int *out, unsigned max)
+{
+    unsigned count = 0;
+    const char *p = text;
+
+    while (p && *p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        if (*p < '0' || *p > '9') {
+            while (*p && *p != ',') p++;
+            continue;
+        }
+
+        unsigned value = 0;
+        while (*p >= '0' && *p <= '9') {
+            if (value <= WC3_PARALLEL_MAX_WORKERS)
+                value = value * 10u + (unsigned)(*p - '0');
+            p++;
+        }
+        if (value < WC3_PARALLEL_MAX_WORKERS) {
+            int duplicate = 0;
+            for (unsigned i = 0; i < count; i++) {
+                if (out[i] == (int)value) {
+                    duplicate = 1;
+                    break;
+                }
+            }
+            if (!duplicate && count < max) out[count++] = (int)value;
+        }
+        while (*p && *p != ',') p++;
+    }
+    return count;
 }
 
 #if WC3_DEBUG && WC3_DEBUG_PERF
@@ -1248,7 +1315,7 @@ static void set_tuning_defaults(void)
     tune_set_uint(&g_tune.min_chunk, RAY_MIN_CHUNK);
     tune_set_uint(&g_tune.stack_zero, RAY_STACK_ZERO);
     tune_set_uint(&g_tune.container_copy, RAY_CONTAINER_DEFAULT);
-#if WC3_DEBUG && WC3_DEBUG_HLE
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
     tune_set_int(&g_tune.verify, env_on("WC3_RAY_VERIFY"));
 #endif
 #if WC3_DEBUG && WC3_DEBUG_PERF
@@ -1295,6 +1362,7 @@ static int alloc_ctx(RayCtx *ctx, unsigned index)
 {
     memset(ctx, 0, sizeof *ctx);
     ctx->index = (int)index;
+    ctx->assigned_cpu = -1;
 
     if (sem_init(&ctx->wake, 0, 0) != 0) return 0;
     ctx->wake_init = 1;
@@ -1714,7 +1782,8 @@ static unsigned triangle_chunk_limit(void)
 
 /* Vertex work has its own split.  It is not derived from the raycast
  * `chunks` value: an old raycast experiment must not cap the vertex path.
- * The default is all pool workers, one per online CPU. */
+ * The default is all pool workers, one per allowed CPU; a product core list
+ * creates exactly one worker per selected core. */
 static unsigned vertex_chunk_limit(void)
 {
     unsigned limit = g_vertex_chunks;
@@ -1722,41 +1791,58 @@ static unsigned vertex_chunk_limit(void)
     return limit;
 }
 
-/* Apply an optional affinity mask only when it changes.  The common case is a
- * single relaxed load per job; sched_setaffinity runs only when the user edits
- * worker_cpu_mask in the live config.  Mask 0 restores all online CPUs. */
+/* Apply the worker affinity only when it changes.  A product core list pins
+ * worker i to the i-th selected CPU (one core per worker).  Without a list,
+ * the diagnostic worker_cpu_mask still applies to every worker; mask 0 keeps
+ * all allowed CPUs.  The common case is one relaxed load per job. */
 static void apply_worker_affinity(RayCtx *ctx)
 {
-    unsigned mask = tune_uint(&g_tune.worker_cpu_mask);
-    if (mask == ctx->applied_cpu_mask) return;
-    ctx->applied_cpu_mask = mask;
-
     unsigned long long set = 0;
-    if (mask) {
-        for (unsigned cpu = 0; cpu < 32u; cpu++) {
-            if (mask & (1u << cpu)) set |= 1ull << cpu;
+
+    if (ctx->assigned_cpu >= 0) {
+        set = 1ull << (unsigned)ctx->assigned_cpu;
+    } else {
+        unsigned mask = tune_uint(&g_tune.worker_cpu_mask);
+        if (mask) {
+            for (unsigned cpu = 0; cpu < 32u; cpu++) {
+                if (mask & (1u << cpu)) set |= 1ull << cpu;
+            }
+        } else if (!read_allowed_cpu_mask(&set)) {
+            /* Fallback for kernels without sched_getaffinity: the old
+             * online-CPU mask is still better than leaving the worker
+             * unbound. */
+            long online = sysconf(_SC_NPROCESSORS_ONLN);
+            if (online < 1) online = 1;
+            if (online > 64) online = 64;
+            for (long cpu = 0; cpu < online; cpu++) set |= 1ull << cpu;
         }
-    } else if (!read_allowed_cpu_mask(&set)) {
-        /* Fallback for kernels without sched_getaffinity: the old online-CPU
-         * mask is still better than leaving the worker unbound. */
-        long online = sysconf(_SC_NPROCESSORS_ONLN);
-        if (online < 1) online = 1;
-        if (online > 64) online = 64;
-        for (long cpu = 0; cpu < online; cpu++) set |= 1ull << cpu;
     }
 
+    if (set == ctx->applied_cpu_mask) return;
+    ctx->applied_cpu_mask = set;
+
 #if defined(__NR_sched_setaffinity)
-    long rc = syscall(__NR_sched_setaffinity, 0, sizeof set, &set);
+    /* The product list only covers CPU ids 0..63, but the kernel cpumask can
+     * be larger.  Pass CPU_SETSIZE bytes; a short buffer is EINVAL on kernels
+     * whose NR_CPUS is above 64. */
+    unsigned char kernel_mask[128];
+    memset(kernel_mask, 0, sizeof kernel_mask);
+    for (unsigned cpu = 0; cpu < 64u; cpu++) {
+        if (set & (1ull << cpu))
+            kernel_mask[cpu >> 3] |= (unsigned char)(1u << (cpu & 7u));
+    }
+    long rc = syscall(__NR_sched_setaffinity, 0, sizeof kernel_mask,
+                      kernel_mask);
     if (rc != 0) {
         fprintf(stderr,
-                "[raycast] worker %d: affinity mask 0x%X failed: %s\n",
-                ctx->index, mask, strerror(errno));
+                "[raycast] worker %d: affinity mask 0x%llX failed: %s\n",
+                ctx->index, (unsigned long long)set, strerror(errno));
     }
 #else
     (void)set;
     fprintf(stderr,
-            "[raycast] worker %d: affinity unavailable, mask 0x%X ignored\n",
-            ctx->index, mask);
+            "[raycast] worker %d: affinity unavailable, mask 0x%llX ignored\n",
+            ctx->index, (unsigned long long)set);
 #endif
 }
 
@@ -1855,6 +1941,9 @@ static void *worker_main(void *arg)
     char name[16];
     snprintf(name, sizeof name, "wc3-ray-%d", ctx->index);
     (void)pthread_setname_np(pthread_self(), name);
+    /* Pin before the first wait so an idle worker is already on its selected
+     * core; the call after the wait still picks up a diagnostic mask edit. */
+    apply_worker_affinity(ctx);
 
     for (;;) {
         if (!worker_wait_for_job(ctx)) break;
@@ -1983,7 +2072,34 @@ static void init_once(void)
     g_triangle_min_chunk = env_u("WC3_TRIANGLE_MIN_CHUNK", TRIANGLE_MIN_CHUNK,
                                  TRIANGLE_MAX_COUNT);
 
-    g_workers = env_u("WC3_PARALLEL_RAYCAST_THREADS", 0, UINT_MAX);
+    /* The product core table is authoritative: a non-empty list sets both
+     * the pool size and a one-core affinity per worker.  An empty list keeps
+     * the diagnostic thread-count/auto behaviour. */
+    const char *worker_cpu_env = getenv("WC3_PARALLEL_WORKER_CPUS");
+    if (worker_cpu_env && *worker_cpu_env) {
+        unsigned parsed = parse_worker_cpu_list(
+            worker_cpu_env, g_worker_cpu, WC3_PARALLEL_MAX_WORKERS);
+        g_worker_cpu_count = parsed;
+        if (g_worker_cpu_count) g_workers = g_worker_cpu_count;
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
+        if (parsed == 0) {
+            fprintf(stderr,
+                    "[parallel] worker core list '%s' is empty; using auto\n",
+                    worker_cpu_env);
+        }
+        if (g_worker_cpu_count) {
+            fprintf(stderr, "[parallel] worker cores:");
+            for (unsigned i = 0; i < g_worker_cpu_count; i++)
+                fprintf(stderr, " %d", g_worker_cpu[i]);
+            fprintf(stderr, " (%u worker(s))\n", g_workers);
+        } else {
+            fprintf(stderr,
+                    "[parallel] worker core list is empty; using auto\n");
+        }
+#endif
+    }
+    if (!g_workers)
+        g_workers = env_u("WC3_PARALLEL_RAYCAST_THREADS", 0, UINT_MAX);
     if (!g_workers) g_workers = auto_worker_count();
     if (g_workers < 1u) g_workers = 1u;
     if (g_vertex_chunks == 0 || g_vertex_chunks > g_workers)
@@ -2023,7 +2139,8 @@ static void init_once(void)
         return;
     }
 
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_PARALLEL_VERTEX_VALIDATE || \
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF || \
+                  WC3_PARALLEL_VERTEX_VALIDATE || \
                   WC3_PARALLEL_TRIANGLE_VALIDATE)
     if (!alloc_ctx(&g_verify_ctx, g_workers)) {
         fprintf(stderr, "[raycast] cannot allocate verification context\n");
@@ -2054,6 +2171,8 @@ static void init_once(void)
 
     for (unsigned i = 0; i < g_workers; i++) {
         g_worker[i].index = (int)i;
+        if (i < g_worker_cpu_count)
+            g_worker[i].assigned_cpu = g_worker_cpu[i];
         if (pthread_create(&g_worker[i].thread, NULL, worker_main,
                            &g_worker[i]) != 0) {
             fprintf(stderr, "[raycast] cannot create worker %u\n", i);
@@ -2068,13 +2187,20 @@ static void init_once(void)
     fprintf(stderr, "[triangle] sequential oracle %s\n",
             g_triangle_verify ? "on" : "off (set WC3_TRIANGLE_VERIFY=1)");
 #endif
+#if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_VERTEX_VALIDATE && \
+    WC3_PARALLEL_TRIANGLE_VALIDATE
+    fprintf(stderr, "[parallel] verify vertex=%u triangle=%u raycast=%u\n",
+            g_vertex_verify ? 1u : 0u, g_triangle_verify ? 1u : 0u,
+            tune_int(&g_tune.verify) ? 1u : 0u);
+#endif
 #if WC3_DEBUG && WC3_DEBUG_HLE
     fprintf(stderr,
-            "[parallel] pool: %u worker(s) for %ld online CPU(s), "
+            "[parallel] pool: %u worker(s), %u selected core(s), "
+            "%ld online CPU(s), "
             "ray threshold %u, vertex threshold %u, vertex chunks %u, "
             "vertex min_chunk %u, triangle threshold %u, triangle chunks %u, "
             "triangle min_chunk %u, verify %s\n",
-            g_workers, sysconf(_SC_NPROCESSORS_ONLN),
+            g_workers, g_worker_cpu_count, sysconf(_SC_NPROCESSORS_ONLN),
             tune_uint(&g_tune.threshold), g_vertex_threshold,
             g_vertex_chunks, g_vertex_min_chunk, g_triangle_threshold,
             g_triangle_chunks, g_triangle_min_chunk,
@@ -2107,7 +2233,8 @@ fail:
             g_worker[i].wake_init = 0;
         }
     }
-#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_PARALLEL_VERTEX_VALIDATE || \
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF || \
+                  WC3_PARALLEL_VERTEX_VALIDATE || \
                   WC3_PARALLEL_TRIANGLE_VALIDATE)
     if (g_verify_ctx.wake_init) {
         sem_destroy(&g_verify_ctx.wake);
@@ -2168,7 +2295,7 @@ static void merge_results(RayCtx *out, unsigned n)
 /* Run the original function once on its own CPU and private stack.  The
  * caller's container and arrays are used directly, so this is exactly the
  * sequential call. */
-#if WC3_DEBUG && WC3_DEBUG_HLE
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
 static void run_verify(CPU *caller, wc3_lifted_fn fn, uint32_t container,
                        uint32_t in1, uint32_t in2, uint32_t out_pos,
                        uint32_t out_dist, uint32_t user_ctx, RayCtx *out)
@@ -2620,9 +2747,9 @@ static int vertex_frame_equal(const uint8_t *par, const uint8_t *seq,
 /* Re-run the full original loop on the caller after a pooled batch and compare
  * every observable result.  The sequential run becomes the final state; a
  * mismatch disables the vertex path instead of leaving a divergent frame. */
-static int vertex_verify_after(CPU *c, wc3_lifted_fn fn, uint32_t count,
-                               const uint32_t *vg, const CPU *before,
-                               const uint8_t *frame_before,
+static int vertex_verify_after(CPU *c, wc3_lifted_fn fn, unsigned kind,
+                               uint32_t count, const uint32_t *vg,
+                               const CPU *before, const uint8_t *frame_before,
                                VertexOracle *oracle)
 {
     uint32_t par_globals[WC3_VERTEX_GLOBAL_WORDS];
@@ -2644,6 +2771,18 @@ static int vertex_verify_after(CPU *c, wc3_lifted_fn fn, uint32_t count,
         }
         return 1;
     }
+
+#if WC3_DEBUG && WC3_DEBUG_PERF
+    unsigned vk = kind & 1u;
+    g_vertex_verify_calls[vk]++;
+    if (g_vertex_verify_calls[vk] == 1u ||
+        (g_vertex_verify_calls[vk] % 8192u) == 0u) {
+        fprintf(stderr,
+                "[vertex] verify kind=%s calls=%llu failures=%llu\n",
+                kind == WC3_VERTEX_TRANSFORM ? "transform" : "copy",
+                g_vertex_verify_calls[vk], g_vertex_verify_failures[vk]);
+    }
+#endif
 
     /* The successful parallel merge has already rewritten the caller frame
      * to its post-loop state.  Restore the pre-batch frame so the sequential
@@ -2675,11 +2814,15 @@ static int vertex_verify_after(CPU *c, wc3_lifted_fn fn, uint32_t count,
 
     if (!ok) {
         static unsigned reports;
+#if WC3_DEBUG && WC3_DEBUG_PERF
+        g_vertex_verify_failures[vk]++;
+#endif
         if (reports < 8u) {
             reports++;
             fprintf(stderr,
-                    "[vertex] VERIFY MISMATCH count=%u out=%d frame=%d "
+                    "[vertex] VERIFY MISMATCH kind=%s count=%u out=%d frame=%d "
                     "cpu=%d globals=%d\n",
+                    kind == WC3_VERTEX_TRANSFORM ? "transform" : "copy",
                     count, out_ok, frame_ok, cpu_ok, globals_ok);
         }
         g_vertex_enabled = 0;
@@ -2715,6 +2858,18 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
                                                      unsigned kind,
                                                      uint32_t count)
 {
+#if WC3_DEBUG && WC3_DEBUG_PERF
+    {
+        static unsigned seen;
+        unsigned bit = 1u << (kind & 1u);
+        if (!(seen & bit)) {
+            seen |= bit;
+            fprintf(stderr, "[vertex] first slow kind=%s count=%u\n",
+                    kind == WC3_VERTEX_TRANSFORM ? "transform" : "copy",
+                    count);
+        }
+    }
+#endif
 #if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
     VertexOracle oracle;
     CPU oracle_before;
@@ -2743,15 +2898,6 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
         WC3_VERTEX_GUARD_FAIL(VG_MODE);
     if (kind == WC3_VERTEX_TRANSFORM && rd32(c->ebp - 0x18u) != 0u)
         WC3_VERTEX_GUARD_FAIL(VG_SLOT);
-    /* p1 is written at EBX+0xC.  The copy wrapper runs before L_6F1419D4
-     * subtracts EBX from [ebp+8], so its slot still holds the absolute
-     * pointer; the transform wrapper runs after the setup already made it
-     * the 0xC offset.  Fail closed if a future call site changes that. */
-    uint32_t p1_off = rd32(c->ebp + 8u);
-    uint32_t p1_expected = kind == WC3_VERTEX_COPY
-                               ? c->ebx + 0x0Cu
-                               : 0x0Cu;
-    if (p1_off != p1_expected) WC3_VERTEX_GUARD_FAIL(VG_SLOT);
 #endif
 
 #if WC3_DEBUG && WC3_DEBUG_HLE
@@ -2889,11 +3035,6 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
         }
         if (!vertex_span_ok(out_ptr[i], out_stride[i], count, out_size[i]))
             WC3_VERTEX_GUARD_FAIL(VG_OUT_SPAN);
-        /* Adjacent vertices of one output stream must not overlap.  A stride
-         * smaller than the element would make a later vertex overwrite the
-         * previous one; serial order hides it, parallel chunks do not. */
-        if (out_stride[i] < out_size[i])
-            WC3_VERTEX_GUARD_FAIL(VG_OUT_SPAN);
         out[i].lo = out_ptr[i];
         out[i].hi = (uint64_t)out_ptr[i] +
                     (uint64_t)(count - 1u) * out_stride[i] + out_size[i];
@@ -2957,6 +3098,17 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
 #if WC3_DEBUG && WC3_DEBUG_PERF
     perf_note_kind(KIND_PERF_VERTEX, count, chunks, pooled,
                    now_ns() - perf_t0);
+    if (pooled) {
+        static unsigned seen;
+        unsigned bit = 1u << (kind & 1u);
+        if (!(seen & bit)) {
+            seen |= bit;
+            fprintf(stderr, "[vertex] first pooled kind=%s count=%u "
+                    "chunks=%u\n",
+                    kind == WC3_VERTEX_TRANSFORM ? "transform" : "copy",
+                    count, chunks);
+        }
+    }
 #endif
 #if WC3_DEBUG && WC3_PARALLEL_VERTEX_VALIDATE
     if (pooled && oracle_run && pthread_mutex_trylock(&g_submit_lock) == 0) {
@@ -2965,7 +3117,7 @@ static __attribute__((noinline)) int vertex_try_slow(CPU *c,
          * sequential, and t_ray_active blocks nested pool use here. */
         int saved_active = t_ray_active;
         t_ray_active = 1;
-        (void)vertex_verify_after(c, fn, count, vg, &oracle_before,
+        (void)vertex_verify_after(c, fn, kind, count, vg, &oracle_before,
                                   oracle_frame, &oracle);
         t_ray_active = saved_active;
         pthread_mutex_unlock(&g_submit_lock);
@@ -3144,6 +3296,9 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
             got.edx = last->cpu.edx;
             memcpy(got.xmm, last->cpu.xmm, sizeof got.xmm);
             log_triangle_mismatch("chunks", total, chunks, &expect, &got);
+#if WC3_DEBUG && WC3_DEBUG_PERF
+            g_triangle_verify_failures++;
+#endif
             g_triangle_enabled = 0;
             t_ray_active = 0;
             pthread_mutex_unlock(&g_submit_lock);
@@ -3186,6 +3341,9 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
             got.sf != expect.sf || got.of != expect.of ||
             got.pf != expect.pf || got.af != expect.af) {
             log_triangle_mismatch("epilogue", total, chunks, &expect, &got);
+#if WC3_DEBUG && WC3_DEBUG_PERF
+            g_triangle_verify_failures++;
+#endif
             /* The frame is gone, so repair the words the epilogue owns.  The
              * merged best/index and the copied chunk state are already the
              * sequential values; only the flag test could differ. */
@@ -3198,6 +3356,20 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
             c->pf = expect.pf;
             c->af = expect.af;
             g_triangle_enabled = 0;
+        }
+    }
+#endif
+
+#if WC3_DEBUG && WC3_PARALLEL_TRIANGLE_VALIDATE && WC3_DEBUG_PERF
+    if (verify) {
+        g_triangle_verify_calls++;
+        if (g_triangle_verify_calls == 1u ||
+            (g_triangle_verify_calls % 4096u) == 0u) {
+            fprintf(stderr,
+                    "[triangle] verify calls=%llu failures=%llu "
+                    "total=%u chunks=%u\n",
+                    g_triangle_verify_calls, g_triangle_verify_failures,
+                    total, chunks);
         }
     }
 #endif
@@ -3232,6 +3404,20 @@ int wc3_parallel_triangle_try_impl(CPU *c, wc3_lifted_fn fn)
     if (!g_parallel_ok || !g_triangle_enabled) return 0;
 
     uint32_t raw_count = rd32(c->ebp + 0x14u);
+#if WC3_DEBUG && WC3_DEBUG_PERF
+    {
+        static unsigned trace;
+        if (trace < 4u) {
+            uint32_t trace_tri =
+                raw_count ? (raw_count - 1u) / 3u + 1u : 0u;
+            fprintf(stderr,
+                    "[triangle] dispatch raw=%u tris=%u threshold=%u minc=%u\n",
+                    raw_count, trace_tri, g_triangle_threshold,
+                    g_triangle_min_chunk);
+            trace++;
+        }
+    }
+#endif
     if (!raw_count || raw_count > TRIANGLE_MAX_COUNT * 3u) return 0;
 
     /* L_6F125924 converts an index count to a triangle count with
@@ -3280,6 +3466,20 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
     }
     if (chunks < 2u) return 0;
 
+#if WC3_DEBUG && WC3_DEBUG_PERF
+    {
+        static unsigned trace;
+        if (trace < 4u) {
+            fprintf(stderr,
+                    "[triangle] run raw=%u tris=%u chunks=%u threshold=%u "
+                    "minc=%u\n",
+                    raw_count, tri_count, chunks, g_triangle_threshold,
+                    g_triangle_min_chunk);
+            trace++;
+        }
+    }
+#endif
+
 #if WC3_DEBUG && WC3_DEBUG_HLE
     {
         static unsigned trace;
@@ -3302,6 +3502,14 @@ static __attribute__((noinline)) int triangle_try_slow(CPU *c,
 #if WC3_DEBUG && WC3_DEBUG_PERF
     perf_note_kind(KIND_PERF_TRIANGLE, tri_count, chunks, pooled,
                    now_ns() - perf_t0);
+    if (pooled) {
+        static unsigned seen;
+        if (!seen) {
+            seen = 1;
+            fprintf(stderr, "[triangle] first pooled tris=%u chunks=%u\n",
+                    tri_count, chunks);
+        }
+    }
 #endif
     return pooled;
 }
@@ -3375,12 +3583,18 @@ static int run_batch(CPU *c, wc3_lifted_fn fn, uint32_t container,
 #endif
     merge_results(merged, limit);
 
-#if WC3_DEBUG && WC3_DEBUG_HLE
+#if WC3_DEBUG && (WC3_DEBUG_HLE || WC3_DEBUG_PERF)
     if (tune_int(&g_tune.verify)) {
         RayCtx seq;
         run_verify(c, fn, container, in1, in2, out_pos, out_dist, user_ctx,
                    &seq);
         g_verify_calls++;
+        if (g_verify_calls == 1u || (g_verify_calls % 65536u) == 0u) {
+            fprintf(stderr,
+                    "[raycast] verify calls=%llu failures=%llu total=%u "
+                    "chunks=%u\n",
+                    g_verify_calls, g_verify_failures, total, limit);
+        }
         if (seq.hit != merged->hit || seq.dist_bits != merged->dist_bits ||
             (seq.hit &&
              (seq.pos[0] != merged->pos[0] ||

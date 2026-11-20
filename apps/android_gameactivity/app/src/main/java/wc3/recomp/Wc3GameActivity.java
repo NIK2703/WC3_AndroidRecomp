@@ -72,11 +72,12 @@ public class Wc3GameActivity extends GameActivity {
     /* JNI matches by name only; host_shell.c must keep the same parameter
      * order (driver id before driver root, DXVK version and config path, then
      * the gesture flag and timers, the SIMPLE tap delay, the selection cap
-     * (12/24/40), the hideCursor toggle, the parallelExecution toggle, the overlay
-     * opacity percent, the grid toggle, darken percent and cycle seconds, the
-     * presentation scale string, and finally the screen present mode string
-     * and buffering count).  These values are strings, so a swap compiles and
-     * fails only at runtime. */
+     * (12/24/40), the hideCursor toggle, the derived parallelExecution flag, the
+     * overlay opacity percent, the grid toggle, darken percent and cycle
+     * seconds, the presentation scale string, the screen present mode string
+     * and buffering count, the comma-separated worker CPU list, and finally
+     * the main-thread CPU id).  Several values are strings, so a swap compiles
+     * and fails only at runtime. */
     private static native void nativeApplyLaunchSettings(
             String gameDir, int width, int height, boolean sound,
             String extraArgs, String driverId, String driverRoot,
@@ -86,7 +87,8 @@ public class Wc3GameActivity extends GameActivity {
             int selectionCap, boolean hideCursor, boolean parallelExecution,
             int overlayOpacityPercent, boolean gridEnabled,
             int gridDarkenPercent, int gridCycleSeconds, String presentScale,
-            String presentMode, int presentBuffers);
+            String presentMode, int presentBuffers, String workerCpus,
+            int mainCpu);
 
     private native void nativeSetOverlaySurface(Surface surface, int width,
                                                 int height);
@@ -308,9 +310,11 @@ public class Wc3GameActivity extends GameActivity {
     }
 
     /**
-     * Applies only the environment variables the settings screen owns.  A
-     * direct host launch without the launch bundle leaves the native defaults
-     * and any diagnostic shell environment untouched.
+     * Applies only the environment variables the settings screen owns.  The
+     * explicit launch bundle wins; a direct host launch gets the saved values
+     * from LaunchCoordinator.resolveForHost, so the CPU selection is applied
+     * on that path too.  A null bundle is the only case that leaves the native
+     * defaults and any diagnostic shell environment untouched.
      */
     private void applyLaunchSettings(final Bundle settings) {
         if (settings == null) return;
@@ -393,7 +397,9 @@ public class Wc3GameActivity extends GameActivity {
                 gridCycleSeconds,
                 presentScale,
                 presentMode,
-                presentBuffers);
+                presentBuffers,
+                settings.getString(LaunchContract.KEY_WORKER_CPUS, ""),
+                settings.getInt(LaunchContract.KEY_MAIN_CPU, -1));
     }
 
     /**

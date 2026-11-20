@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -46,6 +47,7 @@
 #include "pe.h"
 #include "platform.h"
 #include "platform_android.h"
+#include "wc3_crash.h"
 #include "wc3_debug.h"
 #include "wc3_trace.h"
 #include "window_settle.h"
@@ -109,6 +111,192 @@
 #define MOVIE_LOG(...) ((void)0)
 #define MOVIE_LOGE(...) ((void)0)
 #endif
+
+/* Product CPU selection: main-thread pin and per-worker affinity. */
+#if WC3_DEBUG && WC3_DEBUG_CPU
+#define CPU_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "wc3cpu", __VA_ARGS__)
+#define CPU_LOGE(...) \
+    __android_log_print(ANDROID_LOG_ERROR, "wc3cpu", __VA_ARGS__)
+#else
+#define CPU_LOG(...) ((void)0)
+#define CPU_LOGE(...) ((void)0)
+#endif
+
+/*
+ * Linux gives a new thread its creator's CPU affinity.  The game main thread
+ * is pinned to one selected core, so every pthread created by this library
+ * (guest, host and vendored DXVK) must start from the process cpuset;
+ * otherwise those threads would silently inherit the single-core pin.
+ *
+ * CMakeLists.txt links this target with -Wl,--wrap=pthread_create, which
+ * redirects every pthread_create reference in the linked objects to
+ * __wrap_pthread_create().  The trampoline restores the captured process mask
+ * before the real thread entry runs.  The first pin happens only after
+ * android_main has captured that mask, so the glue/UI thread is never
+ * restricted by this mechanism.
+ */
+static _Atomic unsigned long long g_process_cpu_mask;
+static atomic_int g_process_cpu_mask_valid;
+
+/* The kernel cpumask can be larger than 64 bits even when the product only
+ * accepts CPU ids 0..63.  Always pass CPU_SETSIZE bytes to the syscall; an
+ * 8-byte buffer fails with EINVAL on kernels whose NR_CPUS is above 64. */
+#define WC3_CPU_MASK_BYTES 128
+
+/* Read an affinity mask.  pid 0 is the calling thread; getpid() is the
+ * thread-group leader, which carries the process cpuset that the settings
+ * screen reads from /proc/self/status. */
+static int read_cpu_mask_for(pid_t pid, unsigned long long *out)
+{
+#if defined(__NR_sched_getaffinity)
+    unsigned char mask[WC3_CPU_MASK_BYTES];
+    memset(mask, 0, sizeof mask);
+    if (syscall(__NR_sched_getaffinity, pid, sizeof mask, mask) != 0)
+        return 0;
+
+    unsigned long long set = 0;
+    for (unsigned cpu = 0; cpu < 64u; cpu++) {
+        if (mask[cpu >> 3] & (1u << (cpu & 7u)))
+            set |= 1ull << cpu;
+    }
+    if (!set) return 0;
+    *out = set;
+    return 1;
+#else
+    (void)pid;
+    (void)out;
+    return 0;
+#endif
+}
+
+static int read_process_cpu_mask(unsigned long long *out)
+{
+    return read_cpu_mask_for(getpid(), out);
+}
+
+/* Apply a 64-bit mask to the calling thread through a full-size kernel mask. */
+static int set_thread_cpu_mask(unsigned long long set)
+{
+#if defined(__NR_sched_setaffinity)
+    unsigned char mask[WC3_CPU_MASK_BYTES];
+    memset(mask, 0, sizeof mask);
+    for (unsigned cpu = 0; cpu < 64u; cpu++) {
+        if (set & (1ull << cpu))
+            mask[cpu >> 3] |= (unsigned char)(1u << (cpu & 7u));
+    }
+    return syscall(__NR_sched_setaffinity, 0, sizeof mask, mask) == 0;
+#else
+    (void)set;
+    return 0;
+#endif
+}
+
+static void capture_process_cpu_mask(void)
+{
+    unsigned long long mask = 0;
+    /* android_main is not pinned yet, so its own mask is a safe fallback if
+     * the kernel refuses the leader query. */
+    if (!read_process_cpu_mask(&mask) && !read_cpu_mask_for(0, &mask))
+        return;
+    atomic_store_explicit(
+        &g_process_cpu_mask, mask, memory_order_release);
+    atomic_store_explicit(
+        &g_process_cpu_mask_valid, 1, memory_order_release);
+}
+
+static void apply_process_cpu_mask(void)
+{
+    if (!atomic_load_explicit(
+            &g_process_cpu_mask_valid, memory_order_acquire))
+        return;
+    unsigned long long mask = atomic_load_explicit(
+        &g_process_cpu_mask, memory_order_acquire);
+    (void)set_thread_cpu_mask(mask);
+}
+
+typedef struct Wc3ThreadStart {
+    void *(*entry)(void *);
+    void *arg;
+} Wc3ThreadStart;
+
+static void *wc3_thread_start(void *opaque)
+{
+    Wc3ThreadStart *start = (Wc3ThreadStart *)opaque;
+    void *(*entry)(void *) = start->entry;
+    void *arg = start->arg;
+    free(start);
+    apply_process_cpu_mask();
+    return entry(arg);
+}
+
+extern int __real_pthread_create(pthread_t *thread,
+                                 const pthread_attr_t *attr,
+                                 void *(*start_routine)(void *),
+                                 void *arg);
+int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                          void *(*start_routine)(void *), void *arg);
+
+int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                          void *(*start_routine)(void *), void *arg)
+{
+    if (!start_routine)
+        return __real_pthread_create(thread, attr, start_routine, arg);
+
+    Wc3ThreadStart *start = (Wc3ThreadStart *)malloc(sizeof *start);
+    if (!start) {
+        /* Preserve the caller's semantics under OOM; the child may inherit
+         * the main-thread pin, but the thread still starts. */
+        return __real_pthread_create(thread, attr, start_routine, arg);
+    }
+    start->entry = start_routine;
+    start->arg = arg;
+    int rc = __real_pthread_create(thread, attr, wc3_thread_start, start);
+    if (rc != 0) free(start);
+    return rc;
+}
+
+/* The product core table passes the best selected core in WC3_MAIN_CPU.
+ * Pin the guest main thread before it starts booting the game. */
+static void pin_game_main_thread(void)
+{
+    const char *value = getenv("WC3_MAIN_CPU");
+    if (!value || !value[0]) return;
+
+    char *end = NULL;
+    long cpu = strtol(value, &end, 10);
+    if (!end || *end != '\0' || cpu < 0 || cpu >= 64) {
+        CPU_LOGE("WC3_MAIN_CPU='%s' ignored", value);
+        return;
+    }
+
+    unsigned long long set = 1ull << (unsigned)cpu;
+    /* Validate against the process leader, matching the settings table and
+     * the worker filter.  This thread may already be narrowed by the
+     * pthread_create trampoline; sched_setaffinity can widen it back to any
+     * CPU in the process cpuset. */
+    unsigned long long allowed = 0;
+    if (!read_process_cpu_mask(&allowed) &&
+        atomic_load_explicit(
+            &g_process_cpu_mask_valid, memory_order_acquire)) {
+        allowed = atomic_load_explicit(
+            &g_process_cpu_mask, memory_order_acquire);
+    }
+    if (allowed && !(allowed & set)) {
+        CPU_LOGE("WC3_MAIN_CPU=%ld is outside the process cpuset", cpu);
+        return;
+    }
+#if defined(__NR_sched_setaffinity)
+    if (!set_thread_cpu_mask(set))
+        CPU_LOGE("game main thread affinity cpu %ld failed: %s", cpu,
+                 strerror(errno));
+    else
+        CPU_LOG("game main thread pinned to cpu %ld", cpu);
+#else
+    (void)set;
+    CPU_LOGE("game main thread affinity unavailable; cpu %ld ignored", cpu);
+#endif
+}
 
 static Wc3Platform g_platform;
 static _Atomic int g_movie_active;
@@ -1245,15 +1433,18 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     jint selection_cap, jboolean hide_cursor, jboolean parallel_execution,
     jint overlay_opacity_percent, jboolean grid_enabled,
     jint grid_darken_percent, jint grid_cycle_seconds, jstring present_scale,
-    jstring present_mode, jint present_buffers)
+    jstring present_mode, jint present_buffers, jstring worker_cpus,
+    jint main_cpu)
 {
     /* JNI has no type checking between two jstring parameters.  Keep this
      * order identical to Wc3GameActivity.nativeApplyLaunchSettings: id before
      * root, DXVK version and config path, then the gesture flag and timers,
-     * the SIMPLE tap delay, the selection cap (12/24/40), the hideCursor toggle,
-     * the parallelExecution toggle, the overlay opacity percent, then the
-     * grid toggle, darken percent and cycle seconds, the presentation scale
-     * string, and the screen present mode string plus buffering count last, or
+     * the SIMPLE tap delay, the selection cap (12/24/40), the hideCursor
+     * toggle, the derived parallelExecution flag, the overlay opacity percent,
+     * then
+     * the grid toggle, darken percent and cycle seconds, the presentation
+     * scale string, the screen present mode string plus buffering count, the
+     * comma-separated worker CPU list, and the main-thread CPU last, or
      * values are copied into the wrong slot. */
     (void)clazz;
     wc3_legacy_set_grid_disabled_callback(on_grid_runtime_disabled);
@@ -1264,6 +1455,10 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
     g_long_press_timeout_ms = (int)long_press_timeout_ms;
     g_tap_click_delay_ms = (int)tap_click_delay_ms;
     g_overlay_opacity_percent = (int)overlay_opacity_percent;
+    /* The 24-unit selection module latches this before the first panel is
+     * constructed.  "1" enables the 24-unit cap and the 8x3 panel; "0" (the
+     * product default) keeps the original 12-unit cap and 6x2 panel without a
+     * second corpus. */
     /* The selection cap is a runtime choice over the fixed 40-unit structure:
      * 12 keeps the original 6x2 panel, 24 uses 8x3, 40 adds the 10x4 panel.
      * Anything else falls back to the product default of 12. */
@@ -1283,6 +1478,25 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
      * existing WC3_PARALLEL_RAYCAST / WC3_VERTEX / WC3_TRIANGLE diagnostics
      * run. */
     setenv("WC3_PARALLEL_GAMEPLAY", parallel_execution ? "1" : "0", 1);
+    /* The product core table: one worker per listed CPU, pinned to that CPU.
+     * An empty list removes the previous worker list; the pool itself is
+     * disabled above when parallel_execution is false. */
+    const char *worker_cpu_list = NULL;
+    if (worker_cpus)
+        worker_cpu_list = (*env)->GetStringUTFChars(env, worker_cpus, NULL);
+    if (worker_cpu_list && worker_cpu_list[0])
+        setenv("WC3_PARALLEL_WORKER_CPUS", worker_cpu_list, 1);
+    else
+        unsetenv("WC3_PARALLEL_WORKER_CPUS");
+    /* The boot thread pins itself to this CPU before running the guest.  It is
+     * derived from the selected set (capacity, then max frequency). */
+    if (main_cpu >= 0 && main_cpu < 64) {
+        char main_cpu_value[8];
+        snprintf(main_cpu_value, sizeof main_cpu_value, "%d", (int)main_cpu);
+        setenv("WC3_MAIN_CPU", main_cpu_value, 1);
+    } else {
+        unsetenv("WC3_MAIN_CPU");
+    }
 
     const char *dir = NULL;
     const char *user_args = NULL;
@@ -1468,6 +1682,8 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
         (*env)->ReleaseStringUTFChars(env, present_scale, present);
     if (present_mode_value)
         (*env)->ReleaseStringUTFChars(env, present_mode, present_mode_value);
+    if (worker_cpu_list)
+        (*env)->ReleaseStringUTFChars(env, worker_cpus, worker_cpu_list);
 }
 
 static void canvas_attach_provider(struct android_app *app)
@@ -2296,6 +2512,9 @@ static int queue_touch(Wc3TouchPhase phase, int32_t pointer_id, float x,
 static void *boot_thread(void *arg)
 {
     (void)arg;
+    /* This is the guest main thread: wc3_app_boot_start() runs the game here.
+     * Keep it on the most performant selected core for the whole session. */
+    pin_game_main_thread();
     ANativeWindow *window = NULL;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -2745,6 +2964,9 @@ static int load_image(const char *dir, const char *name, uint32_t base)
 
 JNIEXPORT void android_main(struct android_app *app)
 {
+    /* Capture the unrestricted process cpuset before any thread is pinned.
+     * __wrap_pthread_create() restores it in every child thread. */
+    capture_process_cpu_mask();
     WC3_TRACE_THREAD_NAME("wc3-ui");
     WC3_TRACE_SCOPE("wc3.android_main");
     LOGI("android_main pid=%d", (int)getpid());
@@ -2922,4 +3144,7 @@ JNIEXPORT void android_main(struct android_app *app)
     (void)g_guest_ready;
     LOGI("android_main exit platform=%d guest=%d", g_platform_ready,
          g_guest_ready);
+    /* The activity is leaving; mirror the app-private boot log to Download so
+     * a normal session leaves the same variant-tagged file as a fatal one. */
+    wc3_crash_export_log();
 }

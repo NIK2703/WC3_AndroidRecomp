@@ -6,49 +6,49 @@
 #
 # ADR-030 / BV-3: -Variant is the single atomic input.  It selects the output
 # directory, WC3_DEBUG and the diagnostic tag set, so the native half of an
-# APK can no longer disagree with its Gradle half.  Debug stays optimised
-# (BV-1.1): CMAKE_BUILD_TYPE is Release for both variants.
+# APK can no longer disagree with its Gradle half.  There are exactly two
+# variants: release and debug.  Release is the optimized product (O3, ThinLTO,
+# PGO and the layout/visibility profile); debug stays optimised too (BV-1.1),
+# but keeps O2 and the conservative code generation.
 #
-# userdebug is a diagnostic profile of the debug package, not a third package:
-# the same applicationId, Gradle debug build type and WC3_DEBUG=1, but only
-# the BOOT/CRASH tags, the boot log in Download/wc3_log_<variant>.txt and the gameplay
-# experiments off by default.  It is the target for a black-screen boot report.
+# Release consumes a merged PGO profile by default.  The training pass is not
+# a third variant: -Variant release -Pgo generate writes to
+# build/android_app/release-pgo and produces wc3-release-pgo.apk, which is used
+# only to collect counters.  build_release.ps1 runs the two stages.
 #
 # There is deliberately no -Clean switch; delete build\android_app\<variant>
 # and build\android\dxvk by hand if a true clean rebuild is required.
 #
 # All native variants automatically use whichever distributed workers are
 # reachable: IDEAPAD and/or the hotspot phone.  Each is optional, and the
-# normal local path runs when neither is available.  The optimized variants
-# use IDEAPAD by default and exclude the phone unless
-# WC3_DIST_PHONE_OPTIMIZED=1.  Debug-info commands still compile locally by
-# construction.  The optimized variants also allow PGO/LTO commands; a final
-# release_optimized build copies its merged profile to IDEAPAD before
-# compiling when IDEAPAD is used.  See tools/dist/README.md.  Set
-# WC3_DIST_AUTO=0 for a forced local build, WC3_DIST_IDEAPAD=0 to use the
+# normal local path runs when neither is available.  Release uses IDEAPAD by
+# default and excludes the phone unless WC3_DIST_PHONE_OPTIMIZED=1.
+# Debug-info commands still compile locally by construction.  Release also
+# allows PGO/LTO commands; a final release build copies its merged profile to
+# IDEAPAD before compiling when IDEAPAD is used.  See tools/dist/README.md.
+# Set WC3_DIST_AUTO=0 for a forced local build, WC3_DIST_IDEAPAD=0 to use the
 # phone only, or WC3_DIST_PHONE=0 to use IDEAPAD only.
 
 [CmdletBinding()]
 param(
-    [ValidateSet('release', 'debug', 'userdebug',
-                 'release_optimized', 'release_optimized_pgo')]
+    [ValidateSet('release', 'debug')]
     [string]$Variant = 'release',
     [string]$GamesActivityAar = '',
     [string]$AdrenotoolsDir = '',
-    # release_optimized is release plus ThinLTO and a two-stage PGO profile.
-    # release_optimized_pgo is the on-device training build: profile generation
-    # only, with no LTO.  The final release_optimized build consumes the merged
-    # profile and applies ThinLTO.
+    # Release is the optimized product: ThinLTO plus a two-stage PGO profile.
+    # 'generate' is the internal on-device training pass (no LTO, separate
+    # build directory and APK); the default 'use' consumes the merged profile.
+    # 'off' is an explicit optimized-no-PGO A/B build.
     [ValidateSet('off', 'generate', 'use')]
     [string]$Pgo = 'off',
     [string]$PgoProfile = 'build/pgo/wc3.profdata',
     [string]$PgoRawDir = '/data/data/wc3.recomp/files/pgo',
-    # Instrumentation kind.  release_optimized defaults to IRPGO; 'instr' is
-    # retained only for reproducing the historical front-end profile.
+    # Instrumentation kind.  Release defaults to IRPGO; 'instr' is retained
+    # only for reproducing the historical front-end profile.
     [ValidateSet('instr', 'ir')]
     [string]$PgoKind = 'instr',
-    # release_optimized-only code generation profile.  These parameters are
-    # rejected for release/debug so the canonical product stays unchanged.
+    # Release-only code generation profile.  These parameters are rejected for
+    # debug so the diagnostic build keeps its conservative code generation.
     [ValidateSet('O2', 'O3')]
     [string]$OptLevel = 'O2',
     [ValidateSet('', 'O2', 'O3')]
@@ -107,36 +107,31 @@ function ConvertTo-CMakeBool {
     if ($Value) { return 'ON' }
     return 'OFF'
 }
-$isDebug = $Variant -in @('debug', 'userdebug')
-$isUserDebug = $Variant -eq 'userdebug'
-$isOptimized = $Variant -in @('release_optimized', 'release_optimized_pgo')
-$isProfileBuild = $Variant -eq 'release_optimized_pgo'
-if (-not $isOptimized -and $Pgo -ne 'off') {
-    throw "-Pgo is only valid with -Variant release_optimized or release_optimized_pgo"
+$isDebug = $Variant -eq 'debug'
+$isRelease = -not $isDebug
+if ($isDebug -and $Pgo -ne 'off') {
+    throw "-Pgo is only valid with -Variant release"
 }
-if ($isOptimized -and $Pgo -eq 'off') {
-    $Pgo = if ($isProfileBuild) { 'generate' } else { 'use' }
+if ($isRelease -and -not $PSBoundParameters.ContainsKey('Pgo')) {
+    $Pgo = 'use'
 }
-if ($isProfileBuild -and $Pgo -ne 'generate') {
-    throw "-Variant release_optimized_pgo requires -Pgo generate"
-}
-if (-not $isProfileBuild -and $isOptimized -and $Pgo -eq 'generate') {
-    throw "profile generation uses -Variant release_optimized_pgo, not release_optimized"
-}
+$isProfileBuild = $Pgo -eq 'generate'
+$isFinalRelease = $isRelease -and -not $isProfileBuild
+# The training pass keeps WC3_VARIANT=release but gets its own directory and
+# artifact suffix so it can never overwrite the final release product.
+$artifactVariant = if ($isProfileBuild) { 'release-pgo' } else { $Variant }
 
-$isFinalOptimized = $Variant -eq 'release_optimized'
 $experimentalParams = @(
     'PgoKind', 'OptLevel', 'CorpusOptLevel', 'Mtune', 'OmitFramePointer',
     'SplitMachineFunctions', 'CallGraphSort', 'LtoOptLevel',
     'LtoWholeProgramVisibility', 'NoThinLtoCache', 'EmitRelocs', 'Polly',
     'HiddenVisibility', 'NoSemanticInterposition', 'SymbolOrderFile'
 )
-if (-not $isOptimized) {
+if ($isDebug) {
     foreach ($name in $experimentalParams) {
         if ($PSBoundParameters.ContainsKey($name)) {
-            throw "-$name is only valid with -Variant release_optimized or " +
-                  'release_optimized_pgo; release/debug/userdebug must keep ' +
-                  'their historical code generation'
+            throw "-$name is only valid with -Variant release; debug keeps " +
+                  'its conservative code generation'
         }
     }
 }
@@ -144,20 +139,20 @@ if ($Mtune -and $Mtune -notmatch '^[A-Za-z0-9+_.-]+$') {
     throw "-Mtune contains unsupported characters: '$Mtune'"
 }
 
-# Variant defaults.  release_optimized is the measured O3/IRPGO profile; the
-# training build keeps the same base code-generation and instrumentation
-# flags so its counters map to the final build, but it skips LTO and
-# machine-function splitting.
+# Variant defaults.  Release is the measured O3/IRPGO profile; the training
+# build keeps the same base code-generation and instrumentation flags so its
+# counters map to the final build, but it skips LTO and machine-function
+# splitting.
 $effectivePgoKind = if ($PSBoundParameters.ContainsKey('PgoKind')) {
     $PgoKind
-} elseif ($isOptimized) {
+} elseif ($isRelease) {
     'ir'
 } else {
     'instr'
 }
 $effectiveOptLevel = if ($PSBoundParameters.ContainsKey('OptLevel')) {
     $OptLevel
-} elseif ($isOptimized) {
+} elseif ($isRelease) {
     'O3'
 } else {
     'O2'
@@ -172,7 +167,7 @@ if (-not $effectiveCorpusOptLevel) {
 }
 $effectiveOmitFramePointer = if ($PSBoundParameters.ContainsKey('OmitFramePointer')) {
     [bool]$OmitFramePointer
-} elseif ($isOptimized) {
+} elseif ($isRelease) {
     $true
 } else {
     $false
@@ -180,21 +175,21 @@ $effectiveOmitFramePointer = if ($PSBoundParameters.ContainsKey('OmitFramePointe
 $effectiveSplitMachineFunctions =
     if ($PSBoundParameters.ContainsKey('SplitMachineFunctions')) {
         [bool]$SplitMachineFunctions
-    } elseif ($isFinalOptimized) {
+    } elseif ($isFinalRelease -and $Pgo -eq 'use') {
         $true
     } else {
         $false
     }
 $effectiveCallGraphSort = if ($PSBoundParameters.ContainsKey('CallGraphSort')) {
     $CallGraphSort
-} elseif ($isFinalOptimized) {
+} elseif ($isFinalRelease) {
     'cdsort'
 } else {
     'none'
 }
 $effectiveLtoOptLevel = if ($PSBoundParameters.ContainsKey('LtoOptLevel')) {
     $LtoOptLevel
-} elseif ($isFinalOptimized) {
+} elseif ($isFinalRelease) {
     'O3'
 } else {
     'O2'
@@ -202,14 +197,14 @@ $effectiveLtoOptLevel = if ($PSBoundParameters.ContainsKey('LtoOptLevel')) {
 $effectiveLtoWholeProgramVisibility =
     if ($PSBoundParameters.ContainsKey('LtoWholeProgramVisibility')) {
         [bool]$LtoWholeProgramVisibility
-    } elseif ($isFinalOptimized) {
+    } elseif ($isFinalRelease) {
         $true
     } else {
         $false
     }
 $effectiveThinLtoCache = if ($PSBoundParameters.ContainsKey('NoThinLtoCache')) {
     -not [bool]$NoThinLtoCache
-} elseif ($isFinalOptimized) {
+} elseif ($isFinalRelease) {
     $true
 } else {
     $false
@@ -221,17 +216,17 @@ $effectiveEmitRelocs = if ($PSBoundParameters.ContainsKey('EmitRelocs')) {
 }
 $effectivePolly = if ($PSBoundParameters.ContainsKey('Polly')) {
     [bool]$Polly
-} elseif ($isOptimized) {
-    # Polly is part of the experimental release_optimized profile by default.
-    # It remains off for release/debug and can be disabled explicitly with
-    # -Polly:$false when isolating a suspected FP/codegen regression.
+} elseif ($isRelease) {
+    # Polly is part of the release profile by default, including the PGO
+    # training pass.  It can be disabled explicitly with -Polly:$false when
+    # isolating a suspected FP/codegen regression.
     $true
 } else {
     $false
 }
 $effectiveHiddenVisibility = if ($PSBoundParameters.ContainsKey('HiddenVisibility')) {
     [bool]$HiddenVisibility
-} elseif ($isOptimized) {
+} elseif ($isRelease) {
     $true
 } else {
     $false
@@ -239,7 +234,7 @@ $effectiveHiddenVisibility = if ($PSBoundParameters.ContainsKey('HiddenVisibilit
 $effectiveNoSemanticInterposition =
     if ($PSBoundParameters.ContainsKey('NoSemanticInterposition')) {
         [bool]$NoSemanticInterposition
-    } elseif ($isOptimized) {
+    } elseif ($isRelease) {
         $true
     } else {
         $false
@@ -250,18 +245,18 @@ $effectiveSymbolOrderFile = if ($PSBoundParameters.ContainsKey('SymbolOrderFile'
     ''
 }
 
-if ($isProfileBuild -and $effectiveSplitMachineFunctions) {
-    throw '-SplitMachineFunctions requires profile use; the training build ' +
-          'has no profile for the split decision'
+if ($effectiveSplitMachineFunctions -and $Pgo -ne 'use') {
+    throw '-SplitMachineFunctions requires -Pgo use; the split decision ' +
+          'needs a profile'
 }
-if (-not $isFinalOptimized -and $effectiveCallGraphSort -ne 'none') {
-    throw '-CallGraphSort requires -Variant release_optimized with ThinLTO'
+if (-not $isFinalRelease -and $effectiveCallGraphSort -ne 'none') {
+    throw '-CallGraphSort requires the final release build with ThinLTO'
 }
-if (-not $isFinalOptimized -and $effectiveLtoWholeProgramVisibility) {
-    throw '-LtoWholeProgramVisibility requires release_optimized ThinLTO'
+if (-not $isFinalRelease -and $effectiveLtoWholeProgramVisibility) {
+    throw '-LtoWholeProgramVisibility requires final release ThinLTO'
 }
-if (-not $isFinalOptimized -and $effectiveThinLtoCache) {
-    throw 'ThinLTO cache requires release_optimized ThinLTO'
+if (-not $isFinalRelease -and $effectiveThinLtoCache) {
+    throw 'ThinLTO cache requires final release ThinLTO'
 }
 if ($effectiveSymbolOrderFile) {
     $orderPath = if ([IO.Path]::IsPathRooted($effectiveSymbolOrderFile)) {
@@ -340,12 +335,7 @@ function Read-DebugTagsFile {
 if (-not $isDebug) {
     $DebugTags = ''
 } else {
-    $tagFileName = if ($isUserDebug) {
-        'debug_tags_userdebug.txt'
-    } else {
-        'debug_tags.txt'
-    }
-    $tagPath = Join-Path $root "config\$tagFileName"
+    $tagPath = Join-Path $root 'config\debug_tags.txt'
     $knownTags = Get-DeclaredDebugTags `
         -HeaderPath (Join-Path $root 'runtime\diag\wc3_debug.h')
     $tagList = @(Read-DebugTagsFile -Path $tagPath -Known $knownTags)
@@ -570,7 +560,7 @@ if (-not (Test-Path $cmake) -or -not (Test-Path $ninja) -or
 # The profile is copied before the child starts so every profile-use compile
 # sees the same absolute path locally and on IDEAPAD.
 $distPgoProfile = ''
-if ($isOptimized -and $Pgo -eq 'use' -and $PgoProfile) {
+if ($isRelease -and $Pgo -eq 'use' -and $PgoProfile) {
     $profileCandidate = if ([IO.Path]::IsPathRooted($PgoProfile)) {
         $PgoProfile
     } else {
@@ -611,8 +601,12 @@ if ($GamesActivityAar -and -not [IO.Path]::IsPathRooted($GamesActivityAar)) {
     $GamesActivityAar = Join-Path $root $GamesActivityAar
 }
 if (-not $GamesActivityAar) {
-    $previous = Join-Path $root "build\android_app\$Variant\games-activity-4.4.2.aar"
+    $previous = Join-Path $root "build\android_app\$artifactVariant\games-activity-4.4.2.aar"
     $candidates = @($previous)
+    if ($artifactVariant -ne $Variant) {
+        $candidates += Join-Path $root `
+            "build\android_app\$Variant\games-activity-4.4.2.aar"
+    }
     if ($env:GRADLE_USER_HOME) {
         $candidates += Join-Path $env:GRADLE_USER_HOME `
             'caches\modules-2\files-2.1\androidx.games\games-activity\4.4.2'
@@ -642,7 +636,7 @@ if (-not $GamesActivityAar -or -not (Test-Path $GamesActivityAar)) {
 $GamesActivityAar = (Resolve-Path $GamesActivityAar).Path
 
 # BV-3.1: per-variant build tree prevents a stale .so from another variant.
-$out = Join-Path $root "build\android_app\$Variant"
+$out = Join-Path $root "build\android_app\$artifactVariant"
 $ga = Join-Path $out 'gameactivity-aar'
 New-Item -ItemType Directory -Force $out | Out-Null
 $outAar = Join-Path $out 'games-activity-4.4.2.aar'
@@ -654,7 +648,8 @@ New-Item -ItemType Directory -Force $ga | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::ExtractToDirectory($GamesActivityAar, $ga)
 
-$warningState = Initialize-Wc3BuildWarningLog -Root $root -Kind 'native' -Variant $Variant
+$warningState = Initialize-Wc3BuildWarningLog -Root $root -Kind 'native' `
+    -Variant $artifactVariant
 
 $debugValue = if ($isDebug) { 'ON' } else { 'OFF' }
 $configure = @(
@@ -721,56 +716,54 @@ $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
 $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
 $configure += "-DWC3_SELECTION_24=$selection24Value"
-# The userdebug diagnostic writes stdout/stderr to the public Download folder
-# (native side falls back to the app-private state dir when it is not
-# writable).  Other variants keep the historical run.txt in the state dir.
-$logToDownloadsValue = if ($isUserDebug) { 'ON' } else { 'OFF' }
-$configure += "-DWC3_LOG_TO_DOWNLOADS=$logToDownloadsValue"
+if ($selection24Value -eq 'ON') {
+    # The product always carries the 40-entry structural layout; the runtime
+    # dropdown chooses 12, 24 or 40.  Pass it explicitly so a cached 24-entry
+    # comparison configure cannot leak into the product build.
+    $configure += '-DWC3_SELECTION_STRUCT_CAP=40'
+}
 $configure += '-DWC3_CORPUS_WERROR=OFF'
-# release_optimized is the release product plus ThinLTO and PGO.  The training
-# build deliberately skips LTO; it exists only to collect counters.  The final
-# build uses both flags and the same release product inputs.
-$ltoValue = if ($Variant -eq 'release_optimized') { 'THIN' } else { 'OFF' }
+# Release is the optimized product.  The final release build (PGO use and the
+# explicit -Pgo off A/B mode) uses ThinLTO; the internal training pass skips LTO
+# because it exists only to collect counters.
+$ltoValue = if ($isRelease -and -not $isProfileBuild) { 'THIN' } else { 'OFF' }
 $configure += "-DWC3_LTO=$ltoValue"
-if ($isOptimized) {
-    if ($Pgo -eq 'use') {
-        $profilePath = if ([IO.Path]::IsPathRooted($PgoProfile)) {
-            $PgoProfile
-        } else {
-            Join-Path $root $PgoProfile
-        }
-        if (-not (Test-Path -LiteralPath $profilePath)) {
-            throw "PGO profile not found: $profilePath (run the training build first)"
-        }
-        $PgoProfile = ((Resolve-Path -LiteralPath $profilePath).Path) -replace '\\', '/'
-        # clang's -fprofile-use silently consumes a profile of the wrong kind
-        # and the resulting binary has no useful profile data.  Check the
-        # actual instrumentation level instead of trusting the file extension
-        # or an earlier build's sidecar.
-        $actualPgoKind = Get-PgoProfileKind -Path $PgoProfile `
-            -Profdata $ndk.Profdata
-        if ($actualPgoKind -ne $effectivePgoKind) {
-            throw "PGO profile kind '$actualPgoKind' does not match requested " +
-                  "'$effectivePgoKind' ($PgoProfile). Rebuild the training "
-                  "profile with -PgoKind $effectivePgoKind."
-        }
-        $configure += '-DWC3_PGO_MODE=use'
-        $configure += "-DWC3_PGO_PROFILE=$PgoProfile"
+if ($isRelease -and $Pgo -eq 'use') {
+    $profilePath = if ([IO.Path]::IsPathRooted($PgoProfile)) {
+        $PgoProfile
     } else {
-        if (-not $PgoRawDir) {
-            throw '-PgoRawDir is required for profile generation'
-        }
-        $configure += '-DWC3_PGO_MODE=generate'
-        $configure += "-DWC3_PGO_RAW_DIR=$PgoRawDir"
+        Join-Path $root $PgoProfile
     }
+    if (-not (Test-Path -LiteralPath $profilePath)) {
+        throw "PGO profile not found: $profilePath (run the training build first)"
+    }
+    $PgoProfile = ((Resolve-Path -LiteralPath $profilePath).Path) -replace '\\', '/'
+    # clang's -fprofile-use silently consumes a profile of the wrong kind
+    # and the resulting binary has no useful profile data.  Check the
+    # actual instrumentation level instead of trusting the file extension
+    # or an earlier build's sidecar.
+    $actualPgoKind = Get-PgoProfileKind -Path $PgoProfile `
+        -Profdata $ndk.Profdata
+    if ($actualPgoKind -ne $effectivePgoKind) {
+        throw "PGO profile kind '$actualPgoKind' does not match requested " +
+              "'$effectivePgoKind' ($PgoProfile). Rebuild the training " +
+              "profile with -PgoKind $effectivePgoKind."
+    }
+    $configure += '-DWC3_PGO_MODE=use'
+    $configure += "-DWC3_PGO_PROFILE=$PgoProfile"
+} elseif ($isRelease -and $Pgo -eq 'generate') {
+    if (-not $PgoRawDir) {
+        throw '-PgoRawDir is required for profile generation'
+    }
+    $configure += '-DWC3_PGO_MODE=generate'
+    $configure += "-DWC3_PGO_RAW_DIR=$PgoRawDir"
 } else {
     $configure += '-DWC3_PGO_MODE=off'
 }
 $configure += "-DWC3_PGO_KIND=$effectivePgoKind"
-# The release/debug profile is explicit and conservative; only
-# release_optimized changes the code-generation knobs.  Passing every value
-# also prevents a stale CMake cache from a previous optimized configure from
-# leaking into a canonical build.
+# The release code-generation profile is explicit and optimized; debug keeps
+# the conservative defaults.  Passing every value also prevents a stale CMake
+# cache from a previous optimized configure from leaking into a canonical build.
 $configure += "-DWC3_OPT_LEVEL=$effectiveOptLevel"
 $configure += "-DWC3_CORPUS_OPT_LEVEL=$effectiveCorpusOptLevel"
 $configure += "-DWC3_MTUNE=$Mtune"
@@ -823,7 +816,6 @@ Write-Host "[app] lift_p0_1/2/6 unconditional"
 Write-Host "[app] thin_skip_writeonly_copyin $($thinSkipCopyinValue -eq 'ON')"
 Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"
 Write-Host "[app] selection24 $selection24Value"
-Write-Host "[app] log_to_downloads $($logToDownloadsValue -eq 'ON')"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
 Write-Host "[app] lto   $ltoValue"
 Write-Host "[app] pgo   $Pgo kind $effectivePgoKind"
@@ -834,15 +826,16 @@ Write-Host "[app] codegen hidden_visibility $effectiveHiddenVisibility no_semant
 if ($effectiveSymbolOrderFile) {
     Write-Host "[app] symbol_order $effectiveSymbolOrderFile"
 }
-if ($isOptimized) {
+if ($isRelease) {
     if ($Pgo -eq 'use') {
         Write-Host "[app] pgo_profile $PgoProfile"
-    } else {
+    } elseif ($Pgo -eq 'generate') {
         Write-Host "[app] pgo_raw_dir $PgoRawDir"
     }
 }
 Write-Host "[app] aar   $GamesActivityAar"
 Write-Host "[app] variant $Variant"
+Write-Host "[app] output  $artifactVariant"
 Write-Host "[app] debug $isDebug"
 $ErrorActionPreference = 'Continue'
 $configureOut = @(& $cmake @configure 2>&1)
@@ -947,10 +940,15 @@ if ($soStrings -notmatch 'WC3_SAVE_LIST_STRIP_W3Z') {
     Write-Host '[app] save-list display fix marker is absent from the product .so'
     exit 1
 }
-if ($selection24Value -eq 'ON' -and
-    $soStrings -notmatch 'WC3_SELECTION_24') {
-    Write-Host '[app] selection24 marker is absent from the product .so'
-    exit 1
+if ($selection24Value -eq 'ON') {
+    if ($soStrings -notmatch 'WC3_SELECTION_24') {
+        Write-Host '[app] selection24 marker is absent from the product .so'
+        exit 1
+    }
+    if ($soStrings -notmatch 'WC3_SELECTION_CAP') {
+        Write-Host '[app] selection-cap runtime marker is absent from the product .so'
+        exit 1
+    }
 }
 # The cursor switch is a runtime launch setting, but it can only work when the
 # product link kept the --wrap member and resolved the generated corpus call
@@ -958,6 +956,18 @@ if ($selection24Value -eq 'ON' -and
 if ($soStrings -notmatch 'WC3_HIDE_CURSOR') {
     Write-Host '[app] cursor-hide build marker is absent from the product .so'
     exit 1
+}
+# DXVK 1.10.3 is a target product; a stale archive must fail here, not on Mali.
+foreach ($marker in @(
+    'WC3 DXVK: createDevice begin',
+    'WC3 DXVK: vkCreateDevice result=',
+    'WC3 D3D9: InitialReset',
+    'WC3 D3D9: missing adapter core features')) {
+    if (-not $soStrings.Contains($marker)) {
+        Write-Host "[app] DXVK WC3 marker is absent from the product .so: $marker"
+        Write-Host "[app] rebuild DXVK: tools/android/build_dxvk.ps1 -Variant $Variant"
+        exit 1
+    }
 }
 $nm = Join-Path $ndk.Root 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-nm.exe'
 $soSymbols = (& $nm $so 2>&1) -join "`n"

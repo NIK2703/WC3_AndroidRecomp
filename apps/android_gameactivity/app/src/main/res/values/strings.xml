@@ -27,7 +27,12 @@
     <string name="launch_selection_24">24 units</string>
     <string name="launch_selection_40">40 units</string>
     <string name="launch_hide_cursor_label">Hide game cursor</string>
-    <string name="launch_parallel_label">Parallel game loops</string>
+    <string name="launch_cpu_cores_label">CPU cores</string>
+    <string name="launch_cpu_cores_hint">%1$d of %2$d cores selected · main thread: CPU %3$d · parallel execution is on, workers: %1$d · applied on next launch</string>
+    <string name="launch_cpu_cores_single">One core selected · main thread: CPU %1$d · parallel execution is off · select two or more cores for workers · applied on next launch</string>
+    <string name="launch_cpu_cores_unavailable">Could not detect the allowed CPU cores · parallel execution is off</string>
+    <string name="launch_cpu_cores_required">Select at least one core.</string>
+    <string name="launch_cpu_core_description">CPU core %1$d</string>
     <string name="launch_gesture_mode_label">Touchscreen control gestures</string>
     <string name="launch_gesture_mode_double">Double tap, single tap with delay</string>
     <string name="launch_gesture_mode_single">No double tap, single tap without delay</string>

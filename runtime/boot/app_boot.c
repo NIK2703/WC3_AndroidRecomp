@@ -31,9 +31,6 @@
 #ifndef WC3_DEBUG
 #define WC3_DEBUG 0
 #endif
-#ifndef WC3_LOG_TO_DOWNLOADS
-#define WC3_LOG_TO_DOWNLOADS 0
-#endif
 
 #if WC3_DEBUG
 #define TAG "wc3boot"
@@ -68,13 +65,10 @@ static void set_default(const char *name, const char *value)
         setenv(name, value, 1);
 }
 
-/* userdebug writes its boot log to the public Download folder.  The app can
- * start before MANAGE_EXTERNAL_STORAGE is granted, and some devices expose a
- * read-only Download through FUSE, so probe first and fall back to the
- * app-private state dir instead of losing stdout/stderr entirely.  Both paths
- * use the variant-tagged file name so reports from different builds stay
- * separate. */
-#define WC3_DOWNLOAD_LOG WC3_CRASH_DOWNLOAD_LOG
+/* The boot log lives in the app-private state directory while the game runs.
+ * Both stdout and stderr go to the variant-tagged file so reports from
+ * different builds stay separate; the host copies it to Download when the game
+ * exits. */
 
 static int open_log(const char *path)
 {
@@ -91,27 +85,10 @@ static int open_log(const char *path)
     return 0;
 }
 
-static int log_is_writable(const char *path)
-{
-    FILE *f = fopen(path, "a");
-    if (!f)
-        return 0;
-    fclose(f);
-    return 1;
-}
-
 static void redirect_output(const char *state_dir)
 {
     char path[1024];
     int n;
-
-#if WC3_LOG_TO_DOWNLOADS
-    if (log_is_writable(WC3_DOWNLOAD_LOG) &&
-        open_log(WC3_DOWNLOAD_LOG) == 0)
-        return;
-    LOGE("cannot open %s: %s; using state dir", WC3_DOWNLOAD_LOG,
-         strerror(errno));
-#endif
 
     n = snprintf(path, sizeof path, "%s/" WC3_CRASH_LOG_FILE, state_dir);
     if (n <= 0 || (size_t)n >= sizeof path)
@@ -197,6 +174,37 @@ static void set_game_args(int roc)
         setenv("WC3_ARGS", merged, 1);
 }
 
+/* The APK has no shell to pass diagnostic environment variables.  A marker
+ * file in the app-private state directory enables the corresponding oracle
+ * before the guest starts; this is the same file-trigger idea as
+ * hle_report_on and is compiled out of release.  The marker only turns a
+ * verification on, never changes product behavior by default. */
+#if WC3_DEBUG && WC3_DEBUG_BOOT
+static void apply_debug_verify_markers(const char *state_dir)
+{
+    static const struct {
+        const char *file;
+        const char *env;
+    } markers[] = {
+        { "wc3_vertex_verify", "WC3_VERTEX_VERIFY" },
+        { "wc3_triangle_verify", "WC3_TRIANGLE_VERIFY" },
+        { "wc3_ray_verify", "WC3_RAY_VERIFY" },
+    };
+    for (size_t i = 0; i < sizeof markers / sizeof markers[0]; i++) {
+        char path[1200];
+        int n = snprintf(path, sizeof path, "%s/%s", state_dir,
+                         markers[i].file);
+        if (n > 0 && (size_t)n < sizeof path && access(path, F_OK) == 0)
+            setenv(markers[i].env, "1", 1);
+    }
+}
+#else
+static void apply_debug_verify_markers(const char *state_dir)
+{
+    (void)state_dir;
+}
+#endif
+
 /* A separate small marker is reliable even though the boot log is opened
  * twice (stdout truncates, stderr appends) and the two streams can overwrite
  * each other at boot.  It is also the release-visible acceptance signal. */
@@ -239,6 +247,7 @@ int wc3_app_boot_start(const char *data_dir, const char *state_dir,
     start_report_thread(state_dir);
     set_game_args(roc);
     write_game_mode_marker(state_dir, roc);
+    apply_debug_verify_markers(state_dir);
 
     /* These are the product defaults, not diagnostics: the shipped APK has no
      * shell to pass arguments and must load the game and use DXVK.  Sound is

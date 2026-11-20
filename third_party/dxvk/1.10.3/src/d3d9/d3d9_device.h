@@ -803,8 +803,17 @@ namespace dxvk {
       return m_state.renderStates[D3DRS_ZENABLE] && m_state.depthStencil != nullptr;
     }
 
+    inline uint32_t GetMaxClipPlanes() const {
+      /* WC3: shaderClipDistance is optional.  Devices without it have no
+       * user clip planes, so report the same limit as real D3D9 hardware
+       * without the capability. */
+      return m_dxvkDevice->features().core.features.shaderClipDistance
+        ? caps::MaxClipPlanes : 0;
+    }
+
     inline bool IsClipPlaneEnabled() {
-      return m_state.renderStates[D3DRS_CLIPPLANEENABLE] != 0;
+      return GetMaxClipPlanes() != 0
+          && m_state.renderStates[D3DRS_CLIPPLANEENABLE] != 0;
     }
 
     void BindMultiSampleState();

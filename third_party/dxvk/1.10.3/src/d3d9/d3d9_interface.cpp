@@ -332,9 +332,15 @@ namespace dxvk {
 
     auto dxvkAdapter = adapter->GetDXVKAdapter();
 
-    try {
-      auto dxvkDevice = dxvkAdapter->createDevice(m_instance, D3D9DeviceEx::GetDeviceFeatures(dxvkAdapter));
+    Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: CreateDeviceEx adapter=", Adapter,
+      " type=", uint32_t(DeviceType), " flags=", BehaviorFlags));
 
+    try {
+      Logger::debug("[DXVK_DEBUG] WC3 D3D9: creating DXVK device");
+      auto dxvkDevice = dxvkAdapter->createDevice(m_instance, D3D9DeviceEx::GetDeviceFeatures(dxvkAdapter));
+      Logger::debug("[DXVK_DEBUG] WC3 D3D9: DXVK device created");
+
+      Logger::debug("[DXVK_DEBUG] WC3 D3D9: constructing D3D9DeviceEx");
       auto* device = new D3D9DeviceEx(
         this,
         adapter,
@@ -342,15 +348,20 @@ namespace dxvk {
         hFocusWindow,
         BehaviorFlags,
         dxvkDevice);
+      Logger::debug("[DXVK_DEBUG] WC3 D3D9: D3D9DeviceEx constructed");
 
+      Logger::debug("[DXVK_DEBUG] WC3 D3D9: InitialReset begin");
       HRESULT hr = device->InitialReset(pPresentationParameters, pFullscreenDisplayMode);
+      Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: InitialReset hr=", int32_t(hr)));
 
       if (FAILED(hr))
         return hr;
 
       *ppReturnedDeviceInterface = ref(device);
+      Logger::debug("[DXVK_DEBUG] WC3 D3D9: CreateDeviceEx succeeded");
     }
     catch (const DxvkError& e) {
+      Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: CreateDeviceEx failed: ", e.message()));
       Logger::err(e.message());
       return D3DERR_NOTAVAILABLE;
     }

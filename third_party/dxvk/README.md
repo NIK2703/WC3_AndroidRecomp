@@ -7,14 +7,14 @@ the final link.
 
 | Path | Contents |
 |---|---|
-| `1.10.3/` | DXVK 1.10.3 source at `e4fd5e9` (tag `v1.10.3`) with the old tree's Android/static patches plus the low-memory placed and Android present patches |
+| `1.10.3/` | DXVK 1.10.3 source at `e4fd5e9` (tag `v1.10.3`) with the old tree's Android/static patches plus the WC3 optional-feature D3D9 patch, low-memory placed and Android present patches |
 | `3.1.1/` | DXVK 3.1.1 source at `23b07e9` with the same Android/static patches, the WC3 D3D9 compatibility patch, the Android debug/pacing/present patches and the low-memory placed patch |
 | `low-latency/` | `netborg-afps/dxvk-low-latency` at `33ba69f` (tag `low-latency-framepacing-3.1.1`), DXVK 3.1.1 plus the fork's framepacer; carries the same WC3 3.1.1 patch set and `dxvk-low-latency-android.patch` |
 | `3.1.1/build-win64-ucrt/` | `compile_commands.json`, Meson-generated headers and `pnp-id-table.c`; the build recipe, not build output |
 | `low-latency/build-win64-ucrt/` | the same recipe for the low-latency fork (201 translation units) |
 | `1.10.3/build-win64-ucrt/` | the same recipe for the legacy backend |
 | `shim/` | the POSIX Win32 surface (`dxvk_shim/*.h` + `dxvk_win32.cpp`) used by all three trees, the shared low-memory window, and the 1.10.3 Vulkan fallback header |
-| `patches/` | provenance snapshots of the upstream diffs, the WC3 compatibility and Android debug/pacing/present patches, both WC3 low-memory placed mapping patches, and the low-latency Android adaptation |
+| `patches/` | provenance snapshots of the upstream diffs, both WC3 D3D9 compatibility patches, Android debug/pacing/present patches, both WC3 low-memory placed mapping patches, and the low-latency Android adaptation |
 | `VENDOR_COMMIT` | exact upstream and submodule revisions |
 
 The source trees are snapshots of the working trees used by the old build, so
@@ -71,6 +71,20 @@ stderr to `run.txt`.
 Do not weaken the features in a shared D3D11/D3D12 build.  If the archive is
 ever reused outside the D3D9 frontend, revisit this patch rather than keeping
 the requirements disabled by default.
+
+### DXVK 1.10.3 optional features
+
+`patches/dxvk-1.10.3-wc3-d3d9.patch` is the 1.10.3 counterpart.  DXVK 1.10.3
+forces `fillModeNonSolid`, `multiViewport`, `textureCompressionBC`,
+`shaderClipDistance`, `shaderCullDistance` and several other flags in
+`D3D9DeviceEx::GetDeviceFeatures()`.  Mali-G57 MC2 (driver 32.1.0, Vulkan
+1.1.177) reports the first five false, so `vkCreateDevice` returned
+`VK_ERROR_FEATURE_NOT_PRESENT` before D3D9 could create a swap chain.  The
+patch copies every flag from adapter support and gates the dependent paths;
+missing capabilities are reported through `GetDeviceCaps`, and the D3D9 API
+returns the failures real hardware without those capabilities would.  1.10.3
+is the only usable backend on this device because 3.1.1 requires Vulkan 1.3.
+`docs/GRAPHICS_DECISION.md` owns the backend decision.
 
 ## Low-latency fork
 

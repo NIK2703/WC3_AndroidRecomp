@@ -13,13 +13,13 @@
 #   * Ninja starts local plus every available worker, distcc fills the
 #     workers, and runs at most the local slot count on this machine.
 # Either worker is optional: -NoIdeapad, -NoPhone, or both.  If neither
-# worker is available the canonical build runs locally.  The optimized
-# variants use IDEAPAD by default and exclude the phone because it has no
-# merged PGO profile; set WC3_DIST_PHONE_OPTIMIZED=1 to include the phone.
+# worker is available the canonical build runs locally.  release is the
+# optimized product and uses IDEAPAD by default; it excludes the phone because
+# the phone has no merged PGO profile.  Set WC3_DIST_PHONE_OPTIMIZED=1 to
+# include the phone.
 [CmdletBinding()]
 param(
-    [ValidateSet('release', 'debug', 'userdebug',
-                 'release_optimized', 'release_optimized_pgo')]
+    [ValidateSet('release', 'debug')]
     [string]$Variant = 'release',
     [ValidateSet('distcc', 'ssh')]
     [string]$Transport = 'distcc',
@@ -27,9 +27,12 @@ param(
     [int]$LocalSlots = 0,
     [int]$RemoteSlots = 0,
     [int]$RemotePort = 3632,
-    # Merged profile for a final release_optimized build.  The distcc tunnel
-    # copies it to IDEAPAD; the SSH transport leaves profile-use local.
+    # Merged profile for a final release build.  The distcc tunnel copies it
+    # to IDEAPAD; the SSH transport leaves profile-use local.
     [string]$PgoProfile = '',
+    # PGO mode forwarded to build_app.ps1.  Empty uses the build_app default
+    # (release -> use, debug -> off).  The training pass is -Pgo generate.
+    [string]$Pgo = '',
     # Legacy name for the custom SSH transport's remote slot count.
     [int]$Slots = 0,
     # Either worker can be skipped; the other one is still used if available.
@@ -67,10 +70,29 @@ if ($LocalSlots -gt [Environment]::ProcessorCount) {
     $LocalSlots = [Environment]::ProcessorCount
 }
 if ($Slots -gt 0 -and $RemoteSlots -le 0) { $RemoteSlots = $Slots }
-# The canonical final optimized build consumes this profile.  Default it here
-# as well so an explicit build_dist invocation gets the same remote profile
-# copy as the automatic build_app path.
-if ($Variant -eq 'release_optimized' -and -not $PgoProfile) {
+# build_app.ps1 defaults release to -Pgo use.  Mirror that here so the tunnel
+# copies the merged profile for the final build, but never require it for the
+# internal training pass.
+$buildPgo = $Pgo
+$hasPgoArg = $false
+$buildArgList = @($BuildArgs)
+for ($i = 0; $i -lt $buildArgList.Count; $i++) {
+    $arg = [string]$buildArgList[$i]
+    if ($arg -match '^-Pgo:(?<value>off|generate|use)$') {
+        $buildPgo = $Matches.value
+        $hasPgoArg = $true
+    } elseif ($arg -eq '-Pgo' -and $i + 1 -lt $buildArgList.Count) {
+        $buildPgo = [string]$buildArgList[$i + 1]
+        $hasPgoArg = $true
+    }
+}
+if (-not $buildPgo) {
+    $buildPgo = if ($Variant -eq 'release') { 'use' } else { 'off' }
+}
+if ($buildPgo -notin @('off', 'generate', 'use')) {
+    throw "invalid PGO mode '$buildPgo'; expected off, generate, or use"
+}
+if ($Variant -eq 'release' -and $buildPgo -eq 'use' -and -not $PgoProfile) {
     $PgoProfile = 'build/pgo/wc3.profdata'
 }
 if ($PgoProfile) {
@@ -84,13 +106,13 @@ if ($PgoProfile) {
     }
     $PgoProfile = (Resolve-Path -LiteralPath $profileCandidate).Path
 }
-$allowPgo = $Variant -in @('release_optimized', 'release_optimized_pgo')
-$allowLto = $Variant -eq 'release_optimized'
+$allowPgo = $Variant -eq 'release' -and $buildPgo -ne 'off'
+$allowLto = $Variant -eq 'release' -and $buildPgo -ne 'generate'
 $useIdeapad = -not $NoIdeapad
 if ($env:WC3_DIST_IDEAPAD -eq '0') { $useIdeapad = $false }
 $usePhone = -not $NoPhone
 if ($env:WC3_DIST_PHONE -eq '0') { $usePhone = $false }
-if ($Variant -in @('release_optimized', 'release_optimized_pgo') -and
+if ($Variant -eq 'release' -and
     $env:WC3_DIST_PHONE_OPTIMIZED -ne '1') {
     $usePhone = $false
 }
@@ -241,6 +263,9 @@ try {
         }).Count -gt 0
         if ($PgoProfile -and -not $hasProfileArg) {
             $appArgs['PgoProfile'] = $PgoProfile
+        }
+        if ($Pgo -and -not $hasPgoArg) {
+            $appArgs['Pgo'] = $Pgo
         }
         & (Join-Path $root 'tools\android\build_app.ps1') -Variant $Variant `
             @appArgs @BuildArgs

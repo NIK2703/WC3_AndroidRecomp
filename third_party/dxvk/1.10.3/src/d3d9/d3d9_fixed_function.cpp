@@ -1439,7 +1439,8 @@ namespace dxvk {
     setupRenderStateInfo();
 
     // VS Caps
-    m_module.enableCapability(spv::CapabilityClipDistance);
+    if (m_vsKey.Data.Contents.VertexClipping)
+      m_module.enableCapability(spv::CapabilityClipDistance);
 
     emitLightTypeDecl();
     emitBaseBufferDecl();

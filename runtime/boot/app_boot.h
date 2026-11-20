@@ -22,8 +22,7 @@ extern "C" {
  * Runs on a dedicated thread.  data_dir must contain war3.exe, Storm.dll,
  * game.dll, ijl15.dll, Mss32.dll and the four MPQs; it becomes the guest's
  * working directory.  state_dir is the app-private directory for the boot
- * log, audio dumps and other diagnostic state; the userdebug profile writes
- * its boot log to Download instead and uses this directory only as fallback.
+ * log, audio dumps and other diagnostic state.
  * game_mode is "roc" for Reign of
  * Chaos and "tft" (or NULL) for The Frozen Throne.  Returns a negative errno
  * before guest start; after the guest starts the function does not return

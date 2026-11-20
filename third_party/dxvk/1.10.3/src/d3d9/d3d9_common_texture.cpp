@@ -128,6 +128,19 @@ namespace dxvk {
         return D3DERR_INVALIDCALL;
     }
 
+    /* WC3: a guest that ignores CheckDeviceFormat must not reach
+     * vkCreateImage with a block-compressed format on a device without
+     * textureCompressionBC. */
+    if (mapping.IsValid()
+     && !pDevice->GetDXVKDevice()->features().core.features.textureCompressionBC) {
+      const DxvkFormatInfo* formatInfo = imageFormatInfo(mapping.FormatColor);
+      if (formatInfo != nullptr && formatInfo->blockSize.width > 1) {
+        Logger::debug(str::format("[DXVK_DEBUG] WC3 D3D9: rejecting block-compressed texture ",
+          pDesc->Format, ": textureCompressionBC missing"));
+        return D3DERR_INVALIDCALL;
+      }
+    }
+
     ///////////////////
     // Desc Validation
 

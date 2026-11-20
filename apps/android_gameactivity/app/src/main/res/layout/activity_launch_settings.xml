@@ -416,29 +416,34 @@
             </FrameLayout>
 
             <LinearLayout
-                android:id="@+id/parallel_execution_row"
+                android:id="@+id/parallel_cpu_group"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
+                android:orientation="vertical">
 
                 <TextView
                     style="@style/Wc3RowLabel"
-                    android:layout_width="0dp"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/launch_parallel_label" />
+                    android:textSize="16sp"
+                    android:text="@string/launch_cpu_cores_label" />
 
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/parallel_execution_switch"
-                    android:layout_width="wrap_content"
+                <TextView
+                    android:id="@+id/parallel_cpu_hint"
+                    style="@style/Wc3Helper"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:contentDescription="@string/launch_parallel_label"
-                    android:saveEnabled="false"
-                    app:thumbTint="@color/switch_thumb"
-                    app:trackTint="@color/switch_track" />
+                    android:layout_marginTop="4dp"
+                    android:accessibilityLiveRegion="polite" />
+
+                <GridLayout
+                    android:id="@+id/parallel_cpu_grid"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:columnCount="2"
+                    android:useDefaultMargins="false" />
             </LinearLayout>
 
             <TextView

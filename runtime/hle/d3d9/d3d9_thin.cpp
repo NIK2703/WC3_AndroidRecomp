@@ -894,6 +894,16 @@ static void thin_log_real_caps(void)
                  (unsigned)caps.MaxTextureWidth,
                  (unsigned)caps.MaxTextureHeight,
                  (unsigned)caps.PresentationIntervals);
+        THIN_LOG("caps-native clip=%u aniso=%u raster=%08lX dev=%08lX "
+                 "stages=%u textures=%u streams=%u vsconst=%u",
+                 (unsigned)caps.MaxUserClipPlanes,
+                 (unsigned)caps.MaxAnisotropy,
+                 (unsigned long)caps.RasterCaps,
+                 (unsigned long)caps.DevCaps,
+                 (unsigned)caps.MaxTextureBlendStages,
+                 (unsigned)caps.MaxSimultaneousTextures,
+                 (unsigned)caps.MaxStreams,
+                 (unsigned)caps.MaxVertexShaderConst);
     }
     const D3DFORMAT probe[] = { D3DFMT_DXT1, D3DFMT_DXT5, D3DFMT_A8R8G8B8 };
     for (unsigned i = 0; i < sizeof probe / sizeof probe[0]; i++) {

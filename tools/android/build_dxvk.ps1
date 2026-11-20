@@ -250,6 +250,62 @@ if (-not (Select-String -LiteralPath $lowmem1Memory -Pattern 'm_usePlacedMemory'
     throw "DXVK 1.10.3 source does not contain the WC3 low-memory placed-mapping patch"
 }
 
+# DXVK 1.10.3 optional-feature compatibility.  Every forced
+# VkPhysicalDeviceFeatures flag must come from adapter support, and the
+# dependent paths must stay gated.
+$compat1Patch = Join-Path $dxvkRoot 'patches\dxvk-1.10.3-wc3-d3d9.patch'
+if (-not (Test-Path $compat1Patch)) { throw "DXVK 1.10.3 compatibility patch missing: $compat1Patch" }
+$device1 = Join-Path $dxvk1 'src\d3d9\d3d9_device.cpp'
+$device1Header = Join-Path $dxvk1 'src\d3d9\d3d9_device.h'
+$adapter1 = Join-Path $dxvk1 'src\d3d9\d3d9_adapter.cpp'
+$commonTexture1 = Join-Path $dxvk1 'src\d3d9\d3d9_common_texture.cpp'
+$query1 = Join-Path $dxvk1 'src\d3d9\d3d9_query.cpp'
+$fixed1 = Join-Path $dxvk1 'src\d3d9\d3d9_fixed_function.cpp'
+$dxsoOptions1 = Join-Path $dxvk1 'src\dxso\dxso_options.h'
+$dxsoCompiler1 = Join-Path $dxvk1 'src\dxso\dxso_compiler.cpp'
+$cmdlist1 = Join-Path $dxvk1 'src\dxvk\dxvk_cmdlist.cpp'
+$unbound1 = Join-Path $dxvk1 'src\dxvk\dxvk_unbound.cpp'
+if (-not (Select-String -LiteralPath $device1 -SimpleMatch -Pattern 'enabled.core.features.fillModeNonSolid = supported.core.features.fillModeNonSolid' -Quiet) -or
+    -not (Select-String -LiteralPath $device1 -SimpleMatch -Pattern 'enabled.core.features.shaderClipDistance = supported.core.features.shaderClipDistance' -Quiet) -or
+    -not (Select-String -LiteralPath $device1 -SimpleMatch -Pattern 'enabled.core.features.textureCompressionBC = supported.core.features.textureCompressionBC' -Quiet) -or
+    -not (Select-String -LiteralPath $device1 -SimpleMatch -Pattern 'enabled.extHostQueryReset.hostQueryReset = supported.extHostQueryReset.hostQueryReset' -Quiet) -or
+    -not (Select-String -LiteralPath $device1 -SimpleMatch -Pattern 'if (!m_dxvkDevice->features().core.features.fillModeNonSolid)' -Quiet) -or
+    -not (Select-String -LiteralPath $device1 -SimpleMatch -Pattern 'if (!m_dxvkDevice->features().core.features.samplerAnisotropy)' -Quiet) -or
+    -not (Select-String -LiteralPath $device1 -SimpleMatch -Pattern 'supported.extCustomBorderColor.customBorderColors' -Quiet) -or
+    -not (Select-String -LiteralPath $device1 -SimpleMatch -Pattern 'enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor' -Quiet) -or
+    -not (Select-String -LiteralPath $device1Header -SimpleMatch -Pattern 'GetMaxClipPlanes' -Quiet) -or
+    -not (Select-String -LiteralPath $adapter1 -SimpleMatch -Pattern 'core.features.shaderClipDistance' -Quiet) -or
+    -not (Select-String -LiteralPath $adapter1 -SimpleMatch -Pattern 'textureCompressionBC' -Quiet) -or
+    -not (Select-String -LiteralPath $adapter1 -SimpleMatch -Pattern 'D3DPRASTERCAPS_ANISOTROPY' -Quiet) -or
+    -not (Select-String -LiteralPath $adapter1 -SimpleMatch -Pattern 'MaxAnisotropy' -Quiet) -or
+    -not (Select-String -LiteralPath $commonTexture1 -SimpleMatch -Pattern 'textureCompressionBC' -Quiet) -or
+    -not (Select-String -LiteralPath $query1 -SimpleMatch -Pattern 'occlusionQueryPrecise' -Quiet) -or
+    -not (Select-String -LiteralPath $query1 -SimpleMatch -Pattern 'pipelineStatisticsQuery' -Quiet) -or
+    -not (Select-String -LiteralPath $fixed1 -SimpleMatch -Pattern 'if (m_vsKey.Data.Contents.VertexClipping)' -Quiet) -or
+    -not (Select-String -LiteralPath $dxsoOptions1 -SimpleMatch -Pattern 'supportsClipDistance' -Quiet) -or
+    -not (Select-String -LiteralPath $dxsoCompiler1 -SimpleMatch -Pattern 'm_moduleInfo.options.supportsClipDistance' -Quiet) -or
+    -not (Select-String -LiteralPath $cmdlist1 -SimpleMatch -Pattern 'extHostQueryReset' -Quiet) -or
+    -not (Select-String -LiteralPath $cmdlist1 -SimpleMatch -Pattern 'vkResetQueryPoolEXT' -Quiet) -or
+    -not (Select-String -LiteralPath $cmdlist1 -SimpleMatch -Pattern 'vkCmdResetQueryPool' -Quiet) -or
+    -not (Select-String -LiteralPath $unbound1 -SimpleMatch -Pattern 'core.features.imageCubeArray' -Quiet)) {
+    throw "DXVK 1.10.3 source does not contain the WC3 optional-feature fallbacks"
+}
+
+# DXVK 1.10.3 startup diagnostics.  These are debug-level vendor log lines
+# activated by DXVK_LOG_LEVEL=debug (ELF constructor before dxvk::Logger,
+# repeated in wc3_dxvk_prepare()); they name the device-creation stage and
+# the exact optional features that were dropped.
+$interface1 = Join-Path $dxvk1 'src\d3d9\d3d9_interface.cpp'
+$swapchain1diag = Join-Path $dxvk1 'src\d3d9\d3d9_swapchain.cpp'
+$adapter1diag = Join-Path $dxvk1 'src\dxvk\dxvk_adapter.cpp'
+if (-not (Select-String -LiteralPath $interface1 -SimpleMatch -Pattern 'WC3 D3D9: CreateDeviceEx' -Quiet) -or
+    -not (Select-String -LiteralPath $device1 -SimpleMatch -Pattern 'WC3 D3D9: missing adapter core features' -Quiet) -or
+    -not (Select-String -LiteralPath $device1 -SimpleMatch -Pattern 'WC3 D3D9: InitialReset: ResetSwapChain begin' -Quiet) -or
+    -not (Select-String -LiteralPath $swapchain1diag -SimpleMatch -Pattern 'WC3 D3D9: Presenter extent=' -Quiet) -or
+    -not (Select-String -LiteralPath $adapter1diag -SimpleMatch -Pattern 'WC3 DXVK: vkCreateDevice result=' -Quiet)) {
+    throw "DXVK 1.10.3 source does not contain the WC3 debug tracing"
+}
+
 # Device profile 2026-11-11: the Android build defines _WIN32 for the DXVK
 # shim, so DXVK's Windows timer branch (1 ms granularity, 4 ms + duration/6
 # busy-wait) was compiled into the target.  At 60 FPS the presenter thread

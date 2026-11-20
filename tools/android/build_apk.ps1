@@ -4,6 +4,11 @@
 # activity and the already-built libwc3gameactivity.so.  No script from the old
 # working tree is executed.  Exit codes: 0 built, 1 failure, 2 unavailable.
 #
+# -Release is the optimized product and consumes the merged PGO profile by
+# default; pass -Pgo off for the explicit optimized A/B without PGO.  The
+# internal training pass is -Variant release -Pgo generate and writes
+# wc3-release-pgo.apk, which is not a product.
+#
 # There is deliberately no -Clean switch: building must never delete the
 # native or DXVK output as a side effect.  A true clean rebuild is a manual
 # action (delete build\android_app and build\android\dxvk by hand).
@@ -11,16 +16,12 @@
 [CmdletBinding()]
 param(
     [switch]$Release,
-    [switch]$ReleaseOptimized,
     [switch]$NativeDebug,
     [switch]$Install,
     [switch]$Launch,
-    # Internal explicit variant selector for the two-stage release_optimized
-    # profile flow and the userdebug diagnostic profile.  Public callers
-    # normally use -Release or -ReleaseOptimized; userdebug is selected with
-    # -Variant userdebug and packages as wc3.recomp.debug.
-    [ValidateSet('release', 'debug', 'userdebug',
-                 'release_optimized', 'release_optimized_pgo')]
+    # Internal explicit variant selector for the two-stage release/PGO flow.
+    # Public callers normally use -Release or -NativeDebug.
+    [ValidateSet('release', 'debug')]
     [string]$Variant = '',
     [ValidateSet('off', 'generate', 'use')]
     [string]$Pgo = 'off',
@@ -28,8 +29,8 @@ param(
     [string]$PgoRawDir = '/data/data/wc3.recomp/files/pgo',
     [ValidateSet('instr', 'ir')]
     [string]$PgoKind = 'instr',
-    # release_optimized-only code generation profile; rejected for release and
-    # debug by the same validation as build_app.ps1.
+    # Release-only code generation profile; rejected for debug by the same
+    # validation as build_app.ps1.
     [ValidateSet('O2', 'O3')]
     [string]$OptLevel = 'O2',
     [ValidateSet('', 'O2', 'O3')]
@@ -79,52 +80,40 @@ if ($Release -and $NativeDebug) {
     Write-Host '[apk] -NativeDebug is incompatible with -Release'
     exit 1
 }
-if ($ReleaseOptimized -and ($Release -or $NativeDebug)) {
-    Write-Host '[apk] -ReleaseOptimized is incompatible with -Release/-NativeDebug'
-    exit 1
-}
 if ($Variant) {
-    if ($Release -or $ReleaseOptimized -or $NativeDebug) {
-        Write-Host '[apk] -Variant is incompatible with -Release/-ReleaseOptimized/-NativeDebug'
+    if ($Release -or $NativeDebug) {
+        Write-Host '[apk] -Variant is incompatible with -Release/-NativeDebug'
         exit 1
     }
     $variant = $Variant
-} elseif ($ReleaseOptimized) {
-    $variant = 'release_optimized'
 } elseif ($Release) {
     $variant = 'release'
 } else {
     $variant = 'debug'
 }
-$isDebug = $variant -in @('debug', 'userdebug')
-$isOptimized = $variant -in @('release_optimized', 'release_optimized_pgo')
+$isDebug = $variant -eq 'debug'
 $isRelease = -not $isDebug
-if ($isOptimized) {
-    if ($Pgo -eq 'off') {
-        $Pgo = if ($variant -eq 'release_optimized_pgo') { 'generate' } else { 'use' }
-    }
-    if ($variant -eq 'release_optimized_pgo' -and $Pgo -ne 'generate') {
-        Write-Host '[apk] release_optimized_pgo requires -Pgo generate'
-        exit 1
-    }
-    if ($variant -eq 'release_optimized' -and $Pgo -eq 'generate') {
-        Write-Host '[apk] use -Variant release_optimized_pgo for profile generation'
-        exit 1
-    }
-} elseif ($Pgo -ne 'off') {
-    Write-Host '[apk] -Pgo is only valid for release_optimized variants'
+if ($isDebug -and $Pgo -ne 'off') {
+    Write-Host '[apk] -Pgo is only valid with -Variant release'
     exit 1
 }
+if ($isRelease -and -not $PSBoundParameters.ContainsKey('Pgo')) {
+    $Pgo = 'use'
+}
+# The training pass is not a variant: it keeps -Variant release for Gradle and
+# WC3_VARIANT, but writes a separate native directory and APK artifact.
+$isProfileBuild = $Pgo -eq 'generate'
+$artifactVariant = if ($isProfileBuild) { 'release-pgo' } else { $variant }
 $experimentalParams = @(
     'PgoKind', 'OptLevel', 'CorpusOptLevel', 'Mtune', 'OmitFramePointer',
     'SplitMachineFunctions', 'CallGraphSort', 'LtoOptLevel',
     'LtoWholeProgramVisibility', 'NoThinLtoCache', 'EmitRelocs', 'Polly',
     'HiddenVisibility', 'NoSemanticInterposition', 'SymbolOrderFile'
 )
-if (-not $isOptimized) {
+if ($isDebug) {
     foreach ($name in $experimentalParams) {
         if ($PSBoundParameters.ContainsKey($name)) {
-            Write-Host "[apk] -$name is only valid for release_optimized variants"
+            Write-Host "[apk] -$name is only valid with -Variant release; debug keeps its conservative code generation"
             exit 1
         }
     }
@@ -315,13 +304,14 @@ if ($NoHostHardening) { $nativeParams['NoHostHardening'] = $true }
 # against CorpusRoot and passes ON/OFF explicitly to CMake.
 $nativeParams['W3LCompat'] = $W3LCompat
 $nativeParams['W3LLatency'] = $W3LLatency
-if ($isOptimized) {
+if ($isRelease) {
     $nativeParams['Pgo'] = $Pgo
     $nativeParams['PgoProfile'] = $PgoProfile
     $nativeParams['PgoRawDir'] = $PgoRawDir
     # Forward only explicitly supplied knobs; build_app.ps1 owns the
-    # variant-specific defaults (O3/IRPGO/cdsort/Polly for release_optimized
-    # and O2/none/Polly for the training build).
+    # variant-specific defaults (O3/IRPGO/cdsort/Polly/ThinLTO for final
+    # release and O3/IRPGO/Polly without LTO or split-MF for the training
+    # pass).
     if ($PSBoundParameters.ContainsKey('PgoKind')) {
         $nativeParams['PgoKind'] = $PgoKind
     }
@@ -379,16 +369,16 @@ if ($nativeRc -ne 0) {
     exit $nativeRc
 }
 
-$nativeSo = Join-Path $outDir "$variant\cmake\libwc3gameactivity.so"
+$nativeSo = Join-Path $outDir "$artifactVariant\cmake\libwc3gameactivity.so"
 if (-not (Test-Path $nativeSo)) {
-    $found = Get-ChildItem (Join-Path $outDir "$variant\cmake") `
+    $found = Get-ChildItem (Join-Path $outDir "$artifactVariant\cmake") `
         -Recurse -Filter 'libwc3gameactivity.so' -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty FullName
     if ($found) { $nativeSo = $found }
 }
 if (-not (Test-Path $nativeSo)) { Write-Host '[apk] native library missing'; exit 1 }
 
-$jniRoot = Join-Path $outDir "$variant\jniLibs"
+$jniRoot = Join-Path $outDir "$artifactVariant\jniLibs"
 $jniDir = Join-Path $jniRoot 'arm64-v8a'
 New-Item -ItemType Directory -Force $jniDir | Out-Null
 $jniSo = Join-Path $jniDir 'libwc3gameactivity.so'
@@ -436,7 +426,10 @@ if (-not $hooksPresent) {
 if (-not $hooksPresent) {
     # Never write into the read-only legacy tree.  Seed the new vendor output
     # from the previous APK, matching build_apk.sh.
-    $oldApk = Join-Path $outDir "wc3-$variant.apk"
+    $oldApk = Join-Path $outDir "wc3-$artifactVariant.apk"
+    if (-not (Test-Path $oldApk) -and $artifactVariant -ne $variant) {
+        $oldApk = Join-Path $outDir "wc3-$variant.apk"
+    }
     if (-not (Test-Path $oldApk)) {
         $oldApk = Join-Path $outDir 'wc3-debug.apk'
     }
@@ -493,22 +486,19 @@ if (-not (Test-Path $readelf)) {
 }
 
 # O-41: AGP's stripReleaseDebugSymbols is a no-op for this prebuilt library in
-# the useLegacyPackaging=false layout.  Strip only the release copy and only
-# non-PT_LOAD metadata: .symtab/.strtab/.debug_* go away.  For canonical release
-# and debug, .dynsym stays in full so crash_sym() can resolve L_<va>/wc3_*
-# names on device; the unstripped .symtab remains the offline fallback in
-# tools/symbolize_crash.py.  release_optimized hides symbols at compile time
-# through -fvisibility=hidden, so it keeps only the JNI surface unless the
-# caller explicitly passes -HiddenVisibility:$false.
-# The debug/userdebug copy intentionally keeps symbols for the
-# wc3.recomp.debug package.
-# The release_optimized_pgo training APK is not a product: keep its symbols and
-# profile-name metadata so the raw counters remain mergeable.
-$stripProduct = $isRelease -and ($variant -ne 'release_optimized_pgo')
+# the useLegacyPackaging=false layout.  Strip only the final release copy and
+# only non-PT_LOAD metadata: .symtab/.strtab/.debug_* go away.  Release hides
+# internal symbols at compile time through -fvisibility=hidden, so it keeps
+# only the JNI surface unless the caller explicitly passes
+# -HiddenVisibility:$false.  Debug keeps its symbols for the
+# wc3.recomp.debug package.  The release-pgo training APK is not a product:
+# keep its symbols and profile-name metadata so the raw counters remain
+# mergeable.
+$stripProduct = $isRelease -and -not $isProfileBuild
 $expectCrashSymbols = if ($PSBoundParameters.ContainsKey('HiddenVisibility')) {
     -not [bool]$HiddenVisibility
 } else {
-    -not $isOptimized
+    -not $isRelease
 }
 if ($stripProduct) {
     $strip = Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe'
@@ -574,6 +564,19 @@ if ($packagedStrings -notmatch 'WC3_SAVE_LIST_STRIP_W3Z') {
     Write-Host '[apk] save-list display fix marker is absent from the packaged .so'
     exit 1
 }
+# -SkipNative must not ship a stale DXVK.  The native build checks the
+# same markers; this also covers APKs assembled from an existing .so.
+foreach ($marker in @(
+    'WC3 DXVK: createDevice begin',
+    'WC3 DXVK: vkCreateDevice result=',
+    'WC3 D3D9: InitialReset',
+    'WC3 D3D9: missing adapter core features')) {
+    if (-not $packagedStrings.Contains($marker)) {
+        Write-Host "[apk] DXVK WC3 marker is absent from the packaged .so: $marker"
+        Write-Host '[apk] rebuild the native library: tools/android/build_app.ps1'
+        exit 1
+    }
+}
 $packagedDynsyms = (& $readelf --dyn-syms $jniSo 2>&1) -join "`n"
 if ($packagedDynsyms -notmatch '\bpwrite\b' -or
     $packagedDynsyms -notmatch '\bpread\b') {
@@ -613,8 +616,11 @@ $cache = ''
 $aarSource = $GamesActivityAar
 if (-not $aarSource -or -not (Test-Path $aarSource)) {
     $caches = @(
-        (Join-Path $outDir "$variant\games-activity-4.4.2.aar")
+        (Join-Path $outDir "$artifactVariant\games-activity-4.4.2.aar")
     )
+    if ($artifactVariant -ne $variant) {
+        $caches += (Join-Path $outDir "$variant\games-activity-4.4.2.aar")
+    }
     if ($env:GRADLE_USER_HOME) {
         $caches += Join-Path $env:GRADLE_USER_HOME `
             'caches\modules-2\files-2.1\androidx.games\games-activity\4.4.2'
@@ -697,9 +703,9 @@ $env:ANDROID_SDK_ROOT = $sdk
 $gradleApp = Join-Path $outDir 'gradle-app'
 $gradleCache = Join-Path $outDir 'gradle-cache'
 $aapt2 = Join-Path $buildTools 'aapt2.exe'
-# release_optimized and its training build share the release Gradle build
-# type.  Only the native directory and the final APK name differ, so the
-# applicationId and every release input stay identical to wc3-release.apk.
+# release and its training pass share the release Gradle build type.  Only the
+# native directory and the final APK name differ, so the applicationId and
+# every release input stay identical to wc3-release.apk.
 $gradleVariant = if ($isDebug) { 'debug' } else { 'release' }
 $gradleTask = if ($isDebug) { 'assembleDebug' } else { 'assembleRelease' }
 # BV-3.2: jniLibs belong to the Gradle buildType source set, so use the
@@ -730,7 +736,8 @@ $gradleArgs = @(
 Write-Host "[apk] gradle  $gradle"
 Write-Host "[apk] jdk     $jdk"
 Write-Host "[apk] variant $variant"
-$warningState = Initialize-Wc3BuildWarningLog -Root $root -Kind 'apk' -Variant $variant
+Write-Host "[apk] output  $artifactVariant"
+$warningState = Initialize-Wc3BuildWarningLog -Root $root -Kind 'apk' -Variant $artifactVariant
 $ErrorActionPreference = 'Continue'
 $gradleOut = @(& $gradle @gradleArgs 2>&1)
 $gradleOut | ForEach-Object { Write-Host $_ }
@@ -750,7 +757,7 @@ if (-not (Test-Path $apk)) {
         Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 }
 if (-not $apk -or -not (Test-Path $apk)) { Write-Host '[apk] no APK produced'; exit 1 }
-$final = Join-Path $outDir "wc3-$variant.apk"
+$final = Join-Path $outDir "wc3-$artifactVariant.apk"
 Copy-Item $apk $final -Force
 
 # O-12: extractNativeLibs=false requires uncompressed libraries at 16 KiB page
@@ -788,7 +795,7 @@ try {
         Write-Host "[apk] lib     $($entry.FullName) ($($entry.Length) bytes, stored)"
         if ($name -eq 'lib/arm64-v8a/libwc3gameactivity.so') {
             if ($entry.Length -ne $jniSoInfo.Length) {
-                Write-Host "[apk] APK native library size $($entry.Length) != $variant $($jniSoInfo.Length)"
+                Write-Host "[apk] APK native library size $($entry.Length) != $artifactVariant $($jniSoInfo.Length)"
                 exit 1
             }
             $entryStream = $entry.Open()
@@ -805,10 +812,10 @@ try {
                 $entryStream.Dispose()
             }
             if ($entryHash -ne $jniSoHash) {
-                Write-Host "[apk] APK native library does not match $variant"
+                Write-Host "[apk] APK native library does not match $artifactVariant"
                 exit 1
             }
-            Write-Host "[apk] native  packaged .so matches $variant"
+            Write-Host "[apk] native  packaged .so matches $artifactVariant"
         }
     }
     # A clean package has only local/central-directory headers and the APK

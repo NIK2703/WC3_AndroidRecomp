@@ -8,10 +8,14 @@
 # PC and in Termux without a second implementation.
 #
 # Usage:
-#   tools/android/build_apk.sh [--variant debug] [--install]
-#                              [--launch] [--offline] [--skip-native]
+#   tools/android/build_apk.sh [--variant release|debug] [--pgo off|generate|use]
+#                              [--install] [--launch] [--offline] [--skip-native]
 #                              [--aar <file>] [--ndk <dir>]
 #                              [--serial <adb-serial>]
+#
+# Release defaults to --pgo use.  The internal training pass is
+# --variant release --pgo generate and produces wc3-release-pgo.apk.  Debug
+# rejects any non-off PGO mode.
 #
 # By default the native job count is derived from the reachable distcc
 # workers; WC3_DIST_AUTO=0 forces a local build.  There is no --jobs or
@@ -24,6 +28,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 . "$root/tools/lib/wc3_env.sh"
 
 variant=debug
+pgo=""
 install=0
 launch=0
 offline=0
@@ -35,6 +40,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --variant) variant=${2:-}; shift 2 ;;
         --variant=*) variant=${1#*=}; shift ;;
+        --pgo) pgo=${2:-}; shift 2 ;;
+        --pgo=*) pgo=${1#*=}; shift ;;
         --install) install=1; shift ;;
         --launch) launch=1; shift ;;
         --offline) offline=1; shift ;;
@@ -45,13 +52,24 @@ while [ $# -gt 0 ]; do
         --aar=*) aar_arg=${1#*=}; shift ;;
         --ndk) ndk_arg=${2:-}; shift 2 ;;
         --ndk=*) ndk_arg=${1#*=}; shift ;;
-        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
         *) echo "build_apk.sh: unknown argument: $1" >&2; exit 1 ;;
     esac
 done
 case "$variant" in release|debug) ;;
     *) echo "build_apk.sh: bad variant: $variant" >&2; exit 1 ;;
 esac
+case "$pgo" in
+    '') [ "$variant" = release ] && pgo=use || pgo=off ;;
+    off|generate|use) ;;
+    *) echo "build_apk.sh: bad PGO mode: $pgo" >&2; exit 1 ;;
+esac
+if [ "$variant" = debug ] && [ "$pgo" != off ]; then
+    echo "build_apk.sh: --pgo is only valid with --variant release" >&2
+    exit 1
+fi
+is_profile=0; [ "$pgo" = generate ] && is_profile=1
+if [ "$is_profile" = 1 ]; then artifact_variant=release-pgo; else artifact_variant=$variant; fi
 # Probe the configured distcc workers (ideapad and ideacentre) by default.
 # WC3_DIST_AUTO=0 is the documented local-build escape hatch; keep it and
 # discard any transport inherited from a parent build.
@@ -108,6 +126,7 @@ if [ "$WC3_IS_WINDOWS" = 1 ]; then
         "$root/tools/lift/build_tools.sh"
     fi
     ps_args=(-Variant "$variant")
+    [ "$variant" = release ] && ps_args+=(-Pgo "$pgo")
     [ "$install" = 1 ] && ps_args+=(-Install)
     [ "$launch" = 1 ] && ps_args+=(-Launch)
     [ -n "$serial" ] && ps_args+=(-Serial "$serial")
@@ -139,14 +158,14 @@ python=$(wc3_find_python) || { echo '[apk] unavailable: python3 not found' >&2; 
 [ -f "$zipalign" ] || { echo "[apk] unavailable: $zipalign" >&2; exit 2; }
 [ -f "$libcxx" ] || { echo "[apk] unavailable: $libcxx" >&2; exit 2; }
 
-out=$root/build/android_app/$variant
+out=$root/build/android_app/$artifact_variant
 jni_root=$out/jniLibs
 jni_dir=$jni_root/arm64-v8a
 mkdir -p "$jni_dir"
 so_src=$out/cmake/libwc3gameactivity.so
 
 if [ "$skip_native" = 0 ]; then
-    app_args=(--variant "$variant")
+    app_args=(--variant "$variant" --pgo "$pgo")
     [ -n "$ndk_arg" ] && app_args+=(--ndk "$ndk_arg")
     [ -n "$aar_arg" ] && app_args+=(--aar "$aar_arg")
     "$root/tools/android/build_app.sh" "${app_args[@]}" || exit 1
@@ -155,16 +174,32 @@ fi
 cp "$so_src" "$jni_dir/libwc3gameactivity.so"
 jni_so=$jni_dir/libwc3gameactivity.so
 
+# --skip-native must not package a stale DXVK.  The native build checks the
+# same markers; this also covers APKs assembled from an existing .so.
+for m in \
+    'WC3 DXVK: createDevice begin' \
+    'WC3 DXVK: vkCreateDevice result=' \
+    'WC3 D3D9: InitialReset' \
+    'WC3 D3D9: missing adapter core features'; do
+    grep -a -q -F -- "$m" "$jni_so" || {
+        echo "[apk] DXVK WC3 marker absent from $jni_so: $m" >&2
+        echo "[apk] rebuild the native library: tools/android/build_app.sh --variant $variant" >&2
+        exit 1; }
+done
+
 # The product link deliberately has no DT_NEEDED libvulkan.so.
 if "$readelf" -d "$jni_so" | grep -q 'NEEDED.*libvulkan\.so'; then
     echo '[apk] product .so has DT_NEEDED libvulkan.so; ADR-036 requires the hidden shim' >&2
     exit 1
 fi
 
-# Release strips only non-PT_LOAD metadata; .dynsym stays in full so on-device
-# crash_sym() resolves L_<va>/wc3_* names.  Debug keeps the unstripped symbols.
-# The native build already checked the unstripped artifact.
-if [ "$is_debug" = 0 ]; then
+# Only the final release product is stripped.  Release hides internal symbols
+# at compile time through -fvisibility=hidden, so .dynsym keeps the JNI surface
+# only.  Debug keeps the unstripped symbols for wc3.recomp.debug, and the
+# release-pgo training APK is not a product: its counters must stay mergeable.
+strip_product=0
+[ "$variant" = release ] && [ "$is_profile" = 0 ] && strip_product=1
+if [ "$strip_product" = 1 ]; then
     "$strip" --strip-all "$jni_so"
     sections=$("$readelf" -S "$jni_so")
     if ! grep -q '\.dynsym' <<<"$sections" || grep -q '\.symtab' <<<"$sections" ||
@@ -179,12 +214,7 @@ if [ "$is_debug" = 0 ]; then
         echo '[apk] release JNI/android_main surface missing from .dynsym' >&2
         exit 1
     fi
-    if ! grep -Eq 'L_[0-9A-Fa-f]{8}' <<<"$dynsyms" ||
-       ! grep -Eq '(^|[[:space:]])wc3_' <<<"$dynsyms"; then
-        echo '[apk] release .dynsym lost L_*/wc3_* crash symbols' >&2
-        exit 1
-    fi
-    echo '[apk] release .dynsym retains L_*/wc3_* for crash symbolization'
+    echo '[apk] hidden visibility release: .dynsym has the JNI surface only'
 fi
 
 # Pinned hooks, copied from the vendor directory.  A previous APK can seed the
@@ -207,7 +237,10 @@ hooks_ok=1
     hooks_ok=0
 [ "$(wc3_sha256 "$adrenotools/libhook_impl.so" 2>/dev/null || true)" = "$hook_impl" ] ||
     hooks_ok=0
-old_apk=$root/build/android_app/wc3-$variant.apk
+old_apk=$root/build/android_app/wc3-$artifact_variant.apk
+if [ ! -f "$old_apk" ] && [ "$artifact_variant" != "$variant" ]; then
+    old_apk=$root/build/android_app/wc3-$variant.apk
+fi
 [ -f "$old_apk" ] || old_apk=$root/build/android_app/wc3-debug.apk
 if [ "$hooks_ok" = 0 ] && [ -f "$old_apk" ]; then
     # Seed only the two hook DSOs; rebuilding the archives is unnecessary for
@@ -240,6 +273,10 @@ if [ -n "$aar_arg" ]; then
     aar=$aar_arg
 else
     aar=$(wc3_find_gameactivity_aar "$out" || true)
+    if [ -z "$aar" ] && [ "$artifact_variant" != "$variant" ]; then
+        aar=$(wc3_find_gameactivity_aar \
+            "$root/build/android_app/$variant" || true)
+    fi
 fi
 [ -n "$aar" ] && [ -f "$aar" ] || {
     echo '[apk] unavailable: games-activity-4.4.2.aar; pass --aar' >&2; exit 2; }
@@ -252,6 +289,10 @@ dest=$local_maven/androidx/games/games-activity/4.4.2
 mkdir -p "$dest"
 cp "$aar" "$dest/games-activity-4.4.2.aar"
 pom=$(wc3_find_gameactivity_pom "$out" || true)
+if [ -z "$pom" ] && [ "$artifact_variant" != "$variant" ]; then
+    pom=$(wc3_find_gameactivity_pom \
+        "$root/build/android_app/$variant" || true)
+fi
 if [ -n "$pom" ]; then
     pom=$(wc3_abs "$pom")
     cp "$pom" "$dest/games-activity-4.4.2.pom"
@@ -300,14 +341,14 @@ export GRADLE_OPTS=${GRADLE_OPTS:--Xmx1536m -Dorg.gradle.native=false -Dfile.enc
 echo "[apk] gradle  $gradle"
 echo "[apk] home    $GRADLE_USER_HOME"
 echo "[apk] jdk     $java_home"
-echo "[apk] variant $variant"
+echo "[apk] variant $variant output $artifact_variant"
 "$gradle" "${gradle_args[@]}"
 
 apk_dir=$gradle_app/outputs/apk/$gradle_variant
 apk=$apk_dir/app-$gradle_variant.apk
 [ -f "$apk" ] || apk=$(find "$apk_dir" -name '*.apk' -print 2>/dev/null | head -n 1 || true)
 [ -f "$apk" ] || { echo '[apk] no APK produced' >&2; exit 1; }
-final=$root/build/android_app/wc3-$variant.apk
+final=$root/build/android_app/wc3-$artifact_variant.apk
 cp "$apk" "$final"
 
 "$zipalign" -c -P 16 4 "$final" || { echo '[apk] APK is not 16 KiB page aligned' >&2; exit 1; }
@@ -359,4 +400,4 @@ if [ "$install" = 1 ] || [ "$launch" = 1 ]; then
         "$adb" ${adb_args[@]+"${adb_args[@]}"} shell am start -n "$package/wc3.recomp.Wc3GameActivity"
     fi
 fi
-echo "[apk] built $variant"
+echo "[apk] built $artifact_variant"

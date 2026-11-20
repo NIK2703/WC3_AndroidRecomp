@@ -33,7 +33,7 @@ param(
     # steal the tunnel of an active build.
     [switch]$Force,
     [string]$RemoteRoot = 'E:/wc3-dist',
-    # Merged profile for a final release_optimized build.  It is copied to the
+    # Merged profile for a final release build.  It is copied to the
     # same absolute path on IDEAPAD, so the command line stays identical on
     # both sides and distcc's local preprocessor still sees a real file.
     [string]$PgoProfile = '',
