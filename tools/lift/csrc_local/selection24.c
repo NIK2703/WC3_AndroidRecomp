@@ -27,7 +27,7 @@
 #include "sha256.h"
 
 #define PASS "selection24"
-#define PASS_REV 48
+#define PASS_REV 49
 
 /* Structural capacity of the emitted layout.  The product uses 40 so one
  * corpus can serve the 12/24/40 runtime caps; 24 is kept for pass
@@ -82,6 +82,7 @@ typedef enum {
     K_SLOT_UNLINK,
     K_GROUP24,
     K_TRACE_FORMATION,
+    K_ORDER_CURSOR,
     K_COUNT
 } Kind;
 
@@ -130,7 +131,8 @@ static const char *const kind_name[K_COUNT] = {
     "trace_evrelease",
     "slot_unlink",
     "group24",
-    "trace_formation"
+    "trace_formation",
+    "order_cursor"
 };
 
 /* Fixed union totals for the whole relifted game corpus. */
@@ -180,6 +182,7 @@ static const unsigned expected_total[K_COUNT] = {
     1, /* slot_unlink */
     207, /* group24 */
     9, /* trace_formation */
+    6, /* order_cursor */
 };
 /* Whole-file expectations.  seed.c carries both order prologues. */
 static const unsigned expected_seed[K_COUNT] = {
@@ -228,6 +231,7 @@ static const unsigned expected_seed[K_COUNT] = {
     0, /* slot_unlink */
     46, /* group24 */
     2, /* trace_formation */
+    2, /* order_cursor */
 };
 /* seed: builders B/C.  closed: listadd x2, cluster try/insert, formation. */
 
@@ -278,6 +282,7 @@ static const unsigned expected_closed[K_COUNT] = {
     1, /* slot_unlink */
     161, /* group24 */
     7, /* trace_formation */
+    4, /* order_cursor */
 };
 
 typedef struct {
@@ -968,6 +973,25 @@ static const char *const INSERT_TRACE_ORDER_EXEC_2[] = {
 #define VA_TRACE_A5B9          0x6F16A5B9u
 #define VA_TRACE_CF94_BASE     0x6F16D00Fu
 
+/*
+ * Formation cursor carry (PASS_REV 49).
+ *
+ * The builder prologues 0x6F6B9918 / 0x6F6B9F98 reset the host carry once per
+ * point order.  L_6F16A5B0 has two branches: the multi-unit continuation
+ * L_6F16A5F8 stores the base into x and later clamps it after every group,
+ * while the single-member shortcut writes the unit's x/y directly.  Both
+ * branches read the carry at their x store and commit the final x, so a
+ * selection split into several clusters continues one line instead of
+ * restarting at 0x6FD3C744.  The reset lines are outside WC3_DEBUG: the carry
+ * is product behavior, not diagnostics.
+ */
+#define VA_ORDER_CURSOR_RESET_B  0x6F6B9918u
+#define VA_ORDER_CURSOR_RESET_C  0x6F6B9F98u
+#define VA_ORDER_CURSOR_ORIGIN   0x6F16A60Au
+#define VA_ORDER_CURSOR_ORIGIN_1 0x6F16A5D9u
+#define VA_ORDER_CURSOR_COMMIT   0x6F16A6C3u
+#define VA_ORDER_CURSOR_COMMIT_1 0x6F16A5E4u
+
 static const char *const INSERT_TRACE_ORDER_BEGIN_B[] = {
     "    /* selection24 point-order begin trace B */",
     "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
@@ -1020,6 +1044,31 @@ static const char *const INSERT_TRACE_A5B9[] = {
     "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
     "    wc3_sel24_trace_order_base(c, c->ecx, 0u, 0u, 0u);",
     "#endif"
+};
+
+static const char *const INSERT_ORDER_CURSOR_RESET[] = {
+    "    /* selection24 formation cursor reset */",
+    "    wc3_sel24_formation_reset();"
+};
+
+static const char *const INSERT_ORDER_CURSOR_ORIGIN[] = {
+    "    /* selection24 formation cursor origin */",
+    "    wc3_sel24_formation_origin_apply(c);"
+};
+
+static const char *const INSERT_ORDER_CURSOR_ORIGIN_1[] = {
+    "    /* selection24 single-unit formation cursor origin */",
+    "    c->eax = wc3_sel24_formation_origin(c->eax);"
+};
+
+static const char *const INSERT_ORDER_CURSOR_COMMIT[] = {
+    "    /* selection24 formation cursor commit */",
+    "    wc3_sel24_formation_commit_frame(c);"
+};
+
+static const char *const INSERT_ORDER_CURSOR_COMMIT_1[] = {
+    "    /* selection24 single-unit formation cursor commit */",
+    "    wc3_sel24_formation_commit(rd32((c->ecx + 0x0000000Cu)));"
 };
 
 static const char *const INSERT_TRACE_ORDER_BASE[] = {
@@ -3000,6 +3049,62 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
+            case VA_ORDER_CURSOR_RESET_B:
+            case VA_ORDER_CURSOR_RESET_C:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "FS_WR32(c, (0x00000000u), c->eax);",
+                                  NULL,
+                                  "selection24 formation cursor reset",
+                                  INSERT_ORDER_CURSOR_RESET, 2,
+                                  K_ORDER_CURSOR, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_CURSOR_ORIGIN:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "c->edi = 0xFu;",
+                                  NULL,
+                                  "selection24 formation cursor origin",
+                                  INSERT_ORDER_CURSOR_ORIGIN, 2,
+                                  K_ORDER_CURSOR, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_CURSOR_ORIGIN_1:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "c->ecx = rd32((c->ebx + 0x00000028u));",
+                                  NULL,
+                                  "selection24 single-unit formation cursor origin",
+                                  INSERT_ORDER_CURSOR_ORIGIN_1, 2,
+                                  K_ORDER_CURSOR, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_CURSOR_COMMIT:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "push32(c, 0x6F16A6C8u); WC3_DIRECT_CALL(L_6F169E10, c);",
+                                  NULL,
+                                  "selection24 formation cursor commit",
+                                  INSERT_ORDER_CURSOR_COMMIT, 2,
+                                  K_ORDER_CURSOR, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_CURSOR_COMMIT_1:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "wr32((c->ecx + 0x00000010u), c->eax);",
+                                  NULL,
+                                  "selection24 single-unit formation cursor commit",
+                                  INSERT_ORDER_CURSOR_COMMIT_1, 2,
+                                  K_ORDER_CURSOR, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
             case VA_TRACE_LISTADD:
                 next = p;
                 if (handle_insert(out, &next, end,
@@ -3954,6 +4059,7 @@ static int self_test(char *err, size_t errsz)
     /* The fixture deliberately does not carry the new point-order anchors:
      * they are covered by the whole-corpus totals and by the real lift. */
     exp_fix[K_TRACE_FORMATION] = 0;
+    exp_fix[K_ORDER_CURSOR] = 0;
 
     if (process_buffer(SELF_FIXTURE, strlen(SELF_FIXTURE), NULL,
                        &out1, &c1, &s1, err2, sizeof(err2)) != 0) {
@@ -4273,10 +4379,10 @@ fail40:
     }
 
     {
-        /* Mirrors a current report: PASS_REV 48 (342 sites). */
+        /* Mirrors a current report: PASS_REV 49 (348 sites). */
         const char json[] =
             "{\"pass\":\"" PASS "\","
-            "\"pass_rev\":48,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
+            "\"pass_rev\":49,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
             "\"cap_outer\":2,\"cap_inner\":2,\"fill_block\":2,\"fill_grid\":1,"
             "\"note_selection\":1,\"hide_all\":1,\"addunit_cap\":1,\"cap_local_list\":5,"
             "\"cap_copy_list\":3,\"cap_sync_add\":1,\"cap_net_recv\":1,\"cap_net_apply\":5,"
@@ -4288,8 +4394,9 @@ fail40:
             "\"trace_remove\":4,\"trace_evbirth\":1,\"trace_apply\":2,"
             "\"trace_tasknull\":1,\"trace_evinit\":1,\"trace_orderdrop\":1,"
             "\"order_obj_container\":35,\"trace_order_slots\":3,\"order_group_full\":2,"
-            "\"trace_evrelease\":1,\"slot_unlink\":1,\"group24\":207,\"trace_formation\":9},"
-            "\"total\":342};";
+            "\"trace_evrelease\":1,\"slot_unlink\":1,\"group24\":207,\"trace_formation\":9,"
+            "\"order_cursor\":6},"
+            "\"total\":348};";
         Counts c3;
 
         if (json_counts_parse(json, &c3, err2, sizeof(err2)) != 0 ||

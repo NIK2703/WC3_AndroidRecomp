@@ -112,6 +112,33 @@ void wc3_sel24_group_init(uint32_t pair_base);
 void wc3_sel24_group_sort(uint32_t group);
 
 /*
+ * Formation x cursor carry across the clusters of one point order.
+ *
+ * The order builder may split a mixed selection into several clusters (for
+ * example 34 + 6 units), and L_6F16A5B0 lays out each cluster independently.
+ * Its final x cursor is the right edge of the last laid-out row; committing
+ * it and using it as the origin of the next cluster keeps the whole order in
+ * one battle line instead of restarting every cluster at the base constant
+ * 0x6FD3C744.  The builder handlers B/C reset the carry once per order.  The
+ * 12-unit profile is the exact baseline: origin returns base and commit is a
+ * no-op, so multi-cluster 12-unit behavior does not change.
+ */
+void wc3_sel24_formation_reset(void);
+uint32_t wc3_sel24_formation_origin(uint32_t base);
+void wc3_sel24_formation_commit(uint32_t x);
+
+/*
+ * L_6F16A5B0 frame-local wrappers.  The pass calls origin_apply after the
+ * x cursor store and commit_frame at the group-loop exit.  The wrappers own
+ * the profile-dependent [ebp-0xA50]/[ebp-0x1F50] displacement so the
+ * generated C does not embed a frame offset that differs between the 24- and
+ * 40-entry corpora.  They change only the guest stack local, never the CPU
+ * registers or flags.
+ */
+void wc3_sel24_formation_origin_apply(CPU *c);
+void wc3_sel24_formation_commit_frame(CPU *c);
+
+/*
  * Formation row length returned by the table read in L_6F16D270 / L_6F16D286
  * / L_6F16D2D3.  index is the guest eax (13 * flag + count), count is the
  * group size and pair selects the table pair (0 = A/B at 0x6FA91D20,

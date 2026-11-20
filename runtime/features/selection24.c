@@ -20,6 +20,7 @@
 #include "selection24.h"
 #include "wc3_debug.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -2678,6 +2679,95 @@ void wc3_sel24_group_init(uint32_t pair_base)
      * (L_6F16CB80) overwrites it for the groups that actually carry units. */
     if (pair_base >= SEL24_GROUP_PAIR)
         wr32(pair_base - SEL24_GROUP_PAIR, 0u);
+}
+
+/*
+ * Formation x cursor shared by the clusters of one point order.
+ *
+ * The order builder can split one selection into several clusters (the
+ * captured mixed selection split 34 + 6).  L_6F16A5B0 lays out one cluster
+ * and leaves the final x cursor in [ebp-0x1F50]; L_6F16A5F8 then clamps it
+ * with the group width and returns.  Without a carry the next cluster starts
+ * again from the base constant 0x6FD3C744, so its first row is written on top
+ * of the previous cluster.  A selection that stays in one cluster takes the
+ * original path and is unchanged.
+ *
+ * The builder handlers B/C (0x6F6B98F0 / 0x6F6B9F70) reset the carry at the
+ * start of every point order.  The multi-unit and single-unit branches of
+ * L_6F16A5B0 both take the origin and commit the final x, so the carry works
+ * for any cluster size.  The 12-unit profile keeps the exact 1.27 path: the
+ * helper returns the base and the commit is a no-op, because multi-cluster
+ * 12-unit selections are part of the untouched baseline.
+ *
+ * The order executor is the only logical writer.  The atomics prevent a data
+ * race with diagnostic reads; they are not locks and do not serialize orders.
+ */
+static _Atomic uint32_t g_sel24_formation_x;
+static _Atomic int g_sel24_formation_has_x;
+
+void wc3_sel24_formation_reset(void)
+{
+    atomic_store_explicit(&g_sel24_formation_has_x, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_sel24_formation_x, 0u, memory_order_relaxed);
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+    fprintf(SEL24_OUT, "[select24] formationcursor reset\n");
+#endif
+}
+
+uint32_t wc3_sel24_formation_origin(uint32_t base)
+{
+    uint32_t x = base;
+
+    if (wc3_sel24_cap() > 12u &&
+        atomic_load_explicit(&g_sel24_formation_has_x,
+                             memory_order_relaxed)) {
+        x = atomic_load_explicit(&g_sel24_formation_x,
+                                 memory_order_relaxed);
+    }
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+    fprintf(SEL24_OUT,
+            "[select24] formationcursor origin base=%08X x=%08X carry=%u\n",
+            base, x, x != base);
+#endif
+    return x;
+}
+
+void wc3_sel24_formation_commit(uint32_t x)
+{
+    if (wc3_sel24_cap() <= 12u)
+        return;
+    atomic_store_explicit(&g_sel24_formation_x, x, memory_order_relaxed);
+    atomic_store_explicit(&g_sel24_formation_has_x, 1, memory_order_relaxed);
+#if WC3_DEBUG && WC3_DEBUG_SELECT24
+    fprintf(SEL24_OUT, "[select24] formationcursor commit x=%08X\n", x);
+#endif
+}
+
+/*
+ * L_6F16A5B0 stores the base into the x cursor at [ebp-0x1F50] (cap 40) or
+ * [ebp-0xA50] (cap 24) before the group loop.  The offset belongs to the
+ * generated frame, not to the structural table, so the pass calls these two
+ * type-safe wrappers instead of embedding a profile-dependent displacement.
+ * Both wrappers touch only the guest stack local; they do not change the CPU
+ * registers or flags.
+ */
+#if WC3_SELECTION_STRUCT_CAP == 40
+#define SEL24_A5F8_X_OFF 0xFFFFE0B0u
+#else
+#define SEL24_A5F8_X_OFF 0xFFFFF5B0u
+#endif
+
+void wc3_sel24_formation_origin_apply(CPU *c)
+{
+    uint32_t base = rd32(c->ebp + SEL24_A5F8_X_OFF);
+
+    wr32(c->ebp + SEL24_A5F8_X_OFF,
+         wc3_sel24_formation_origin(base));
+}
+
+void wc3_sel24_formation_commit_frame(CPU *c)
+{
+    wc3_sel24_formation_commit(rd32(c->ebp + SEL24_A5F8_X_OFF));
 }
 
 /*
