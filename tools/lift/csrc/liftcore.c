@@ -305,25 +305,137 @@ static const char *flag_mask_suffix(int sz)
     return "";
 }
 
-static char *flag_mat_call(int kind, int sz, uint32_t addr)
+static const char *flag_helper_name(LfFlagKind kind, int nopf)
+{
+    switch (kind) {
+    case LF_FLAG_CMP:
+    case LF_FLAG_SUB:
+    case LF_FLAG_NEG: return nopf ? "flags_sub_nopf" : "flags_sub";
+    case LF_FLAG_TEST:
+    case LF_FLAG_AND:
+    case LF_FLAG_OR:
+    case LF_FLAG_XOR: return nopf ? "flags_logicz_nopf" : "flags_logicz";
+    case LF_FLAG_ADD: return nopf ? "flags_add_nopf" : "flags_add";
+    case LF_FLAG_INC: return nopf ? "flags_incs_nopf" : "flags_incs";
+    case LF_FLAG_DEC: return nopf ? "flags_decs_nopf" : "flags_decs";
+    case LF_FLAG_ADC: return nopf ? "flags_adc_nopf" : "flags_adc";
+    case LF_FLAG_SBB: return nopf ? "flags_sbb_nopf" : "flags_sbb";
+    default: return NULL;
+    }
+}
+
+/* Flags a producer actually defines.  AF is intentionally absent for
+ * TEST/AND/OR/XOR and CF is absent for INC/DEC: their original helpers leave
+ * those fields unchanged.  The exact-mask helpers below preserve the same
+ * contract. */
+static uint8_t flag_kind_writes(LfFlagKind kind)
+{
+    switch (kind) {
+    case LF_FLAG_TEST:
+    case LF_FLAG_AND:
+    case LF_FLAG_OR:
+    case LF_FLAG_XOR:
+        return LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF | LF_FLAG_PF;
+    case LF_FLAG_INC:
+    case LF_FLAG_DEC:
+        return LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF | LF_FLAG_AF | LF_FLAG_PF;
+    case LF_FLAG_CMP:
+    case LF_FLAG_SUB:
+    case LF_FLAG_NEG:
+    case LF_FLAG_ADD:
+    case LF_FLAG_ADC:
+    case LF_FLAG_SBB:
+    case LF_FLAG_FP_CMP:
+        return LF_FLAG_ALL;
+    default:
+        return 0;
+    }
+}
+
+static const char *flag_mask_helper_name(LfFlagKind kind)
+{
+    switch (kind) {
+    case LF_FLAG_CMP:
+    case LF_FLAG_SUB:
+    case LF_FLAG_NEG: return "flags_sub_mask";
+    case LF_FLAG_TEST:
+    case LF_FLAG_AND:
+    case LF_FLAG_OR:
+    case LF_FLAG_XOR: return "flags_logicz_mask";
+    case LF_FLAG_ADD: return "flags_add_mask";
+    case LF_FLAG_INC: return "flags_incs_mask";
+    case LF_FLAG_DEC: return "flags_decs_mask";
+    case LF_FLAG_ADC: return "flags_adc_mask";
+    case LF_FLAG_SBB: return "flags_sbb_mask";
+    default: return NULL;
+    }
+}
+
+/* Full masks keep the original helper, so the common case is unchanged.
+ * Every partial mask uses the exact-mask helper; a zero mask means the caller
+ * must omit the helper (or use pure arithmetic) instead. */
+static const char *flag_helper_for_mask(LfFlagKind kind, uint8_t mask)
+{
+    uint8_t writes = flag_kind_writes(kind);
+    mask &= writes;
+    if (mask == 0) return NULL;
+    if (mask == writes) return flag_helper_name(kind, 0);
+    return flag_mask_helper_name(kind);
+}
+
+/* Argument text for an exact-mask helper.  The full mask uses the original
+ * helper and therefore has no extra argument. */
+static char *flag_mask_arg(LfFlagKind kind, uint8_t mask)
+{
+    uint8_t writes = flag_kind_writes(kind);
+    mask &= writes;
+    if (mask == 0 || mask == writes) return "";
+    return lf_afmt(", 0x%02Xu", mask);
+}
+
+static char *flag_mat_call(int kind, int sz, uint32_t addr, uint8_t mask)
 {
     char fa[32], fb[32];
+    LfFlagKind k = (LfFlagKind)kind;
+    uint8_t writes = flag_kind_writes(k);
+    const char *fn;
+    int exact;
     flag_tmp_name(addr, "a", fa, sizeof fa);
     flag_tmp_name(addr, "b", fb, sizeof fb);
+    mask &= writes;
+    if (mask == 0) return "";
+    fn = flag_helper_for_mask(k, mask);
+    if (!fn) return "";
+    exact = mask != writes;
     switch (kind) {
-    case LF_FLAG_CMP:  return lf_afmt("flags_sub(c, %s, %s, %d);", fa, fb, sz);
-    case LF_FLAG_TEST: return lf_afmt("flags_logicz(c, %s & %s, %d);", fa, fb, sz);
-    case LF_FLAG_ADD:  return lf_afmt("flags_add(c, %s, %s, %d);", fa, fb, sz);
-    case LF_FLAG_SUB:  return lf_afmt("flags_sub(c, %s, %s, %d);", fa, fb, sz);
-    case LF_FLAG_AND:  return lf_afmt("flags_logicz(c, %s & %s, %d);", fa, fb, sz);
-    case LF_FLAG_OR:   return lf_afmt("flags_logicz(c, %s | %s, %d);", fa, fb, sz);
-    case LF_FLAG_XOR:  return lf_afmt("flags_logicz(c, %s ^ %s, %d);", fa, fb, sz);
-    case LF_FLAG_INC:  return lf_afmt("flags_incs(c, %s, %d);", fa, sz);
-    case LF_FLAG_DEC:  return lf_afmt("flags_decs(c, %s, %d);", fa, sz);
-    case LF_FLAG_NEG:  return lf_afmt("flags_sub(c, 0, %s, %d);", fb, sz);
-    case LF_FLAG_ADC:  return lf_afmt("flags_adc(c, %s, %s, %d);", fa, fb, sz);
-    case LF_FLAG_SBB:  return lf_afmt("flags_sbb(c, %s, %s, %d);", fa, fb, sz);
-    default: return "";
+    case LF_FLAG_CMP:
+    case LF_FLAG_SUB:
+    case LF_FLAG_NEG:
+        return kind == LF_FLAG_NEG
+            ? lf_afmt(exact ? "%s(c, 0, %s, %d, 0x%02Xu);"
+                            : "%s(c, 0, %s, %d);", fn, fb, sz, mask)
+            : lf_afmt(exact ? "%s(c, %s, %s, %d, 0x%02Xu);"
+                            : "%s(c, %s, %s, %d);", fn, fa, fb, sz, mask);
+    case LF_FLAG_TEST:
+    case LF_FLAG_AND:
+    case LF_FLAG_OR:
+    case LF_FLAG_XOR: {
+        const char *op = kind == LF_FLAG_TEST || kind == LF_FLAG_AND ? "&" :
+                         kind == LF_FLAG_OR ? "|" : "^";
+        return lf_afmt(exact ? "%s(c, %s %s %s, %d, 0x%02Xu);"
+                             : "%s(c, %s %s %s, %d);", fn, fa, op, fb, sz, mask);
+    }
+    case LF_FLAG_ADD:
+    case LF_FLAG_ADC:
+    case LF_FLAG_SBB:
+        return lf_afmt(exact ? "%s(c, %s, %s, %d, 0x%02Xu);"
+                             : "%s(c, %s, %s, %d);", fn, fa, fb, sz, mask);
+    case LF_FLAG_INC:
+    case LF_FLAG_DEC:
+        return lf_afmt(exact ? "%s(c, %s, %d, 0x%02Xu);"
+                             : "%s(c, %s, %d);", fn, fa, sz, mask);
+    default:
+        return "";
     }
 }
 
@@ -567,9 +679,13 @@ static Emit lf_fused_start(Lifter *L, cs_insn *p, const LfFlagFuse *f)
         /* Materialisation on one edge runs the original helper. */
         if (f->mat_taken || f->mat_fall) {
             char *mat = NULL;
-            if (f->kind != LF_FLAG_FP_CMP)
+            if (f->kind != LF_FLAG_FP_CMP) {
+                uint8_t mm = 0;
+                if (f->mat_taken) mm |= f->mat_taken_mask;
+                if (f->mat_fall) mm |= f->mat_fall_mask;
                 mat = flag_mat_call((LfFlagKind)f->kind, f->size,
-                                    f->producer_addr);
+                                    f->producer_addr, mm);
+            }
             if (mat) {
                 if (strstr(mat, fa)) need_a = 1;
                 if (strstr(mat, fb)) need_b = 1;
@@ -700,6 +816,7 @@ static Emit lf_fused_end(Lifter *L, const LfFlagFuse *f,
     char fa[32], fb[32], fr[32], ffull[32], fcin[32], cond[4096];
     char *mat = NULL;
     int cond_value = 0, fold_const = 0;
+    uint8_t mat_mask = 0;
 
     flag_tmp_name(f->producer_addr, "a", fa, sizeof fa);
     flag_tmp_name(f->producer_addr, "b", fb, sizeof fb);
@@ -742,11 +859,17 @@ static Emit lf_fused_end(Lifter *L, const LfFlagFuse *f,
         fold_const = lf_cond_const(cond, &cond_value);
     }
 
+    if (f->mat_taken) mat_mask |= f->mat_taken_mask;
+    if (f->mat_fall) mat_mask |= f->mat_fall_mask;
+    mat_mask &= flag_kind_writes((LfFlagKind)f->kind);
+
     if (f->kind == LF_FLAG_FP_CMP) {
         if (f->mat_taken || f->mat_fall)
             mat = lf_afmt("sse_compare(c, %s, %s);", fa, fb);
     } else if (f->mat_taken || f->mat_fall) {
-        mat = flag_mat_call(f->kind, f->size, f->producer_addr);
+        mat = mat_mask
+            ? flag_mat_call(f->kind, f->size, f->producer_addr, mat_mask)
+            : "";
     }
 
     if (!strncmp(m, "cmov", 4)) {
@@ -821,6 +944,17 @@ static int flag_live_any(Lifter *L, uint8_t mask)
     return (L->flag_live_out[L->flag_current_index] & mask) != 0;
 }
 
+/* Exact flags this producer must materialise at this site.  Outside the
+ * flagless path the answer is the full producer mask, so the original helper
+ * is kept. */
+static uint8_t flag_live_written(Lifter *L, LfFlagKind kind)
+{
+    uint8_t writes = flag_kind_writes(kind);
+    if (!L->flagless || !L->flag_live_out || L->flag_current_index < 0)
+        return writes;
+    return (uint8_t)(L->flag_live_out[L->flag_current_index] & writes);
+}
+
 Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
 {
     Emit e = lf_emit();
@@ -872,71 +1006,100 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
         cs_x86_op *d = OP(insn, 0);
         char *a = lf_addr_expr(L, insn, d);
         if (!strcmp(m, "inc")) {
-            if (flag_live_any(L, LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF |
-                                  LF_FLAG_PF | LF_FLAG_AF))
+            uint8_t fmask = flag_live_written(L, LF_FLAG_INC);
+            if (fmask) {
+                const char *fn = flag_helper_for_mask(LF_FLAG_INC, fmask);
+                char *marg = flag_mask_arg(LF_FLAG_INC, fmask);
                 lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, 1u); "
-                                    "flags_incs(c, _old, 4); }", a));
-            else
+                                    "%s(c, _old, 4%s); }", a, fn, marg));
+            } else {
                 lf_push(&e, lf_afmt("atomic_xadd32(%s, 1u);", a));
+            }
             return e;
         }
         if (!strcmp(m, "dec")) {
-            if (flag_live_any(L, LF_FLAG_ZF | LF_FLAG_SF | LF_FLAG_OF |
-                                  LF_FLAG_PF | LF_FLAG_AF))
+            uint8_t fmask = flag_live_written(L, LF_FLAG_DEC);
+            if (fmask) {
+                const char *fn = flag_helper_for_mask(LF_FLAG_DEC, fmask);
+                char *marg = flag_mask_arg(LF_FLAG_DEC, fmask);
                 lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, 0xFFFFFFFFu); "
-                                    "flags_decs(c, _old, 4); }", a));
-            else
+                                    "%s(c, _old, 4%s); }", a, fn, marg));
+            } else {
                 lf_push(&e, lf_afmt("atomic_xadd32(%s, 0xFFFFFFFFu);", a));
+            }
             return e;
         }
         if (!strcmp(m, "add") && nops > 1) {
             char *v = lf_src(L, insn, OP(insn, 1));
-            if (flag_live_any(L, LF_FLAG_ALL))
+            uint8_t fmask = flag_live_written(L, LF_FLAG_ADD);
+            if (fmask) {
+                const char *fn = flag_helper_for_mask(LF_FLAG_ADD, fmask);
+                char *marg = flag_mask_arg(LF_FLAG_ADD, fmask);
                 lf_push(&e, lf_afmt("{ uint32_t _old = atomic_xadd32(%s, %s); "
-                                    "flags_add(c, _old, %s, 4); }", a, v, v));
-            else
+                                    "%s(c, _old, %s, 4%s); }", a, v, fn, v, marg));
+            } else {
                 lf_push(&e, lf_afmt("atomic_xadd32(%s, %s);", a, v));
+            }
             return e;
         }
         if (!strcmp(m, "sub") && nops > 1) {
             char *v = lf_src(L, insn, OP(insn, 1));
-            if (flag_live_any(L, LF_FLAG_ALL))
+            uint8_t fmask = flag_live_written(L, LF_FLAG_SUB);
+            if (fmask) {
+                const char *fn = flag_helper_for_mask(LF_FLAG_SUB, fmask);
+                char *marg = flag_mask_arg(LF_FLAG_SUB, fmask);
                 lf_push(&e, lf_afmt("{ uint32_t _old = atomic_sub32(%s, %s); "
-                                    "flags_sub(c, _old, %s, 4); }", a, v, v));
-            else
+                                    "%s(c, _old, %s, 4%s); }", a, v, fn, v, marg));
+            } else {
                 lf_push(&e, lf_afmt("atomic_sub32(%s, %s);", a, v));
+            }
             return e;
         }
         if ((!strcmp(m, "and") || !strcmp(m, "or") || !strcmp(m, "xor")) && nops > 1) {
             char *v = lf_src(L, insn, OP(insn, 1));
             const char *op = !strcmp(m, "and") ? "&" : !strcmp(m, "or") ? "|" : "^";
-            if (flag_live_any(L, LF_FLAG_CF | LF_FLAG_ZF | LF_FLAG_SF |
-                                  LF_FLAG_OF | LF_FLAG_PF))
+            LfFlagKind lk = !strcmp(m, "and") ? LF_FLAG_AND :
+                            !strcmp(m, "or") ? LF_FLAG_OR : LF_FLAG_XOR;
+            uint8_t fmask = flag_live_written(L, lk);
+            if (fmask) {
+                const char *fn = flag_helper_for_mask(lk, fmask);
+                char *marg = flag_mask_arg(lk, fmask);
                 lf_push(&e, lf_afmt("{ uint32_t _old = atomic_%s32(%s, %s); "
-                                    "flags_logicz(c, _old %s %s, 4); }", m, a, v, op, v));
-            else
+                                    "%s(c, _old %s %s, 4%s); }",
+                                    m, a, v, fn, op, v, marg));
+            } else {
                 lf_push(&e, lf_afmt("atomic_%s32(%s, %s);", m, a, v));
+            }
             return e;
         }
         if ((!strcmp(m, "adc") || !strcmp(m, "sbb")) && nops > 1) {
             char *v = lf_src(L, insn, OP(insn, 1));
-            if (flag_live_any(L, LF_FLAG_ALL))
+            LfFlagKind lk = !strcmp(m, "adc") ? LF_FLAG_ADC : LF_FLAG_SBB;
+            uint8_t fmask = flag_live_written(L, lk);
+            if (fmask) {
+                const char *fn = flag_helper_for_mask(lk, fmask);
+                char *marg = flag_mask_arg(lk, fmask);
                 lf_push(&e, lf_afmt("{ uint32_t _old = %s(%s, %s + c->cf); "
-                                    "flags_%s(c, _old, %s, 4); }",
+                                    "%s(c, _old, %s, 4%s); }",
                                     !strcmp(m, "adc") ? "atomic_xadd32" : "atomic_sub32",
-                                    a, v, m, v));
-            else
+                                    a, v, fn, v, marg));
+            } else {
                 lf_push(&e, lf_afmt("%s(%s, %s + c->cf);",
                                     !strcmp(m, "adc") ? "atomic_xadd32" : "atomic_sub32",
                                     a, v));
+            }
             return e;
         }
         if (!strcmp(m, "neg")) {
-            if (flag_live_any(L, LF_FLAG_ALL))
+            uint8_t fmask = flag_live_written(L, LF_FLAG_NEG);
+            if (fmask) {
+                const char *fn = flag_helper_for_mask(LF_FLAG_NEG, fmask);
+                char *marg = flag_mask_arg(LF_FLAG_NEG, fmask);
                 lf_push(&e, lf_afmt("{ uint32_t _old = atomic_neg32(%s); "
-                                    "flags_sub(c, 0, _old, 4); }", a));
-            else
+                                    "%s(c, 0, _old, 4%s); }", a, fn, marg));
+            } else {
                 lf_push(&e, lf_afmt("atomic_neg32(%s);", a));
+            }
             return e;
         }
         if (!strcmp(m, "not")) {
@@ -1041,7 +1204,19 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
         char *a = lf_read_dst(L, insn, d), *b = lf_src(L, insn, s);
         char *r;
         int kind, ksz = 0;
-        if (flag_dead(L, insn, &kind, &ksz)) {
+        LfFlagKind fk;
+        const char *fn;
+        char *marg;
+        uint8_t fmask;
+        if (!strcmp(m, "add")) fk = LF_FLAG_ADD;
+        else if (!strcmp(m, "sub")) fk = LF_FLAG_SUB;
+        else if (!strcmp(m, "adc")) fk = LF_FLAG_ADC;
+        else if (!strcmp(m, "sbb")) fk = LF_FLAG_SBB;
+        else if (!strcmp(m, "and")) fk = LF_FLAG_AND;
+        else if (!strcmp(m, "or")) fk = LF_FLAG_OR;
+        else fk = LF_FLAG_XOR;
+        fmask = flag_live_written(L, fk);
+        if (flag_dead(L, insn, &kind, &ksz) || fmask == 0) {
             if (!strcmp(m, "add")) r = lf_afmt("add32(%s, %s, %d)", a, b, sz);
             else if (!strcmp(m, "sub")) r = lf_afmt("sub32(%s, %s, %d)", a, b, sz);
             else if (!strcmp(m, "adc")) r = lf_afmt("adc32(c, %s, %s, %d)", a, b, sz);
@@ -1052,66 +1227,122 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
             lf_push(&e, lf_dst_write(L, insn, d, r));
             return e;
         }
-        if (!strcmp(m, "add")) r = lf_afmt("flags_add(c, %s, %s, %d)", a, b, sz);
-        else if (!strcmp(m, "sub")) r = lf_afmt("flags_sub(c, %s, %s, %d)", a, b, sz);
-        else if (!strcmp(m, "adc")) r = lf_afmt("flags_adc(c, %s, %s, %d)", a, b, sz);
-        else if (!strcmp(m, "sbb")) r = lf_afmt("flags_sbb(c, %s, %s, %d)", a, b, sz);
-        else if (!strcmp(m, "and")) r = lf_afmt("flags_logicz(c, %s & %s, %d)", a, b, sz);
-        else if (!strcmp(m, "or"))  r = lf_afmt("flags_logicz(c, %s | %s, %d)", a, b, sz);
-        else                        r = lf_afmt("flags_logicz(c, %s ^ %s, %d)", a, b, sz);
+        fn = flag_helper_for_mask(fk, fmask);
+        marg = flag_mask_arg(fk, fmask);
+        if (fk == LF_FLAG_AND || fk == LF_FLAG_OR || fk == LF_FLAG_XOR) {
+            const char *op = fk == LF_FLAG_AND ? "&" :
+                             fk == LF_FLAG_OR ? "|" : "^";
+            r = lf_afmt("%s(c, %s %s %s, %d%s)", fn, a, op, b, sz, marg);
+        } else {
+            r = lf_afmt("%s(c, %s, %s, %d%s)", fn, a, b, sz, marg);
+        }
         lf_push(&e, lf_dst_write(L, insn, d, r));
         return e;
     }
     if (!strcmp(m, "cmp")) {
         int kind, ksz = 0;
+        const char *fn;
+        char *marg;
+        uint8_t fmask;
         if (flag_dead(L, insn, &kind, &ksz)) return e;
-        lf_push(&e, lf_afmt("flags_sub(c, %s, %s, %d);",
+        fmask = flag_live_written(L, LF_FLAG_CMP);
+        /* A memory cmp/test is a guest load.  If all flags are dead, keep the
+         * full helper as the load fence; a partial mask is still exact. */
+        if (fmask == 0) fmask = flag_kind_writes(LF_FLAG_CMP);
+        fn = flag_helper_for_mask(LF_FLAG_CMP, fmask);
+        marg = flag_mask_arg(LF_FLAG_CMP, fmask);
+        lf_push(&e, lf_afmt("%s(c, %s, %s, %d%s);", fn,
                             lf_read_dst(L, insn, OP(insn, 0)),
-                            lf_src(L, insn, OP(insn, 1)), OP(insn, 0)->size));
+                            lf_src(L, insn, OP(insn, 1)), OP(insn, 0)->size,
+                            marg));
         return e;
     }
     if (!strcmp(m, "test")) {
         int kind, ksz = 0;
+        const char *fn;
+        char *marg;
+        uint8_t fmask;
         if (flag_dead(L, insn, &kind, &ksz)) return e;
-        lf_push(&e, lf_afmt("flags_logicz(c, %s & %s, %d);",
+        fmask = flag_live_written(L, LF_FLAG_TEST);
+        if (fmask == 0) fmask = flag_kind_writes(LF_FLAG_TEST);
+        fn = flag_helper_for_mask(LF_FLAG_TEST, fmask);
+        marg = flag_mask_arg(LF_FLAG_TEST, fmask);
+        lf_push(&e, lf_afmt("%s(c, %s & %s, %d%s);", fn,
                             lf_read_dst(L, insn, OP(insn, 0)),
-                            lf_src(L, insn, OP(insn, 1)), OP(insn, 0)->size));
+                            lf_src(L, insn, OP(insn, 1)), OP(insn, 0)->size,
+                            marg));
         return e;
     }
     if (!strcmp(m, "inc")) {
         cs_x86_op *d = OP(insn, 0);
         int kind, ksz = 0;
+        const char *fn;
+        char *marg;
+        uint8_t fmask;
         if (flag_dead(L, insn, &kind, &ksz)) {
             lf_push(&e, lf_dst_write(L, insn, d,
                     lf_afmt("inc32(%s, %d)", lf_read_dst(L, insn, d), d->size)));
             return e;
         }
+        fmask = flag_live_written(L, LF_FLAG_INC);
+        if (fmask == 0) {
+            lf_push(&e, lf_dst_write(L, insn, d,
+                    lf_afmt("inc32(%s, %d)", lf_read_dst(L, insn, d), d->size)));
+            return e;
+        }
+        fn = flag_helper_for_mask(LF_FLAG_INC, fmask);
+        marg = flag_mask_arg(LF_FLAG_INC, fmask);
         lf_push(&e, lf_dst_write(L, insn, d,
-                lf_afmt("flags_incs(c, %s, %d)", lf_read_dst(L, insn, d), d->size)));
+                lf_afmt("%s(c, %s, %d%s)", fn, lf_read_dst(L, insn, d),
+                        d->size, marg)));
         return e;
     }
     if (!strcmp(m, "dec")) {
         cs_x86_op *d = OP(insn, 0);
         int kind, ksz = 0;
+        const char *fn;
+        char *marg;
+        uint8_t fmask;
         if (flag_dead(L, insn, &kind, &ksz)) {
             lf_push(&e, lf_dst_write(L, insn, d,
                     lf_afmt("dec32(%s, %d)", lf_read_dst(L, insn, d), d->size)));
             return e;
         }
+        fmask = flag_live_written(L, LF_FLAG_DEC);
+        if (fmask == 0) {
+            lf_push(&e, lf_dst_write(L, insn, d,
+                    lf_afmt("dec32(%s, %d)", lf_read_dst(L, insn, d), d->size)));
+            return e;
+        }
+        fn = flag_helper_for_mask(LF_FLAG_DEC, fmask);
+        marg = flag_mask_arg(LF_FLAG_DEC, fmask);
         lf_push(&e, lf_dst_write(L, insn, d,
-                lf_afmt("flags_decs(c, %s, %d)", lf_read_dst(L, insn, d), d->size)));
+                lf_afmt("%s(c, %s, %d%s)", fn, lf_read_dst(L, insn, d),
+                        d->size, marg)));
         return e;
     }
     if (!strcmp(m, "neg")) {
         cs_x86_op *d = OP(insn, 0);
         int kind, ksz = 0;
+        const char *fn;
+        char *marg;
+        uint8_t fmask;
         if (flag_dead(L, insn, &kind, &ksz)) {
             lf_push(&e, lf_dst_write(L, insn, d,
                     lf_afmt("neg32(%s, %d)", lf_read_dst(L, insn, d), d->size)));
             return e;
         }
+        fmask = flag_live_written(L, LF_FLAG_NEG);
+        if (fmask == 0) {
+            lf_push(&e, lf_dst_write(L, insn, d,
+                    lf_afmt("neg32(%s, %d)", lf_read_dst(L, insn, d), d->size)));
+            return e;
+        }
+        fn = flag_helper_for_mask(LF_FLAG_NEG, fmask);
+        marg = flag_mask_arg(LF_FLAG_NEG, fmask);
         lf_push(&e, lf_dst_write(L, insn, d,
-                lf_afmt("flags_sub(c, 0, %s, %d)", lf_read_dst(L, insn, d), d->size)));
+                lf_afmt("%s(c, 0, %s, %d%s)", fn, lf_read_dst(L, insn, d),
+                        d->size, marg)));
         return e;
     }
     if (!strcmp(m, "not")) {
@@ -1250,19 +1481,32 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
                 lf_push(&e, lf_afmt("{ uint32_t _v = %s;", lf_src(L, insn, s)));
                 lf_push(&e, lf_afmt("  uint32_t _old = atomic_xadd32(%s, _v);", a));
                 lf_push(&e, lf_afmt("  %s", lf_dst_write(L, insn, s, "_old")));
-                if (flag_live_any(L, LF_FLAG_ALL))
-                    lf_push(&e, "  flags_add(c, _old, _v, 4); }");
-                else
-                    lf_push(&e, "}");
+                {
+                    uint8_t fmask = flag_live_written(L, LF_FLAG_ADD);
+                    if (fmask) {
+                        const char *fn = flag_helper_for_mask(LF_FLAG_ADD, fmask);
+                        char *marg = flag_mask_arg(LF_FLAG_ADD, fmask);
+                        lf_push(&e, lf_afmt("  %s(c, _old, _v, 4%s); }",
+                                            fn, marg));
+                    } else {
+                        lf_push(&e, "}");
+                    }
+                }
                 return e;
             }
             lf_push(&e, lf_afmt("{ uint32_t _old = atomic_cmpxchg32(%s, c->eax, %s);",
                                 a, lf_src(L, insn, s)));
-            if (flag_live_any(L, LF_FLAG_CF | LF_FLAG_SF | LF_FLAG_OF |
-                                  LF_FLAG_AF | LF_FLAG_PF))
-                lf_push(&e, "  flags_sub(c, c->eax, _old, 4);");
-            else if (flag_live_any(L, LF_FLAG_ZF))
-                lf_push(&e, "  c->zf = (_old == c->eax);");
+            {
+                uint8_t fmask = flag_live_written(L, LF_FLAG_CMP);
+                if (fmask & ~(uint8_t)LF_FLAG_ZF) {
+                    const char *fn = flag_helper_for_mask(LF_FLAG_CMP, fmask);
+                    char *marg = flag_mask_arg(LF_FLAG_CMP, fmask);
+                    lf_push(&e, lf_afmt("  %s(c, c->eax, _old, 4%s);",
+                                        fn, marg));
+                } else if (fmask & LF_FLAG_ZF) {
+                    lf_push(&e, "  c->zf = (_old == c->eax);");
+                }
+            }
             lf_push(&e, "  if (_old != c->eax) c->eax = _old; }");
             return e;
         }
@@ -1482,8 +1726,17 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
                 else if (esz == 2) lf_push(&e, lf_afmt("SET16(c->eax,%s(c->esi)); c->esi += %d;", rfn, esz));
                 else lf_push(&e, lf_afmt("c->eax = %s(c->esi); c->esi += %d;", rfn, esz));
             } else if (!strncmp(base, "scas", 4)) {
-                char *cmp = lf_afmt("flags_sub(c, %s, %s(c->edi), %d); c->edi += %d;",
-                                    ar, rfn, esz, esz);
+                uint8_t fmask = flag_live_written(L, LF_FLAG_CMP);
+                const char *fn;
+                char *marg;
+                /* REP reads ZF on every iteration; a plain SCAS still performs
+                 * the guest load, so never pass a zero mask here. */
+                if (rep) fmask |= LF_FLAG_ZF;
+                if (fmask == 0) fmask = LF_FLAG_ALL;
+                fn = flag_helper_for_mask(LF_FLAG_CMP, fmask);
+                marg = flag_mask_arg(LF_FLAG_CMP, fmask);
+                char *cmp = lf_afmt("%s(c, %s, %s(c->edi), %d%s); c->edi += %d;",
+                                    fn, ar, rfn, esz, marg, esz);
                 if (rep && (!strcmp(rep, "repe") || !strcmp(rep, "repz")))
                     lf_push(&e, lf_afmt("while (c->ecx) { c->ecx--; %s if (!c->zf) break; }", cmp));
                 else if (rep && (!strcmp(rep, "repne") || !strcmp(rep, "repnz")))
@@ -1492,8 +1745,15 @@ Emit lf_translate(Lifter *L, cs_insn *insn, const uint32_t *labels, int nlabels)
                     lf_push(&e, cmp);
                 return e;
             } else if (!strncmp(base, "cmps", 4)) {
-                char *cmp = lf_afmt("flags_sub(c, %s(c->esi), %s(c->edi), %d); c->esi += %d; c->edi += %d;",
-                                    rfn, rfn, esz, esz, esz);
+                uint8_t fmask = flag_live_written(L, LF_FLAG_CMP);
+                const char *fn;
+                char *marg;
+                if (rep) fmask |= LF_FLAG_ZF;
+                if (fmask == 0) fmask = LF_FLAG_ALL;
+                fn = flag_helper_for_mask(LF_FLAG_CMP, fmask);
+                marg = flag_mask_arg(LF_FLAG_CMP, fmask);
+                char *cmp = lf_afmt("%s(c, %s(c->esi), %s(c->edi), %d%s); c->esi += %d; c->edi += %d;",
+                                    fn, rfn, rfn, esz, marg, esz, esz);
                 if (rep && (!strcmp(rep, "repe") || !strcmp(rep, "repz")))
                     lf_push(&e, lf_afmt("while (c->ecx) { c->ecx--; %s if (!c->zf) break; }", cmp));
                 else if (rep && (!strcmp(rep, "repne") || !strcmp(rep, "repnz")))
@@ -2893,6 +3153,17 @@ static int build_flag_plan(Lifter *L, const InsnCopy *ins, int n,
         } else {
             d[i].succ1 = (i + 1 < n) ? i + 1 : -1;
         }
+    }
+    /* flag_use() folds the external target's needs into reads[] for liveness,
+     * but the fusion planner decides the taken and fall-through edges
+     * separately.  Give it the exact tail reads instead of the generic
+     * live_at(-1) == ALL fallback.  Leave ALL everywhere else so a caller
+     * that does not compute an exact boundary stays conservative. */
+    for (i = 0; i < n; i++) {
+        d[i].tail_reads = LF_FLAG_ALL;
+        if (d[i].consumer == LF_CONS_JCC && d[i].succ1 == -1 &&
+            d[i].is_control && !d[i].is_call && d[i].tail_exact)
+            d[i].tail_reads = lf_tail_reads(L, &ins[i].insn, labels, nlabels);
     }
     nf = lf_flag_plan_ex(d, n, pairs, n, live_out);
     free(d);

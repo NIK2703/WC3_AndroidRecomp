@@ -217,6 +217,15 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (argc == 2 && !strcmp(argv[1], "--self-test-flags")) {
+        if (lf_flag_plan_selftest() != 0) {
+            fprintf(stderr, "lift32: flag-plan self-test FAIL\n");
+            return 1;
+        }
+        puts("lift32: flag-plan self-test OK");
+        return 0;
+    }
+
     if (argc == 2 && !strcmp(argv[1], "--self-test-x87")) {
         int rc = lf_x87_summary_selftest();
         if (rc == 2) {

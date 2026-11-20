@@ -1313,6 +1313,11 @@ def test_lift_cond_fold() -> int:
     return run_host_tool("lift32", ["--self-test-cond"])
 
 
+def test_lift_flag_plan() -> int:
+    """Exact external-tail edges do not force flag materialisation."""
+    return run_host_tool("lift32", ["--self-test-flags"])
+
+
 def test_lift_x87_summary() -> int:
     """D1 source check: only proven x87/MMX-free callees skip the flush."""
     return run_host_tool("lift32", ["--self-test-x87"])
@@ -3569,6 +3574,7 @@ TESTS = {
     "patch_pipeline": test_patch_pipeline,
     "leaf_call_pass": test_leaf_call_pass,
     "lift_cond_fold": test_lift_cond_fold,
+    "lift_flag_plan": test_lift_flag_plan,
     "lift_x87_summary": test_lift_x87_summary,
     "save_list_display_pass": test_save_list_display_pass,
     "required_save_fixes": test_required_save_fixes,

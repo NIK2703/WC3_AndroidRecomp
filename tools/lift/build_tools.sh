@@ -170,6 +170,8 @@ if [ "$smoke" = 1 ]; then
         echo "smoke: $t"
         "$bin/$t.exe" --self-test
     done
+    echo "smoke: lift32 flag-plan"
+    "$bin/lift32.exe" --self-test-flags
 fi
 
 compiler_version=$("$clang_bin" --version | head -n 1)

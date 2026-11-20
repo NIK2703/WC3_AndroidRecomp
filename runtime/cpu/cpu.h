@@ -630,6 +630,21 @@ static inline uint32_t parity8(uint8_t v) {
     v ^= v >> 4; v ^= v >> 2; v ^= v >> 1; return (~v) & 1;
 }
 
+/* Exact per-site flag masks.  These values are part of the generated-C
+ * contract and must match LF_FLAG_* in tools/lift/csrc/liftflags.h.  The
+ * lifter passes a compile-time constant, so the inline helpers below fold
+ * away every branch for a flag that is dead at that site. */
+enum {
+    WC3_FLAG_CF = 1u << 0,
+    WC3_FLAG_ZF = 1u << 1,
+    WC3_FLAG_SF = 1u << 2,
+    WC3_FLAG_OF = 1u << 3,
+    WC3_FLAG_AF = 1u << 4,
+    WC3_FLAG_PF = 1u << 5,
+    WC3_FLAG_ALL = WC3_FLAG_CF | WC3_FLAG_ZF | WC3_FLAG_SF |
+                   WC3_FLAG_OF | WC3_FLAG_AF | WC3_FLAG_PF
+};
+
 /* logical ops (AND/OR/XOR/TEST): CF=OF=0 */
 static inline void flags_logic32(CPU *c, uint32_t r) {
     c->cf = 0; c->of = 0; c->sf = r >> 31; c->zf = (r == 0); WC3_SET_PF(c, parity8((uint8_t)r));
@@ -728,6 +743,121 @@ static inline uint32_t flags_sbb(CPU *c, uint32_t a, uint32_t b, int sz) {
     c->cf = (full >> (sz * 8)) & 1; c->zf = (r == 0); c->sf = (r & s) != 0;
     c->of = (((a ^ b) & (a ^ r)) & s) != 0; WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
     WC3_SET_PF(c, parity8((uint8_t)r)); return r;
+}
+
+/* P0b `_nopf` variants.  They are retained for A/B and fallback; the
+ * current exact-mask selection uses the `flags_*_mask` helpers below.  They
+ * write the same CF/ZF/SF/OF as the normal helpers and deliberately leave
+ * PF/AF untouched. */
+static inline uint32_t flags_sub_nopf(CPU *c, uint32_t a, uint32_t b, int sz) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz);
+    a &= m; b &= m; uint32_t r = (a - b) & m;
+    c->cf = (a < b); c->zf = (r == 0); c->sf = (r & s) != 0;
+    c->of = (((a ^ b) & (a ^ r)) & s) != 0; return r;
+}
+static inline uint32_t flags_add_nopf(CPU *c, uint32_t a, uint32_t b, int sz) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz);
+    a &= m; b &= m; uint32_t r = (a + b) & m;
+    c->cf = (r < a); c->zf = (r == 0); c->sf = (r & s) != 0;
+    c->of = ((~(a ^ b) & (a ^ r)) & s) != 0; return r;
+}
+static inline uint32_t flags_logicz_nopf(CPU *c, uint32_t r, int sz) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz); r &= m;
+    c->cf = 0; c->of = 0; c->sf = (r & s) != 0; c->zf = (r == 0); return r;
+}
+static inline uint32_t flags_incs_nopf(CPU *c, uint32_t a, int sz) {
+    uint32_t keep = c->cf, r = flags_add_nopf(c, a, 1, sz); c->cf = keep; return r;
+}
+static inline uint32_t flags_decs_nopf(CPU *c, uint32_t a, int sz) {
+    uint32_t keep = c->cf, r = flags_sub_nopf(c, a, 1, sz); c->cf = keep; return r;
+}
+static inline uint32_t flags_adc_nopf(CPU *c, uint32_t a, uint32_t b, int sz) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz), cin = c->cf & 1;
+    a &= m; b &= m; uint64_t full = (uint64_t)a + b + cin; uint32_t r = (uint32_t)full & m;
+    c->cf = (full >> (sz * 8)) & 1; c->zf = (r == 0); c->sf = (r & s) != 0;
+    c->of = ((~(a ^ b) & (a ^ r)) & s) != 0; return r;
+}
+static inline uint32_t flags_sbb_nopf(CPU *c, uint32_t a, uint32_t b, int sz) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz), bin = c->cf & 1;
+    a &= m; b &= m; uint64_t full = (uint64_t)a - b - bin; uint32_t r = (uint32_t)full & m;
+    c->cf = (full >> (sz * 8)) & 1; c->zf = (r == 0); c->sf = (r & s) != 0;
+    c->of = (((a ^ b) & (a ^ r)) & s) != 0; return r;
+}
+
+/* Exact-mask helpers.  Each writes only the flags selected by mask; callers
+ * prove every other written flag is dead.  A zero mask is never passed here:
+ * the call is omitted, or the pure arithmetic helper is used.  A cmp/test
+ * with a memory operand keeps the full fallback because the guest load must
+ * still happen even when all flags are dead. */
+static inline uint32_t flags_sub_mask(CPU *c, uint32_t a, uint32_t b,
+                                      int sz, uint32_t mask) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz);
+    a &= m; b &= m; uint32_t r = (a - b) & m;
+    if (mask & WC3_FLAG_CF) c->cf = (a < b);
+    if (mask & WC3_FLAG_ZF) c->zf = (r == 0);
+    if (mask & WC3_FLAG_SF) c->sf = (r & s) != 0;
+    if (mask & WC3_FLAG_OF) c->of = (((a ^ b) & (a ^ r)) & s) != 0;
+    if (mask & WC3_FLAG_AF) WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
+    if (mask & WC3_FLAG_PF) WC3_SET_PF(c, parity8((uint8_t)r));
+    return r;
+}
+static inline uint32_t flags_add_mask(CPU *c, uint32_t a, uint32_t b,
+                                      int sz, uint32_t mask) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz);
+    a &= m; b &= m; uint32_t r = (a + b) & m;
+    if (mask & WC3_FLAG_CF) c->cf = (r < a);
+    if (mask & WC3_FLAG_ZF) c->zf = (r == 0);
+    if (mask & WC3_FLAG_SF) c->sf = (r & s) != 0;
+    if (mask & WC3_FLAG_OF) c->of = ((~(a ^ b) & (a ^ r)) & s) != 0;
+    if (mask & WC3_FLAG_AF) WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
+    if (mask & WC3_FLAG_PF) WC3_SET_PF(c, parity8((uint8_t)r));
+    return r;
+}
+static inline uint32_t flags_logicz_mask(CPU *c, uint32_t r,
+                                         int sz, uint32_t mask) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz); r &= m;
+    if (mask & WC3_FLAG_CF) c->cf = 0;
+    if (mask & WC3_FLAG_OF) c->of = 0;
+    if (mask & WC3_FLAG_SF) c->sf = (r & s) != 0;
+    if (mask & WC3_FLAG_ZF) c->zf = (r == 0);
+    if (mask & WC3_FLAG_PF) WC3_SET_PF(c, parity8((uint8_t)r));
+    return r;
+}
+static inline uint32_t flags_incs_mask(CPU *c, uint32_t a,
+                                       int sz, uint32_t mask) {
+    /* INC/DEC never modify CF.  Masking it out also removes the save/restore
+     * pair from the original flags_incs/flags_decs helpers. */
+    return flags_add_mask(c, a, 1u, sz, mask & ~WC3_FLAG_CF);
+}
+static inline uint32_t flags_decs_mask(CPU *c, uint32_t a,
+                                       int sz, uint32_t mask) {
+    return flags_sub_mask(c, a, 1u, sz, mask & ~WC3_FLAG_CF);
+}
+static inline uint32_t flags_adc_mask(CPU *c, uint32_t a, uint32_t b,
+                                      int sz, uint32_t mask) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz), cin = c->cf & 1;
+    a &= m; b &= m; uint64_t full = (uint64_t)a + b + cin;
+    uint32_t r = (uint32_t)full & m;
+    if (mask & WC3_FLAG_CF) c->cf = (uint32_t)(full >> (sz * 8)) & 1u;
+    if (mask & WC3_FLAG_ZF) c->zf = (r == 0);
+    if (mask & WC3_FLAG_SF) c->sf = (r & s) != 0;
+    if (mask & WC3_FLAG_OF) c->of = ((~(a ^ b) & (a ^ r)) & s) != 0;
+    if (mask & WC3_FLAG_AF) WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
+    if (mask & WC3_FLAG_PF) WC3_SET_PF(c, parity8((uint8_t)r));
+    return r;
+}
+static inline uint32_t flags_sbb_mask(CPU *c, uint32_t a, uint32_t b,
+                                      int sz, uint32_t mask) {
+    uint32_t m = mask_sz(sz), s = sign_sz(sz), bin = c->cf & 1;
+    a &= m; b &= m; uint64_t full = (uint64_t)a - b - bin;
+    uint32_t r = (uint32_t)full & m;
+    if (mask & WC3_FLAG_CF) c->cf = (uint32_t)(full >> (sz * 8)) & 1u;
+    if (mask & WC3_FLAG_ZF) c->zf = (r == 0);
+    if (mask & WC3_FLAG_SF) c->sf = (r & s) != 0;
+    if (mask & WC3_FLAG_OF) c->of = (((a ^ b) & (a ^ r)) & s) != 0;
+    if (mask & WC3_FLAG_AF) WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
+    if (mask & WC3_FLAG_PF) WC3_SET_PF(c, parity8((uint8_t)r));
+    return r;
 }
 
 static inline uint32_t op_shl(CPU *c, uint32_t v, uint32_t cnt, int sz) {

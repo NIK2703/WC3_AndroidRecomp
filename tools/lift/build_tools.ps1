@@ -213,6 +213,13 @@ if ($Smoke) {
     }
     Write-Host 'smoke: cond-fold self-test OK'
 
+    $flags = & (Join-Path $bin 'lift32.exe') --self-test-flags 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $flags | ForEach-Object { Write-Host $_ }
+        throw 'lift32 flag-plan self-test failed'
+    }
+    Write-Host 'smoke: flag-plan self-test OK'
+
     $x87 = & (Join-Path $bin 'lift32.exe') --self-test-x87 2>&1
     if ($LASTEXITCODE -ne 0) {
         $x87 | ForEach-Object { Write-Host $_ }

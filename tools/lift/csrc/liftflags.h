@@ -68,6 +68,9 @@ typedef struct {
     uint8_t is_ret;       /* direct ret/retn/retf: a transparent exit edge */
     uint8_t is_call;      /* succ1 == -1 after a call is an unknown return */
     uint8_t tail_exact;   /* exact boundary model when succ1 == -1 was built */
+    uint8_t tail_reads;   /* flags an exact external succ1 target reads;
+                           * valid for a control edge when tail_exact is set;
+                           * initialize to LF_FLAG_ALL unless it is known */
     int succ1;
     int succ2;
 } LfFlagInsn;
@@ -84,6 +87,8 @@ typedef struct {
     int mat_fall;
     uint32_t producer_addr;
     uint8_t cond_mask;      /* flags the fused condition actually reads */
+    uint8_t mat_taken_mask; /* exact live flags on the taken edge */
+    uint8_t mat_fall_mask;  /* exact live flags on the fall-through edge */
 } LfFlagFuse;
 
 #define LF_FLAG_MAX_SPAN 8
@@ -120,5 +125,9 @@ int lf_flag_plan_ex(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out,
 
 /* Wrapper without liveness export. */
 int lf_flag_plan(const LfFlagInsn *ins, int n, LfFlagFuse *out, int max_out);
+
+/* Host self-test for the fusion planner, including the exact external-tail
+ * edge model.  Returns 0 on success. */
+int lf_flag_plan_selftest(void);
 
 #endif /* WC3_LIFTFLAGS_H */

@@ -32,6 +32,35 @@ static void eqf_bits(const char *what, float got, float want)
     }
 }
 
+static void check_mask_flags(const char *what, const CPU *init,
+                             const CPU *full, const CPU *part, uint32_t mask)
+{
+    static const uint32_t bits[6] = {
+        WC3_FLAG_CF, WC3_FLAG_ZF, WC3_FLAG_SF,
+        WC3_FLAG_OF, WC3_FLAG_AF, WC3_FLAG_PF
+    };
+    static const char *const names[6] = {
+        "cf", "zf", "sf", "of", "af", "pf"
+    };
+    const uint32_t fv[6] = {
+        full->cf, full->zf, full->sf, full->of, full->af, full->pf
+    };
+    const uint32_t iv[6] = {
+        init->cf, init->zf, init->sf, init->of, init->af, init->pf
+    };
+    const uint32_t pv[6] = {
+        part->cf, part->zf, part->sf, part->of, part->af, part->pf
+    };
+    for (int i = 0; i < 6; i++) {
+        uint32_t want = (mask & bits[i]) ? fv[i] : iv[i];
+        if (pv[i] != want) {
+            printf("FAIL %-20s mask 0x%02X flag %s got %u want %u\n",
+                   what, mask, names[i], pv[i], want);
+            fails++;
+        }
+    }
+}
+
 int main(void)
 {
     CPU c = {0};
@@ -276,6 +305,93 @@ int main(void)
         sse_divps(&a, &b);
         eq("divps NaN lane is NaN", (a.u32[0] & 0x7F800000u) == 0x7F800000u, 1u);
         eqf_bits("divps non-NaN lane", a.f32[3], 1.0f);
+    }
+
+    /* CGP-5: exact-mask helpers must produce the full helper's result and
+     * exactly the selected flag fields.  Unselected fields must retain their
+     * incoming values, because the lifter proved them dead. */
+    {
+        static const uint32_t vals[] = {
+            0u, 1u, 0x7Fu, 0x80u, 0xFFu, 0x100u, 0x7FFFu, 0x8000u,
+            0xFFFFu, 0x12345678u, 0x7FFFFFFFu, 0x80000000u, 0xFFFFFFFFu
+        };
+        const uint32_t all = WC3_FLAG_ALL;
+        const uint32_t logic = WC3_FLAG_CF | WC3_FLAG_ZF | WC3_FLAG_SF |
+                               WC3_FLAG_OF | WC3_FLAG_PF;
+        const uint32_t incdec = WC3_FLAG_ZF | WC3_FLAG_SF | WC3_FLAG_OF |
+                                WC3_FLAG_AF | WC3_FLAG_PF;
+
+        eq("WC3_FLAG_CF", WC3_FLAG_CF, 1u);
+        eq("WC3_FLAG_ZF", WC3_FLAG_ZF, 2u);
+        eq("WC3_FLAG_SF", WC3_FLAG_SF, 4u);
+        eq("WC3_FLAG_OF", WC3_FLAG_OF, 8u);
+        eq("WC3_FLAG_AF", WC3_FLAG_AF, 16u);
+        eq("WC3_FLAG_PF", WC3_FLAG_PF, 32u);
+
+        for (int sz = 1; sz <= 4; sz++) {
+            for (unsigned vi = 0; vi < sizeof vals / sizeof vals[0]; vi++) {
+                for (unsigned vj = 0; vj < sizeof vals / sizeof vals[0]; vj++) {
+                    uint32_t a = vals[vi], b = vals[vj];
+                    CPU init = c;
+                    init.cf = (uint32_t)(vi & 1u);
+                    init.zf = (uint32_t)((vi + vj) & 1u);
+                    init.sf = (uint32_t)((vi + 1u) & 1u);
+                    init.of = (uint32_t)((vj + 1u) & 1u);
+                    init.af = (uint32_t)((vi + vj + 1u) & 1u);
+                    init.pf = (uint32_t)((vi + 2u) & 1u);
+
+#define RUN_PRODUCER(NAME, WRITES, FEXPR, MEXPR) do {                         \
+                        for (uint32_t mask = 1; mask < 64u; mask++) {         \
+                            CPU full, part;                                   \
+                            uint32_t rf, rp;                                  \
+                            if (mask & ~(uint32_t)(WRITES)) continue;         \
+                            full = init; part = init;                         \
+                            rf = (FEXPR);                                     \
+                            rp = (MEXPR);                                     \
+                            if (rf != rp) {                                   \
+                                printf("FAIL %-16s mask 0x%02X result "        \
+                                       "0x%08X/0x%08X\n", NAME, mask, rp, rf); \
+                                fails++;                                      \
+                            }                                                 \
+                            check_mask_flags(NAME, &init, &full, &part, mask);\
+                        }                                                     \
+                    } while (0)
+
+                    RUN_PRODUCER("add", all,
+                                 flags_add(&full, a, b, sz),
+                                 flags_add_mask(&part, a, b, sz, mask));
+                    RUN_PRODUCER("sub", all,
+                                 flags_sub(&full, a, b, sz),
+                                 flags_sub_mask(&part, a, b, sz, mask));
+                    RUN_PRODUCER("neg", all,
+                                 flags_sub(&full, 0u, a, sz),
+                                 flags_sub_mask(&part, 0u, a, sz, mask));
+                    RUN_PRODUCER("adc", all,
+                                 flags_adc(&full, a, b, sz),
+                                 flags_adc_mask(&part, a, b, sz, mask));
+                    RUN_PRODUCER("sbb", all,
+                                 flags_sbb(&full, a, b, sz),
+                                 flags_sbb_mask(&part, a, b, sz, mask));
+                    RUN_PRODUCER("inc", incdec,
+                                 flags_incs(&full, a, sz),
+                                 flags_incs_mask(&part, a, sz, mask));
+                    RUN_PRODUCER("dec", incdec,
+                                 flags_decs(&full, a, sz),
+                                 flags_decs_mask(&part, a, sz, mask));
+                    RUN_PRODUCER("logic-and", logic,
+                                 flags_logicz(&full, a & b, sz),
+                                 flags_logicz_mask(&part, a & b, sz, mask));
+                    RUN_PRODUCER("logic-or", logic,
+                                 flags_logicz(&full, a | b, sz),
+                                 flags_logicz_mask(&part, a | b, sz, mask));
+                    RUN_PRODUCER("logic-xor", logic,
+                                 flags_logicz(&full, a ^ b, sz),
+                                 flags_logicz_mask(&part, a ^ b, sz, mask));
+
+#undef RUN_PRODUCER
+                }
+            }
+        }
     }
 
     if (fails == 0) printf("cpu helpers OK\n");
