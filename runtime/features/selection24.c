@@ -326,20 +326,22 @@ void wc3_sel24_cluster_prepare(uint32_t vector)
  * keep their local extents, but use a larger scale than the original cut:
  * 0.80 instead of 0.75 for grid24 and 0.65 instead of 0.55 for grid40.  The
  * grids are anchored bottom-centre (7/7), so the larger scale enlarges the
- * screen footprint uniformly left, right and up and makes the icons less
- * shrunken.  The X offset preserves the original -0.0015625 screen-space
- * centre correction at the new scale. */
+ * screen footprint uniformly left, right and up.  The Y offset adds half of
+ * the height increase below the old bottom edge, which centres the enlarged
+ * footprint on the old one and makes the vertical expansion symmetric too.
+ * The X offset preserves the original -0.0015625 screen-space centre
+ * correction at the new scale. */
 #define SEL24_GRID12_WIDTH   0x3E3E6666u
 #define SEL24_GRID12_HEIGHT  0x3DD00000u
 #define SEL24_GRID24_WIDTH   0x3E7DDDDDu
 #define SEL24_GRID24_HEIGHT  0x3E0AAAABu
 #define SEL24_GRID24_OFFSET_X 0xBB000000u /* -0.0015625 / 0.80 */
-#define SEL24_GRID24_OFFSET_Y 0x00000000u
+#define SEL24_GRID24_OFFSET_Y 0x3B8AAAABu /* +0.003385417 / 0.80 */
 #define SEL24_GRID24_SCALE   0x3F4CCCCDu /* 0.80f */
 #define SEL24_GRID40_WIDTH   0x3EA00000u /* 0.3125f */
 #define SEL24_GRID40_HEIGHT  0x3E3C6A7Fu /* 0.184f */
 #define SEL24_GRID40_OFFSET_X 0xBB1D89D9u /* -0.0015625 / 0.65 */
-#define SEL24_GRID40_OFFSET_Y 0x00000000u
+#define SEL24_GRID40_OFFSET_Y 0x3C67E589u /* +0.0092 / 0.65 */
 #define SEL24_GRID40_SCALE   0x3F266666u /* 0.65f */
 
 #define SEL24_GRID24_ROWS    3u
