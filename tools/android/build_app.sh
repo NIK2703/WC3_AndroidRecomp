@@ -386,7 +386,7 @@ configure=(
     "-DGAMEACTIVITY_ROOT=$ga"
     "-DWC3_RELIFTED_CORPUS_ROOT=$corpus_abs"
     -DWC3_W3L_COMPAT=ON -DWC3_W3L_PROFILE=rubattle -DWC3_W3L_LATENCY=100
-    -DWC3_SELECTION_24=ON -DWC3_SELECTION_STRUCT_CAP=40
+    -DWC3_SELECTION=ON -DWC3_SELECTION_STRUCT_CAP=40
     -DWC3_CORPUS_WERROR=OFF
     "-DWC3_CORPUS_JOBS=$jobs"
     -DWC3_CORPUS_RETRIES=5
@@ -444,12 +444,12 @@ done
 
 corpus_archive=$cmake_dir/libwc3_corpus_relifted.a
 [ -f "$corpus_archive" ] || {
-    echo "[app] selection24 corpus archive missing: $corpus_archive" >&2; exit 1; }
+    echo "[app] selection corpus archive missing: $corpus_archive" >&2; exit 1; }
 corpus_syms=$("$nm" -u "$corpus_archive")
-for s in wc3_sel24_init_group wc3_sel24_note_selection wc3_sel24_select \
-         wc3_sel24_hide_buttons wc3_sel24_fill wc3_sel24_cap; do
+for s in wc3_sel_grid_init wc3_sel_panel_note wc3_sel_panel_select \
+         wc3_sel_panel_hide wc3_sel_panel_fill wc3_sel_cap; do
     grep -qw "$s" <<<"$corpus_syms" || {
-        echo "[app] selection24 call site absent from corpus: $s" >&2; exit 1; }
+        echo "[app] selection call site absent from corpus: $s" >&2; exit 1; }
 done
 
 fix_report=$root/reports/generated/required_fixes.json
@@ -466,13 +466,13 @@ if f.get("overlapped_save_io") is None:
 PY
 
 so_strings=$("$strings" "$so" |
-    grep -E 'WC3_SAVE_LIST_STRIP_W3Z|WC3_HIDE_CURSOR|WC3_SELECTION_24|WC3_SELECTION_CAP|WC3 DXVK: createDevice begin|WC3 DXVK: vkCreateDevice result=|WC3 D3D9: InitialReset|WC3 D3D9: missing adapter core features' || true)
+    grep -E 'WC3_SAVE_LIST_STRIP_W3Z|WC3_HIDE_CURSOR|WC3_SELECTION|WC3_SELECTION_CAP|WC3 DXVK: createDevice begin|WC3 DXVK: vkCreateDevice result=|WC3 D3D9: InitialReset|WC3 D3D9: missing adapter core features' || true)
 grep -q WC3_SAVE_LIST_STRIP_W3Z <<<"$so_strings" || {
     echo '[app] save-list marker absent from the product .so' >&2; exit 1; }
 grep -q WC3_HIDE_CURSOR <<<"$so_strings" || {
     echo '[app] cursor-hide marker absent from the product .so' >&2; exit 1; }
-grep -q WC3_SELECTION_24 <<<"$so_strings" || {
-    echo '[app] selection24 marker absent from the product .so' >&2; exit 1; }
+grep -q WC3_SELECTION <<<"$so_strings" || {
+    echo '[app] selection marker absent from the product .so' >&2; exit 1; }
 grep -q WC3_SELECTION_CAP <<<"$so_strings" || {
     echo '[app] selection-cap runtime marker absent from the product .so' >&2; exit 1; }
 # The final link must contain the patched DXVK 1.10.3, not a cached archive.
@@ -498,5 +498,5 @@ grep -qw pwrite <<<"$dynsyms" || { echo '[app] pwrite missing' >&2; exit 1; }
 grep -qw pread <<<"$dynsyms" || { echo '[app] pread missing' >&2; exit 1; }
 
 echo "[app] so      $so ($(wc3_file_size "$so") bytes)"
-echo "[app] syms    android_main/JNI_OnLoad/GameActivity present; selection24 and save fixes verified"
+echo "[app] syms    android_main/JNI_OnLoad/GameActivity present; selection and save fixes verified"
 echo "[app] built $variant"

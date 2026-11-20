@@ -113,7 +113,7 @@ $targets = @(
     @{ out = 'parallel_raycast.exe'; src = @('parallel_raycast.c'); dir = $csrcLocal },
     @{ out = 'return_address_elide.exe'; src = @('return_address_elide.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'w3l_compat.exe'; src = @('w3l_compat.c', 'sha256.c'); dir = $csrcLocal },
-    @{ out = 'selection24.exe'; src = @('selection24.c', 'sha256.c'); dir = $csrcLocal },
+    @{ out = 'selection.exe'; src = @('selection.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'ccache_wrapper.exe'; src = @('ccache_wrapper.c'); dir = $csrcLocal },
     @{ out = 'dxvk_isolate_archive_elf.exe'; src = @('dxvk_isolate_archive_elf.c'); dir = $csrcLocal },
     @{ out = 'flag_read_audit.exe'; src = @('flag_read_audit.c'); dir = $csrcLocal },
@@ -416,11 +416,11 @@ void L_00401000(CPU *c)
         $wcOut | ForEach-Object { Write-Host $_ }
         throw 'w3l_compat self-test failed'
     }
-    $s24 = Join-Path $bin 'selection24.exe'
-    $s24Out = & $s24 --self-test 2>&1
-    if ($LASTEXITCODE -ne 0 -or -not ($s24Out -match 'self-test: OK')) {
-        $s24Out | ForEach-Object { Write-Host $_ }
-        throw 'selection24 self-test failed'
+    $sel = Join-Path $bin 'selection.exe'
+    $selOut = & $sel --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($selOut -match 'self-test: OK')) {
+        $selOut | ForEach-Object { Write-Host $_ }
+        throw 'selection self-test failed'
     }
     $cw = Join-Path $bin 'ccache_wrapper.exe'
     $cwSelf = & $cw --self-test 2>&1

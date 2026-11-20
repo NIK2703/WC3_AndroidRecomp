@@ -1,4 +1,4 @@
-/* selection24.c - 12/24/40-unit selection / adaptive 6x2 <-> 8x3 <-> 10x4 panel
+/* selection.c - 12/24/40-unit selection / adaptive 6x2 <-> 8x3 <-> 10x4 panel
  * LiftPass.
  *
  * The pass edits the generated corpus through address-comment anchors.  It is
@@ -7,10 +7,10 @@
  * the sites; the configure step sums every chunk JSON through
  * --verify-coverage and compares the union with the fixed totals below.
  *
- *   selection24 --lift IN --out OUT [--json REPORT] [--profile seed|closed]
+ *   selection --lift IN --out OUT [--json REPORT] [--profile seed|closed]
  *               [--struct-cap 24|40] [--quiet]
- *   selection24 --verify-coverage @manifest
- *   selection24 --self-test
+ *   selection --verify-coverage @manifest
+ *   selection --self-test
  *
  * Product integration is described in docs/research/SELECTION_24_ANALYSIS.md.
  * No source file under build/corpus-full is modified in place.
@@ -26,7 +26,7 @@
 
 #include "sha256.h"
 
-#define PASS "selection24"
+#define PASS "selection"
 #define PASS_REV 49
 
 /* Structural capacity of the emitted layout.  The product uses 40 so one
@@ -80,7 +80,7 @@ typedef enum {
     K_ORDER_GROUP_FULL,
     K_TRACE_EVRELEASE,
     K_SLOT_UNLINK,
-    K_GROUP24,
+    K_LAYOUT,
     K_TRACE_FORMATION,
     K_ORDER_CURSOR,
     K_COUNT
@@ -130,7 +130,7 @@ static const char *const kind_name[K_COUNT] = {
     "order_group_full",
     "trace_evrelease",
     "slot_unlink",
-    "group24",
+    "layout",
     "trace_formation",
     "order_cursor"
 };
@@ -180,7 +180,7 @@ static const unsigned expected_total[K_COUNT] = {
     2, /* order_group_full */
     1, /* trace_evrelease */
     1, /* slot_unlink */
-    207, /* group24 */
+    207, /* layout */
     9, /* trace_formation */
     6, /* order_cursor */
 };
@@ -229,7 +229,7 @@ static const unsigned expected_seed[K_COUNT] = {
     0, /* order_group_full */
     0, /* trace_evrelease */
     0, /* slot_unlink */
-    46, /* group24 */
+    46, /* layout */
     2, /* trace_formation */
     2, /* order_cursor */
 };
@@ -280,7 +280,7 @@ static const unsigned expected_closed[K_COUNT] = {
     2, /* order_group_full */
     1, /* trace_evrelease */
     1, /* slot_unlink */
-    161, /* group24 */
+    161, /* layout */
     7, /* trace_formation */
     4, /* order_cursor */
 };
@@ -575,7 +575,7 @@ static void sites_add(Sites *s, Kind k, uint32_t va, const char *action,
  *     12 must become 24 together with the store bound; otherwise
  *     `12 - occupancy` underflows once occupancy exceeds 12.
  *
- * Every limit below is emitted as wc3_sel24_cap(), never as a literal.  The
+ * Every limit below is emitted as wc3_sel_cap(), never as a literal.  The
  * helper returns 24 for the product default and 12 when the launch-settings
  * switch is off.  The corpus is therefore built once and the choice is made at
  * run time.  Structural changes (group allocation 0x134 -> 0x144, order
@@ -714,23 +714,23 @@ static void sites_add(Sites *s, Kind k, uint32_t va, const char *action,
 #define VA_TRACE_LOOKUP_RES  0x6F04D9F3u
 
 static const char *const INSERT_TRACE_EVT2[] = {
-    "    /* selection24 evt2 trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_evt2(c, c->ecx, rd32((c->ebp + 0x00000008u)));",
+    "    /* selection evt2 trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_evt2(c, c->ecx, rd32((c->ebp + 0x00000008u)));",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_LOOKUP_ARG[] = {
-    "    /* selection24 lookup trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_lookup(c, 0u, c->ecx, c->edx);",
+    "    /* selection lookup trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_lookup(c, 0u, c->ecx, c->edx);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_LOOKUP_RES[] = {
-    "    /* selection24 lookup result */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_lookup(c, 1u, c->edi, 0u);",
+    "    /* selection lookup result */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_lookup(c, 1u, c->edi, 0u);",
     "#endif"
 };
 
@@ -754,30 +754,30 @@ static const char *const INSERT_TRACE_LOOKUP_RES[] = {
 #define VA_TRACE_ORDER_LOOP_C 0x6F6BA4C2u
 
 static const char *const INSERT_TRACE_ORDER_UNIT_B[] = {
-    "    /* selection24 order unit trace B */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_unit(c, 0x38u, c->edi, c->ebx);",
+    "    /* selection order unit trace B */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_unit(c, 0x38u, c->edi, c->ebx);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_ORDER_UNIT_C[] = {
-    "    /* selection24 order unit trace C */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_unit(c, 0x30u, c->edi, c->ebx);",
+    "    /* selection order unit trace C */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_unit(c, 0x30u, c->edi, c->ebx);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_ORDER_LOOP_B[] = {
-    "    /* selection24 order loop trace B */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_loop(c, 0x18u, c->esi, c->ecx, c->edx);",
+    "    /* selection order loop trace B */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_loop(c, 0x18u, c->esi, c->ecx, c->edx);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_ORDER_LOOP_C[] = {
-    "    /* selection24 order loop trace C */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_loop(c, 0x1Cu, c->esi, c->ecx, c->edx);",
+    "    /* selection order loop trace C */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_loop(c, 0x1Cu, c->esi, c->ecx, c->edx);",
     "#endif"
 };
 
@@ -797,23 +797,23 @@ static const char *const INSERT_TRACE_ORDER_LOOP_C[] = {
 #define VA_TRACE_SLOTS_C  0x6F6BBFCCu
 
 static const char *const INSERT_TRACE_SLOTS_A1[] = {
-    "    /* selection24 order slots trace A1 */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_slots(c, 1u, c->ebx, c->edi);",
+    "    /* selection order slots trace A1 */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_slots(c, 1u, c->ebx, c->edi);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_SLOTS_A2[] = {
-    "    /* selection24 order slots trace A2 */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_slots(c, 2u, c->ebx, c->edi);",
+    "    /* selection order slots trace A2 */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_slots(c, 2u, c->ebx, c->edi);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_SLOTS_C[] = {
-    "    /* selection24 order slots trace C */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_slots(c, 3u, c->ebx, c->esi);",
+    "    /* selection order slots trace C */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_slots(c, 3u, c->ebx, c->esi);",
     "#endif"
 };
 
@@ -833,16 +833,16 @@ static const char *const INSERT_TRACE_SLOTS_C[] = {
 #define VA_TRACE_REMOVE_UNIT 0x6F28EFBBu
 
 static const char *const INSERT_TRACE_REMOVE_ENTRY[] = {
-    "    /* selection24 remove entry trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_remove(c, 0u, c->ebx, 0u);",
+    "    /* selection remove entry trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_remove(c, 0u, c->ebx, 0u);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_REMOVE_UNIT[] = {
-    "    /* selection24 remove unit trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_remove(c, 1u, c->eax, c->edi);",
+    "    /* selection remove unit trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_remove(c, 1u, c->eax, c->edi);",
     "#endif"
 };
 
@@ -859,9 +859,9 @@ static const char *const INSERT_TRACE_REMOVE_UNIT[] = {
 #define VA_TRACE_EVBIRTH 0x6F154B76u
 
 static const char *const INSERT_TRACE_EVBIRTH[] = {
-    "    /* selection24 event birth trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_evbirth(c, c->eax, c->ebx);",
+    "    /* selection event birth trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_evbirth(c, c->eax, c->ebx);",
     "#endif"
 };
 
@@ -875,9 +875,9 @@ static const char *const INSERT_TRACE_EVBIRTH[] = {
 #define VA_TRACE_EVINIT 0x6F154B92u
 
 static const char *const INSERT_TRACE_EVINIT[] = {
-    "    /* selection24 event init trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_evinit(c, c->edi, c->ebx);",
+    "    /* selection event init trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_evinit(c, c->edi, c->ebx);",
     "#endif"
 };
 
@@ -898,16 +898,16 @@ static const char *const INSERT_TRACE_EVINIT[] = {
 #define VA_TRACE_ORDEREV_RET 0x6F69BE5Cu
 
 static const char *const INSERT_TRACE_ORDEREV_RES[] = {
-    "    /* selection24 orderev result trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_apply(c, 0u, c->eax, c->edi);",
+    "    /* selection orderev result trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_apply(c, 0u, c->eax, c->edi);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_ORDEREV_RET[] = {
-    "    /* selection24 orderev event trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_apply(c, 1u, c->esi, c->edi);",
+    "    /* selection orderev event trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_apply(c, 1u, c->esi, c->edi);",
     "#endif"
 };
 
@@ -918,7 +918,7 @@ static const char *const INSERT_TRACE_ORDEREV_RET[] = {
  * the selection array.  Their 0xC is part of a 32/16-bit mask walk and must
  * stay 12.  At a 40-unit cap the rotating bit wrapped at index 32 and the
  * player accessor returned NULL, which was the load-screen SIGSEGV.  The
- * selection-width sites are the explicit GROUP24/deserialize sites only.
+ * selection-width sites are the explicit SELECTION_LAYOUT/deserialize sites only.
  */
 /*
  * 0x6F6B93A0 hands the order event to the unit through a virtual call on the
@@ -932,18 +932,18 @@ static const char *const INSERT_TRACE_ORDEREV_RET[] = {
 #define VA_TRACE_ORDER_EXEC_2 0x6F6B93EAu
 
 static const char *const INSERT_TRACE_ORDER_EXEC_1[] = {
-    "    /* selection24 order exec trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_exec(c, 0u, rd32((c->ebp + 0xFFFFFFECu)),",
+    "    /* selection order exec trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_exec(c, 0u, rd32((c->ebp + 0xFFFFFFECu)),",
     "                               c->ecx, c->edx, rd32((c->edx + 0x0000001Cu)),",
     "                               0u);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_ORDER_EXEC_2[] = {
-    "    /* selection24 order exec result trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_exec(c, 1u, rd32((c->ebp + 0xFFFFFFECu)),",
+    "    /* selection order exec result trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_exec(c, 1u, rd32((c->ebp + 0xFFFFFFECu)),",
     "                               c->ebx, 0u, 0u, c->eax);",
     "#endif"
 };
@@ -955,7 +955,7 @@ static const char *const INSERT_TRACE_ORDER_EXEC_2[] = {
  * 0x6F6B991E is message 0x12 (builder B) and 0x6F6B9F9E is message 0x13
  * (builder C).  The list trace sits before the PrClGen pointer write at
  * 0x6F169670, on the `cmovne eax, esi` line at 0x6F16966D, because the write
- * line itself is a group24 shift site and cannot also be an insertion anchor.
+ * line itself is a layout shift site and cannot also be an insertion anchor.
  * The solver trace sits after `mov edi, ecx` at 0x6F16B306, before the
  * index/pair workspace is formed.  The cluster growth prepare and capacity
  * trace share the entry of the member-vector insertion at 0x6F16C077; the
@@ -993,88 +993,88 @@ static const char *const INSERT_TRACE_ORDER_EXEC_2[] = {
 #define VA_ORDER_CURSOR_COMMIT_1 0x6F16A5E4u
 
 static const char *const INSERT_TRACE_ORDER_BEGIN_B[] = {
-    "    /* selection24 point-order begin trace B */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_begin(c, c->ebx, 0u);",
+    "    /* selection point-order begin trace B */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_begin(c, c->ebx, 0u);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_ORDER_BEGIN_C[] = {
-    "    /* selection24 point-order begin trace C */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_begin(c, c->ebx, 1u);",
+    "    /* selection point-order begin trace C */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_begin(c, c->ebx, 1u);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_LISTADD[] = {
-    "    /* selection24 PrClGen list-add trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_listadd(c, c->edi, c->edx, c->eax,",
+    "    /* selection PrClGen list-add trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_listadd(c, c->edi, c->edx, c->eax,",
     "                            rd32((c->ebp + 0x00000008u)),",
     "                            rd32((c->ebp + 0x0000000Cu)));",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_FORMATION[] = {
-    "    /* selection24 formation entry trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_formation_begin(c, c->ecx);",
+    "    /* selection formation entry trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_formation_begin(c, c->ecx);",
     "#endif"
 };
 
 static const char *const INSERT_CLUSTER_PREPARE[] = {
-    "    /* selection24 cluster growth prepare */",
-    "    wc3_sel24_cluster_prepare(c->esi);",
-    "    /* selection24 cluster capacity trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_cluster_try(c, c->esi, c->edi);",
+    "    /* selection cluster growth prepare */",
+    "    wc3_sel_cluster_prepare(c->esi);",
+    "    /* selection cluster capacity trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_cluster_try(c, c->esi, c->edi);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_CLUSTER_INS[] = {
-    "    /* selection24 cluster insertion trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_cluster_insert(c,",
+    "    /* selection cluster insertion trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_cluster_insert(c,",
     "        rd32((c->ebp + 0x00000008u)), c->edi, c->ebx, c->esi, c->eax);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_A5B9[] = {
-    "    /* selection24 group builder entry trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_base(c, c->ecx, 0u, 0u, 0u);",
+    "    /* selection group builder entry trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_base(c, c->ecx, 0u, 0u, 0u);",
     "#endif"
 };
 
 static const char *const INSERT_ORDER_CURSOR_RESET[] = {
-    "    /* selection24 formation cursor reset */",
-    "    wc3_sel24_formation_reset();"
+    "    /* selection formation cursor reset */",
+    "    wc3_sel_formation_reset();"
 };
 
 static const char *const INSERT_ORDER_CURSOR_ORIGIN[] = {
-    "    /* selection24 formation cursor origin */",
-    "    wc3_sel24_formation_origin_apply(c);"
+    "    /* selection formation cursor origin */",
+    "    wc3_sel_formation_origin_apply(c);"
 };
 
 static const char *const INSERT_ORDER_CURSOR_ORIGIN_1[] = {
-    "    /* selection24 single-unit formation cursor origin */",
-    "    c->eax = wc3_sel24_formation_origin(c->eax);"
+    "    /* selection single-unit formation cursor origin */",
+    "    c->eax = wc3_sel_formation_origin(c->eax);"
 };
 
 static const char *const INSERT_ORDER_CURSOR_COMMIT[] = {
-    "    /* selection24 formation cursor commit */",
-    "    wc3_sel24_formation_commit_frame(c);"
+    "    /* selection formation cursor commit */",
+    "    wc3_sel_formation_commit_frame(c);"
 };
 
 static const char *const INSERT_ORDER_CURSOR_COMMIT_1[] = {
-    "    /* selection24 single-unit formation cursor commit */",
-    "    wc3_sel24_formation_commit(rd32((c->ecx + 0x0000000Cu)));"
+    "    /* selection single-unit formation cursor commit */",
+    "    wc3_sel_formation_commit(rd32((c->ecx + 0x0000000Cu)));"
 };
 
 static const char *const INSERT_TRACE_ORDER_BASE[] = {
-    "    /* selection24 ground-order base trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_base(c, rd32((c->ebp + 0xFFFFFFFCu)),",
+    "    /* selection ground-order base trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_base(c, rd32((c->ebp + 0xFFFFFFFCu)),",
     "                                rd32((c->ebp + 0x00000008u)),",
     "                                rd32((c->ebx)), c->esi);",
     "#endif"
@@ -1093,17 +1093,17 @@ static const char *const INSERT_TRACE_ORDER_BASE[] = {
 #define VA_TRACE_ORDER_APPLY_2 0x6F6B9426u
 
 static const char *const INSERT_TRACE_ORDER_APPLY[] = {
-    "    /* selection24 order apply trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_apply(c, rd32((c->ebp + 0xFFFFFFECu)),",
+    "    /* selection order apply trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_apply(c, rd32((c->ebp + 0xFFFFFFECu)),",
     "                               rd32((c->ebp + 0xFFFFFFF0u)), c->eax, 0u);",
     "#endif"
 };
 
 static const char *const INSERT_TRACE_ORDER_APPLY_2[] = {
-    "    /* selection24 order apply trace 2 */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_order_apply(c, rd32((c->ebp + 0xFFFFFFECu)),",
+    "    /* selection order apply trace 2 */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_order_apply(c, rd32((c->ebp + 0xFFFFFFECu)),",
     "                               rd32((c->ebp + 0xFFFFFFF0u)), c->eax, 1u);",
     "#endif"
 };
@@ -1128,7 +1128,7 @@ static const char *const TRACE_ORDER_APPLY_ELIDED =
 #define VA_ORDER_GROUP_FULL 0x6F67DDF1u
 
 static const char *const INSERT_ORDER_GROUP_FULL[] = {
-    "    flags_sub(c, c->eax, wc3_sel24_cap(), 4); /* selection24 group-full threshold */"
+    "    flags_sub(c, c->eax, wc3_sel_cap(), 4); /* selection group-full threshold */"
 };
 
 /*
@@ -1144,9 +1144,9 @@ static const char *const INSERT_ORDER_GROUP_FULL[] = {
 #define VA_TRACE_EVRELEASE 0x6F1CBFB3u
 
 static const char *const INSERT_TRACE_EVRELEASE[] = {
-    "    /* selection24 event release trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_evrelease(c, c->ecx, c->edx);",
+    "    /* selection event release trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_evrelease(c, c->ecx, c->edx);",
     "#endif"
 };
 
@@ -1168,23 +1168,23 @@ static const char *const INSERT_TRACE_EVRELEASE[] = {
 #define VA_SLOT_UNLINK 0x6F1CBE99u
 
 static const char *const INSERT_SLOT_UNLINK[] = {
-    "    /* selection24 free-list unlink */",
+    "    /* selection free-list unlink */",
     "    {",
-    "        uint32_t sel24_headp = rd32((c->ebp + 0x00000010u));",
-    "        uint32_t sel24_prev = 0xFFFFFFFFu;",
-    "        uint32_t sel24_cur = sel24_headp != 0u ? rd32(sel24_headp) : 0xFFFFFFFFu;",
-    "        unsigned sel24_hops = 0u;",
-    "        while (sel24_cur != 0xFFFFFFFFu && sel24_hops++ < 4096u) {",
-    "            if (sel24_cur == c->esi) {",
-    "                uint32_t sel24_next = rd32((c->ecx + c->esi * 8u));",
-    "                if (sel24_prev == 0xFFFFFFFFu)",
-    "                    wr32(sel24_headp, sel24_next);",
+    "        uint32_t sel_headp = rd32((c->ebp + 0x00000010u));",
+    "        uint32_t sel_prev = 0xFFFFFFFFu;",
+    "        uint32_t sel_cur = sel_headp != 0u ? rd32(sel_headp) : 0xFFFFFFFFu;",
+    "        unsigned sel_hops = 0u;",
+    "        while (sel_cur != 0xFFFFFFFFu && sel_hops++ < 4096u) {",
+    "            if (sel_cur == c->esi) {",
+    "                uint32_t sel_next = rd32((c->ecx + c->esi * 8u));",
+    "                if (sel_prev == 0xFFFFFFFFu)",
+    "                    wr32(sel_headp, sel_next);",
     "                else",
-    "                    wr32((c->ecx + sel24_prev * 8u), sel24_next);",
+    "                    wr32((c->ecx + sel_prev * 8u), sel_next);",
     "                break;",
     "            }",
-    "            sel24_prev = sel24_cur;",
-    "            sel24_cur = rd32((c->ecx + sel24_cur * 8u));",
+    "            sel_prev = sel_cur;",
+    "            sel_cur = rd32((c->ecx + sel_cur * 8u));",
     "        }",
     "    }"
 };
@@ -1199,9 +1199,9 @@ static const char *const INSERT_SLOT_UNLINK[] = {
 #define VA_TRACE_TASKNULL 0x6F692727u
 
 static const char *const INSERT_TRACE_TASKNULL[] = {
-    "    /* selection24 task null trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    wc3_sel24_trace_tasknull(c, c->eax);",
+    "    /* selection task null trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_tasknull(c, c->eax);",
     "#endif"
 };
 
@@ -1214,9 +1214,9 @@ static const char *const INSERT_TRACE_TASKNULL[] = {
 #define VA_TRACE_ORDERDROP 0x6F69273Fu
 
 static const char *const INSERT_TRACE_ORDERDROP[] = {
-    "    /* selection24 order drop trace */",
-    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-    "    if (c->eax == 0u) wc3_sel24_trace_orderdrop(",
+    "    /* selection order drop trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    if (c->eax == 0u) wc3_sel_trace_orderdrop(",
     "        c, c->edi, rd32((c->ebp + 0xFFFFFFB8u)), c->eax);",
     "#endif"
 };
@@ -1227,27 +1227,27 @@ static const char *const INIT_GROUP_DIRECT =
     "push32(c, 0x6F39EDA9u); WC3_DIRECT_CALL(L_6F3B91B0, c);";
 
 static const char *const INSERT_INIT_LINES[] = {
-    "    wc3_sel24_init_group(c, c->edi); "
-    "/* 6F39EDA4: selection24 grid24 init */"
+    "    wc3_sel_grid_init(c, c->edi); "
+    "/* 6F39EDA4: selection grid24 init */"
 };
 
 static const char *const INSERT_SELECT_LINES[] = {
-    "    wc3_sel24_select(c, rd32((c->ebp + 0xFFFFFFE0u)), "
+    "    wc3_sel_panel_select(c, rd32((c->ebp + 0xFFFFFFE0u)), "
     "rd32((c->ebp + 0xFFFFFFDCu))); "
-    "/* 6F3C7DBB: selection24 mode */"
+    "/* 6F3C7DBB: selection mode */"
 };
 
 static const char *const INSERT_NOTE_LINES[] = {
-    "    wc3_sel24_note_selection(c, rd32((c->ebp + 0xFFFFFFE0u)), c->esi); "
-    "/* 6F3C7D35: selection24 total */"
+    "    wc3_sel_panel_note(c, rd32((c->ebp + 0xFFFFFFE0u)), c->esi); "
+    "/* 6F3C7D35: selection total */"
 };
 
 static const char *const INSERT_HIDE[] = {
     /* The insertion is emitted after `mov ebx, ecx`, so ebx is the group
      * `this` pointer.  Keep that argument explicit: the helper signature is
-     * wc3_sel24_hide_buttons(c, group), not a raw caller register. */
-    "    wc3_sel24_hide_buttons(c, c->ebx); "
-    "/* 6F3ACCA3: selection24 active grid */",
+     * wc3_sel_panel_hide(c, group), not a raw caller register. */
+    "    wc3_sel_panel_hide(c, c->ebx); "
+    "/* 6F3ACCA3: selection active grid */",
     "    c->edi = (uint32_t)(pop32(c));                               "
     "/* 6F3ACCF2: pop edi */",
     "    c->esi = (uint32_t)(pop32(c));                               "
@@ -1259,8 +1259,8 @@ static const char *const INSERT_HIDE[] = {
 };
 
 static const char INSERT_FILL[] =
-    "    wc3_sel24_fill(c, rd32((c->ebp + 0xFFFFFFE0u)), c->ebx, c->esi, "
-    "rd32((c->ebp + 0xFFFFFFE4u))); /* 6F3C7E78: selection24 fill */";
+    "    wc3_sel_panel_fill(c, rd32((c->ebp + 0xFFFFFFE0u)), c->ebx, c->esi, "
+    "rd32((c->ebp + 0xFFFFFFE4u))); /* 6F3C7E78: selection fill */";
 
 static const char *const FILL_CALL_DIRECT =
     "push32(c, 0x6F3C7E99u); WC3_DIRECT_CALL(L_6F3DA470, c);";
@@ -1307,7 +1307,7 @@ static int is_fill_va(uint32_t va)
  * The 24-unit profile is the reference layout for every site below.  The
  * 40-unit profile only moves structure: member pointers, pair arrays, stack
  * frames and the point-order container.  Limits still come from
- * wc3_sel24_cap(), so the same substitutions are used for both layouts and
+ * wc3_sel_cap(), so the same substitutions are used for both layouts and
  * only their numeric targets differ.
  *
  * Values were derived from the 1.27 layout:
@@ -1676,7 +1676,7 @@ static int handle_insert(Buf *out, const char **pp, const char *end,
             size_t l = strlen(ins[i]);
 
             if (inslen + l + 3 > sizeof(insbuf)) {
-                snprintf(err, errsz, "selection24 insertion text too large");
+                snprintf(err, errsz, "selection insertion text too large");
                 return -1;
             }
             memcpy(insbuf + inslen, ins[i], l);
@@ -1709,7 +1709,7 @@ static int handle_fill_block(Buf *out, const char **pp, const char *end,
     char after[65];
     int i;
 
-    if (contains_sub(p, (size_t)(le - p), "wc3_sel24_fill")) {
+    if (contains_sub(p, (size_t)(le - p), "wc3_sel_panel_fill")) {
         const char *ns = le;
         const char *ne = line_end(ns, end);
         uint32_t nv;
@@ -1955,7 +1955,7 @@ static int shift_container_line(const char *p, const char *e,
 /* free-list link followed by the object, so the object itself grows   */
 /* from 0x104 to 0x1C4 and the flags land at +0x1C0, inside the new    */
 /* element.  Only literal displacements change;                        */
-/* the lifted control flow is identical.  wc3_sel24_cap() keeps the    */
+/* the lifted control flow is identical.  wc3_sel_cap() keeps the    */
 /* old 12 when WC3_SELECTION_CAP is absent or invalid, so the      */
 /* default build keeps the original 12-unit limit.                 */
 /*                                                                     */
@@ -1974,10 +1974,10 @@ static int shift_container_line(const char *p, const char *e,
 /* D37D).  The group entry becomes count +0, index[24] +4, pair[24]    */
 /* +0x64, tail +0x124; the element size grows 0xA4 -> 0x134 and the    */
 /* frame 0xA54 -> 0x1354.  L_6F16A6E0 now calls                       */
-/* wc3_sel24_group_sort() instead of the 12-entry L_6F16DFD0, so a    */
+/* wc3_sel_group_sort() instead of the 12-entry L_6F16DFD0, so a    */
 /* 14-unit selection can no longer write pair 12/13 over the tail at    */
 /* +0x94/+0x9C.  The debug-only group snapshot wrappers log the entry   */
-/* around init/sort under WC3_DEBUG_SELECT24.                          */
+/* around init/sort under WC3_DEBUG_SELECTION.                          */
 /*                                                                     */
 /* Rev 46 makes every structural site above relative to the 40-unit    */
 /* layout through STRUCT40_VALUES / --struct-cap 40: pair +0x64 ->     */
@@ -1988,7 +1988,7 @@ static int shift_container_line(const char *p, const char *e,
 /* the 40-entry structure.                                             */
 /*                                                                     */
 /* Rev 59 replaces the formation-table reads in L_6F16D270/D286/D2D3   */
-/* with wc3_sel24_formation_columns().  The 12-entry table at           */
+/* with wc3_sel_formation_columns().  The 12-entry table at           */
 /* 0x6FA91D20/0x6FA91D88 is followed by a vtable, so count 13 read      */
 /* B[0]/C[0] = 0 and the order loop never advanced its step.  The       */
 /* helper returns the original word for count <= 12 and a defined       */
@@ -2003,13 +2003,13 @@ typedef struct {
     uint32_t va;
     const char *old_code;
     const char *new_code;
-} Group24Site;
+} SelectionSite;
 
-static const Group24Site GROUP24_SITES[] = {
+static const SelectionSite SELECTION_SITES[] = {
     /* CPrCluster member-vector capacity: 12 -> runtime cap. */
-    { 0x6F14FCAFu, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F14FCAFu, "0xCu", "wc3_sel_cap()" },
     { 0x6F157A27u, "0x108u", "0x1C8u" },
-    { 0x6F169231u, "0xBu", "wc3_sel24_cap() - 1" },
+    { 0x6F169231u, "0xBu", "wc3_sel_cap() - 1" },
     { 0x6F169282u, "0x000000E4u", "0x000001A4u" },
     { 0x6F16928Cu, "0x000000E0u", "0x000001A0u" },
     { 0x6F169296u, "0x000000DCu", "0x0000019Cu" },
@@ -2032,17 +2032,17 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F169959u, "0x000000F8u", "0x000001B8u" },
     { 0x6F169968u, "0x000000FCu", "0x000001BCu" },
     { 0x6F16996Eu, "0x00000100u", "0x000001C0u" },
-    { 0x6F169C68u, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F169C68u, "0xCu", "wc3_sel_cap()" },
     { 0x6F169C70u, "0x000000ACu", "0x0000013Cu" },
-    { 0x6F169D71u, "0xCu", "wc3_sel24_cap()" },
-    { 0x6F16A07Cu, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F169D71u, "0xCu", "wc3_sel_cap()" },
+    { 0x6F16A07Cu, "0xCu", "wc3_sel_cap()" },
     { 0x6F16A08Fu, "0x000000E0u", "0x000001A0u" },
     { 0x6F16A095u, "0x000000DCu", "0x0000019Cu" },
     { 0x6F16A0A9u, "0x000000ECu", "0x000001ACu" },
     { 0x6F16A0BEu, "0x000000E8u", "0x000001A8u" },
     { 0x6F16A0DDu, "0x000000FCu", "0x000001BCu" },
     { 0x6F16A0FBu, "0x00000100u", "0x000001C0u" },
-    { 0x6F16A13Au, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F16A13Au, "0xCu", "wc3_sel_cap()" },
     { 0x6F16A1FAu, "0x000000DCu", "0x0000019Cu" },
     { 0x6F16A251u, "0x000000E0u", "0x000001A0u" },
     { 0x6F16A2A8u, "0x000000E8u", "0x000001A8u" },
@@ -2057,7 +2057,7 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16A604u, "0xFFFFF5B0u", "0xFFFFECB0u" },
     { 0x6F16A612u,
       "c->esp -= 4; WC3_DIRECT_CALL(L_6F169300, c);",
-      "wc3_sel24_group_init((uint32_t)(c->esi + 0x64u));" },
+      "wc3_sel_group_init((uint32_t)(c->esi + 0x64u));" },
     { 0x6F16A617u, "0xA4u", "0x134u" },
     { 0x6F16A620u, "0xFFFFF5BCu", "0xFFFFECBCu" },
     { 0x6F16A62Fu, "0xFFFFF5B8u", "0xFFFFECB8u" },
@@ -2079,7 +2079,7 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16A6BDu, "0xFFFFF5B4u", "0xFFFFECB4u" },
     { 0x6F16A6EFu,
       "push32(c, 0x6F16A6F4u); WC3_DIRECT_CALL(L_6F16DFD0, c);",
-      "wc3_sel24_group_sort(c->edi); c->esp += 4;" },
+      "wc3_sel_group_sort(c->edi); c->esp += 4;" },
     { 0x6F16A6FBu, "0x00000094u", "0x00000124u" },
     { 0x6F16A72Eu, "0x0000009Cu", "0x0000012Cu" },
     { 0x6F16A75Fu, "0x0000009Cu", "0x0000012Cu" },
@@ -2093,10 +2093,10 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16AB9Bu, "0x000000ACu", "0x0000013Cu" },
     { 0x6F16ABA1u, "0x000000F8u", "0x000001B8u" },
     { 0x6F16ABA7u, "0x000000F0u", "0x000001B0u" },
-    { 0x6F16ABB7u, "0xCu", "wc3_sel24_stream_default_cap()" },
+    { 0x6F16ABB7u, "0xCu", "wc3_sel_stream_default_cap()" },
     { 0x6F16ABD9u,
       "c->esp -= 4; WC3_DIRECT_CALL(L_6F06A690, c);",
-      "c->esp -= 4; WC3_DIRECT_CALL(L_6F06A690, c); wc3_sel24_stream_slot_read(c->edi, rd32((c->ebp + 0xFFFFFFFCu)), (uint32_t)(c->ebp + 0xFFFFFFF8u));" },
+      "c->esp -= 4; WC3_DIRECT_CALL(L_6F06A690, c); wc3_sel_stream_slot_read(c->edi, rd32((c->ebp + 0xFFFFFFFCu)), (uint32_t)(c->ebp + 0xFFFFFFF8u));" },
     { 0x6F16ADDEu, "0x000000DCu", "0x0000019Cu" },
     { 0x6F16ADECu, "0x000000E0u", "0x000001A0u" },
     { 0x6F16ADF9u, "0x000000E4u", "0x000001A4u" },
@@ -2107,10 +2107,10 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16AE3Au, "0x000000F4u", "0x000001B4u" },
     { 0x6F16AE53u, "0x000000F8u", "0x000001B8u" },
     { 0x6F16AE63u, "0xACu", "0x13Cu" },
-    { 0x6F16AE6Cu, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F16AE6Cu, "0xCu", "wc3_sel_cap()" },
     { 0x6F16AE87u,
       "push32(c, rd32((c->esi)));",
-      "push32(c, wc3_sel24_stream_slot_write(rd32((c->ebp + 0xFFFFFFFCu)), c->esi, rd32((c->esi))));" },
+      "push32(c, wc3_sel_stream_slot_write(rd32((c->ebp + 0xFFFFFFFCu)), c->esi, rd32((c->esi))));" },
     { 0x6F16AFF0u, "0x000000F4u", "0x000001B4u" },
     { 0x6F16B000u, "0x000000F4u", "0x000001B4u" },
     /* Ground-order solver workspace L_6F16B2F0: 12 -> 24 entries. */
@@ -2118,7 +2118,7 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16B308u, "0xFFFFFF58u", "0xFFFFFDC0u" },
     { 0x6F16B314u,
       "c->esp -= 4; WC3_DIRECT_CALL_CLEAN(L_6F169300, c);",
-      "wc3_sel24_init24((uint32_t)(c->ebp + 0xFFFFFE24u));" },
+      "wc3_sel_workspace_init((uint32_t)(c->ebp + 0xFFFFFE24u));" },
     { 0x6F16B330u, "0xFFFFFF58u", "0xFFFFFDC0u" },
     { 0x6F16B47Cu, "0xFFFFFF5Cu", "0xFFFFFDC4u" },
     { 0x6F16B496u, "0xFFFFFF8Cu", "0xFFFFFE24u" },
@@ -2127,22 +2127,22 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16B4D4u, "0xFFFFFF58u", "0xFFFFFDC0u" },
     { 0x6F16B4DDu,
       "push32(c, 0x6F16B4E2u); WC3_DIRECT_CALL_LEAF(L_6F16DFD0, c);",
-      "wc3_sel24_sort24(c->eax); c->esp += 4;" },
+      "wc3_sel_workspace_sort(c->eax); c->esp += 4;" },
     { 0x6F16B4E2u, "0xFFFFFF58u", "0xFFFFFDC0u" },
     { 0x6F16B4F7u, "0xFFFFFF90u", "0xFFFFFE28u" },
     { 0x6F16B500u, "0xFFFFFF58u", "0xFFFFFDC0u" },
     { 0x6F16B551u, "0xFFFFFF8Cu", "0xFFFFFE24u" },
     { 0x6F16B558u, "0xFFFFFF5Cu", "0xFFFFFDC4u" },
-    { 0x6F16B78Du, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F16B78Du, "0xCu", "wc3_sel_cap()" },
     { 0x6F16B7CCu, "0x000000ACu", "0x0000013Cu" },
     { 0x6F16B7FEu, "0x000000ACu", "0x0000013Cu" },
     { 0x6F16B809u, "0x00000100u", "0x000001C0u" },
     { 0x6F16B8F9u, "0x00000100u", "0x000001C0u" },
     { 0x6F16B924u, "0xACu", "0x13Cu" },
-    { 0x6F16BA90u, "0xCu", "wc3_sel24_cap()" },
-    { 0x6F16BB2Cu, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F16BA90u, "0xCu", "wc3_sel_cap()" },
+    { 0x6F16BB2Cu, "0xCu", "wc3_sel_cap()" },
     { 0x6F16BD3Du, "0x000000E8u", "0x000001A8u" },
-    { 0x6F16BD89u, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F16BD89u, "0xCu", "wc3_sel_cap()" },
     { 0x6F16BDBCu, "0x000000ACu", "0x0000013Cu" },
     { 0x6F16BDE0u, "0x000000E0u", "0x000001A0u" },
     { 0x6F16BDE6u, "0x000000DCu", "0x0000019Cu" },
@@ -2156,7 +2156,7 @@ static const Group24Site GROUP24_SITES[] = {
     { 0x6F16BE76u, "0x000000DCu", "0x0000019Cu" },
     { 0x6F16BF83u, "0x00000100u", "0x000001C0u" },
     { 0x6F16BFF0u, "0x00000100u", "0x000001C0u" },
-    { 0x6F16C8EEu, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F16C8EEu, "0xCu", "wc3_sel_cap()" },
     { 0x6F16C8F3u, "0x000000ACu", "0x0000013Cu" },
     /* Selection-group fill L_6F16CB80 and tail writer L_6F16D270. */
     { 0x6F16CBC2u, "0x000000A4u", "0x00000134u" },
@@ -2171,17 +2171,17 @@ static const Group24Site GROUP24_SITES[] = {
      * row length for 13..40.  eax = 13 * flag + count, ecx = count. */
     { 0x6F16D2CAu,
       "c->edi = rd32((c->eax*4 + GVA(0x6FA91D20)));",
-      "c->edi = wc3_sel24_formation_columns(c->eax, c->ecx, 0u);" },
+      "c->edi = wc3_sel_formation_columns(c->eax, c->ecx, 0u);" },
     { 0x6F16D2D3u,
       "c->edi = rd32((c->eax*4 + GVA(0x6FA91D88)));",
-      "c->edi = wc3_sel24_formation_columns(c->eax, c->ecx, 1u);" },
+      "c->edi = wc3_sel_formation_columns(c->eax, c->ecx, 1u);" },
     { 0x6F16D35Fu, "0x00000098u", "0x00000128u" },
     { 0x6F16D368u, "0x000000A0u", "0x00000130u" },
     { 0x6F16D371u, "0x00000094u", "0x00000124u" },
     { 0x6F16D377u, "0x0000009Cu", "0x0000012Cu" },
     { 0x6F16D37Du, "0xA4u", "0x134u" },
     { 0x6F16D5D0u, "0x000000ACu", "0x0000013Cu" },
-    { 0x6F16D5D9u, "0xCu", "wc3_sel24_cap()" },
+    { 0x6F16D5D9u, "0xCu", "wc3_sel_cap()" },
     { 0x6F16D634u, "0x000000ACu", "0x0000013Cu" },
     { 0x6F16D818u, "0x000000FCu", "0x000001BCu" },
     { 0x6F16D877u, "0x000000ACu", "0x0000013Cu" },
@@ -2230,46 +2230,46 @@ static const Group24Site GROUP24_SITES[] = {
 
 /* The call-macro spelling of the two helper call sites depends on the
  * earlier passes: a fresh w3l_compat chunk emits WC3_DIRECT_CALL, while an
- * older selection24 output carried WC3_DIRECT_CALL_CLEAN/_LEAF.  Both forms
+ * older selection output carried WC3_DIRECT_CALL_CLEAN/_LEAF.  Both forms
  * are accepted so the pass stays idempotent across pass-order changes. */
-static const Group24Site GROUP24_ALT_SITES[] = {
+static const SelectionSite SELECTION_ALT_SITES[] = {
     { 0x6F16B314u,
       "c->esp -= 4; WC3_DIRECT_CALL(L_6F169300, c);",
-      "wc3_sel24_init24((uint32_t)(c->ebp + 0xFFFFFE24u));" },
+      "wc3_sel_workspace_init((uint32_t)(c->ebp + 0xFFFFFE24u));" },
     { 0x6F16B4DDu,
       "push32(c, 0x6F16B4E2u); WC3_DIRECT_CALL(L_6F16DFD0, c);",
-      "wc3_sel24_sort24(c->eax); c->esp += 4;" },
+      "wc3_sel_workspace_sort(c->eax); c->esp += 4;" },
     { 0x6F16A612u,
       "c->esp -= 4; WC3_DIRECT_CALL_CLEAN(L_6F169300, c);",
-      "wc3_sel24_group_init((uint32_t)(c->esi + 0x64u));" },
+      "wc3_sel_group_init((uint32_t)(c->esi + 0x64u));" },
     { 0x6F16A6EFu,
       "push32(c, 0x6F16A6F4u); WC3_DIRECT_CALL_LEAF(L_6F16DFD0, c);",
-      "wc3_sel24_group_sort(c->edi); c->esp += 4;" }
+      "wc3_sel_group_sort(c->edi); c->esp += 4;" }
 };
 
-static const Group24Site *group24_alt_lookup(uint32_t va)
+static const SelectionSite *selection_alt_lookup(uint32_t va)
 {
     size_t i;
 
-    for (i = 0; i < sizeof(GROUP24_ALT_SITES) / sizeof(GROUP24_ALT_SITES[0]);
+    for (i = 0; i < sizeof(SELECTION_ALT_SITES) / sizeof(SELECTION_ALT_SITES[0]);
          ++i) {
-        if (GROUP24_ALT_SITES[i].va == va)
-            return &GROUP24_ALT_SITES[i];
+        if (SELECTION_ALT_SITES[i].va == va)
+            return &SELECTION_ALT_SITES[i];
     }
     return NULL;
 }
 
-static const Group24Site *group24_lookup(uint32_t va)
+static const SelectionSite *selection_site_lookup(uint32_t va)
 {
     int lo = 0;
-    int hi = (int)(sizeof(GROUP24_SITES) / sizeof(GROUP24_SITES[0])) - 1;
+    int hi = (int)(sizeof(SELECTION_SITES) / sizeof(SELECTION_SITES[0])) - 1;
 
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
 
-        if (GROUP24_SITES[mid].va == va)
-            return &GROUP24_SITES[mid];
-        if (GROUP24_SITES[mid].va < va)
+        if (SELECTION_SITES[mid].va == va)
+            return &SELECTION_SITES[mid];
+        if (SELECTION_SITES[mid].va < va)
             lo = mid + 1;
         else
             hi = mid - 1;
@@ -2312,8 +2312,8 @@ static int replace_all(const char *hay, size_t n, const char *old_s,
     return 0;
 }
 
-static int handle_group24(Buf *out, const char *p, const char *e,
-                          const Group24Site *g, int line, Counts *counts,
+static int handle_selection_sites(Buf *out, const char *p, const char *e,
+                          const SelectionSite *g, int line, Counts *counts,
                           Sites *sites, int *handled, char *err, size_t errsz)
 {
     size_t n = (size_t)(e - p);
@@ -2407,8 +2407,8 @@ static int handle_group24(Buf *out, const char *p, const char *e,
         return -1;
     }
     free(res);
-    counts->n[K_GROUP24]++;
-    sites_add(sites, K_GROUP24, g->va, action, line, before, after);
+    counts->n[K_LAYOUT]++;
+    sites_add(sites, K_LAYOUT, g->va, action, line, before, after);
     *handled = 1;
     return 0;
 }
@@ -2494,7 +2494,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 next = p;
                 if (handle_insert(out, &next, end,
                                   INIT_GROUP_DISPATCH, INIT_GROUP_DIRECT,
-                                  "wc3_sel24_init_group", INSERT_INIT_LINES, 1,
+                                  "wc3_sel_grid_init", INSERT_INIT_LINES, 1,
                                   K_INIT_GROUP, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
                     return -1;
@@ -2504,7 +2504,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "wr32((c->ebp + 0xFFFFFFF0u), c->edi);",
                                   NULL,
-                                  "wc3_sel24_select", INSERT_SELECT_LINES, 1,
+                                  "wc3_sel_panel_select", INSERT_SELECT_LINES, 1,
                                   K_SELECT, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
                     return -1;
@@ -2512,7 +2512,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_OUTER:
                 if (handle_subst(out, p, le,
                                  "(uint32_t)(0xCu)",
-                                 "(uint32_t)(wc3_sel24_cap())",
+                                 "(uint32_t)(wc3_sel_cap())",
                                  NULL, NULL,
                                  K_CAP_OUTER, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2520,7 +2520,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 break;
             case VA_CAP_INNER:
                 if (handle_subst(out, p, le,
-                                 "0xCu", "wc3_sel24_cap()",
+                                 "0xCu", "wc3_sel_cap()",
                                  NULL, NULL,
                                  K_CAP_INNER, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2545,7 +2545,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->esi = rd32((c->eax + 0x00000034u));",
                                   NULL,
-                                  "wc3_sel24_note_selection", INSERT_NOTE_LINES, 1,
+                                  "wc3_sel_panel_note", INSERT_NOTE_LINES, 1,
                                   K_NOTE_SELECTION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
                     return -1;
@@ -2555,7 +2555,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->ebx = c->ecx;",
                                   NULL,
-                                  "wc3_sel24_hide_buttons",
+                                  "wc3_sel_panel_hide",
                                   INSERT_HIDE, 5,
                                   K_HIDE_ALL, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2563,14 +2563,14 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 break;
             case VA_ADDUNIT_CAP: {
                 /* The trace is inserted after the patched comparison and is
-                 * compiled out unless WC3_DEBUG_SELECT24 is enabled.  It is
+                 * compiled out unless WC3_DEBUG_SELECTION is enabled.  It is
                  * part of the same site: the cap substitution remains the one
                  * counted change, and the insertion is idempotent because the
                  * marker line is already present on a second pass. */
                 static const char *const TRACE_LINES[] = {
-                    "#if WC3_DEBUG && WC3_DEBUG_SELECT24",
-                    "    wc3_sel24_trace_addunit(c, c->ebx, c->edi, c->eax); "
-                    "/* selection24 addunit trace */",
+                    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+                    "    wc3_sel_trace_addunit(c, c->ebx, c->edi, c->eax); "
+                    "/* selection addunit trace */",
                     "#endif"
                 };
                 const char *term;
@@ -2581,7 +2581,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 int scan_i;
 
                 if (handle_subst(out, p, le,
-                                 "0xCu", "wc3_sel24_cap()",
+                                 "0xCu", "wc3_sel_cap()",
                                  NULL, NULL,
                                  K_ADDUNIT_CAP, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2594,7 +2594,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                     const char *se = line_end(scan, end);
 
                     if (contains_sub(scan, (size_t)(se - scan),
-                                     "wc3_sel24_trace_addunit")) {
+                                     "wc3_sel_trace_addunit")) {
                         trace_present = 1;
                         break;
                     }
@@ -2619,7 +2619,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_LOCAL_LIST:
                 if (handle_subst(out, p, le,
                                  "push32(c, 0xCu);",
-                                 "push32(c, wc3_sel24_cap());",
+                                 "push32(c, wc3_sel_cap());",
                                  NULL, NULL,
                                  K_CAP_LOCAL_LIST, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2628,7 +2628,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_COPY_LIST:
                 if (handle_subst(out, p, le,
                                  "c->edx = 0xCu;",
-                                 "c->edx = wc3_sel24_cap();",
+                                 "c->edx = wc3_sel_cap();",
                                  NULL, NULL,
                                  K_CAP_COPY_LIST, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2639,7 +2639,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                  "flags_sub(c, rd32((c->ebx + 0x00000010u)), "
                                  "0xCu, 4);",
                                  "flags_sub(c, rd32((c->ebx + 0x00000010u)), "
-                                 "wc3_sel24_cap(), 4);",
+                                 "wc3_sel_cap(), 4);",
                                  NULL, NULL,
                                  K_CAP_SYNC_ADD, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2648,7 +2648,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_NET_RECV:
                 if (handle_subst(out, p, le,
                                  "flags_sub(c, c->eax, 0xCu, 4);",
-                                 "flags_sub(c, c->eax, wc3_sel24_cap(), 4);",
+                                 "flags_sub(c, c->eax, wc3_sel_cap(), 4);",
                                  NULL, NULL,
                                  K_CAP_NET_RECV, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2657,7 +2657,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_NET_APPLY:
                 if (handle_subst(out, p, le,
                                  "c->edx = 0xCu;",
-                                 "c->edx = wc3_sel24_cap();",
+                                 "c->edx = wc3_sel_cap();",
                                  NULL, NULL,
                                  K_CAP_NET_APPLY, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2667,7 +2667,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_NET_SEND_B:
                 if (handle_subst(out, p, le,
                                  "c->ebx = 0xCu;",
-                                 "c->ebx = wc3_sel24_cap();",
+                                 "c->ebx = wc3_sel_cap();",
                                  NULL, NULL,
                                  K_CAP_NET_SEND, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2676,7 +2676,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_SELECT_ALL:
                 if (handle_subst(out, p, le,
                                  "push32(c, 0xCu);",
-                                 "push32(c, wc3_sel24_cap());",
+                                 "push32(c, wc3_sel_cap());",
                                  NULL, NULL,
                                  K_CAP_SELECT_ALL, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2686,7 +2686,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_GROUP_STORE_B:
                 if (handle_subst(out, p, le,
                                  "flags_sub(c, c->esi, 0xCu, 4);",
-                                 "flags_sub(c, c->esi, wc3_sel24_cap(), 4);",
+                                 "flags_sub(c, c->esi, wc3_sel_cap(), 4);",
                                  NULL, NULL,
                                  K_CAP_GROUP_STORE, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2695,7 +2695,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_GROUP_STORE_C:
                 if (handle_subst(out, p, le,
                                  "flags_sub(c, c->eax, 0xCu, 4);",
-                                 "flags_sub(c, c->eax, wc3_sel24_cap(), 4);",
+                                 "flags_sub(c, c->eax, wc3_sel_cap(), 4);",
                                  NULL, NULL,
                                  K_CAP_GROUP_STORE, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2704,7 +2704,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_ADD_MERGE_A:
                 if (handle_subst(out, p, le,
                                  "c->edx = 0xCu;",
-                                 "c->edx = wc3_sel24_cap();",
+                                 "c->edx = wc3_sel_cap();",
                                  NULL, NULL,
                                  K_CAP_ADD_MERGE, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2714,7 +2714,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_subst(out, p, le,
                                  "wr32((c->ebp + 0xFFFFFFD8u), 0xCu);",
                                  "wr32((c->ebp + 0xFFFFFFD8u), "
-                                 "wc3_sel24_cap());",
+                                 "wc3_sel_cap());",
                                  NULL, NULL,
                                  K_CAP_ADD_MERGE, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2723,7 +2723,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_CAP_ADD_MERGE_C:
                 if (handle_subst(out, p, le,
                                  "c->ecx = 0xCu;",
-                                 "c->ecx = wc3_sel24_cap();",
+                                 "c->ecx = wc3_sel_cap();",
                                  NULL, NULL,
                                  K_CAP_ADD_MERGE, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2864,7 +2864,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->esp = flags_sub(c, c->esp, 0xCu, 4);",
                                   NULL,
-                                  "selection24 evt2 trace",
+                                  "selection evt2 trace",
                                   INSERT_TRACE_EVT2, 4,
                                   K_TRACE_EVT2, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2875,7 +2875,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->ecx = rd32((c->eax));",
                                   NULL,
-                                  "selection24 lookup trace",
+                                  "selection lookup trace",
                                   INSERT_TRACE_LOOKUP_ARG, 4,
                                   K_TRACE_LOOKUP, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2886,7 +2886,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->edi = c->eax;",
                                   NULL,
-                                  "selection24 lookup result",
+                                  "selection lookup result",
                                   INSERT_TRACE_LOOKUP_RES, 4,
                                   K_TRACE_LOOKUP, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2898,7 +2898,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   "push32(c, 0x6F6B93F3u); "
                                   "WC3_DIRECT_CALL(L_6F04CDD0, c);",
                                   TRACE_ORDER_APPLY_ELIDED,
-                                  "selection24 order apply trace",
+                                  "selection order apply trace",
                                   INSERT_TRACE_ORDER_APPLY, 5,
                                   K_TRACE_ORDER_APPLY, va, line, counts,
                                   sites, &handled, err, errsz) != 0)
@@ -2910,7 +2910,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   "push32(c, 0x6F6B942Bu); "
                                   "WC3_DIRECT_CALL(L_6F04CDD0, c);",
                                   TRACE_ORDER_APPLY_ELIDED,
-                                  "selection24 order apply trace 2",
+                                  "selection order apply trace 2",
                                   INSERT_TRACE_ORDER_APPLY_2, 5,
                                   K_TRACE_ORDER_APPLY, va, line, counts,
                                   sites, &handled, err, errsz) != 0)
@@ -2921,7 +2921,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->ebx = c->ecx;",
                                   NULL,
-                                  "selection24 remove entry trace",
+                                  "selection remove entry trace",
                                   INSERT_TRACE_REMOVE_ENTRY, 4,
                                   K_TRACE_REMOVE, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2933,7 +2933,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   "wr32((c->eax + 0x000001F8u), "
                                   "dec32(rd32((c->eax + 0x000001F8u)), 4));",
                                   NULL,
-                                  "selection24 remove unit trace",
+                                  "selection remove unit trace",
                                   INSERT_TRACE_REMOVE_UNIT, 4,
                                   K_TRACE_REMOVE, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2944,7 +2944,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->edi = c->eax;",
                                   NULL,
-                                  "selection24 event birth trace",
+                                  "selection event birth trace",
                                   INSERT_TRACE_EVBIRTH, 4,
                                   K_TRACE_EVBIRTH, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2955,7 +2955,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->eax = c->edi;",
                                   NULL,
-                                  "selection24 event init trace",
+                                  "selection event init trace",
                                   INSERT_TRACE_EVINIT, 4,
                                   K_TRACE_EVINIT, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2966,7 +2966,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "flags_logicz(c, c->eax & c->eax, 4);",
                                   NULL,
-                                  "selection24 orderev result trace",
+                                  "selection orderev result trace",
                                   INSERT_TRACE_ORDEREV_RES, 4,
                                   K_TRACE_APPLY, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2977,7 +2977,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->eax = c->esi;",
                                   NULL,
-                                  "selection24 orderev event trace",
+                                  "selection orderev event trace",
                                   INSERT_TRACE_ORDEREV_RET, 4,
                                   K_TRACE_APPLY, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2988,7 +2988,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->edi = rd32((c->eax + 0x00000054u));",
                                   NULL,
-                                  "selection24 task null trace",
+                                  "selection task null trace",
                                   INSERT_TRACE_TASKNULL, 4,
                                   K_TRACE_TASKNULL, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -2999,7 +2999,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "flags_logicz(c, c->eax & c->eax, 4);",
                                   NULL,
-                                  "selection24 order drop trace",
+                                  "selection order drop trace",
                                   INSERT_TRACE_ORDERDROP, 5,
                                   K_TRACE_ORDERDROP, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3010,7 +3010,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->esi = c->eax;",
                                   NULL,
-                                  "selection24 order exec trace",
+                                  "selection order exec trace",
                                   INSERT_TRACE_ORDER_EXEC_1, 6,
                                   K_TRACE_ORDER_EXEC, va, line, counts,
                                   sites, &handled, err, errsz) != 0)
@@ -3021,7 +3021,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->edx = c->esi;",
                                   NULL,
-                                  "selection24 order exec result trace",
+                                  "selection order exec result trace",
                                   INSERT_TRACE_ORDER_EXEC_2, 5,
                                   K_TRACE_ORDER_EXEC, va, line, counts,
                                   sites, &handled, err, errsz) != 0)
@@ -3032,7 +3032,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->ebx = c->ecx;",
                                   NULL,
-                                  "selection24 point-order begin trace B",
+                                  "selection point-order begin trace B",
                                   INSERT_TRACE_ORDER_BEGIN_B, 4,
                                   K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3043,7 +3043,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->ebx = c->ecx;",
                                   NULL,
-                                  "selection24 point-order begin trace C",
+                                  "selection point-order begin trace C",
                                   INSERT_TRACE_ORDER_BEGIN_C, 4,
                                   K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3055,7 +3055,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "FS_WR32(c, (0x00000000u), c->eax);",
                                   NULL,
-                                  "selection24 formation cursor reset",
+                                  "selection formation cursor reset",
                                   INSERT_ORDER_CURSOR_RESET, 2,
                                   K_ORDER_CURSOR, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3066,7 +3066,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->edi = 0xFu;",
                                   NULL,
-                                  "selection24 formation cursor origin",
+                                  "selection formation cursor origin",
                                   INSERT_ORDER_CURSOR_ORIGIN, 2,
                                   K_ORDER_CURSOR, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3077,7 +3077,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->ecx = rd32((c->ebx + 0x00000028u));",
                                   NULL,
-                                  "selection24 single-unit formation cursor origin",
+                                  "selection single-unit formation cursor origin",
                                   INSERT_ORDER_CURSOR_ORIGIN_1, 2,
                                   K_ORDER_CURSOR, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3088,7 +3088,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "push32(c, 0x6F16A6C8u); WC3_DIRECT_CALL(L_6F169E10, c);",
                                   NULL,
-                                  "selection24 formation cursor commit",
+                                  "selection formation cursor commit",
                                   INSERT_ORDER_CURSOR_COMMIT, 2,
                                   K_ORDER_CURSOR, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3099,7 +3099,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "wr32((c->ecx + 0x00000010u), c->eax);",
                                   NULL,
-                                  "selection24 single-unit formation cursor commit",
+                                  "selection single-unit formation cursor commit",
                                   INSERT_ORDER_CURSOR_COMMIT_1, 2,
                                   K_ORDER_CURSOR, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3110,7 +3110,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "if (!c->zf) { c->eax = c->esi; }",
                                   NULL,
-                                  "selection24 PrClGen list-add trace",
+                                  "selection PrClGen list-add trace",
                                   INSERT_TRACE_LISTADD, 7,
                                   K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3121,7 +3121,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->edi = c->ecx;",
                                   NULL,
-                                  "selection24 formation entry trace",
+                                  "selection formation entry trace",
                                   INSERT_TRACE_FORMATION, 4,
                                   K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3132,7 +3132,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->ecx = rd32((c->esi + 0x0000001Cu));",
                                   NULL,
-                                  "selection24 cluster growth prepare",
+                                  "selection cluster growth prepare",
                                   INSERT_CLUSTER_PREPARE, 6,
                                   K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3143,7 +3143,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "push32(c, rd32((c->ebp + 0x00000008u)));",
                                   NULL,
-                                  "selection24 cluster insertion trace",
+                                  "selection cluster insertion trace",
                                   INSERT_TRACE_CLUSTER_INS, 5,
                                   K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3152,14 +3152,14 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_TRACE_A5B9:
                 /* Anchor one instruction past the frame allocation.  The
                  * 0xA54 -> 0x1354 frame substitution on 6F16A5B3 is a
-                 * GROUP24 site and must go through the default branch;
+                 * SELECTION_LAYOUT site and must go through the default branch;
                  * keeping the trace on 6F16A5B3 would mark the line handled
                  * and silently skip the frame growth. */
                 next = p;
                 if (handle_insert(out, &next, end,
                                   "c->eax = rd32((GVA(0x6FCE689C)));",
                                   NULL,
-                                  "selection24 group builder entry trace",
+                                  "selection group builder entry trace",
                                   INSERT_TRACE_A5B9, 4,
                                   K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3170,7 +3170,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->ecx = rd32((c->ebp + 0xFFFFFFFCu));",
                                   NULL,
-                                  "selection24 ground-order base trace",
+                                  "selection ground-order base trace",
                                   INSERT_TRACE_ORDER_BASE, 6,
                                   K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3181,7 +3181,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->esi = rd32((c->edi));",
                                   NULL,
-                                  "selection24 order unit trace B",
+                                  "selection order unit trace B",
                                   INSERT_TRACE_ORDER_UNIT_B, 4,
                                   K_TRACE_ORDER_UNIT_B, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3192,7 +3192,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->esi = rd32((c->edi));",
                                   NULL,
-                                  "selection24 order unit trace C",
+                                  "selection order unit trace C",
                                   INSERT_TRACE_ORDER_UNIT_C, 4,
                                   K_TRACE_ORDER_UNIT_C, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3203,7 +3203,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->edx = c->eax;",
                                   NULL,
-                                  "selection24 order loop trace B",
+                                  "selection order loop trace B",
                                   INSERT_TRACE_ORDER_LOOP_B, 4,
                                   K_TRACE_ORDER_LOOP_B, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3214,7 +3214,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->edx = c->eax;",
                                   NULL,
-                                  "selection24 order loop trace C",
+                                  "selection order loop trace C",
                                   INSERT_TRACE_ORDER_LOOP_C, 4,
                                   K_TRACE_ORDER_LOOP_C, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3225,7 +3225,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "wr32((c->edi + 0x00000050u), c->eax);",
                                   NULL,
-                                  "selection24 order slots trace A1",
+                                  "selection order slots trace A1",
                                   INSERT_TRACE_SLOTS_A1, 4,
                                   K_TRACE_ORDER_SLOTS, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3236,7 +3236,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "wr32((c->edi + 0x00000050u), c->eax);",
                                   NULL,
-                                  "selection24 order slots trace A2",
+                                  "selection order slots trace A2",
                                   INSERT_TRACE_SLOTS_A2, 4,
                                   K_TRACE_ORDER_SLOTS, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3247,7 +3247,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "wr32((c->esi + 0x0000002Cu), c->eax);",
                                   NULL,
-                                  "selection24 order slots trace C",
+                                  "selection order slots trace C",
                                   INSERT_TRACE_SLOTS_C, 4,
                                   K_TRACE_ORDER_SLOTS, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3258,7 +3258,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "flags_sub(c, c->eax, 0xCu, 4);",
                                   NULL,
-                                  "selection24 group-full threshold",
+                                  "selection group-full threshold",
                                   INSERT_ORDER_GROUP_FULL, 1,
                                   K_ORDER_GROUP_FULL, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3269,7 +3269,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->edx = rd32((c->ebp + 0x00000008u));",
                                   NULL,
-                                  "selection24 event release trace",
+                                  "selection event release trace",
                                   INSERT_TRACE_EVRELEASE, 4,
                                   K_TRACE_EVRELEASE, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3280,7 +3280,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (handle_insert(out, &next, end,
                                   "c->edi = (uint32_t)(pop32(c));",
                                   NULL,
-                                  "selection24 free-list unlink",
+                                  "selection free-list unlink",
                                   INSERT_SLOT_UNLINK, 19,
                                   K_SLOT_UNLINK, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
@@ -3292,14 +3292,14 @@ static int process_buffer(const char *data, size_t n, const char *profile,
         }
 
         if (!handled && has_va) {
-            const Group24Site *g = group24_lookup(va);
+            const SelectionSite *g = selection_site_lookup(va);
 
-            if (g && handle_group24(out, p, le, g, line, counts, sites,
+            if (g && handle_selection_sites(out, p, le, g, line, counts, sites,
                                     &handled, err, errsz) != 0) {
-                const Group24Site *alt = group24_alt_lookup(va);
+                const SelectionSite *alt = selection_alt_lookup(va);
 
                 if (!alt ||
-                    handle_group24(out, p, le, alt, line, counts, sites,
+                    handle_selection_sites(out, p, le, alt, line, counts, sites,
                                    &handled, err, errsz) != 0)
                     return -1;
             }
@@ -3870,7 +3870,7 @@ static int verify_coverage(const char *arg, int quiet, char *err,
 /* ------------------------------------------------------------------ */
 
 static const char SELF_FIXTURE[] =
-"/* selection24 self-test fixture */\n"
+"/* selection self-test fixture */\n"
 "void L_fixture(CPU *restrict c)\n"
 "{\n"
 "    push32(c, 0x134u);                                           /* 6F39E7DE: push 0x134 */\n"
@@ -4055,7 +4055,7 @@ static int self_test(char *err, size_t errsz)
     exp_fix[K_ORDER_GROUP_FULL] = 1;
     exp_fix[K_TRACE_EVRELEASE] = 1;
     exp_fix[K_SLOT_UNLINK] = 1;
-    exp_fix[K_GROUP24] = 9;
+    exp_fix[K_LAYOUT] = 9;
     /* The fixture deliberately does not carry the new point-order anchors:
      * they are covered by the whole-corpus totals and by the real lift. */
     exp_fix[K_TRACE_FORMATION] = 0;
@@ -4070,15 +4070,15 @@ static int self_test(char *err, size_t errsz)
         snprintf(err, errsz, "self-test counts mismatch after first pass");
         goto fail;
     }
-    if (count_occurrences(out1.p, out1.n, "wc3_sel24_init_group") != 2 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel24_note_selection") != 1 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel24_select") != 2 ||
+    if (count_occurrences(out1.p, out1.n, "wc3_sel_grid_init") != 2 ||
+        count_occurrences(out1.p, out1.n, "wc3_sel_panel_note") != 1 ||
+        count_occurrences(out1.p, out1.n, "wc3_sel_panel_select") != 2 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_hide_buttons(c, c->ebx)") != 1 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel24_fill") != 2 ||
+                          "wc3_sel_panel_hide(c, c->ebx)") != 1 ||
+        count_occurrences(out1.p, out1.n, "wc3_sel_panel_fill") != 2 ||
         count_occurrences(out1.p, out1.n, "0x144u") != 1 ||
         count_occurrences(out1.p, out1.n, "0x00000138u") != 1 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel24_cap()") != 32 ||
+        count_occurrences(out1.p, out1.n, "wc3_sel_cap()") != 32 ||
         count_occurrences(out1.p, out1.n, "0x9A0u") != 1 ||
         count_occurrences(out1.p, out1.n, "0x9A8u") != 1 ||
         count_occurrences(out1.p, out1.n, "0xFFFFF6A0u") != 4 ||
@@ -4089,37 +4089,37 @@ static int self_test(char *err, size_t errsz)
         count_occurrences(out1.p, out1.n, "0xFFFFF8C0u") != 2 ||
         count_occurrences(out1.p, out1.n, "0xFFFFF8A8u") != 4 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_addunit") != 1 ||
+                          "wc3_sel_trace_addunit") != 1 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_evt2") != 1 ||
+                          "wc3_sel_trace_evt2") != 1 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_lookup") != 2 ||
+                          "wc3_sel_trace_lookup") != 2 ||
         count_occurrences(out1.p, out1.n,
-                          "selection24 remove entry trace") != 1 ||
+                          "selection remove entry trace") != 1 ||
         count_occurrences(out1.p, out1.n,
-                          "selection24 remove unit trace") != 3 ||
+                          "selection remove unit trace") != 3 ||
         count_occurrences(out1.p, out1.n,
-                          "selection24 event birth trace") != 1 ||
+                          "selection event birth trace") != 1 ||
         count_occurrences(out1.p, out1.n,
-                          "selection24 orderev result trace") != 1 ||
+                          "selection orderev result trace") != 1 ||
         count_occurrences(out1.p, out1.n,
-                          "selection24 orderev event trace") != 1 ||
+                          "selection orderev event trace") != 1 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_order_unit") != 2 ||
+                          "wc3_sel_trace_order_unit") != 2 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_order_loop") != 4 ||
+                          "wc3_sel_trace_order_loop") != 4 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_order_slots") != 3 ||
+                          "wc3_sel_trace_order_slots") != 3 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_order_apply") != 2 ||
+                          "wc3_sel_trace_order_apply") != 2 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_order_exec") != 2 ||
+                          "wc3_sel_trace_order_exec") != 2 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_tasknull") != 1 ||
+                          "wc3_sel_trace_tasknull") != 1 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_evinit") != 1 ||
+                          "wc3_sel_trace_evinit") != 1 ||
         count_occurrences(out1.p, out1.n,
-                          "wc3_sel24_trace_orderdrop") != 1 ||
+                          "wc3_sel_trace_orderdrop") != 1 ||
         count_occurrences(out1.p, out1.n, "0x5B8u") != 1 ||
         count_occurrences(out1.p, out1.n, "0x5B4u") != 1 ||
         count_occurrences(out1.p, out1.n, "[esi + 0x4c], 0x18 */") != 1 ||
@@ -4141,14 +4141,14 @@ static int self_test(char *err, size_t errsz)
         count_occurrences(out1.p, out1.n, "0x13Cu") != 2 ||
         count_occurrences(out1.p, out1.n, "0x0000019Cu") != 1 ||
         count_occurrences(out1.p, out1.n, "0x1C8u") != 1 ||
-        count_occurrences(out1.p, out1.n, "wc3_sel24_cap() - 1") != 1 ||
+        count_occurrences(out1.p, out1.n, "wc3_sel_cap() - 1") != 1 ||
         count_occurrences(out1.p, out1.n, "0xBu") != 0 ||
         count_occurrences(out1.p, out1.n, "0x00000100u") != 0 ||
         count_occurrences(out1.p, out1.n, "0x000000ACu") != 0 ||
         count_occurrences(out1.p, out1.n, "0xACu") != 0 ||
         count_occurrences(out1.p, out1.n, "0x000000DCu") != 0 ||
         count_occurrences(out1.p, out1.n, "0x108u") != 0) {
-        snprintf(err, errsz, "self-test group24 shift mismatch");
+        snprintf(err, errsz, "self-test layout shift mismatch");
         goto fail;
     }
 
@@ -4236,7 +4236,7 @@ static int self_test(char *err, size_t errsz)
             count_occurrences(out40a.p, out40a.n, "0x9A0u") != 0 ||
             count_occurrences(out40a.p, out40a.n, "0x1C8u") != 0 ||
             count_occurrences(out40a.p, out40a.n, "0x000001C0u") != 0) {
-            snprintf(err, errsz, "self-test 40 group24 shift mismatch");
+            snprintf(err, errsz, "self-test 40 layout shift mismatch");
             ok = 0;
             goto fail40;
         }
@@ -4336,7 +4336,7 @@ fail40:
         }
         if (!counts_match(&c3, exp_fix) ||
             count_occurrences(out3.p, out3.n,
-                              "wc3_sel24_trace_order_apply") != 2) {
+                              "wc3_sel_trace_order_apply") != 2) {
             snprintf(err, errsz, "self-test elided anchor mismatch");
             free(variant);
             buf_free(&out3);
@@ -4394,7 +4394,7 @@ fail40:
             "\"trace_remove\":4,\"trace_evbirth\":1,\"trace_apply\":2,"
             "\"trace_tasknull\":1,\"trace_evinit\":1,\"trace_orderdrop\":1,"
             "\"order_obj_container\":35,\"trace_order_slots\":3,\"order_group_full\":2,"
-            "\"trace_evrelease\":1,\"slot_unlink\":1,\"group24\":207,\"trace_formation\":9,"
+            "\"trace_evrelease\":1,\"slot_unlink\":1,\"layout\":207,\"trace_formation\":9,"
             "\"order_cursor\":6},"
             "\"total\":348};";
         Counts c3;

@@ -421,7 +421,7 @@ throughput numbers:
 A full debug app Ninja build through the IDEAPAD-only path completed with
 `local=4 remote=12 jobs=16` and produced and installed the APK. The first
 automatic full-build attempt had reached CMake configure and stopped on a
-stale local lift tool (`selection24.exe` older than `selection24.c`) before any
+stale local lift tool (`selection.exe` older than `selection.c`) before any
 corpus compilation; that failure was not a transport failure. The two-worker
 path has been validated by the dry run, the 16-job mixed compile, and the phone
 link/run test above. The independent paths are covered by the four dry runs and

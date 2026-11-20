@@ -235,23 +235,23 @@ endif()
 
 # --- optional selection helpers -------------------------------------------
 # Gameplay/UI code, not HLE: this library exists only when
-# WC3_SELECTION_24=ON, and the generated corpus calls it through the
-# selection24 LiftPass.  The runtime cap is 12/24/40; the corpus structure is
+# WC3_SELECTION=ON, and the generated corpus calls it through the
+# selection LiftPass.  The runtime cap is 12/24/40; the corpus structure is
 # the 40-entry layout selected by WC3_SELECTION_STRUCT_CAP.  The exact baseline
 # and the headless DUT keep the original 12-unit cap and the 6x2 grid.
-if(WC3_SELECTION_24)
-    add_library(wc3_selection24 STATIC
-        "${WC3_ROOT}/runtime/features/selection24.c")
-    target_include_directories(wc3_selection24 PRIVATE
+if(WC3_SELECTION)
+    add_library(wc3_selection STATIC
+        "${WC3_ROOT}/runtime/features/selection.c")
+    target_include_directories(wc3_selection PRIVATE
         "${WC3_ROOT}/runtime/features"
         "${WC3_ROOT}/runtime/cpu"
         "${WC3_ROOT}/runtime/guest"
         "${WC3_ROOT}/runtime/diag")
-    target_compile_definitions(wc3_selection24 PRIVATE
+    target_compile_definitions(wc3_selection PRIVATE
         GVA_DELTA=0
         WC3_SELECTION_STRUCT_CAP=${WC3_SELECTION_STRUCT_CAP}
         WC3_DEBUG=${WC3_DEBUG_DEFINE})
-    target_compile_options(wc3_selection24 PRIVATE
+    target_compile_options(wc3_selection PRIVATE
         -fno-strict-aliasing
         -fwrapv
         -ffp-contract=off
@@ -259,7 +259,7 @@ if(WC3_SELECTION_24)
         -Wno-sign-compare
         -U_FORTIFY_SOURCE
         -D_FORTIFY_SOURCE=0)
-    set_target_properties(wc3_selection24 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(wc3_selection PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 # --- target HLE modules (M5 migration, H6.2 order) -------------------------
@@ -496,7 +496,7 @@ if(WC3_PRODUCT_COMPILE_OPTIONS)
             wc3_boot
             wc3_hle_bridge
             wc3_compat
-            wc3_selection24
+            wc3_selection
             wc3_hle_modules
             wc3_hle_android
             wc3_hle_d3d9
@@ -680,13 +680,13 @@ if(WC3_W3L_COMPAT)
     target_link_libraries(wc3gameactivity PRIVATE wc3_compat)
 endif()
 
-if(WC3_SELECTION_24)
-    # Static link order: after the corpus that references wc3_sel24_*.
-    target_link_libraries(wc3gameactivity PRIVATE wc3_selection24)
+if(WC3_SELECTION)
+    # Static link order: after the corpus that references wc3_sel_*.
+    target_link_libraries(wc3gameactivity PRIVATE wc3_selection)
     # The marker is otherwise a candidate for section GC; keep the member and
     # the string visible for the build_app.ps1 artifact check.
     target_link_options(wc3gameactivity PRIVATE
-        -Wl,--undefined=wc3_selection24_build_marker)
+        -Wl,--undefined=wc3_selection_build_marker)
 endif()
 
 # The widescreen and cursor wrappers are linked with --wrap so neither the

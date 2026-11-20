@@ -86,11 +86,13 @@ param(
     [string]$W3LCompat = 'rubattle',
     [ValidateRange(30, 255)]
     [int]$W3LLatency = 100,
-    # 24-unit selection / adaptive 8x3 panel (gameplay/UI, not HLE).  auto
+    # 12/24/40 selection / adaptive panel (gameplay/UI, not HLE).  auto
     # follows the product profile: on with a W3L product corpus, off for the
     # exact baseline.  The headless DUT never receives this profile.
+    # The alias keeps older -Selection24 invocations working.
+    [Alias('Selection24')]
     [ValidateSet('auto', 'on', 'off')]
-    [string]$Selection24 = 'auto',
+    [string]$Selection = 'auto',
     [string]$CMakeArgs = '',
     [string]$NativeBuildArgs = ''
 )
@@ -376,15 +378,15 @@ if ($w3lCompatValue -eq 'ON' -and -not $CorpusRoot) {
 # The selection profile edits generated C too, so an explicit on without a
 # corpus is a caller error.  auto keeps the exact baseline and any headless
 # configure at 12 units.
-$selection24Value = switch ($Selection24) {
+$selectionValue = switch ($Selection) {
     'on' { 'ON' }
     'off' { 'OFF' }
     default {
         if ($CorpusRoot -and $w3lCompatValue -eq 'ON') { 'ON' } else { 'OFF' }
     }
 }
-if ($selection24Value -eq 'ON' -and -not $CorpusRoot) {
-    Write-Host '[app] -Selection24 on requires -CorpusRoot'
+if ($selectionValue -eq 'ON' -and -not $CorpusRoot) {
+    Write-Host '[app] -Selection on requires -CorpusRoot'
     exit 1
 }
 
@@ -715,8 +717,8 @@ $configure += "-DWC3_RELIFTED_CORPUS_ROOT=$CorpusRoot"
 $configure += "-DWC3_W3L_COMPAT=$w3lCompatValue"
 $configure += "-DWC3_W3L_PROFILE=$w3lProfile"
 $configure += "-DWC3_W3L_LATENCY=$W3LLatency"
-$configure += "-DWC3_SELECTION_24=$selection24Value"
-if ($selection24Value -eq 'ON') {
+$configure += "-DWC3_SELECTION=$selectionValue"
+if ($selectionValue -eq 'ON') {
     # The product always carries the 40-entry structural layout; the runtime
     # dropdown chooses 12, 24 or 40.  Pass it explicitly so a cached 24-entry
     # comparison configure cannot leak into the product build.
@@ -815,7 +817,7 @@ Write-Host "[app] native_tls $($nativeTlsValue -eq 'ON') model $TlsModel"
 Write-Host "[app] lift_p0_1/2/6 unconditional"
 Write-Host "[app] thin_skip_writeonly_copyin $($thinSkipCopyinValue -eq 'ON')"
 Write-Host "[app] w3l_compat $w3lCompatValue ($w3lProfile, latency $W3LLatency)"
-Write-Host "[app] selection24 $selection24Value"
+Write-Host "[app] selection $selectionValue"
 Write-Host "[app] host_hardening $($hostHardeningValue -eq 'ON')"
 Write-Host "[app] lto   $ltoValue"
 Write-Host "[app] pgo   $Pgo kind $effectivePgoKind"
@@ -884,31 +886,31 @@ if (-not ($hasMain -and $hasJni -and $hasGa)) {
 }
 
 # A linked helper library is not evidence that the generated corpus actually
-# calls it.  An incremental build once reused pre-selection24 leaf_call
-# objects, so the .so contained wc3_sel24_* but every call site still had the
+# calls it.  An incremental build once reused pre-selection leaf_call
+# objects, so the .so contained wc3_sel_* but every call site still had the
 # original 12-unit code.  The corpus archive is the artifact that must carry
 # the undefined references; check it before trusting the product marker.
-if ($selection24Value -eq 'ON') {
+if ($selectionValue -eq 'ON') {
     $nm = Join-Path $ndk.Root 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-nm.exe'
     $corpusArchive = Join-Path $out 'cmake\libwc3_corpus_relifted.a'
     if (-not (Test-Path -LiteralPath $corpusArchive)) {
-        Write-Host "[app] selection24 corpus archive missing: $corpusArchive"
+        Write-Host "[app] selection corpus archive missing: $corpusArchive"
         exit 1
     }
     $corpusSyms = (& $nm -u $corpusArchive 2>&1) -join "`n"
     foreach ($sym in @(
-        'wc3_sel24_init_group',
-        'wc3_sel24_note_selection',
-        'wc3_sel24_select',
-        'wc3_sel24_hide_buttons',
-        'wc3_sel24_fill',
-        'wc3_sel24_cap')) {
+        'wc3_sel_grid_init',
+        'wc3_sel_panel_note',
+        'wc3_sel_panel_select',
+        'wc3_sel_panel_hide',
+        'wc3_sel_panel_fill',
+        'wc3_sel_cap')) {
         if ($corpusSyms -notmatch ('\b' + [regex]::Escape($sym) + '\b')) {
-            Write-Host "[app] selection24 call site is absent from the corpus archive: $sym"
+            Write-Host "[app] selection call site is absent from the corpus archive: $sym"
             exit 1
         }
     }
-    Write-Host '[app] selection24 corpus calls present'
+    Write-Host '[app] selection corpus calls present'
 }
 
 # V10/T2-save: a rebuild is not "the product" unless both known save fixes are
@@ -940,9 +942,9 @@ if ($soStrings -notmatch 'WC3_SAVE_LIST_STRIP_W3Z') {
     Write-Host '[app] save-list display fix marker is absent from the product .so'
     exit 1
 }
-if ($selection24Value -eq 'ON') {
-    if ($soStrings -notmatch 'WC3_SELECTION_24') {
-        Write-Host '[app] selection24 marker is absent from the product .so'
+if ($selectionValue -eq 'ON') {
+    if ($soStrings -notmatch 'WC3_SELECTION') {
+        Write-Host '[app] selection marker is absent from the product .so'
         exit 1
     }
     if ($soStrings -notmatch 'WC3_SELECTION_CAP') {
@@ -980,7 +982,7 @@ if ($dynSyms -notmatch '\bpwrite\b' -or $dynSyms -notmatch '\bpread\b') {
     Write-Host '[app] overlapped save I/O is absent from the product .so'
     exit 1
 }
-Write-Host "[app] fixes save-list=$($fixes.fixes.save_list_display.sites) site(s), overlapped-save-io=present, selection24=$($selection24Value -eq 'ON'), cursor-hide=present"
+Write-Host "[app] fixes save-list=$($fixes.fixes.save_list_display.sites) site(s), overlapped-save-io=present, selection=$($selectionValue -eq 'ON'), cursor-hide=present"
 Complete-Wc3BuildWarningLog -Status ok -ExitCode 0
 Write-Host '[app] built'
 exit 0

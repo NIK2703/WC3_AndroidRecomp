@@ -89,8 +89,8 @@
 #if !defined(WC3_DEBUG_JASS)
 #define WC3_DEBUG_JASS 0
 #endif
-#if !defined(WC3_DEBUG_SELECT24)
-#define WC3_DEBUG_SELECT24 0
+#if !defined(WC3_DEBUG_SELECTION)
+#define WC3_DEBUG_SELECTION 0
 #endif
 #if !defined(WC3_DEBUG_JNI)
 #define WC3_DEBUG_JNI 0
@@ -118,7 +118,7 @@
     WC3_DEBUG_DXVK_DEBUG || \
     WC3_DEBUG_AUDIO || WC3_DEBUG_MOVIE || \
     WC3_DEBUG_INPUT || WC3_DEBUG_SAVE || WC3_DEBUG_JASS || \
-    WC3_DEBUG_SELECT24 || \
+    WC3_DEBUG_SELECTION || \
     WC3_DEBUG_JNI || WC3_DEBUG_CRASH || WC3_DEBUG_PERF)
 #error "WC3_DEBUG=0 but a WC3_DEBUG_<TAG> is enabled; see BV-5.3"
 #endif

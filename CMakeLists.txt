@@ -606,16 +606,16 @@ if(WC3_W3L_COMPAT)
         "w3l compat: profile ${WC3_W3L_PROFILE}, latency ${WC3_W3L_LATENCY} ms")
 endif()
 
-# 24-unit selection profile (gameplay/UI, not HLE).  The product build gets it
+# 12/24/40 selection profile (gameplay/UI, not HLE).  The product build gets it
 # by default; the exact baseline (W3LCompat off) and the headless DUT keep the
 # original 12-unit cap and the 6x2 grid.  The pass edits generated C through
-# the compiled selection24 LiftPass; no source file under build/corpus-full is
+# the compiled selection LiftPass; no source file under build/corpus-full is
 # modified in place.  See docs/research/SELECTION_24_ANALYSIS.md.
 if(WC3_RELIFTED_CORPUS_ROOT AND WC3_BUILD_APP AND
    WC3_WITH_ASBUILT_HLE AND WC3_W3L_COMPAT)
-    set(WC3_SELECTION_24_DEFAULT ON)
+    set(WC3_SELECTION_DEFAULT ON)
 else()
-    set(WC3_SELECTION_24_DEFAULT OFF)
+    set(WC3_SELECTION_DEFAULT OFF)
 endif()
 # Opt-in cutover: the old per-stage blocks stay the default until this path is
 # checked by an explicit configure and product build.
@@ -627,10 +627,10 @@ if(WC3_PATCH_PIPELINE AND NOT WC3_RELIFTED_CORPUS_ROOT)
         "WC3_PATCH_PIPELINE=ON requires WC3_RELIFTED_CORPUS_ROOT")
 endif()
 
-option(WC3_SELECTION_24
+option(WC3_SELECTION
        "Apply the 12/24/40-unit selection / 6x2, 8x3, 10x4 panel profile to the relifted corpus"
-       ${WC3_SELECTION_24_DEFAULT})
-if(WC3_SELECTION_24)
+       ${WC3_SELECTION_DEFAULT})
+if(WC3_SELECTION)
     set(WC3_SELECTION_STRUCT_CAP "40" CACHE STRING
         "Selection structural capacity: 24 (legacy layout) or 40 (product layout)")
     set_property(CACHE WC3_SELECTION_STRUCT_CAP PROPERTY STRINGS "24" "40")
@@ -641,22 +641,22 @@ if(WC3_SELECTION_24)
     endif()
     if(NOT WC3_RELIFTED_CORPUS_ROOT)
         message(FATAL_ERROR
-            "WC3_SELECTION_24=ON requires WC3_RELIFTED_CORPUS_ROOT; the legacy "
+            "WC3_SELECTION=ON requires WC3_RELIFTED_CORPUS_ROOT; the legacy "
             "prebuilt corpus cannot be patched through a LiftPass.  Pass "
-            "-DWC3_SELECTION_24=OFF for the exact baseline.")
+            "-DWC3_SELECTION=OFF for the exact baseline.")
     endif()
     if(NOT WC3_BUILD_APP)
         message(FATAL_ERROR
-            "WC3_SELECTION_24=ON is a product profile; the headless DUT must "
-            "keep the original 12-unit cap.  Pass -DWC3_SELECTION_24=OFF.")
+            "WC3_SELECTION=ON is a product profile; the headless DUT must "
+            "keep the original 12-unit cap.  Pass -DWC3_SELECTION=OFF.")
     endif()
     if(NOT WC3_WITH_ASBUILT_HLE)
         message(FATAL_ERROR
-            "WC3_SELECTION_24=ON requires WC3_WITH_ASBUILT_HLE=ON; the helper "
+            "WC3_SELECTION=ON requires WC3_WITH_ASBUILT_HLE=ON; the helper "
             "is linked into wc3gameactivity, which does not exist otherwise.")
     endif()
     message(STATUS
-        "selection24: 12/24/40 runtime cap, structural ${WC3_SELECTION_STRUCT_CAP}, "
+        "selection: 12/24/40 runtime cap, structural ${WC3_SELECTION_STRUCT_CAP}, "
         "6x2 for <=12, 8x3 for 13..24, 10x4 for 25..40")
 endif()
 

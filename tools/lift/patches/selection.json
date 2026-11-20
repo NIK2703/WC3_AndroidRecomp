@@ -1,0 +1,46 @@
+{
+  "schema": 2,
+  "id": "selection",
+  "rev": 49,
+  "description": "12/24/40 selection profile over the full relifted corpus; the engine's --verify-coverage union check is the single site-count authority.",
+  "engine": "selection",
+  "kind": "transform",
+  "mode": "per_chunk",
+  "scope": "all",
+  "order": 40,
+  "after": [
+    "w3l_compat"
+  ],
+  "command": {
+    "args": [
+      "--struct-cap",
+      "40",
+      "--lift",
+      "{in}",
+      "--out",
+      "{out}",
+      "--json",
+      "{report}",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "report_pass"
+    },
+    {
+      "kind": "field_equals",
+      "path": "struct_cap",
+      "equals_param": "struct_cap"
+    }
+  ],
+  "coverage": {
+    "args": [
+      "--verify-coverage"
+    ],
+    "reports": "manifest"
+  },
+  "params": {
+    "struct_cap": "40"
+  }
+}

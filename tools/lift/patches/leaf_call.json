@@ -9,7 +9,7 @@
   "scope": "all",
   "order": 50,
   "after": [
-    "selection24_cap40"
+    "selection"
   ],
   "output_layout": "flat",
   "command": {

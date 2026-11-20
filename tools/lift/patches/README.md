@@ -27,7 +27,7 @@ python3 tools/lift/patch_pipeline.py apply \
     --base build/corpus-full/game \
     --index build/patch-index.tsv \
     --registry tools/lift/patches/registry.json \
-    --patch w3l_compat --patch selection24_cap40 \
+    --patch w3l_compat --patch selection \
     --param profile=rubattle --out build/patch-overlay
 
 # Run a named pipeline from the registry.
@@ -62,20 +62,20 @@ and reserved future stages:
     {"manifest": "xmm_local.json", "enabled": false},
     {"manifest": "xmm_lane.json", "enabled": false},
     "w3l_compat.json",
-    "selection24_cap40.json",
+    "selection.json",
     "leaf_call.json",
     "parallel_raycast.json"
   ],
   "pipelines": {
-    "semantic": ["atomiccheck", "w3l_compat", "selection24_cap40",
+    "semantic": ["atomiccheck", "w3l_compat", "selection",
                  "leaf_call", "parallel_raycast"],
     "post_save": ["atomiccheck", "return_address_elide_index",
                   "devirtualize", "return_address_elide", "dead_flags",
                   "xmm_local", "xmm_lane", "w3l_compat",
-                  "selection24_cap40", "leaf_call", "parallel_raycast"],
+                  "selection", "leaf_call", "parallel_raycast"],
     "raw": ["atomiccheck", "save_list_display", "return_address_elide_index",
             "devirtualize", "return_address_elide", "dead_flags",
-            "xmm_local", "xmm_lane", "w3l_compat", "selection24_cap40",
+            "xmm_local", "xmm_lane", "w3l_compat", "selection",
             "leaf_call", "parallel_raycast"]
   },
   "reserved": [
@@ -177,7 +177,7 @@ assertions that describe their report.
 ```
 
 The manifest form writes a text file with one report path per line and passes
-`@file`, which is the contract used by `selection24`.
+`@file`, which is the contract used by `selection`.
 
 ## Current stages
 
@@ -192,7 +192,7 @@ The manifest form writes a text file with one report path per line and passes
 | `xmm_local` | per_chunk | all | Block/lazy local-XMM lowering. |
 | `xmm_lane` | per_chunk | all | Upper-lane zero reuse. |
 | `w3l_compat` | per_chunk | targets | Declared W3L compatibility profile. |
-| `selection24_cap40` | per_chunk | targets | Declared selection-cap delta. |
+| `selection` | per_chunk | all | 12/24/40 selection delta; union coverage. |
 | `leaf_call` | batch | all | Direct-call rewriting over the whole corpus. |
 | `parallel_raycast` | batch | all | Parallel-raycast rewriting after `leaf_call`. |
 
@@ -209,8 +209,9 @@ The synthetic self-test covers per-chunk, batch, ordering, target resolution
 and marker assertions.  The real pipeline has been compared byte-for-byte with
 the existing stages on the full 263-chunk corpus:
 
-- `w3l_compat` (10 chunks, 12 sites), `save_list_display` (2 chunks),
-  `selection24_cap40` (51 chunks, 348 sites);
+- `w3l_compat` (10 chunks, 12 sites), `save_list_display` (2 chunks);
+- the `selection` transform (348 sites over the full corpus; its
+  `--verify-coverage` union check is the site-count gate);
 - `leaf_call` and `parallel_raycast` batch outputs (263 chunks);
 - `devirtualize` + `return_address_elide_index` + `return_address_elide`
   (263 chunks, global index identical);
@@ -228,7 +229,7 @@ skips the old per-chunk and post-loop transform ladder, and runs:
 1. `patch_pipeline.py index` over `build/<variant>/cmake/relifted`.
 2. `patch_pipeline.py apply` with stages selected from the existing CMake flags
    (`devirtualize`, `return_address_elide`, `dead_flags`, `xmm_local`,
-   `xmm_lane`, `w3l_compat`, `selection24_cap40`, `leaf_call`,
+   `xmm_lane`, `w3l_compat`, `selection`, `leaf_call`,
    `parallel_raycast`).
 3. The chunk list from `patch-overlay/overlay.json` becomes
    `WC3_RELIFTED_SOURCES`.
@@ -237,10 +238,12 @@ The base is the post-save split tree, so the save stage is not selected again.
 `apply --reuse --force` validates an existing overlay against base chunk hashes,
 index hash, selected stage IDs, manifest/engine hashes and effective params;
 a stale overlay is rebuilt.  CMake passes the orchestrator hash as a cache
-parameter, so editing `patch_pipeline.py` also invalidates an overlay.  The
-`selection24_cap40` manifest is the only
-selection manifest with a verified target list; the CMake switch fails closed
-when `WC3_SELECTION_STRUCT_CAP=24` instead of applying cap-40 targets.
+parameter, so editing `patch_pipeline.py` also invalidates an overlay.
+`selection` scans every chunk, like the legacy per-stage path; the
+engine's `--verify-coverage` union check against its fixed total is the single
+site-count authority, so the manifest carries no duplicated target list.  The
+CMake switch still fails closed when `WC3_SELECTION_STRUCT_CAP=24`, because
+the stage is pinned to the 40-entry layout.
 
 The switch is not exercised by a configure or product build yet.  The old path
 remains the default until that check is run explicitly; the pipeline itself is

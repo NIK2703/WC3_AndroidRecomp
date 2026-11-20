@@ -1,24 +1,24 @@
 /*
- * selection24.h - 12/24/40-unit selection and adaptive 6x2 / 8x3 / 10x4 panel.
+ * selection.h - 12/24/40-unit selection and adaptive 6x2 / 8x3 / 10x4 panel.
  *
  * This is gameplay/UI code, not HLE: the selection manager and the info panel
  * remain lifted guest code.  The helpers below are called from the generated
- * corpus by tools/lift/csrc_local/selection24.c when the selection24 profile is
+ * corpus by tools/lift/csrc_local/selection.c when the selection profile is
  * ON.
  *
  * The helpers call guest code only through push32 + dispatch and preserve the
  * caller's integer registers, esp, eip and flags.  They do not use host locks,
  * static TLS or untagged logging.
  *
- * The exact baseline (selection24 OFF) does not contain this module and keeps
+ * The exact baseline (selection OFF) does not contain this module and keeps
  * the original 12-unit cap and the 6x2 grid.  With the module ON the corpus
  * carries the 24-entry comparison layout or the 40-entry product layout chosen
  * at configure time, and the cap is a runtime choice: the Android launch
  * settings write WC3_SELECTION_CAP=12|24|40 before android_main, so the 40
  * product build serves all three modes.
  */
-#ifndef WC3_FEATURES_SELECTION24_H
-#define WC3_FEATURES_SELECTION24_H
+#ifndef WC3_FEATURES_SELECTION_H
+#define WC3_FEATURES_SELECTION_H
 
 #include <stdint.h>
 
@@ -31,16 +31,15 @@ extern "C" {
 /*
  * Runtime unit cap used by every limit site the LiftPass rewrites.  The
  * product default is the original 12; the Android launch settings set
- * WC3_SELECTION_CAP=12|24|40 before android_main.  The legacy
- * WC3_SELECTION_24=1 is still honoured for older hosts and selects 24.  An
- * unknown or missing value keeps 12.  The value is latched on first use.
+ * WC3_SELECTION_CAP=12|24|40 before android_main.  An unknown or missing
+ * value keeps 12.  The value is latched on first use.
  */
-uint32_t wc3_sel24_cap(void);
+uint32_t wc3_sel_cap(void);
 
 /*
  * Save/load stream compatibility for the PrClGen slot array.
  *
- * The pre-40 corpus wrote wc3_sel24_cap() slots and read wc3_sel24_cap()
+ * The pre-40 corpus wrote wc3_sel_cap() slots and read wc3_sel_cap()
  * slots; the stream itself carried no count.  A 40-slot reader therefore
  * over-read a legacy 24-slot save and produced a null unit at the end of the
  * group.  New saves put a marker in the third dword of slot 0 (the field is
@@ -50,14 +49,14 @@ uint32_t wc3_sel24_cap(void);
  * therefore keep loading as 24, while new 12/24/40 saves round-trip at their
  * own width.
  *
- * wc3_sel24_stream_slot_write/read are called from the generated serializer
+ * wc3_sel_stream_slot_write/read are called from the generated serializer
  * (0x6F16AE87) and deserializer (0x6F16ABD9).  They only touch guest memory
  * and never call guest code.
  */
-uint32_t wc3_sel24_stream_default_cap(void);
-uint32_t wc3_sel24_stream_slot_write(uint32_t self, uint32_t slot_ptr,
+uint32_t wc3_sel_stream_default_cap(void);
+uint32_t wc3_sel_stream_slot_write(uint32_t self, uint32_t slot_ptr,
                                      uint32_t value);
-void wc3_sel24_stream_slot_read(uint32_t slot_serial, uint32_t bool_base,
+void wc3_sel_stream_slot_read(uint32_t slot_serial, uint32_t bool_base,
                                 uint32_t cap_addr);
 
 /*
@@ -69,7 +68,7 @@ void wc3_sel24_stream_slot_read(uint32_t slot_serial, uint32_t bool_base,
  * nothing for the baseline 12-unit profile and for any vector that is not the
  * CPrCluster member vector at cluster+0x1C.
  */
-void wc3_sel24_cluster_prepare(uint32_t vector);
+void wc3_sel_cluster_prepare(uint32_t vector);
 
 /*
  * Diagnostic trace inserted at the ground-order base read 0x6F16D012 and at
@@ -77,10 +76,10 @@ void wc3_sel24_cluster_prepare(uint32_t vector);
  * group the temporary group, cursor the batch cursor value and idx the loop
  * index.  It prints the live [sel+0x28] unit-record base, the embedded member
  * vector fields and the group index, so a 12-entry base reused after the
- * member-vector grow is visible in sel24_trace.txt.  Compiled out unless
- * WC3_DEBUG && WC3_DEBUG_SELECT24.
+ * member-vector grow is visible in sel_trace.txt.  Compiled out unless
+ * WC3_DEBUG && WC3_DEBUG_SELECTION.
  */
-void wc3_sel24_trace_order_base(CPU *c, uint32_t sel, uint32_t group,
+void wc3_sel_trace_order_base(CPU *c, uint32_t sel, uint32_t group,
                                 uint32_t cursor, uint32_t idx);
 
 /*
@@ -95,21 +94,21 @@ void wc3_sel24_trace_order_base(CPU *c, uint32_t sel, uint32_t group,
  * init24/sort24 and the selection group through init_group/sort_group.
  * pair_base is the guest address count+0xA4.
  */
-void wc3_sel24_init24(uint32_t pair_base);
-void wc3_sel24_sort24(uint32_t count_ptr);
+void wc3_sel_workspace_init(uint32_t pair_base);
+void wc3_sel_workspace_sort(uint32_t count_ptr);
 
 /*
  * Selection-group workspace wrappers used by the 16-element array in
  * L_6F16A5F8 / L_6F16A6E0.  One group entry is 0x1F4 bytes: count +0,
  * index[40] +4, pair[40] +0xA4 (key/value dwords) and tail +0x1E4..+0x1F0.
  * The wrappers do not modify the guest CPU state; under
- * WC3_DEBUG && WC3_DEBUG_SELECT24 they snapshot the entry around zeroing and
+ * WC3_DEBUG && WC3_DEBUG_SELECTION they snapshot the entry around zeroing and
  * around the sort so a tail overwrite by the old pair stride is visible in
- * sel24_trace.txt.  The names differ from the panel-group helper
- * wc3_sel24_init_group(CPU *, uint32_t), which creates the CInfoPanelGroup.
+ * sel_trace.txt.  The names differ from the panel-group helper
+ * wc3_sel_grid_init(CPU *, uint32_t), which creates the CInfoPanelGroup.
  */
-void wc3_sel24_group_init(uint32_t pair_base);
-void wc3_sel24_group_sort(uint32_t group);
+void wc3_sel_group_init(uint32_t pair_base);
+void wc3_sel_group_sort(uint32_t group);
 
 /*
  * Formation x cursor carry across the clusters of one point order.
@@ -123,9 +122,9 @@ void wc3_sel24_group_sort(uint32_t group);
  * 12-unit profile is the exact baseline: origin returns base and commit is a
  * no-op, so multi-cluster 12-unit behavior does not change.
  */
-void wc3_sel24_formation_reset(void);
-uint32_t wc3_sel24_formation_origin(uint32_t base);
-void wc3_sel24_formation_commit(uint32_t x);
+void wc3_sel_formation_reset(void);
+uint32_t wc3_sel_formation_origin(uint32_t base);
+void wc3_sel_formation_commit(uint32_t x);
 
 /*
  * L_6F16A5B0 frame-local wrappers.  The pass calls origin_apply after the
@@ -135,8 +134,8 @@ void wc3_sel24_formation_commit(uint32_t x);
  * 40-entry corpora.  They change only the guest stack local, never the CPU
  * registers or flags.
  */
-void wc3_sel24_formation_origin_apply(CPU *c);
-void wc3_sel24_formation_commit_frame(CPU *c);
+void wc3_sel_formation_origin_apply(CPU *c);
+void wc3_sel_formation_commit_frame(CPU *c);
 
 /*
  * Formation row length returned by the table read in L_6F16D270 / L_6F16D286
@@ -153,7 +152,7 @@ void wc3_sel24_formation_commit_frame(CPU *c);
  * length: the order loop clamps it to the units left, so every value >= 1
  * advances the loop.
  */
-uint32_t wc3_sel24_formation_columns(uint32_t index, uint32_t count,
+uint32_t wc3_sel_formation_columns(uint32_t index, uint32_t count,
                                      uint32_t pair);
 
 /*
@@ -175,7 +174,7 @@ uint32_t wc3_sel24_formation_columns(uint32_t index, uint32_t count,
  * fields are not owned by this profile, so hide/fill fall back to grid12 and
  * select/note return without touching group memory.
  */
-void wc3_sel24_init_group(CPU *c, uint32_t group);
+void wc3_sel_grid_init(CPU *c, uint32_t group);
 
 /*
  * Called from the CInfoPanelGroup::Update prologue after the selection object
@@ -183,7 +182,7 @@ void wc3_sel24_init_group(CPU *c, uint32_t group);
  * group+0x140 so the mode choice and the fill loop can see the total count
  * even from split-entry fragments.
  */
-void wc3_sel24_note_selection(CPU *c, uint32_t group, uint32_t selection);
+void wc3_sel_panel_note(CPU *c, uint32_t group, uint32_t selection);
 
 /*
  * Called from CInfoPanelGroup::Update after [ebp-0x24] (the number of units in
@@ -195,14 +194,14 @@ void wc3_sel24_note_selection(CPU *c, uint32_t group, uint32_t selection);
  * not change the active frame is still made visible again, because a parent
  * HideAll may have unregistered it.
  */
-void wc3_sel24_select(CPU *c, uint32_t group, uint32_t subgroup_units);
+void wc3_sel_panel_select(CPU *c, uint32_t group, uint32_t subgroup_units);
 
 /*
  * Replaces the original hard-coded 6x2 hide-all body.  Hides every button of
  * the active grid, but not the grid frame itself: the following fill path
  * shows individual buttons and must keep the grid registered.
  */
-void wc3_sel24_hide_buttons(CPU *c, uint32_t group);
+void wc3_sel_panel_hide(CPU *c, uint32_t group);
 
 /*
  * Replaces the original hard-coded (index / 6, index % 6) fill block.  Uses
@@ -210,29 +209,29 @@ void wc3_sel24_hide_buttons(CPU *c, uint32_t group);
  * original CInfoPanelGroup fill routine 0x6F3DA470.  index is the global
  * displayed-icon counter that the caller increments after each fill.
  */
-void wc3_sel24_fill(CPU *c, uint32_t group, uint32_t index,
+void wc3_sel_panel_fill(CPU *c, uint32_t group, uint32_t index,
                     uint32_t unit, uint32_t flag);
 
 /*
- * Debug-only trace of the original AddUnit cap.  The selection24 LiftPass
+ * Debug-only trace of the original AddUnit cap.  The selection LiftPass
  * inserts a guarded call after `cmp eax, 0x18` at 0x6F28DC30; the body is
- * compiled only when WC3_DEBUG && WC3_DEBUG_SELECT24, so release keeps the
+ * compiled only when WC3_DEBUG && WC3_DEBUG_SELECTION, so release keeps the
  * original cap path with no extra call.  The helper preserves the guest CPU
  * state, including flags, because the following `jae` depends on them.
  */
-void wc3_sel24_trace_addunit(CPU *c, uint32_t group, uint32_t unit,
+void wc3_sel_trace_addunit(CPU *c, uint32_t group, uint32_t unit,
                              uint32_t count);
 
 /*
  * Debug-only traces for the selection event that crashed on the second order
  * to a group of more than twelve units (write to [0+0x54] from 0x6F057C41).
- * All three are compiled only when WC3_DEBUG && WC3_DEBUG_SELECT24; release
+ * All three are compiled only when WC3_DEBUG && WC3_DEBUG_SELECTION; release
  * keeps the original instruction stream unchanged.  Output goes to
- * <WC3_DATA_DIR>/sel24_trace.txt on Android so the stream stays separate from
+ * <WC3_DATA_DIR>/sel_trace.txt on Android so the stream stays separate from
  * the much larger run.txt, and falls back to stderr when the state directory
  * is unavailable.
  *
- * wc3_sel24_trace_evt2 is called on entry to 0x6F146D30 with the object that
+ * wc3_sel_trace_evt2 is called on entry to 0x6F146D30 with the object that
  * supplies the event payload and the event argument.  It prints the object's
  * {handle, serial} pair (0x14/0x18), its ref/prev/class links and a read-only
  * replay of the handle table lookup at 0x6F054530.  For a rejected pair it
@@ -242,15 +241,15 @@ void wc3_sel24_trace_addunit(CPU *c, uint32_t group, uint32_t unit,
  * The target event descriptor, the raw builder-B candidates and the guest EBP
  * chain are printed as well.
  *
- * wc3_sel24_trace_lookup is called around that lookup in 0x6F04D9C0:
+ * wc3_sel_trace_lookup is called around that lookup in 0x6F04D9C0:
  * stage 0 passes {handle, serial}, stage 1 the lookup result.  Only rejected
  * pairs and zero results are printed.
  */
-void wc3_sel24_trace_evt2(CPU *c, uint32_t self, uint32_t arg);
-void wc3_sel24_trace_lookup(CPU *c, uint32_t stage, uint32_t a, uint32_t b);
+void wc3_sel_trace_evt2(CPU *c, uint32_t self, uint32_t arg);
+void wc3_sel_trace_lookup(CPU *c, uint32_t stage, uint32_t a, uint32_t b);
 
 /*
- * wc3_sel24_trace_tasknull is called right after 0x6F6926B0 reads the task
+ * wc3_sel_trace_tasknull is called right after 0x6F6926B0 reads the task
  * payload at [factory+0x54].  The two consumers it feeds - 0x6F689FC0 and
  * 0x6F691E60 - only see the null target; this trace records every task
  * creation, with `null=` marking the ones the engine drops: the wrapper, the
@@ -258,7 +257,7 @@ void wc3_sel24_trace_lookup(CPU *c, uint32_t stage, uint32_t a, uint32_t b);
  * [ebp-0x3C] (class tag at +4, resolved class factory at +0xC, argument at
  * +0x10) and the order target from [ebp+8]/[ebp+0xC].
  */
-void wc3_sel24_trace_tasknull(CPU *c, uint32_t wrapper);
+void wc3_sel_trace_tasknull(CPU *c, uint32_t wrapper);
 
 /*
  * Called from the shared epilogue branch of 0x6F6926B0 at 0x6F69273F: the
@@ -266,24 +265,24 @@ void wc3_sel24_trace_tasknull(CPU *c, uint32_t wrapper);
  * that unit.  Records the rejected unit, the order argument, the class tag at
  * [ebp-0x48] and the wrapper object's identity fields.
  */
-void wc3_sel24_trace_orderdrop(CPU *c, uint32_t wrapper, uint32_t tag,
+void wc3_sel_trace_orderdrop(CPU *c, uint32_t wrapper, uint32_t tag,
                                uint32_t result);
 
 /*
  * Debug-only traces of the per-unit command batch that explains why a group
  * order reaches fewer units than the selection holds.  Both helpers are
- * compiled only when WC3_DEBUG && WC3_DEBUG_SELECT24 and preserve the guest
+ * compiled only when WC3_DEBUG && WC3_DEBUG_SELECTION and preserve the guest
  * CPU state, including flags, because the call sites sit between instructions
  * that still consume ecx, edx, esi and the flags.
  *
- * wc3_sel24_trace_order_unit is inserted at the entry of the two batch writers
+ * wc3_sel_trace_order_unit is inserted at the entry of the two batch writers
  * 0x6F6BA590 and 0x6F6BA800, right after `mov esi, [edi]`.  `pair_off` names
  * the handle/serial pair the writer later pushes: 0x38 at the 0x6F6BA590 site
  * and 0x30 at the 0x6F6BA800 site.  The trace prints the object, its [0] word,
  * both pairs and the neighbouring fields, so a writer that reads a stale pair
  * is visible before the handle lookup runs.
  *
- * wc3_sel24_trace_order_loop is inserted after `mov edx, eax` at 0x6F6B9E8D
+ * wc3_sel_trace_order_loop is inserted after `mov edx, eax` at 0x6F6B9E8D
  * and 0x6F6BA4C2, where eax is the event object that 0x6F69BC80/0x6F69BD80
  * returned and ecx is the target unit.  `cursor_off` is the record offset the
  * loop's esi points at, 0x18 at the 0x6F6B9E8D site and 0x1C at the 0x6F6BA4C2
@@ -295,9 +294,9 @@ void wc3_sel24_trace_orderdrop(CPU *c, uint32_t wrapper, uint32_t tag,
  * before the loop started skipping units.  The batch count is [ebp-0x1C4] in
  * both loops.
  */
-void wc3_sel24_trace_order_unit(CPU *c, uint32_t pair_off, uint32_t object,
+void wc3_sel_trace_order_unit(CPU *c, uint32_t pair_off, uint32_t object,
                                 uint32_t self);
-void wc3_sel24_trace_order_loop(CPU *c, uint32_t cursor_off, uint32_t cursor,
+void wc3_sel_trace_order_loop(CPU *c, uint32_t cursor_off, uint32_t cursor,
                                 uint32_t unit, uint32_t event);
 
 /*
@@ -309,7 +308,7 @@ void wc3_sel24_trace_order_loop(CPU *c, uint32_t cursor_off, uint32_t cursor,
  * prints both counts and the derived index, so a list that still stops at
  * twelve while the batch holds fourteen is visible in one line.
  */
-void wc3_sel24_trace_order_slots(CPU *c, uint32_t tag, uint32_t list,
+void wc3_sel_trace_order_slots(CPU *c, uint32_t tag, uint32_t list,
                                  uint32_t element);
 
 /*
@@ -320,7 +319,7 @@ void wc3_sel24_trace_order_slots(CPU *c, uint32_t tag, uint32_t list,
  * frame at [ebp-0x14] and [ebp-0x10].  phase 0 is the first delivery,
  * phase 1 the second one.
  */
-void wc3_sel24_trace_order_apply(CPU *c, uint32_t unit, uint32_t event,
+void wc3_sel_trace_order_apply(CPU *c, uint32_t unit, uint32_t event,
                                  uint32_t result, uint32_t phase);
 
 /*
@@ -330,7 +329,7 @@ void wc3_sel24_trace_order_apply(CPU *c, uint32_t unit, uint32_t event,
  * event object is ebx and the unit is the first argument, kept in the frame
  * at [ebp-0x14].
  */
-void wc3_sel24_trace_order_exec(CPU *c, uint32_t stage, uint32_t unit,
+void wc3_sel_trace_order_exec(CPU *c, uint32_t stage, uint32_t unit,
                                 uint32_t event, uint32_t vtbl,
                                 uint32_t handler, uint32_t result);
 
@@ -363,12 +362,12 @@ void wc3_sel24_trace_order_exec(CPU *c, uint32_t stage, uint32_t unit,
  * it unlinks the unit from PrClGen; the line shows the result, the cluster
  * count and the slot pair.
  */
-void wc3_sel24_trace_order_begin(CPU *c, uint32_t request, uint32_t source);
-void wc3_sel24_trace_listadd(CPU *c, uint32_t list, uint32_t index,
+void wc3_sel_trace_order_begin(CPU *c, uint32_t request, uint32_t source);
+void wc3_sel_trace_listadd(CPU *c, uint32_t list, uint32_t index,
                              uint32_t value, uint32_t unit, uint32_t store);
-void wc3_sel24_trace_formation_begin(CPU *c, uint32_t cluster);
-void wc3_sel24_trace_cluster_try(CPU *c, uint32_t vector, uint32_t add);
-void wc3_sel24_trace_cluster_insert(CPU *c, uint32_t cluster, uint32_t unit,
+void wc3_sel_trace_formation_begin(CPU *c, uint32_t cluster);
+void wc3_sel_trace_cluster_try(CPU *c, uint32_t vector, uint32_t add);
+void wc3_sel_trace_cluster_insert(CPU *c, uint32_t cluster, uint32_t unit,
                                     uint32_t list, uint32_t slot,
                                     uint32_t result);
 
@@ -380,7 +379,7 @@ void wc3_sel24_trace_cluster_insert(CPU *c, uint32_t cluster, uint32_t unit,
  * but is never removed from the group stays in the selection and later gets
  * an order with a dead target.
  */
-void wc3_sel24_trace_remove(CPU *c, uint32_t phase, uint32_t group,
+void wc3_sel_trace_remove(CPU *c, uint32_t phase, uint32_t group,
                             uint32_t unit);
 
 /*
@@ -391,8 +390,8 @@ void wc3_sel24_trace_remove(CPU *c, uint32_t phase, uint32_t group,
  * slot or the factory callback filled the +0x54 payload that 0x6F6926B0 later
  * reads.  `desc` is the descriptor built by 0x6F055D00.
  */
-void wc3_sel24_trace_evbirth(CPU *c, uint32_t object, uint32_t desc);
-void wc3_sel24_trace_evinit(CPU *c, uint32_t object, uint32_t desc);
+void wc3_sel_trace_evbirth(CPU *c, uint32_t object, uint32_t desc);
+void wc3_sel_trace_evinit(CPU *c, uint32_t object, uint32_t desc);
 
 /*
  * Inserted at 0x6F1CBFB3, the first instruction of the negative handle-table
@@ -401,7 +400,7 @@ void wc3_sel24_trace_evinit(CPU *c, uint32_t object, uint32_t desc);
  * later returns 0xFFFFFFFE.  `slotval` equal to 0xFFFFFFFE on a repeated
  * `index` is the duplicate release.
  */
-void wc3_sel24_trace_evrelease(CPU *c, uint32_t table, uint32_t handle);
+void wc3_sel_trace_evrelease(CPU *c, uint32_t table, uint32_t handle);
 
 /*
  * Inserted in 0x6F04CE16, the function that applies the order to one unit.
@@ -410,10 +409,10 @@ void wc3_sel24_trace_evrelease(CPU *c, uint32_t table, uint32_t handle);
  * a null event and crashes the delivery, so the trace shows which branch
  * rejected the unit.
  */
-void wc3_sel24_trace_apply(CPU *c, uint32_t phase, uint32_t a, uint32_t b);
+void wc3_sel_trace_apply(CPU *c, uint32_t phase, uint32_t a, uint32_t b);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* WC3_FEATURES_SELECTION24_H */
+#endif /* WC3_FEATURES_SELECTION_H */

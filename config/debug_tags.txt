@@ -3,7 +3,7 @@
 # tools/android/build_app.ps1 at build start.
 BOOT
 CRASH
-SELECT24
+SELECTION
 PERF
 # Vulkan/D3D9 startup diagnostics for the Mali vkCreateDevice failure.
 # DXVK_DEBUG turns on the Vulkan boundary trace and DXVK's debug log level;

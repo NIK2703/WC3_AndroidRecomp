@@ -76,8 +76,8 @@ find_program(WC3_W3L_COMPAT_EXE
     HINTS "${WC3_ROOT}/build/lift-tools"
     NO_DEFAULT_PATH)
 
-find_program(WC3_SELECTION24_EXE
-    NAMES selection24 selection24.exe
+find_program(WC3_SELECTION_EXE
+    NAMES selection selection.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
     NO_DEFAULT_PATH)
 
@@ -159,7 +159,7 @@ endif()
 set(WC3_RELIFTED_SOURCES)
 set(_wc3_check_commands)
 set(_wc3_compat_jsons)
-set(_wc3_sel24_jsons)
+set(_wc3_sel_jsons)
 math(EXPR _wc3_last_mod "${_wc3_nmod} - 1")
 
 if(WC3_W3L_COMPAT)
@@ -677,36 +677,36 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             wc3_run_jobpool("${_compat_jobs}" "w3l_compat ${_name}/${_kind}")
             set(_chunks "${_compat_chunks}")
         endif()
-        if(WC3_SELECTION_24)
+        if(WC3_SELECTION)
             # The 12/24/40-unit selection profile runs after every other
             # enabled pass, so it sees the final instruction text.  The pass
             # edits the generated C only; no source file under
             # build/corpus-full is modified in place.  Each chunk reports its
             # own site counts and the union is verified after all modules.
-            if(NOT WC3_SELECTION24_EXE)
+            if(NOT WC3_SELECTION_EXE)
                 message(FATAL_ERROR
-                    "selection24.exe missing; run tools/lift/build_tools.ps1 "
+                    "selection.exe missing; run tools/lift/build_tools.ps1 "
                     "before configuring")
             endif()
-            set(_sel24_cap "${WC3_SELECTION_STRUCT_CAP}")
-            if(NOT _sel24_cap)
-                set(_sel24_cap "40")
+            set(_sel_cap "${WC3_SELECTION_STRUCT_CAP}")
+            if(NOT _sel_cap)
+                set(_sel_cap "40")
             endif()
-            if(NOT _sel24_cap MATCHES "^(24|40)$")
+            if(NOT _sel_cap MATCHES "^(24|40)$")
                 message(FATAL_ERROR
                     "WC3_SELECTION_STRUCT_CAP must be 24 or 40, got "
-                    "'${_sel24_cap}'")
+                    "'${_sel_cap}'")
             endif()
             # A stale pass silently re-emits the old source text while the
             # configure still reports success.  Refuse that state instead of
             # letting an executable older than its source define the product.
-            set(_sel24_pass_src
-                "${WC3_ROOT}/tools/lift/csrc_local/selection24.c")
-            if(EXISTS "${_sel24_pass_src}" AND
-               "${_sel24_pass_src}" IS_NEWER_THAN "${WC3_SELECTION24_EXE}")
+            set(_sel_pass_src
+                "${WC3_ROOT}/tools/lift/csrc_local/selection.c")
+            if(EXISTS "${_sel_pass_src}" AND
+               "${_sel_pass_src}" IS_NEWER_THAN "${WC3_SELECTION_EXE}")
                 message(FATAL_ERROR
-                    "selection24.exe is older than tools/lift/csrc_local/"
-                    "selection24.c; run tools/lift/build_tools.ps1 -Force "
+                    "selection.exe is older than tools/lift/csrc_local/"
+                    "selection.c; run tools/lift/build_tools.ps1 -Force "
                     "before configuring")
             endif()
             # The input chunk comes from the w3l_compat directory, whose path
@@ -714,40 +714,40 @@ foreach(_mi RANGE 0 ${_wc3_last_mod})
             # otherwise a rubattle build could reuse a pvpgn-patched chunk
             # whose mtime happens to be newer than the new input.
             if(WC3_W3L_COMPAT)
-                set(_sel24_tag
-                    "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}-cap${_sel24_cap}")
+                set(_sel_tag
+                    "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}-layout${_sel_cap}")
             else()
-                set(_sel24_tag "plain-cap${_sel24_cap}")
+                set(_sel_tag "plain-layout${_sel_cap}")
             endif()
-            set(_sel24_dir
-                "${CMAKE_CURRENT_BINARY_DIR}/selection24/${_name}/${_kind}/${_sel24_tag}")
-            file(MAKE_DIRECTORY "${_sel24_dir}")
-            set(_sel24_jobs
-                "${CMAKE_CURRENT_BINARY_DIR}/jobs/${_name}_${_kind}_selection24.txt")
-            set(_sel24_job_text "")
-            set(_sel24_chunks)
+            set(_sel_dir
+                "${CMAKE_CURRENT_BINARY_DIR}/selection/${_name}/${_kind}/${_sel_tag}")
+            file(MAKE_DIRECTORY "${_sel_dir}")
+            set(_sel_jobs
+                "${CMAKE_CURRENT_BINARY_DIR}/jobs/${_name}_${_kind}_selection.txt")
+            set(_sel_job_text "")
+            set(_sel_chunks)
             foreach(_chunk IN LISTS _chunks)
                 get_filename_component(_chunk_name "${_chunk}" NAME)
-                set(_sel24_out "${_sel24_dir}/${_chunk_name}")
-                set(_sel24_json "${_sel24_out}.json")
-                if(NOT EXISTS "${_sel24_out}" OR
-                   NOT EXISTS "${_sel24_json}" OR
-                   "${_chunk}" IS_NEWER_THAN "${_sel24_out}" OR
-                   "${WC3_SELECTION24_EXE}" IS_NEWER_THAN "${_sel24_out}")
-                    string(APPEND _sel24_job_text
-                        "10\n${WC3_SELECTION24_EXE}\n"
-                        "--struct-cap\n${_sel24_cap}\n"
+                set(_sel_out "${_sel_dir}/${_chunk_name}")
+                set(_sel_json "${_sel_out}.json")
+                if(NOT EXISTS "${_sel_out}" OR
+                   NOT EXISTS "${_sel_json}" OR
+                   "${_chunk}" IS_NEWER_THAN "${_sel_out}" OR
+                   "${WC3_SELECTION_EXE}" IS_NEWER_THAN "${_sel_out}")
+                    string(APPEND _sel_job_text
+                        "10\n${WC3_SELECTION_EXE}\n"
+                        "--struct-cap\n${_sel_cap}\n"
                         "--lift\n${_chunk}\n"
-                        "--out\n${_sel24_out}\n"
-                        "--json\n${_sel24_json}\n"
+                        "--out\n${_sel_out}\n"
+                        "--json\n${_sel_json}\n"
                         "--quiet\n")
                 endif()
-                list(APPEND _sel24_chunks "${_sel24_out}")
-                list(APPEND _wc3_sel24_jsons "${_sel24_json}")
+                list(APPEND _sel_chunks "${_sel_out}")
+                list(APPEND _wc3_sel_jsons "${_sel_json}")
             endforeach()
-            file(WRITE "${_sel24_jobs}" "${_sel24_job_text}")
-            wc3_run_jobpool("${_sel24_jobs}" "selection24 ${_name}/${_kind}")
-            set(_chunks "${_sel24_chunks}")
+            file(WRITE "${_sel_jobs}" "${_sel_job_text}")
+            wc3_run_jobpool("${_sel_jobs}" "selection ${_name}/${_kind}")
+            set(_chunks "${_sel_chunks}")
         endif()
         endif()
         list(APPEND WC3_RELIFTED_SOURCES ${_chunks})
@@ -763,9 +763,9 @@ endforeach()
 # Registry-driven cutover.  The split tree is already post-save, so the save
 # stage stays in the split loop and this branch owns only the later transforms.
 if(WC3_PATCH_PIPELINE)
-    if(WC3_SELECTION_24 AND NOT "${WC3_SELECTION_STRUCT_CAP}" STREQUAL "40")
+    if(WC3_SELECTION AND NOT "${WC3_SELECTION_STRUCT_CAP}" STREQUAL "40")
         message(FATAL_ERROR
-            "WC3_PATCH_PIPELINE has a selection24 manifest only for "
+            "WC3_PATCH_PIPELINE has a selection manifest only for "
             "WC3_SELECTION_STRUCT_CAP=40 (got "
             "'${WC3_SELECTION_STRUCT_CAP}').  Set "
             "-DWC3_PATCH_PIPELINE=OFF for the cap-24 experiment, or add a "
@@ -792,8 +792,8 @@ if(WC3_PATCH_PIPELINE)
     if(WC3_W3L_COMPAT)
         list(APPEND _patch_stage_args --patch w3l_compat)
     endif()
-    if(WC3_SELECTION_24)
-        list(APPEND _patch_stage_args --patch selection24_cap40)
+    if(WC3_SELECTION)
+        list(APPEND _patch_stage_args --patch selection)
     endif()
     list(APPEND _patch_stage_args --patch leaf_call)
     if(WC3_PARALLEL_RAYCAST)
@@ -807,7 +807,7 @@ if(WC3_PATCH_PIPELINE)
              --param "profile=${WC3_W3L_PROFILE}"
              --param "latency=${WC3_W3L_LATENCY}")
     endif()
-    if(WC3_SELECTION_24 AND WC3_SELECTION_STRUCT_CAP)
+    if(WC3_SELECTION AND WC3_SELECTION_STRUCT_CAP)
         list(APPEND _patch_param_args
              --param "struct_cap=${WC3_SELECTION_STRUCT_CAP}")
     endif()
@@ -882,28 +882,28 @@ if(WC3_W3L_COMPAT)
     endif()
 endif()
 
-if(WC3_SELECTION_24)
-    # The 24-unit selection profile is spread over several chunks, so the
+if(WC3_SELECTION)
+    # The 12/24/40 selection profile is spread over several chunks, so the
     # union of the per-chunk counts must match the fixed totals of the whole
     # game corpus.  A missing or duplicated site fails the configure.
-    set(_wc3_sel24_manifest
-        "${CMAKE_CURRENT_BINARY_DIR}/selection24_change_sets.txt")
-    set(_wc3_sel24_manifest_text "")
-    foreach(_json IN LISTS _wc3_sel24_jsons)
-        string(APPEND _wc3_sel24_manifest_text "${_json}\n")
+    set(_wc3_sel_manifest
+        "${CMAKE_CURRENT_BINARY_DIR}/selection_change_sets.txt")
+    set(_wc3_sel_manifest_text "")
+    foreach(_json IN LISTS _wc3_sel_jsons)
+        string(APPEND _wc3_sel_manifest_text "${_json}\n")
     endforeach()
-    file(WRITE "${_wc3_sel24_manifest}" "${_wc3_sel24_manifest_text}")
+    file(WRITE "${_wc3_sel_manifest}" "${_wc3_sel_manifest_text}")
     execute_process(
-        COMMAND "${WC3_SELECTION24_EXE}"
-                --verify-coverage "@${_wc3_sel24_manifest}"
+        COMMAND "${WC3_SELECTION_EXE}"
+                --verify-coverage "@${_wc3_sel_manifest}"
                 --quiet
-        RESULT_VARIABLE _wc3_sel24_cov_rc
-        OUTPUT_VARIABLE _wc3_sel24_cov_stdout
-        ERROR_VARIABLE _wc3_sel24_cov_stderr)
-    if(NOT _wc3_sel24_cov_rc EQUAL 0)
+        RESULT_VARIABLE _wc3_sel_cov_rc
+        OUTPUT_VARIABLE _wc3_sel_cov_stdout
+        ERROR_VARIABLE _wc3_sel_cov_stderr)
+    if(NOT _wc3_sel_cov_rc EQUAL 0)
         message(FATAL_ERROR
-            "selection24 coverage check failed (rc=${_wc3_sel24_cov_rc}):\n"
-            "${_wc3_sel24_cov_stdout}\n${_wc3_sel24_cov_stderr}")
+            "selection coverage check failed (rc=${_wc3_sel_cov_rc}):\n"
+            "${_wc3_sel_cov_stdout}\n${_wc3_sel_cov_stderr}")
     endif()
 endif()
 
@@ -919,7 +919,7 @@ endif()
 # full WC3_DIRECT_CALL.
 # Tag the leaf_call tree with every pass that changes the chunk text.  With a
 # fixed leaf_call/<basename> path an incremental build kept an object compiled
-# from a pre-selection24 chunk, even though the regenerated source was newer:
+# from a pre-selection chunk, even though the regenerated source was newer:
 # the linked product then had the helper library but no calls to it.  A
 # distinct directory gives the generated source and its object a distinct
 # identity instead of relying on timestamp invalidation alone.
@@ -927,14 +927,14 @@ set(_wc3_leaf_tag "plain")
 if(WC3_W3L_COMPAT)
     set(_wc3_leaf_tag "${WC3_W3L_PROFILE}-${WC3_W3L_LATENCY}")
 endif()
-if(WC3_SELECTION_24)
-    if(NOT _sel24_cap)
-        set(_sel24_cap "${WC3_SELECTION_STRUCT_CAP}")
+if(WC3_SELECTION)
+    if(NOT _sel_cap)
+        set(_sel_cap "${WC3_SELECTION_STRUCT_CAP}")
     endif()
-    if(NOT _sel24_cap)
-        set(_sel24_cap "40")
+    if(NOT _sel_cap)
+        set(_sel_cap "40")
     endif()
-    string(APPEND _wc3_leaf_tag "-sel24-cap${_sel24_cap}")
+    string(APPEND _wc3_leaf_tag "-layout${_sel_cap}")
 endif()
 set(_wc3_leaf_dir "${CMAKE_CURRENT_BINARY_DIR}/leaf_call/${_wc3_leaf_tag}")
 set(_wc3_leaf_list "${CMAKE_CURRENT_BINARY_DIR}/leaf_call_inputs.txt")
@@ -1208,15 +1208,15 @@ if(WC3_W3L_COMPAT)
         "SHELL:-include ${WC3_ROOT}/runtime/compat/w3l_compat.h")
 endif()
 
-if(WC3_SELECTION_24)
-    # The 24-unit selection pass emits direct calls to the native helpers in
+if(WC3_SELECTION)
+    # The 12/24/40 selection pass emits direct calls to the native helpers in
     # runtime/features.  Force-include the declarations instead of editing the
     # include block of every chunk; the header exists only in a
-    # selection24 build.
+    # selection build.
     target_include_directories(wc3_corpus_relifted PRIVATE
         "${WC3_ROOT}/runtime/features")
     target_compile_options(wc3_corpus_relifted PRIVATE
-        "SHELL:-include ${WC3_ROOT}/runtime/features/selection24.h")
+        "SHELL:-include ${WC3_ROOT}/runtime/features/selection.h")
 endif()
 
 if(_wc3_check_commands)
