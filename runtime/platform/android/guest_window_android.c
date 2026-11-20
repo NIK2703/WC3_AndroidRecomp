@@ -15,6 +15,7 @@
 #include "guest_window.h"
 #include "guest_host.h"
 #include "wc3_debug.h"
+#include "wc3_lowmem.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -54,6 +55,12 @@ static GwRange g_ranges[GW_MAX_RANGES];
 static GwRange g_scratch[GW_MAX_RANGES];
 static unsigned g_range_count;
 static int g_coarse_page_warned;
+/* Bump allocator for VK_EXT_map_memory_placed ranges.  Protected by g_lock;
+ * the DXVK shim calls wc3_guest_window_place() during device memory init. */
+static uintptr_t g_lowmem_next = WC3_LOWMEM_BEGIN;
+#if WC3_DEBUG && WC3_DEBUG_MEMORY
+static unsigned long long g_place_calls, g_place_ok, g_place_fail;
+#endif
 
 static int gw_contains(uint32_t base, uint32_t size)
 {
@@ -390,6 +397,73 @@ int wc3_guest_window_protect(uint32_t gva, uint32_t size, int host_prot)
     return rc;
 }
 
+static uintptr_t lowmem_align_up(uintptr_t value, uintptr_t alignment)
+{
+    return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
+int wc3_guest_window_place(uint64_t size, uint64_t alignment, uint32_t *gva)
+{
+    if (!gva) return -1;
+    *gva = 0;
+#if WC3_DEBUG && WC3_DEBUG_MEMORY
+    g_place_calls++;
+#endif
+    if (wc3_guest_window_init() != 0 || !g_active) return -1;
+    if (!size || size > (uint64_t)(WC3_LOWMEM_END - WC3_LOWMEM_BEGIN))
+        return -1;
+    if (!alignment) alignment = 4096u;
+    if (alignment < 4096u || (alignment & (alignment - 1u)) != 0)
+        return -1;
+    /* The host mapping is page granular; never place a partial host page. */
+    uintptr_t align = (uintptr_t)alignment;
+    if (g_page > align) align = g_page;
+
+    /* The driver requires the placed size to be a multiple of its alignment. */
+    uint64_t span64 = (size + align - 1u) & ~(align - 1u);
+    if (span64 > (uint64_t)(WC3_LOWMEM_END - WC3_LOWMEM_BEGIN))
+        return -1;
+    if (span64 > 0xFFFFFFFFull) return -1;
+    uint32_t span = (uint32_t)span64;
+
+    pthread_mutex_lock(&g_lock);
+    for (unsigned pass = 0; pass < 2; pass++) {
+        uintptr_t addr = (pass == 0)
+            ? lowmem_align_up(g_lowmem_next, align)
+            : lowmem_align_up((uintptr_t)WC3_LOWMEM_BEGIN, align);
+        if (addr < WC3_LOWMEM_BEGIN) addr = WC3_LOWMEM_BEGIN;
+        while (addr + span <= (uintptr_t)WC3_LOWMEM_END) {
+            if (g_range_count >= GW_MAX_RANGES) break;
+            if (gw_reserve_locked((uint32_t)addr, span) == 0) {
+                /* The window is one long mapping.  Remove the selected range
+                 * so the driver's MAP_FIXED mapping can take its place; the
+                 * registry entry keeps the guest allocator out of it. */
+                void *host = (void *)(g_guest_host_base + addr);
+                if (munmap(host, span) != 0) {
+                    gw_remove_locked((uint32_t)addr,
+                                     (uint32_t)(addr + span));
+                    pthread_mutex_unlock(&g_lock);
+                    return -1;
+                }
+                g_lowmem_next = addr + span;
+                pthread_mutex_unlock(&g_lock);
+                *gva = (uint32_t)addr;
+#if WC3_DEBUG && WC3_DEBUG_MEMORY
+                g_place_ok++;
+#endif
+                return 0;
+            }
+            addr += align;
+        }
+    }
+    g_lowmem_next = WC3_LOWMEM_BEGIN;
+    pthread_mutex_unlock(&g_lock);
+#if WC3_DEBUG && WC3_DEBUG_MEMORY
+    g_place_fail++;
+#endif
+    return -1;
+}
+
 void wc3_guest_window_dump(void)
 {
     if (wc3_guest_window_init() != 0) {
@@ -403,6 +477,11 @@ void wc3_guest_window_dump(void)
     pthread_mutex_lock(&g_lock);
     fprintf(stderr, "[mem] guest window base=%p page=%zu ranges=%u\n",
             (void *)g_guest_host_base, g_page, g_range_count);
+#if WC3_DEBUG && WC3_DEBUG_MEMORY
+    fprintf(stderr,
+            "[mem] guest window place calls=%llu ok=%llu fail=%llu\n",
+            g_place_calls, g_place_ok, g_place_fail);
+#endif
     unsigned n = g_range_count < 48u ? g_range_count : 48u;
     for (unsigned i = 0; i < n; i++)
         fprintf(stderr, "[mem]   guest %08X+%08X -> host %p prot=%d\n",

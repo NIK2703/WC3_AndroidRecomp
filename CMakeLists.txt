@@ -726,7 +726,8 @@ target_include_directories(wc3_platform PUBLIC
     "${WC3_ROOT}/runtime/ipc"
     "${WC3_ROOT}/runtime/diag"
     "${WC3_ROOT}/runtime/platform"
-    "${WC3_ROOT}/runtime/platform/android")
+    "${WC3_ROOT}/runtime/platform/android"
+    "${WC3_ROOT}/third_party/dxvk/shim")
 target_compile_definitions(wc3_platform PUBLIC WC3_DEBUG=${WC3_DEBUG_DEFINE})
 target_compile_definitions(wc3_platform PRIVATE
     "WC3_BUILD_VARIANT=\"${WC3_BUILD_VARIANT}\"")

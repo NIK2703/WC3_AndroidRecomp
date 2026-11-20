@@ -30,6 +30,14 @@ size_t wc3_guest_window_host_page_size(void);
 void *wc3_guest_window_host_ptr(uint32_t gva);
 int wc3_guest_window_contains(uint32_t gva, uint32_t size);
 
+/* Reserve a guest VA range in the low window [WC3_LOWMEM_BEGIN,
+ * WC3_LOWMEM_END) for a Vulkan placed mapping.  The range is marked in the
+ * window registry and its host pages are unmapped, so the driver can map
+ * there with VK_EXT_map_memory_placed.  Returns 0 and stores the guest VA on
+ * success, -1 when the window is inactive or has no aligned gap.  This is the
+ * window-mode counterpart of the shim's low host probe. */
+int wc3_guest_window_place(uint64_t size, uint64_t alignment, uint32_t *gva);
+
 /* Reserve/commit guest ranges inside the window.  In identity mode these
  * return -1; callers use the historical mmap path there. */
 int wc3_guest_window_reserve(uint32_t gva, uint32_t size);

@@ -1817,9 +1817,34 @@ uintptr_t lowMemAlign(uintptr_t value, uintptr_t alignment) {
 
 } // namespace
 
+/* Runtime guest window (runtime/platform/guest_window.h).  When the 4 GiB
+ * window is active, a low host address is unreachable by the 32-bit guest:
+ * host = window_base + gva.  The placed mapping must land inside the window,
+ * so ask the runtime for a guest VA and return its host address.  In identity
+ * mode the historical low host probe below stays in use. */
+extern "C" int wc3_guest_window_active(void);
+extern "C" uintptr_t wc3_guest_window_base(void);
+extern "C" int wc3_guest_window_place(uint64_t size, uint64_t alignment,
+                                      uint32_t *gva);
+
 extern "C" uintptr_t wc3_lowmem_acquire(uint64_t size, uint64_t alignment) {
     if (!size || size > uint64_t(kLowMemEnd - kLowMemBegin))
         return 0;
+
+    if (wc3_guest_window_active()) {
+        uint32_t gva = 0;
+        int placed = wc3_guest_window_place(size, alignment, &gva) == 0;
+        uintptr_t addr = placed
+            ? (uintptr_t)wc3_guest_window_base() + gva : 0;
+#if WC3_DEBUG && WC3_DEBUG_DXVK_DEBUG
+        DXVK_SHIM_TRACE("lowmem acquire size=%llu align=%llu placed=%d "
+                        "gva=%u addr=%llu\n",
+                        (unsigned long long)size,
+                        (unsigned long long)alignment, placed, gva,
+                        (unsigned long long)addr);
+#endif
+        return addr;
+    }
 
     if (!alignment)
         alignment = 4096u;

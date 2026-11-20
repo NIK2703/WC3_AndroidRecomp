@@ -82,6 +82,9 @@ struct ThinLockStats {
     unsigned long long dims_calls, dims_hits;
     unsigned long long staging_grows;
     unsigned long long low_register_fail;
+    unsigned long long reject_window;
+    unsigned long long reject_high_ptr;
+    unsigned long long reject_range;
 };
 static ThinLockStats g_lk;
 
@@ -94,6 +97,7 @@ static void thin_lock_stats_dump(const char *why)
             "[thin-lock] %s buf=%llu/%llu rect=%llu/%llu copyin=%llu "
             "copyout=%llu direct=%llu discard=%llu wo=%llu wo_skip=%llu "
             "getdesc=%llu/%llu dims=%llu/%llu staging_grow=%llu low_fail=%llu "
+            "reject_window=%llu reject_high=%llu reject_range=%llu "
             "bouter=%llu router=%llu rnested=%llu bshadow=%llu rfallback=%llu "
             "bcopyin=%llu bcopyout=%llu rcopyin=%llu rcopyout=%llu "
             "bdiscard=%llu rdiscard=%llu breadonly=%llu rreadonly=%llu\n",
@@ -106,6 +110,7 @@ static void thin_lock_stats_dump(const char *why)
             g_lk.getdesc_calls, g_lk.getdesc_hits,
             g_lk.dims_calls, g_lk.dims_hits,
             g_lk.staging_grows, g_lk.low_register_fail,
+            g_lk.reject_window, g_lk.reject_high_ptr, g_lk.reject_range,
             g_lk.buffer_outer_locks, g_lk.rect_outer_locks,
             g_lk.rect_nested_locks,
             g_lk.buffer_shadow_locks, g_lk.rect_fallback_locks,
@@ -232,6 +237,19 @@ static int low_ready(void)
 {
     if (g_state) return g_state > 0;
     g_state = -1;
+
+#if WC3_DEBUG && WC3_DEBUG_PERF
+    {
+        static int window_logged;
+        if (!window_logged) {
+            window_logged = 1;
+            fprintf(stderr,
+                    "[thin-lock] guest window active=%d aligned=%d base=%p\n",
+                    wc3_guest_window_active(), wc3_guest_window_aligned(),
+                    (void *)wc3_guest_window_base());
+        }
+    }
+#endif
 
     /* In window mode the guest VA is not a host address.  Reserve a range of
      * guest address space and use the window mapping for every host access;
@@ -389,24 +407,48 @@ static void low_free(void *p, size_t n)
 static int low_buffer_usable(void *ptr, uint32_t off, uint32_t size,
                              uint32_t total)
 {
-    /* A DXVK mapping below 4 GiB is a host address, not a guest VA.  The guest
-     * reaches its memory through window_base + gva, so the native pointer can
-     * only be used directly when it already lies inside that window. */
-    if (wc3_guest_window_active() &&
-        (!wc3_guest_window_aligned() || !guest_host_contains(ptr)))
+    /* A DXVK mapping is a host address.  In window mode the guest reaches it
+     * as window_base + gva, so the native pointer is usable only inside the
+     * window and the validator must be told the guest VA, not the host one.
+     * In identity mode the host address is the guest VA. */
+    uint32_t gva;
+    if (wc3_guest_window_active()) {
+        if (!wc3_guest_window_aligned() || !guest_host_contains(ptr)) {
+            LK_INC(reject_window);
+            return 0;
+        }
+        gva = guest_host_va(ptr);
+        if (gva == 0xFFFFFFFFu) {
+            LK_INC(reject_window);
+            return 0;
+        }
+    } else {
+        uintptr_t a = (uintptr_t)ptr;
+        if (!a || a >= 0x100000000ull) {
+            LK_INC(reject_high_ptr);
+            return 0;
+        }
+        gva = (uint32_t)a;
+    }
+    if ((uint64_t)gva + size > 0x100000000ull) {
+        LK_INC(reject_range);
         return 0;
-    uintptr_t a = (uintptr_t)ptr;
-    if (!a || a >= 0x100000000ull) return 0;
-    if ((uint64_t)a + size > 0x100000000ull) return 0;
-    if (hle_android_guest_ok((uint32_t)a, size)) return 1;
-    if (a < off || !total) return 0;
-    uintptr_t base = a - off;
-    if ((uint64_t)base + total > 0x100000000ull) return 0;
-    if (!guest_range_register((uint32_t)base, total)) {
+    }
+    if (hle_android_guest_ok(gva, size)) return 1;
+    if (gva < off || !total) {
+        LK_INC(reject_range);
+        return 0;
+    }
+    uint32_t base = gva - off;
+    if ((uint64_t)base + total > 0x100000000ull) {
+        LK_INC(reject_range);
+        return 0;
+    }
+    if (!guest_range_register(base, total)) {
         LK_INC(low_register_fail);
         return 0;
     }
-    return hle_android_guest_ok((uint32_t)a, size);
+    return hle_android_guest_ok(gva, size);
 }
 
 /* ------------------------------------------------------------------ */
