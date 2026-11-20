@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "id": "selection",
-  "rev": 50,
+  "rev": 51,
   "description": "12/24/40 selection profile over the full relifted corpus; the engine's --verify-coverage union check is the single site-count authority.",
   "engine": "selection",
   "kind": "transform",

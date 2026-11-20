@@ -1,15 +1,5 @@
-# Final debug package: boot log, crash breadcrumbs, the 24-unit
-# point-order/formation trace and the vertex-dispatch/perf counters.  Read by
-# tools/android/build_app.ps1 at build start.
-BOOT
-CRASH
+# Debug build tags.  Read and validated by tools/android/build_app.sh and
+# build_app.ps1.  Only the selection-expansion trace and the parallel-execution
+# perf counters are enabled; release enables none.
 SELECTION
 PERF
-# Vulkan/D3D9 startup diagnostics for the Mali vkCreateDevice failure.
-# DXVK_DEBUG turns on the Vulkan boundary trace and DXVK's debug log level;
-# GPU_DRIVERS records which loader/ICD was selected; GRAPHICS enables the
-# project-owned thin D3D9 bridge logs (CreateDevice stage/HRESULT and native
-# caps).  Remove these three lines once the startup path is understood.
-DXVK_DEBUG
-GPU_DRIVERS
-GRAPHICS

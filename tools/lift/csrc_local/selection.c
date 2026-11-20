@@ -27,7 +27,7 @@
 #include "sha256.h"
 
 #define PASS "selection"
-#define PASS_REV 50
+#define PASS_REV 51
 
 /* The pass always emits the product 40-entry layout.  The site table is
  * authored against the 24-reference displacements and mapped once below. */
@@ -72,6 +72,7 @@ typedef enum {
     K_TRACE_EVINIT,
     K_TRACE_ORDERDROP,
     K_ORDER_OBJ_CONTAINER,
+    K_ORDER_MSG10,
     K_TRACE_ORDER_SLOTS,
     K_ORDER_GROUP_FULL,
     K_TRACE_EVRELEASE,
@@ -122,6 +123,7 @@ static const char *const kind_name[K_COUNT] = {
     "trace_evinit",
     "trace_orderdrop",
     "order_obj_container",
+    "order_msg10",
     "trace_order_slots",
     "order_group_full",
     "trace_evrelease",
@@ -172,11 +174,12 @@ static const unsigned expected_total[K_COUNT] = {
     1, /* trace_evinit */
     1, /* trace_orderdrop */
     35, /* order_obj_container */
+    5, /* order_msg10 */
     3, /* trace_order_slots */
     2, /* order_group_full */
     1, /* trace_evrelease */
     1, /* slot_unlink */
-    207, /* layout */
+    209, /* layout */
     9, /* trace_formation */
     6, /* order_cursor */
 };
@@ -221,11 +224,12 @@ static const unsigned expected_seed[K_COUNT] = {
     0, /* trace_evinit */
     0, /* trace_orderdrop */
     4, /* order_obj_container */
+    1, /* order_msg10 */
     3, /* trace_order_slots */
     0, /* order_group_full */
     0, /* trace_evrelease */
     0, /* slot_unlink */
-    46, /* layout */
+    48, /* layout */
     2, /* trace_formation */
     2, /* order_cursor */
 };
@@ -272,6 +276,7 @@ static const unsigned expected_closed[K_COUNT] = {
     1, /* trace_evinit */
     1, /* trace_orderdrop */
     31, /* order_obj_container */
+    4, /* order_msg10 */
     0, /* trace_order_slots */
     2, /* order_group_full */
     1, /* trace_evrelease */
@@ -624,6 +629,43 @@ static void sites_add(Sites *s, Kind k, uint32_t va, const char *action,
 #define VA_ORDER_CB_FIELD04 0x6F6BA78Cu
 #define VA_ORDER_CB_B_PTR   0x6F6BAA00u
 #define VA_ORDER_CB_B_FLD0C 0x6F6BAA73u
+
+/*
+ * Message 0x10 (stop/hold) order frame (PASS_REV 51).
+ *
+ * L_6F6B95E0 fills a 12-entry 0x1C-byte stack array with one record per
+ * selected unit.  The array base is [ebp-0x160] and the count is [ebp-0x164];
+ * the 13th record starts at [ebp-0x10], the stack cookie.  The callback
+ * 0x6F6B9810 increments the count without a bound, so a 13-unit selection
+ * overwrites the cookie, SEH, saved EBP and return address before the epilogue
+ * calls __security_check_cookie.
+ *
+ * The whole live block below the old array is moved down by 0x310:
+ *
+ *   old -0x184 .. -0x160  ->  new -0x494 .. -0x470
+ *
+ * The array becomes 40 * 0x1C = 0x460 bytes and ends exactly at [ebp-0x10],
+ * where the cookie lives.  The frame grows from 0x17C to 0x48C.  The callback
+ * works through the args pointer, so only the caller-side offsets and the
+ * qsort/loop base move.  The request at -0x180, the flag at -0x17C and the
+ * temporary args/count at -0x174..-0x164 move with the block.
+ *
+ * The continuation blocks L_6F6B96D3, L_6F6B96E1, L_6F6B9752 and L_6F6B9757
+ * share the same ebp frame, so the same range shift is active for all of
+ * them.  The two exact sites are the frame size and the memset size; the
+ * range shift rewrites every other ebp displacement and its comment.
+ */
+#define VA_ORDER_MSG10_FRAME 0x6F6B95F1u
+#define VA_ORDER_MSG10_MEMSET 0x6F6B9633u
+#define ORDER_MSG10_LO       0x6F6B95E0u
+#define ORDER_MSG10_HI       0x6F6B9758u
+#define ORDER_MSG10_OLD_LO   0xFFFFFE7Cu /* [ebp - 0x184] */
+#define ORDER_MSG10_OLD_HI   0xFFFFFEA0u /* [ebp - 0x160] */
+#define ORDER_MSG10_DELTA    0x310u
+#define ORDER_MSG10_OLD_FRAME 0x17Cu
+#define ORDER_MSG10_NEW_FRAME 0x48Cu
+#define ORDER_MSG10_OLD_SIZE 0x150u
+#define ORDER_MSG10_NEW_SIZE 0x460u
 
 /*
  * Point-order container expansion (rev 31).
@@ -2391,6 +2433,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
     int line = 1;
     ShiftSpan span;
     ShiftSpan span40;
+    ShiftSpan span10;
     uint32_t cur_block = 0;
     int block_site = 0;
 
@@ -2402,6 +2445,10 @@ static int process_buffer(const char *data, size_t n, const char *profile,
     span40.lo = 0;
     span40.hi = 0;
     span40.delta = ORDER_CONTAINER_40_DELTA;
+    span10.active = 0;
+    span10.lo = 0;
+    span10.hi = 0;
+    span10.delta = ORDER_MSG10_DELTA;
 
     if (err && errsz)
         err[0] = '\0';
@@ -2420,6 +2467,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             block_site = 0;
             span.active = 0;
             span40.active = 0;
+            span10.active = 0;
             if (block_va >= ORDER_HANDLER_A_LO && block_va < ORDER_HANDLER_A_HI) {
                 span.active = 1;
                 span.lo = ORDER_CONTAINER_A_LO;
@@ -2435,6 +2483,11 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 span40.active = 1;
                 span40.lo = ORDER_CONTAINER_B24_LO;
                 span40.hi = ORDER_CONTAINER_B24_HI;
+            } else if (block_va >= ORDER_MSG10_LO &&
+                       block_va < ORDER_MSG10_HI) {
+                span10.active = 1;
+                span10.lo = ORDER_MSG10_OLD_LO;
+                span10.hi = ORDER_MSG10_OLD_HI;
             }
         } else if (le - p >= 7 && memcmp(p, "void L_", 7) == 0) {
             /* A definition the lift emitted with another signature: do not
@@ -2443,6 +2496,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             block_site = 0;
             span.active = 0;
             span40.active = 0;
+            span10.active = 0;
         }
 
         if (has_va) {
@@ -2821,6 +2875,28 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                  "c->eax);",
                                  NULL, NULL,
                                  K_ORDER_CALLBACK_B, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_MSG10_FRAME:
+                if (handle_subst(out, p, le,
+                                 "c->esp = flags_sub(c, c->esp, "
+                                 "0x17Cu, 4);",
+                                 "c->esp = flags_sub(c, c->esp, "
+                                 "0x48Cu, 4);",
+                                 "sub esp, 0x17c */",
+                                 "sub esp, 0x48c */",
+                                 K_LAYOUT, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_MSG10_MEMSET:
+                if (handle_subst(out, p, le,
+                                 "push32(c, 0x150u);",
+                                 "push32(c, 0x460u);",
+                                 "push 0x150 */",
+                                 "push 0x460 */",
+                                 K_LAYOUT, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
                     return -1;
                 break;
@@ -3270,21 +3346,24 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             }
         }
 
-        if (!handled && (span.active || span40.active)) {
+        if (!handled && (span.active || span40.active || span10.active)) {
             Buf stage1 = {0};
             Buf stage2 = {0};
+            Buf stage3 = {0};
             const char *src = p;
             size_t srcn = (size_t)(le - p);
             int replaced = 0;
             int hit = 0;
             int r = 0;
             int a = 0;
+            Kind kind = span10.active ? K_ORDER_MSG10 : K_ORDER_OBJ_CONTAINER;
 
             if (span.active) {
                 if (shift_container_line(src, src + srcn, &span, &stage1,
                                          &r, &a) != 0) {
                     buf_free(&stage1);
                     buf_free(&stage2);
+                    buf_free(&stage3);
                     return -1;
                 }
                 src = stage1.p;
@@ -3297,10 +3376,24 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                          &r, &a) != 0) {
                     buf_free(&stage1);
                     buf_free(&stage2);
+                    buf_free(&stage3);
                     return -1;
                 }
                 src = stage2.p;
                 srcn = stage2.n;
+                hit |= (r || a);
+                replaced |= r;
+            }
+            if (span10.active) {
+                if (shift_container_line(src, src + srcn, &span10, &stage3,
+                                         &r, &a) != 0) {
+                    buf_free(&stage1);
+                    buf_free(&stage2);
+                    buf_free(&stage3);
+                    return -1;
+                }
+                src = stage3.p;
+                srcn = stage3.n;
                 hit |= (r || a);
                 replaced |= r;
             }
@@ -3311,8 +3404,8 @@ static int process_buffer(const char *data, size_t n, const char *profile,
 
                     hash_hex(p, (size_t)(le - p), before);
                     hash_hex(src, srcn, after);
-                    counts->n[K_ORDER_OBJ_CONTAINER]++;
-                    sites_add(sites, K_ORDER_OBJ_CONTAINER, cur_block,
+                    counts->n[kind]++;
+                    sites_add(sites, kind, cur_block,
                               replaced ? "replace" : "already", line,
                               before, after);
                     block_site = 1;
@@ -3320,12 +3413,14 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 if (buf_append(out, src, srcn) != 0) {
                     buf_free(&stage1);
                     buf_free(&stage2);
+                    buf_free(&stage3);
                     return -1;
                 }
                 handled = 1;
             }
             buf_free(&stage1);
             buf_free(&stage2);
+            buf_free(&stage3);
         }
 
         if (!handled && buf_append(out, p, (size_t)(le - p)) != 0)
@@ -3586,7 +3681,7 @@ static int write_json(const char *path, const char *input, const char *output,
         write_json_string(f, profile);
     else
         fputs("null", f);
-    fputs("  \"counts\": {\n", f);
+    fputs(",\n  \"counts\": {\n", f);
     for (i = 0; i < K_COUNT; ++i) {
         fputs("    \"", f);
         fputs(kind_name[i], f);
@@ -4012,6 +4107,7 @@ static int self_test(char *err, size_t errsz)
     exp_fix[K_ORDER_GROUP_FULL] = 1;
     exp_fix[K_TRACE_EVRELEASE] = 1;
     exp_fix[K_SLOT_UNLINK] = 1;
+    exp_fix[K_ORDER_MSG10] = 0;
     exp_fix[K_LAYOUT] = 9;
     /* The fixture deliberately does not carry the new point-order anchors:
      * they are covered by the whole-corpus totals and by the real lift. */
@@ -4220,10 +4316,10 @@ fail40:
             "\"trace_order_loop_c\":2,\"trace_order_apply\":2,\"trace_order_exec\":2,"
             "\"trace_remove\":4,\"trace_evbirth\":1,\"trace_apply\":2,"
             "\"trace_tasknull\":1,\"trace_evinit\":1,\"trace_orderdrop\":1,"
-            "\"order_obj_container\":35,\"trace_order_slots\":3,\"order_group_full\":2,"
-            "\"trace_evrelease\":1,\"slot_unlink\":1,\"layout\":207,\"trace_formation\":9,"
-            "\"order_cursor\":6},"
-            "\"total\":348};";
+            "\"order_obj_container\":35,\"order_msg10\":5,\"trace_order_slots\":3,"
+            "\"order_group_full\":2,\"trace_evrelease\":1,\"slot_unlink\":1,"
+            "\"layout\":209,\"trace_formation\":9,\"order_cursor\":6},"
+            "\"total\":353};";
         Counts c3;
 
         if (json_counts_parse(json, &c3, err2, sizeof(err2)) != 0 ||
