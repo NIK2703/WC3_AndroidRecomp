@@ -461,7 +461,16 @@ class LaunchSettingsActivity : AppCompatActivity() {
             savedIds
         }
 
-        for (core in availableCpuCores) {
+        /* Two rows, not two columns: all cores fill the first row and spill
+         * into the second one.  The column count is derived from the core
+         * count so the grid stays two rows on every device. */
+        val columns = (availableCpuCores.size + 1) / 2
+        if (columns > 0) {
+            parallelCpuGrid.columnCount = columns
+            parallelCpuGrid.rowCount = minOf(2, availableCpuCores.size)
+        }
+
+        for ((index, core) in availableCpuCores.withIndex()) {
             val cell = TextView(this).apply {
                 tag = core.id
                 text = core.id.toString()
@@ -483,11 +492,19 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 isFocusable = true
                 setOnClickListener { toggleCpuCore(this@apply) }
             }
+            val column = index % columns
+            val row = index / columns
+            /* A column with one core must carry the weight of the two-core
+             * columns so every cell keeps the same width on an odd count. */
+            val columnCells = if (column + columns < availableCpuCores.size) 2 else 1
             val params = GridLayout.LayoutParams().apply {
                 width = 0
                 height = dp(48)
-                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
-                rowSpec = GridLayout.spec(GridLayout.UNDEFINED)
+                columnSpec = GridLayout.spec(
+                    column,
+                    if (columnCells == 1) 2f else 1f
+                )
+                rowSpec = GridLayout.spec(row)
                 setMargins(dp(4), dp(4), dp(4), dp(4))
             }
             parallelCpuGrid.addView(cell, params)

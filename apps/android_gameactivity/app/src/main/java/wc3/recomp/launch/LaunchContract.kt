@@ -88,9 +88,10 @@ object LaunchContract {
     /* Half-resolution grid presentation: one pixel of every 2x2 screen cell
      * stays untouched and the other three are dimmed by the darken percent.
      * Off by default; the native grid layer is created only when enabled, so
-     * a disabled build composites the game surface exactly as before. */
+     * a disabled build composites the game surface exactly as before.  The
+     * product default dims the three grid pixels to one third (33 percent). */
     const val DEFAULT_GRID_ENABLED = false
-    const val DEFAULT_GRID_DARKEN_PERCENT = 50
+    const val DEFAULT_GRID_DARKEN_PERCENT = 33
     const val MIN_GRID_DARKEN_PERCENT = 0
     const val MAX_GRID_DARKEN_PERCENT = 100
 
