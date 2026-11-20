@@ -574,6 +574,17 @@ static int is_control_name(const char *name)
     return 0;
 }
 
+static int is_exact_flag_helper(const char *name)
+{
+    return strcmp(name, "flags_add_mask") == 0 ||
+           strcmp(name, "flags_sub_mask") == 0 ||
+           strcmp(name, "flags_adc_mask") == 0 ||
+           strcmp(name, "flags_sbb_mask") == 0 ||
+           strcmp(name, "flags_logicz_mask") == 0 ||
+           strcmp(name, "flags_incs_mask") == 0 ||
+           strcmp(name, "flags_decs_mask") == 0;
+}
+
 static int is_flag_helper(const char *name)
 {
     return strcmp(name, "flags_add") == 0 ||
@@ -584,11 +595,20 @@ static int is_flag_helper(const char *name)
            strcmp(name, "flags_logic32") == 0 ||
            strcmp(name, "flags_logic8") == 0 ||
            strcmp(name, "flags_incs") == 0 ||
-           strcmp(name, "flags_decs") == 0;
+           strcmp(name, "flags_decs") == 0 ||
+           is_exact_flag_helper(name);
 }
 
 static unsigned helper_reads(const char *name)
 {
+    /* Exact INC/DEC helpers mask CF out and never load c->cf.  ADC/SBB
+     * always read the incoming carry, even when they do not write it back. */
+    if (is_exact_flag_helper(name)) {
+        if (strcmp(name, "flags_adc_mask") == 0 ||
+            strcmp(name, "flags_sbb_mask") == 0)
+            return F_CF;
+        return 0;
+    }
     if (strcmp(name, "flags_adc") == 0 || strcmp(name, "flags_sbb") == 0 ||
         strcmp(name, "flags_incs") == 0 || strcmp(name, "flags_decs") == 0)
         return F_CF;
@@ -689,6 +709,52 @@ static int parse_size(const char *s, size_t n, int *out)
     return 1;
 }
 
+static int parse_flag_mask(const char *s, unsigned *out)
+{
+    char *t = trim_dup(s, strlen(s));
+    size_t l = strlen(t);
+    char *end = NULL;
+    unsigned long v;
+
+    while (l && (t[l - 1] == 'u' || t[l - 1] == 'U' ||
+                 t[l - 1] == 'l' || t[l - 1] == 'L'))
+        t[--l] = 0;
+    if (!l) {
+        free(t);
+        return 0;
+    }
+    v = strtoul(t, &end, 0);
+    if (end == t || !end || *end || v > ALL_FLAGS) {
+        free(t);
+        return 0;
+    }
+    free(t);
+    *out = (unsigned)v;
+    return 1;
+}
+
+static int exact_mask_arg(const Call *call, unsigned *mask)
+{
+    size_t idx;
+    const char *name = call->name;
+
+    if (strcmp(name, "flags_add_mask") == 0 ||
+        strcmp(name, "flags_sub_mask") == 0 ||
+        strcmp(name, "flags_adc_mask") == 0 ||
+        strcmp(name, "flags_sbb_mask") == 0) {
+        if (call->nargs != 5) return 0;
+        idx = 4;
+    } else if (strcmp(name, "flags_logicz_mask") == 0 ||
+               strcmp(name, "flags_incs_mask") == 0 ||
+               strcmp(name, "flags_decs_mask") == 0) {
+        if (call->nargs != 4) return 0;
+        idx = 3;
+    } else {
+        return 0;
+    }
+    return parse_flag_mask(call->args[idx], mask);
+}
+
 static char *mask_expr(const char *expr, int size)
 {
     Buf b = {0};
@@ -706,19 +772,30 @@ static char *mask_expr(const char *expr, int size)
 static int make_replacement(const Call *call, char **out, unsigned *flags)
 {
     const char *name = call->name;
+    int exact = is_exact_flag_helper(name);
+    unsigned emask = 0;
     *out = NULL;
     *flags = 0;
-    if (strcmp(name, "flags_add") == 0 || strcmp(name, "flags_sub") == 0 ||
-        strcmp(name, "flags_adc") == 0 || strcmp(name, "flags_sbb") == 0) {
+    if (exact && !exact_mask_arg(call, &emask)) return 0;
+    if ((!exact && (strcmp(name, "flags_add") == 0 ||
+                    strcmp(name, "flags_sub") == 0 ||
+                    strcmp(name, "flags_adc") == 0 ||
+                    strcmp(name, "flags_sbb") == 0)) ||
+        (exact && (strcmp(name, "flags_add_mask") == 0 ||
+                   strcmp(name, "flags_sub_mask") == 0 ||
+                   strcmp(name, "flags_adc_mask") == 0 ||
+                   strcmp(name, "flags_sbb_mask") == 0))) {
         int sz;
         Buf expr = {0};
-        if (call->nargs != 4) return 0;
+        if (call->nargs != (exact ? 5u : 4u)) return 0;
         if (!parse_size(call->args[3], strlen(call->args[3]), &sz)) return 0;
-        if (strcmp(name, "flags_add") == 0)
+        if (strcmp(name, "flags_add") == 0 || strcmp(name, "flags_add_mask") == 0)
             buf_printf(&expr, "(%s) + (%s)", call->args[1], call->args[2]);
-        else if (strcmp(name, "flags_sub") == 0)
+        else if (strcmp(name, "flags_sub") == 0 ||
+                 strcmp(name, "flags_sub_mask") == 0)
             buf_printf(&expr, "(%s) - (%s)", call->args[1], call->args[2]);
-        else if (strcmp(name, "flags_adc") == 0)
+        else if (strcmp(name, "flags_adc") == 0 ||
+                 strcmp(name, "flags_adc_mask") == 0)
             buf_printf(&expr, "(%s) + (%s) + (c->cf & 1u)",
                        call->args[1], call->args[2]);
         else
@@ -726,30 +803,35 @@ static int make_replacement(const Call *call, char **out, unsigned *flags)
                        call->args[1], call->args[2]);
         *out = mask_expr(expr.p, sz);
         free(expr.p);
-        *flags = ALL_FLAGS;
+        *flags = exact ? (emask & ALL_FLAGS) : ALL_FLAGS;
         return 1;
     }
-    if (strcmp(name, "flags_logicz") == 0) {
+    if ((strcmp(name, "flags_logicz") == 0 && !exact) ||
+        (strcmp(name, "flags_logicz_mask") == 0 && exact)) {
         int sz;
         Buf expr = {0};
-        if (call->nargs != 3) return 0;
+        if (call->nargs != (exact ? 4u : 3u)) return 0;
         if (!parse_size(call->args[2], strlen(call->args[2]), &sz)) return 0;
         buf_printf(&expr, "(%s)", call->args[1]);
         *out = mask_expr(expr.p, sz);
         free(expr.p);
-        *flags = LOGIC_FLAGS;
+        *flags = exact ? (emask & LOGIC_FLAGS) : LOGIC_FLAGS;
         return 1;
     }
-    if (strcmp(name, "flags_incs") == 0 || strcmp(name, "flags_decs") == 0) {
+    if ((!exact && (strcmp(name, "flags_incs") == 0 ||
+                    strcmp(name, "flags_decs") == 0)) ||
+        (exact && (strcmp(name, "flags_incs_mask") == 0 ||
+                   strcmp(name, "flags_decs_mask") == 0))) {
         int sz;
         Buf expr = {0};
-        if (call->nargs != 3) return 0;
+        if (call->nargs != (exact ? 4u : 3u)) return 0;
         if (!parse_size(call->args[2], strlen(call->args[2]), &sz)) return 0;
         buf_printf(&expr, "(%s) %s 1u", call->args[1],
-                   strcmp(name, "flags_incs") == 0 ? "+" : "-");
+                   strcmp(name, "flags_incs") == 0 ||
+                   strcmp(name, "flags_incs_mask") == 0 ? "+" : "-");
         *out = mask_expr(expr.p, sz);
         free(expr.p);
-        *flags = INC_FLAGS;
+        *flags = exact ? (emask & INC_FLAGS) : INC_FLAGS;
         return 1;
     }
     if (strcmp(name, "flags_logic32") == 0 || strcmp(name, "flags_logic8") == 0) {
@@ -1127,7 +1209,10 @@ static int helper_regex(const char *s)
            strstr(s, "flags_adc(") || strstr(s, "flags_sbb(") ||
            strstr(s, "flags_logicz(") || strstr(s, "flags_logic32(") ||
            strstr(s, "flags_logic8(") || strstr(s, "flags_incs(") ||
-           strstr(s, "flags_decs(");
+           strstr(s, "flags_decs(") || strstr(s, "flags_add_mask(") ||
+           strstr(s, "flags_sub_mask(") || strstr(s, "flags_adc_mask(") ||
+           strstr(s, "flags_sbb_mask(") || strstr(s, "flags_logicz_mask(") ||
+           strstr(s, "flags_incs_mask(") || strstr(s, "flags_decs_mask(");
 }
 
 static int verify(const char *before, size_t bn, const char *after, size_t an,
@@ -1316,6 +1401,16 @@ static const char SELF_TEST[] =
     "    unknown_hle(c);\n"
     "    c->edx = flags_add(c, c->edx, 2u, 4);\n"
     "    return;\n"
+    "}\n"
+    "void L_00000003(CPU *c)\n"
+    "{\n"
+    "    c->eax = flags_add_mask(c, c->eax, 9u, 4, 0x01);   /* CF */\n"
+    "    c->edx = flags_add_mask(c, c->edx, 10u, 4, 0x01);  /* CF kills 1 */\n"
+    "    c->ebx = flags_add_mask(c, c->ebx, 11u, 4, 0x02);  /* ZF, CF stays */\n"
+    "    c->esi = flags_add_mask(c, c->esi, 12u, 4, 0x02);  /* ZF kills 3 */\n"
+    "    c->edi = flags_adc_mask(c, c->edi, 13u, 4, 0x02);  /* reads CF */\n"
+    "    if (c->cf) { return; }                              /* keeps 2 */\n"
+    "    return;\n"
     "}\n";
 
 static int self_test(void)
@@ -1331,6 +1426,11 @@ static int self_test(void)
         "flags_add(c, c->eax, 6u, 4)",
         "flags_add(c, c->ebx, 8u, 4)",
         "unknown_hle(c)",
+        "c->eax = (uint32_t)((c->eax) + (9u));",
+        "c->ebx = (uint32_t)((c->ebx) + (11u));",
+        "c->esi = (uint32_t)((c->esi) + (12u));",
+        "c->edx = flags_add_mask(c, c->edx, 10u, 4, 0x01);",
+        "c->edi = flags_adc_mask(c, c->edi, 13u, 4, 0x02);",
     };
     size_t i;
     memset(&report, 0, sizeof(report));
@@ -1355,8 +1455,8 @@ static int self_test(void)
         fputs("dead_flags self-test: logic value not preserved\n", stderr);
         return 1;
     }
-    if (report.dead_writes != 6) {
-        fprintf(stderr, "dead_flags self-test: dead_writes=%zu, want 6\n",
+    if (report.dead_writes != 9) {
+        fprintf(stderr, "dead_flags self-test: dead_writes=%zu, want 9\n",
                 report.dead_writes);
         return 1;
     }
