@@ -297,7 +297,7 @@ void wc3_sel_cluster_prepare(uint32_t vector)
  * extents and uses 0.67 instead of the committed 0.65, so only the 40-unit
  * icons are enlarged; 0.67 keeps the 0.209375-wide screen footprint well
  * inside the bottom panel.  The grid anchor's local +Y points up, so grid40
- * gets -0.008 local (-0.00536 screen) to move the top row down into the free
+ * gets -0.006 local (-0.00402 screen) to move the top row down into the free
  * space at the bottom of the black panel.  grid24 stays anchored
  * bottom-centre (7/7) with no Y offset.  The X offset preserves the original
  * -0.0015625 screen-space centre correction at the selected scale. */
@@ -311,7 +311,7 @@ void wc3_sel_cluster_prepare(uint32_t vector)
 #define SEL_GRID40_WIDTH   0x3EA00000u /* 0.3125f */
 #define SEL_GRID40_HEIGHT  0x3E3C6A7Fu /* 0.184f */
 #define SEL_GRID40_OFFSET_X 0xBB18D5F8u /* -0.0015625 / 0.67 */
-#define SEL_GRID40_OFFSET_Y 0xBC03126Fu /* -0.008 local = -0.00536 screen (down) */
+#define SEL_GRID40_OFFSET_Y 0xBBC49BA6u /* -0.006 local = -0.00402 screen (down) */
 #define SEL_GRID40_SCALE   0x3F2B851Fu /* 0.67f */
 
 #define SEL_GRID24_ROWS    3u
