@@ -120,6 +120,11 @@ $targets = @(
     @{ out = 'audit_tls.exe'; src = @('audit_tls.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'dxvk_android_probe.exe'; src = @('dxvk_android_probe.c'); dir = $csrcLocal },
     @{ out = 'closure_pipeline.exe'; src = @('closure_pipeline.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
+    @{ out = 'recomp_ratio.exe'; srcfull = @(
+        (Join-Path $csrcLocal 'recomp_ratio.c'),
+        (Join-Path $csrcLocal 'sha256.c'),
+        (Join-Path $csrcLocal 'dirwalk.c'),
+        (Join-Path $csrc 'csglue.c')) },
     @{ out = 'thunkseeds.exe'; srcfull = @((Join-Path $csrcLocal 'thunkseeds.c'), (Join-Path $csrc 'csglue.c')) },
     @{ out = 'corpusinput.exe'; src = @('corpusinput.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
     @{ out = 'corpusclosure.exe'; src = @('corpusclosure.c', 'sha256.c', 'dirwalk.c'); dir = $csrcLocal },
