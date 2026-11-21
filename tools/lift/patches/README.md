@@ -210,8 +210,11 @@ and marker assertions.  The real pipeline has been compared byte-for-byte with
 the existing stages on the full 263-chunk corpus:
 
 - `w3l_compat` (10 chunks, 12 sites), `save_list_display` (2 chunks);
-- the `selection` transform (353 sites over the full corpus; its
-  `--verify-coverage` union check is the site-count gate);
+- the `selection` transform (359 sites over the full corpus after PASS_REV 54
+  added the nine third-writer continuation fragments to the B range; PASS_REV
+  52/53 also removed the six global formation-cursor sites and added the one
+  formation-remainder guard.  Its `--verify-coverage` union check is the
+  site-count gate);
 - `leaf_call` and `parallel_raycast` batch outputs (263 chunks);
 - `devirtualize` + `return_address_elide_index` + `return_address_elide`
   (263 chunks, global index identical);

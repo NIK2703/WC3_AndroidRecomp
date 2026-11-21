@@ -27,7 +27,7 @@
 #include "sha256.h"
 
 #define PASS "selection"
-#define PASS_REV 51
+#define PASS_REV 54
 
 /* The pass always emits the product 40-entry layout.  The site table is
  * authored against the 24-reference displacements and mapped once below. */
@@ -80,6 +80,7 @@ typedef enum {
     K_LAYOUT,
     K_TRACE_FORMATION,
     K_ORDER_CURSOR,
+    K_FORMATION_SINGLE,
     K_COUNT
 } Kind;
 
@@ -130,7 +131,8 @@ static const char *const kind_name[K_COUNT] = {
     "slot_unlink",
     "layout",
     "trace_formation",
-    "order_cursor"
+    "order_cursor",
+    "formation_single"
 };
 
 /* Fixed union totals for the whole relifted game corpus. */
@@ -173,7 +175,7 @@ static const unsigned expected_total[K_COUNT] = {
     1, /* trace_tasknull */
     1, /* trace_evinit */
     1, /* trace_orderdrop */
-    35, /* order_obj_container */
+    44, /* order_obj_container: +9 third-writer fragments (PASS_REV 54) */
     5, /* order_msg10 */
     3, /* trace_order_slots */
     2, /* order_group_full */
@@ -181,7 +183,8 @@ static const unsigned expected_total[K_COUNT] = {
     1, /* slot_unlink */
     209, /* layout */
     9, /* trace_formation */
-    6, /* order_cursor */
+    0, /* order_cursor: removed - global formation carry corrupted orders */
+    1, /* formation_single */
 };
 /* Whole-file expectations.  seed.c carries both order prologues. */
 static const unsigned expected_seed[K_COUNT] = {
@@ -231,7 +234,8 @@ static const unsigned expected_seed[K_COUNT] = {
     0, /* slot_unlink */
     48, /* layout */
     2, /* trace_formation */
-    2, /* order_cursor */
+    0, /* order_cursor */
+    0, /* formation_single */
 };
 /* seed: builders B/C.  closed: listadd x2, cluster try/insert, formation. */
 
@@ -275,7 +279,7 @@ static const unsigned expected_closed[K_COUNT] = {
     1, /* trace_tasknull */
     1, /* trace_evinit */
     1, /* trace_orderdrop */
-    31, /* order_obj_container */
+    40, /* order_obj_container: +9 third-writer fragments (PASS_REV 54) */
     4, /* order_msg10 */
     0, /* trace_order_slots */
     2, /* order_group_full */
@@ -283,7 +287,8 @@ static const unsigned expected_closed[K_COUNT] = {
     1, /* slot_unlink */
     161, /* layout */
     7, /* trace_formation */
-    4, /* order_cursor */
+    0, /* order_cursor */
+    1, /* formation_single */
 };
 
 typedef struct {
@@ -715,7 +720,43 @@ static void sites_add(Sites *s, Kind k, uint32_t va, const char *action,
 #define ORDER_HANDLER_A_LO    0x6F6BAAA0u
 #define ORDER_HANDLER_A_HI    0x6F6BB050u
 #define ORDER_HANDLER_B_LO    0x6F6BB050u
+/* The B handler's main body ends at the first standalone appender.  The
+ * third writer continues above it in fragments that run on the main
+ * handler's ebp: 0x6F6BBD13 builds the context at container+0x24,
+ * 0x6F6BBD60/65 and 0x6F6BBDA6/DB3/DB6 walk the same count/array, and
+ * 0x6F6BBE16 unwinds it.  They keep writing the old twelve-slot array at
+ * ebp-0x190, whose end is the security cookie at ebp-0x10, so they must
+ * move with the container.  A contiguous range cannot be used: the
+ * standalone appenders at 0x6F6BB5F0/0x6F6BB7A0/0x6F6BB980 have their own
+ * frames, and shifting their locals (for example [ebp-0x14]) would corrupt
+ * them.  The callback 0x6F6BBEB0 stays outside too: it receives the
+ * shifted context pointer and has no ebp-relative container offsets. */
 #define ORDER_HANDLER_B_HI    0x6F6BB5F0u
+
+/* Third-writer continuation fragments above the main B body.  Each one is
+ * a function without a frame prologue: it runs on the main handler's ebp.
+ * Keep this list explicit; do not widen it to the standalone appenders. */
+static const uint32_t ORDER_B_CONT_VAS[] = {
+    0x6F6BBD13u, /* third-writer setup */
+    0x6F6BBD18u, /* setup continuation */
+    0x6F6BBD1Eu, /* setup continuation */
+    0x6F6BBD60u, /* array walk helper */
+    0x6F6BBD65u, /* array walk helper */
+    0x6F6BBDA6u, /* loop guard */
+    0x6F6BBDB3u, /* loop body */
+    0x6F6BBDB6u, /* loop body */
+    0x6F6BBE16u, /* cleanup */
+};
+
+static int order_b_cont(uint32_t va)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(ORDER_B_CONT_VAS) / sizeof(ORDER_B_CONT_VAS[0]); ++i)
+        if (ORDER_B_CONT_VAS[i] == va)
+            return 1;
+    return 0;
+}
 #define VA_ORDER_A_FRAME      0x6F6BAAB1u
 #define VA_ORDER_B_FRAME      0x6F6BB061u
 #define VA_ORDER_CTOR_CAP     0x6F6B879Au
@@ -1012,23 +1053,26 @@ static const char *const INSERT_TRACE_ORDER_EXEC_2[] = {
 #define VA_TRACE_CF94_BASE     0x6F16D00Fu
 
 /*
- * Formation cursor carry (PASS_REV 49).
- *
- * The builder prologues 0x6F6B9918 / 0x6F6B9F98 reset the host carry once per
- * point order.  L_6F16A5B0 has two branches: the multi-unit continuation
- * L_6F16A5F8 stores the base into x and later clamps it after every group,
- * while the single-member shortcut writes the unit's x/y directly.  Both
- * branches read the carry at their x store and commit the final x, so a
- * selection split into several clusters continues one line instead of
- * restarting at 0x6FD3C744.  The reset lines are outside WC3_DEBUG: the carry
- * is product behavior, not diagnostics.
+ * The former formation-cursor carry (PASS_REV 49) is deliberately absent.
+ * It kept one process-global X value for all clusters of "one" order, reset
+ * it only in the msg 0x12/0x13 prologues, and committed it again from the
+ * per-cluster builder reached by the solver.  Any other point-order handler,
+ * spawn, death or cluster update reused that value as the start coordinate of
+ * a different order, so units walked to another cluster's point and later
+ * lost the order.  The 1.27 base constant is restored; no host state is kept.
  */
-#define VA_ORDER_CURSOR_RESET_B  0x6F6B9918u
-#define VA_ORDER_CURSOR_RESET_C  0x6F6B9F98u
-#define VA_ORDER_CURSOR_ORIGIN   0x6F16A60Au
-#define VA_ORDER_CURSOR_ORIGIN_1 0x6F16A5D9u
-#define VA_ORDER_CURSOR_COMMIT   0x6F16A6C3u
-#define VA_ORDER_CURSOR_COMMIT_1 0x6F16A5E4u
+
+/*
+ * A territory order splits the selected group into batches.  The lifted
+ * single-unit shortcut at 0x6F16CF60 is selected from the *batch* size, so a
+ * trailing remainder of one unit (40 units with the 3-wide compact formation:
+ * 13*3 + 1) sends that unit straight to the order point instead of placing it
+ * in the formation.  With 24 units both column rules divide the group exactly,
+ * which is why 24 never showed the defect.  Compare the total group count
+ * instead: the shortcut stays exact for a real one-unit selection, while a
+ * one-unit remainder of a larger group goes through the normal formation loop.
+ */
+#define VA_FORMATION_SINGLE 0x6F16CF60u
 
 static const char *const INSERT_TRACE_ORDER_BEGIN_B[] = {
     "    /* selection point-order begin trace B */",
@@ -1082,31 +1126,6 @@ static const char *const INSERT_TRACE_A5B9[] = {
     "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
     "    wc3_sel_trace_order_base(c, c->ecx, 0u, 0u, 0u);",
     "#endif"
-};
-
-static const char *const INSERT_ORDER_CURSOR_RESET[] = {
-    "    /* selection formation cursor reset */",
-    "    wc3_sel_formation_reset();"
-};
-
-static const char *const INSERT_ORDER_CURSOR_ORIGIN[] = {
-    "    /* selection formation cursor origin */",
-    "    wc3_sel_formation_origin_apply(c);"
-};
-
-static const char *const INSERT_ORDER_CURSOR_ORIGIN_1[] = {
-    "    /* selection single-unit formation cursor origin */",
-    "    c->eax = wc3_sel_formation_origin(c->eax);"
-};
-
-static const char *const INSERT_ORDER_CURSOR_COMMIT[] = {
-    "    /* selection formation cursor commit */",
-    "    wc3_sel_formation_commit_frame(c);"
-};
-
-static const char *const INSERT_ORDER_CURSOR_COMMIT_1[] = {
-    "    /* selection single-unit formation cursor commit */",
-    "    wc3_sel_formation_commit(rd32((c->ecx + 0x0000000Cu)));"
 };
 
 static const char *const INSERT_TRACE_ORDER_BASE[] = {
@@ -2475,8 +2494,9 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 span40.active = 1;
                 span40.lo = ORDER_CONTAINER_A24_LO;
                 span40.hi = ORDER_CONTAINER_A24_HI;
-            } else if (block_va >= ORDER_HANDLER_B_LO &&
-                       block_va < ORDER_HANDLER_B_HI) {
+            } else if ((block_va >= ORDER_HANDLER_B_LO &&
+                        block_va < ORDER_HANDLER_B_HI) ||
+                       order_b_cont(block_va)) {
                 span.active = 1;
                 span.lo = ORDER_CONTAINER_B_LO;
                 span.hi = ORDER_CONTAINER_B_HI;
@@ -3090,60 +3110,13 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
-            case VA_ORDER_CURSOR_RESET_B:
-            case VA_ORDER_CURSOR_RESET_C:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "FS_WR32(c, (0x00000000u), c->eax);",
-                                  NULL,
-                                  "selection formation cursor reset",
-                                  INSERT_ORDER_CURSOR_RESET, 2,
-                                  K_ORDER_CURSOR, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_ORDER_CURSOR_ORIGIN:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->edi = 0xFu;",
-                                  NULL,
-                                  "selection formation cursor origin",
-                                  INSERT_ORDER_CURSOR_ORIGIN, 2,
-                                  K_ORDER_CURSOR, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_ORDER_CURSOR_ORIGIN_1:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "c->ecx = rd32((c->ebx + 0x00000028u));",
-                                  NULL,
-                                  "selection single-unit formation cursor origin",
-                                  INSERT_ORDER_CURSOR_ORIGIN_1, 2,
-                                  K_ORDER_CURSOR, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_ORDER_CURSOR_COMMIT:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "push32(c, 0x6F16A6C8u); WC3_DIRECT_CALL(L_6F169E10, c);",
-                                  NULL,
-                                  "selection formation cursor commit",
-                                  INSERT_ORDER_CURSOR_COMMIT, 2,
-                                  K_ORDER_CURSOR, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
-                    return -1;
-                break;
-            case VA_ORDER_CURSOR_COMMIT_1:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "wr32((c->ecx + 0x00000010u), c->eax);",
-                                  NULL,
-                                  "selection single-unit formation cursor commit",
-                                  INSERT_ORDER_CURSOR_COMMIT_1, 2,
-                                  K_ORDER_CURSOR, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
+            case VA_FORMATION_SINGLE:
+                if (handle_subst(out, p, le,
+                                 "flags_sub(c, c->edi, 0x1u, 4);",
+                                 "flags_sub(c, rd32((c->ecx)), 0x1u, 4);",
+                                 "cmp edi, 1 */", "cmp group count, 1 */",
+                                 K_FORMATION_SINGLE, va, line, counts, sites,
+                                 &handled, err, errsz) != 0)
                     return -1;
                 break;
             case VA_TRACE_LISTADD:
@@ -3152,7 +3125,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   "if (!c->zf) { c->eax = c->esi; }",
                                   NULL,
                                   "selection PrClGen list-add trace",
-                                  INSERT_TRACE_LISTADD, 7,
+                                  INSERT_TRACE_LISTADD, 6,
                                   K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
                     return -1;
@@ -4113,6 +4086,7 @@ static int self_test(char *err, size_t errsz)
      * they are covered by the whole-corpus totals and by the real lift. */
     exp_fix[K_TRACE_FORMATION] = 0;
     exp_fix[K_ORDER_CURSOR] = 0;
+    exp_fix[K_FORMATION_SINGLE] = 0;
 
     /* The fixture must produce the 40-layout targets, and a second pass must
      * be byte-identical. */
@@ -4302,10 +4276,10 @@ fail40:
     }
 
     {
-        /* Mirrors a current report: PASS_REV 50 (348 sites). */
+        /* Mirrors a current report: PASS_REV 54 (359 sites). */
         const char json[] =
             "{\"pass\":\"" PASS "\","
-            "\"pass_rev\":50,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
+            "\"pass_rev\":54,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
             "\"cap_outer\":2,\"cap_inner\":2,\"fill_block\":2,\"fill_grid\":1,"
             "\"note_selection\":1,\"hide_all\":1,\"addunit_cap\":1,\"cap_local_list\":5,"
             "\"cap_copy_list\":3,\"cap_sync_add\":1,\"cap_net_recv\":1,\"cap_net_apply\":5,"
@@ -4316,16 +4290,82 @@ fail40:
             "\"trace_order_loop_c\":2,\"trace_order_apply\":2,\"trace_order_exec\":2,"
             "\"trace_remove\":4,\"trace_evbirth\":1,\"trace_apply\":2,"
             "\"trace_tasknull\":1,\"trace_evinit\":1,\"trace_orderdrop\":1,"
-            "\"order_obj_container\":35,\"order_msg10\":5,\"trace_order_slots\":3,"
+            "\"order_obj_container\":44,\"order_msg10\":5,\"trace_order_slots\":3,"
             "\"order_group_full\":2,\"trace_evrelease\":1,\"slot_unlink\":1,"
-            "\"layout\":209,\"trace_formation\":9,\"order_cursor\":6},"
-            "\"total\":353};";
+            "\"layout\":209,\"trace_formation\":9,\"order_cursor\":0,"
+            "\"formation_single\":1},"
+            "\"total\":359};";
         Counts c3;
 
         if (json_counts_parse(json, &c3, err2, sizeof(err2)) != 0 ||
             !counts_match(&c3, expected_total)) {
             snprintf(err, errsz, "self-test coverage parser mismatch");
             goto fail;
+        }
+    }
+
+    /* Regression: the third-writer fragments must move with the container.
+     * PASS_REV 53 stopped at 0x6F6BB5F0, so the helper below kept the
+     * twelve-slot offset and the class A array walk ended on the security
+     * cookie at ebp-0x10.  PASS_REV 54 lists the fragments explicitly; the
+     * standalone appender below must stay on its own frame. */
+    {
+        static const char b_cont[] =
+            "void L_6F6BBD60(CPU *restrict c)\n"
+            "{\n"
+            "    wr32((c->ebp + 0xFFFFFE6Cu), c->eax); /* 6F6BBD65: mov dword ptr [ebp - 0x194], eax */\n"
+            "}\n";
+        Buf out = {0};
+        Counts counts;
+        Sites sites = {0};
+
+        if (process_buffer(b_cont, strlen(b_cont), NULL,
+                           &out, &counts, &sites, err2, sizeof(err2)) != 0) {
+            snprintf(err, errsz, "self-test B continuation pass failed: %s", err2);
+            ok = 0;
+        } else if (counts.n[K_ORDER_OBJ_CONTAINER] != 1 ||
+                   count_occurrences(out.p, out.n, "0xFFFFF8A8u") != 1 ||
+                   count_occurrences(out.p, out.n, "[ebp - 0x758]") != 1 ||
+                   count_occurrences(out.p, out.n, "0xFFFFFE6Cu") != 0 ||
+                   count_occurrences(out.p, out.n, "[ebp - 0x194]") != 0) {
+            snprintf(err, errsz, "self-test B continuation mismatch");
+            ok = 0;
+        }
+        buf_free(&out);
+        free(sites.v);
+        if (!ok) {
+            goto done;
+        }
+    }
+
+    {
+        static const char b_appender[] =
+            "void L_6F6BB5F0(CPU *restrict c)\n"
+            "{\n"
+            "    push32(c, c->ebp);\n"
+            "    c->ebp = c->esp;\n"
+            "    c->esp = flags_sub(c, c->esp, 0x14u, 4);\n"
+            "    wr32((c->ebp + 0xFFFFFFECu), c->eax); /* 6F6BB651: mov dword ptr [ebp - 0x14], eax */\n"
+            "}\n";
+        Buf out = {0};
+        Counts counts;
+        Sites sites = {0};
+
+        if (process_buffer(b_appender, strlen(b_appender), NULL,
+                           &out, &counts, &sites, err2, sizeof(err2)) != 0) {
+            snprintf(err, errsz, "self-test B appender pass failed: %s", err2);
+            ok = 0;
+        } else if (counts.n[K_ORDER_OBJ_CONTAINER] != 0 ||
+                   count_occurrences(out.p, out.n, "0xFFFFFFECu") != 1 ||
+                   count_occurrences(out.p, out.n, "[ebp - 0x14]") != 1 ||
+                   count_occurrences(out.p, out.n, "0xFFFFFA28u") != 0) {
+            snprintf(err, errsz, "self-test B appender was shifted");
+            ok = 0;
+        }
+        buf_free(&out);
+        free(sites.v);
+        if (!ok) {
+            goto done;
         }
     }
 
