@@ -1,0 +1,6 @@
+#!/bin/sh
+# Reject runtime logs, screenshots and oversized dumps before they enter a
+# commit.  Enable once per clone with tools/install_git_hooks.sh.
+set -eu
+root=$(git rev-parse --show-toplevel)
+exec python3 "$root/tools/check_no_junk.py" --staged

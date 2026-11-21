@@ -60,3 +60,22 @@ __pycache__/
 *.w3m
 *.w3x
 *.w3g
+
+# --- runtime logs, screenshots and device dumps ----------------------------
+# Produced by local runs and adb captures; keep them out of the tree.  The
+# pre-commit hook (tools/check_no_junk.py) rejects them even when force-added.
+*.log
+*.raw
+*.dmp
+/core.[0-9]*
+/vgcore.[0-9]*
+/device_logcat*.txt
+/game_mode*.txt
+/grid_*.png
+/logcat*.txt
+/run*.txt
+/screen*.png
+/sel[0-9]*_trace*.txt
+/sf[0-9]*.txt
+/thr[0-9]*.bin
+/wc3_log*.txt
