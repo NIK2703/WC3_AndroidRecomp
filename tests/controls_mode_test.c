@@ -26,6 +26,89 @@ static void actions_clear(void)
     g_action_count = 0;
 }
 
+#define DIRECT_RECORDED 16
+static Wc3DirectTouchKind g_direct_kinds[DIRECT_RECORDED];
+static Wc3DirectTouchRoute g_direct_routes[DIRECT_RECORDED];
+static float g_direct_x[DIRECT_RECORDED];
+static float g_direct_y[DIRECT_RECORDED];
+static int g_direct_count;
+
+static void direct_sink(const Wc3DirectTouchEvent *event, void *user)
+{
+    (void)user;
+    if (!event || g_direct_count >= DIRECT_RECORDED) return;
+    g_direct_kinds[g_direct_count] = (Wc3DirectTouchKind)event->kind;
+    g_direct_routes[g_direct_count] = (Wc3DirectTouchRoute)event->route;
+    g_direct_x[g_direct_count] = event->x;
+    g_direct_y[g_direct_count] = event->y;
+    g_direct_count++;
+}
+
+static void direct_clear(void)
+{
+    g_direct_count = 0;
+}
+
+static int direct_has(Wc3DirectTouchKind kind)
+{
+    for (int i = 0; i < g_direct_count; i++) {
+        if (g_direct_kinds[i] == kind) return 1;
+    }
+    return 0;
+}
+
+static int direct_has_route(Wc3DirectTouchKind kind, Wc3DirectTouchRoute route)
+{
+    for (int i = 0; i < g_direct_count; i++) {
+        if (g_direct_kinds[i] == kind && g_direct_routes[i] == route) return 1;
+    }
+    return 0;
+}
+
+static int direct_index(Wc3DirectTouchKind kind)
+{
+    for (int i = 0; i < g_direct_count; i++) {
+        if (g_direct_kinds[i] == kind) return i;
+    }
+    return -1;
+}
+
+static int direct_nth_index(Wc3DirectTouchKind kind, int nth)
+{
+    for (int i = 0; i < g_direct_count; i++) {
+        if (g_direct_kinds[i] == kind && nth-- == 0) return i;
+    }
+    return -1;
+}
+
+static Wc3DirectTouchRoute route_field(void *user)
+{
+    (void)user;
+    return WC3_DIRECT_TOUCH_ROUTE_FIELD;
+}
+
+static int portrait_rect(float *left, float *top, float *right,
+                         float *bottom, void *user)
+{
+    (void)user;
+    *left = 0.02f;
+    *top = 0.80f;
+    *right = 0.12f;
+    *bottom = 0.90f;
+    return 1;
+}
+
+static int minimap_rect(float *left, float *top, float *right,
+                        float *bottom, void *user)
+{
+    (void)user;
+    *left = 0.80f;
+    *top = 0.75f;
+    *right = 0.95f;
+    *bottom = 0.95f;
+    return 1;
+}
+
 static int has_pointer_move(int x, int y)
 {
     for (int i = 0; i < g_action_count; i++) {
@@ -326,6 +409,165 @@ int main(int argc, char **argv)
     assert(controls_set_overlay_mode(WC3_OVERLAY_MODE_FULL) == 0);
     assert(controls_layout_id() == 6);
 
+    /* Direct-touch routing: an overlay element stays on the legacy engine
+     * even inside the battlefield rectangle; a battlefield touch uses the
+     * semantic recognizer; native HUD outside the rectangle is forwarded as
+     * raw pointer phases.  This is the split the host gate publishes. */
+    set_transform(1.0f, 1.0f, 0.0f, 0.0f);
+    assert(controls_resize(1000, 1000) == 0);
+    assert(g_state.element_count == 12);
+    controls_set_action_sink(sink, NULL);
+    controls_set_direct_touch_sink(direct_sink, NULL);
+    controls_set_direct_touch_route_gate(route_field, NULL);
+    controls_set_direct_touch_portrait_gate(portrait_rect, NULL);
+    controls_set_direct_touch_minimap_gate(minimap_rect, NULL);
+    controls_set_direct_touch_enabled(true);
+
+    const TouchElement *shift_element = find_key(50);
+    assert(shift_element);
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, shift_element->x,
+                          shift_element->y, 5000) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, shift_element->x,
+                          shift_element->y, 5050) == 0);
+    controls_tick(5100);
+    assert(has_key(50, 1));
+    assert(has_key(50, 0));
+    assert(g_direct_count == 0);
+
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 500.0f, 500.0f, 5200) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 500.0f, 500.0f, 5250) == 0);
+    controls_tick(5300);
+    assert(g_action_count == 0);
+    assert(direct_has(WC3_DIRECT_TOUCH_TAP));
+
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 900.0f, 900.0f, 5400) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 900.0f, 900.0f, 5450) == 0);
+    controls_tick(5500);
+    assert(g_action_count == 0);
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+
+    /* Portrait: follow starts immediately on DOWN and stops on UP.  No
+     * long-press deadline and no separate tap action.  The portrait frame is
+     * outside the field rectangle, so without its own route this touch would
+     * be a dead native mouse click. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 70.0f, 850.0f, 5600) == 0);
+    assert(direct_has_route(WC3_DIRECT_TOUCH_FOLLOW_START,
+                            WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
+    assert(!direct_has(WC3_DIRECT_TOUCH_LONG_PRESS));
+    assert(controls_touch(WC3_TOUCH_UP, 0, 70.0f, 850.0f, 5650) == 0);
+    controls_tick(5700);
+    assert(g_action_count == 0);
+    assert(direct_has_route(WC3_DIRECT_TOUCH_HOLD_RELEASE,
+                            WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+    assert(!direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
+
+    /* Moving off the portrait keeps the follow; the tick must not turn it
+     * into a long-press event. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 70.0f, 850.0f, 5800) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, 500.0f, 500.0f, 5900) == 0);
+    controls_tick(6250);
+    assert(direct_has(WC3_DIRECT_TOUCH_FOLLOW_START));
+    assert(!direct_has(WC3_DIRECT_TOUCH_LONG_PRESS));
+    assert(controls_touch(WC3_TOUCH_UP, 0, 500.0f, 500.0f, 6300) == 0);
+    controls_tick(6350);
+    assert(direct_has_route(WC3_DIRECT_TOUCH_HOLD_RELEASE,
+                            WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+
+    /* A second finger on the field does not cancel the portrait follow; it
+     * is swallowed until the portrait finger is released. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 70.0f, 850.0f, 6400) == 0);
+    assert(controls_touch(WC3_TOUCH_DOWN, 1, 500.0f, 500.0f, 6410) == 0);
+    assert(direct_has_route(WC3_DIRECT_TOUCH_FOLLOW_START,
+                            WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
+    assert(!direct_has(WC3_DIRECT_TOUCH_HOLD_RELEASE));
+    assert(controls_touch(WC3_TOUCH_UP, 0, 70.0f, 850.0f, 6500) == 0);
+    assert(direct_has_route(WC3_DIRECT_TOUCH_HOLD_RELEASE,
+                            WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
+    assert(controls_touch(WC3_TOUCH_UP, 1, 500.0f, 500.0f, 6510) == 0);
+    assert(g_action_count == 0);
+
+    /* An overlay element pressed while the portrait follow is active still
+     * reaches the legacy engine; it must not release the follow. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 70.0f, 850.0f, 6520) == 0);
+    assert(controls_touch(WC3_TOUCH_DOWN, 1, shift_element->x,
+                          shift_element->y, 6530) == 0);
+    controls_tick(6550);
+    assert(has_key(50, 1));
+    assert(direct_has_route(WC3_DIRECT_TOUCH_FOLLOW_START,
+                            WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
+    assert(!direct_has(WC3_DIRECT_TOUCH_HOLD_RELEASE));
+    assert(controls_touch(WC3_TOUCH_UP, 1, shift_element->x,
+                          shift_element->y, 6560) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 70.0f, 850.0f, 6570) == 0);
+    controls_tick(6580);
+    assert(has_key(50, 0));
+    assert(direct_has_route(WC3_DIRECT_TOUCH_HOLD_RELEASE,
+                            WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
+
+    /* Minimap: the finger that starts on the minimap keeps the drag until it
+     * is released.  Moves outside the rectangle are clamped to its edge so
+     * the native minimap handler still receives the drag. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 850.0f, 800.0f, 6600) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, 100.0f, 100.0f, 6610) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, 990.0f, 990.0f, 6620) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 100.0f, 100.0f, 6630) == 0);
+    controls_tick(6700);
+    assert(g_action_count == 0);
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+    assert(!direct_has(WC3_DIRECT_TOUCH_LONG_PRESS));
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_MOVE));
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
+    const int mm_down = direct_index(WC3_DIRECT_TOUCH_POINTER_DOWN);
+    const int mm_move1 = direct_nth_index(WC3_DIRECT_TOUCH_POINTER_MOVE, 0);
+    const int mm_move2 = direct_nth_index(WC3_DIRECT_TOUCH_POINTER_MOVE, 1);
+    const int mm_up = direct_index(WC3_DIRECT_TOUCH_POINTER_UP);
+    assert(mm_down >= 0 && mm_move1 >= 0 && mm_move2 >= 0 && mm_up >= 0);
+    assert(fabsf(g_direct_x[mm_down] - 0.85f) < 0.0001f);
+    assert(fabsf(g_direct_y[mm_down] - 0.80f) < 0.0001f);
+    assert(fabsf(g_direct_x[mm_move1] - 0.80f) < 0.0001f);
+    assert(fabsf(g_direct_y[mm_move1] - 0.75f) < 0.0001f);
+    assert(fabsf(g_direct_x[mm_move2] - 0.95f) < 0.0001f);
+    assert(fabsf(g_direct_y[mm_move2] - 0.95f) < 0.0001f);
+    assert(fabsf(g_direct_x[mm_up] - 0.80f) < 0.0001f);
+    assert(fabsf(g_direct_y[mm_up] - 0.75f) < 0.0001f);
+
+    /* The minimap owner is released with the pointer: the next field touch
+     * is a normal semantic tap again. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 500.0f, 500.0f, 6800) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 500.0f, 500.0f, 6850) == 0);
+    controls_tick(6900);
+    assert(direct_has(WC3_DIRECT_TOUCH_TAP));
+    assert(!direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
+
+    controls_set_direct_touch_enabled(false);
+    controls_set_direct_touch_sink(NULL, NULL);
+    controls_set_direct_touch_route_gate(NULL, NULL);
+    controls_set_direct_touch_portrait_gate(NULL, NULL);
+    controls_set_direct_touch_minimap_gate(NULL, NULL);
+    controls_set_action_sink(NULL, NULL);
     controls_cancel_all();
     free(json);
     printf("controls_mode: okay\n");

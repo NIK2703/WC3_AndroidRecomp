@@ -109,6 +109,7 @@ static void test_tap(void)
 
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_TAP);
+    assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
     assert(g_events[0].pointer_id == 1);
     expect_near("tap x", g_events[0].x, 0.105f);
     expect_near("tap y", g_events[0].y, 0.205f);
@@ -164,6 +165,7 @@ static void test_long_press_fires_once(void)
     assert(wc3_direct_touch_tick(&dt, 2450) == 1);
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_LONG_PRESS);
+    assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
     assert(g_events[0].pointer_id == 3);
     expect_near("long x", g_events[0].x, 0.5f);
     expect_near("long y", g_events[0].y, 0.6f);
@@ -286,45 +288,165 @@ static void test_owner_rule(void)
 
 static void test_tap_intent_resolution(void)
 {
-    /* No pick, a validated own unit with no selection, and a selected own
-     * unit all select.  A valid non-unit sprite is a phase-1 no-op. */
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_NONE, 0, 0, 0, 0) ==
+    /* Without a controlled selection a selectable unit selects, even when
+     * the previous selection was an uncontrolled unit. */
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_NONE, 0, 0, 0, 0, 0) ==
            WC3_DT_INTENT_NONE);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 0) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 0, 0) ==
            WC3_DT_INTENT_SELECT_UNIT);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 0) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 1, 0) ==
            WC3_DT_INTENT_SELECT_UNIT);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 1, 0) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 0, 1, 0) ==
            WC3_DT_INTENT_NONE);
 
-    /* An enemy/neutral-hostile unit always orders; with an empty selection
-     * the native ghost handler is a no-op, and selecting the enemy would be
-     * wrong. */
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 1) ==
+    /* A controlled selection makes every unit tap the right-click
+     * analogue, friendly or hostile. */
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 0, 1) ==
            WC3_DT_INTENT_ORDER_UNIT);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 1) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 0, 1) ==
            WC3_DT_INTENT_ORDER_UNIT);
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 1, 1) ==
+           WC3_DT_INTENT_ORDER_UNIT);
+
+    /* A hostile target with no controlled selection keeps the native
+     * terrain substitution: ground order when something is selected, clear
+     * otherwise. */
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 0, 0) ==
+           WC3_DT_INTENT_CLEAR_SELECTION);
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 1, 0) ==
+           WC3_DT_INTENT_ORDER_GROUND);
 
     /* An object that failed 0x6F21B730 is a terrain click, and terrain
      * orders only when something is selected. */
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 0, 0) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 0, 0, 0) ==
            WC3_DT_INTENT_CLEAR_SELECTION);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 1, 0) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 0, 1, 0) ==
            WC3_DT_INTENT_ORDER_GROUND);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0, 0) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0, 0, 0) ==
            WC3_DT_INTENT_CLEAR_SELECTION);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 1, 0) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0, 1, 0) ==
            WC3_DT_INTENT_ORDER_GROUND);
+}
+
+static void test_route(void)
+{
+    /* Normal gameplay: CSelectMode is stacked and owns the top input. */
+    assert(wc3_dt_route(1, 1, 0, 1) == WC3_DIRECT_TOUCH_ROUTE_FIELD);
+    /* Targeting on top: native pointer phases place the target or building;
+     * direct touch must not drop the tap and must not use the overlay. */
+    assert(wc3_dt_route(1, 1, 1, 1) == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+    /* Select mode is stacked, but another mode owns the top input. */
+    assert(wc3_dt_route(1, 1, 0, 0) == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+    /* Menu/loading/modal: the native UI is still the right recipient. */
+    assert(wc3_dt_route(1, 0, 0, 0) == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+    assert(wc3_dt_route(1, 0, 0, 1) == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+    /* UI singleton not readable yet: direct touch cannot claim the pointer. */
+    assert(wc3_dt_route(0, 0, 0, 0) == WC3_DIRECT_TOUCH_ROUTE_LEGACY);
+}
+
+static void test_pointer_phases(void)
+{
+    Wc3DirectTouch dt;
+    wc3_direct_touch_init(&dt, 100.0f, 200.0f, 8.0f, 24.0f, 450,
+                          sink, NULL);
+    events_clear();
+    wc3_direct_touch_emit_pointer(&dt, WC3_DIRECT_TOUCH_POINTER_DOWN,
+                                  7, 50.0f, 100.0f, 10);
+    wc3_direct_touch_emit_pointer(&dt, WC3_DIRECT_TOUCH_POINTER_MOVE,
+                                  7, 60.0f, 120.0f, 11);
+    wc3_direct_touch_emit_pointer(&dt, WC3_DIRECT_TOUCH_POINTER_UP,
+                                  7, 60.0f, 120.0f, 12);
+    /* Semantic kinds are not accepted by the raw-pointer entry point. */
+    wc3_direct_touch_emit_pointer(&dt, WC3_DIRECT_TOUCH_TAP,
+                                  7, 60.0f, 120.0f, 13);
+
+    assert(g_event_count == 3);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_POINTER_DOWN);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_POINTER_MOVE);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_POINTER_UP);
+    assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+    assert(g_events[1].route == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+    assert(g_events[2].route == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+    expect_near("pointer move x", g_events[1].x, 0.6f);
+    expect_near("pointer move y", g_events[1].y, 0.6f);
+}
+
+static void test_portrait_gesture(void)
+{
+    Wc3DirectTouch dt = make_recognizer();
+    events_clear();
+
+    /* The portrait follow starts on DOWN, not after a long-press deadline,
+     * and the matching UP ends it. */
+    wc3_direct_touch_down_route(&dt, 20, 100.0f, 850.0f, 1000,
+                                WC3_DIRECT_TOUCH_ROUTE_PORTRAIT);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FOLLOW_START);
+    assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT);
+    expect_near("portrait follow x", g_events[0].x, 0.1f);
+    expect_near("portrait follow y", g_events[0].y, 0.85f);
+    wc3_direct_touch_up(&dt, 20, 100.0f, 850.0f, 1050);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_HOLD_RELEASE);
+    assert(g_events[1].route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT);
+
+    /* Moving anywhere, including outside the portrait, does not cancel the
+     * follow and does not create a long-press event.  Only the owning
+     * finger's UP ends it. */
+    events_clear();
+    wc3_direct_touch_down_route(&dt, 21, 100.0f, 850.0f, 2000,
+                                WC3_DIRECT_TOUCH_ROUTE_PORTRAIT);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FOLLOW_START);
+    wc3_direct_touch_move(&dt, 21, 800.0f, 100.0f, 2100);
+    assert(g_event_count == 1);
+    assert(wc3_direct_touch_tick(&dt, 2450) == 0);
+    assert(g_event_count == 1);
+    wc3_direct_touch_up(&dt, 21, 800.0f, 100.0f, 2500);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_HOLD_RELEASE);
+    assert(g_events[1].route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT);
+
+    /* A cancelled gesture must not leave the follow latched. */
+    events_clear();
+    wc3_direct_touch_down_route(&dt, 23, 100.0f, 850.0f, 4000,
+                                WC3_DIRECT_TOUCH_ROUTE_PORTRAIT);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FOLLOW_START);
+    wc3_direct_touch_reset(&dt);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_HOLD_RELEASE);
+
+    /* A second pointer does not cancel the follow owned by the first one;
+     * the release still arrives for the portrait pointer. */
+    events_clear();
+    wc3_direct_touch_down_route(&dt, 24, 100.0f, 850.0f, 5000,
+                                WC3_DIRECT_TOUCH_ROUTE_PORTRAIT);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FOLLOW_START);
+    wc3_direct_touch_down(&dt, 25, 200.0f, 200.0f, 5010);
+    assert(g_event_count == 1);
+    wc3_direct_touch_up(&dt, 24, 100.0f, 850.0f, 5100);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_HOLD_RELEASE);
+    wc3_direct_touch_up(&dt, 25, 200.0f, 200.0f, 5110);
+    assert(g_event_count == 2);
 }
 
 static void test_long_press_intent_resolution(void)
 {
-    assert(wc3_dt_long_press_intent(WC3_DT_PICK_NONE) ==
+    assert(wc3_dt_long_press_intent(WC3_DT_PICK_NONE, 0, 0, 0) ==
            WC3_DT_LONG_INTENT_NONE);
-    assert(wc3_dt_long_press_intent(WC3_DT_PICK_OBJECT) ==
+    assert(wc3_dt_long_press_intent(WC3_DT_PICK_OBJECT, 1, 1, 1) ==
+           WC3_DT_LONG_INTENT_SELECT_UNIT);
+    assert(wc3_dt_long_press_intent(WC3_DT_PICK_OBJECT, 1, 0, 0) ==
+           WC3_DT_LONG_INTENT_NONE);
+    assert(wc3_dt_long_press_intent(WC3_DT_PICK_OBJECT, 1, 1, 0) ==
            WC3_DT_LONG_INTENT_ORDER_UNIT);
-    assert(wc3_dt_long_press_intent(WC3_DT_PICK_TERRAIN) ==
-           WC3_DT_LONG_INTENT_ORDER_GROUND);
+    assert(wc3_dt_long_press_intent(WC3_DT_PICK_OBJECT, 0, 0, 0) ==
+           WC3_DT_LONG_INTENT_NONE);
+    assert(wc3_dt_long_press_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0) ==
+           WC3_DT_LONG_INTENT_CLEAR_SELECTION);
 }
 
 int main(void)
@@ -341,6 +463,9 @@ int main(void)
     test_coordinate_mapping();
     test_owner_rule();
     test_tap_intent_resolution();
+    test_route();
+    test_pointer_phases();
+    test_portrait_gesture();
     test_long_press_intent_resolution();
     puts("direct_touch: ok");
     return 0;

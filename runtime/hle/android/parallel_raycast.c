@@ -93,6 +93,7 @@
 #include "parallel_raycast.h"
 #include "parallel_vertex.h"
 #include "parallel_triangle.h"
+#include "parallel_phase.h"
 
 #include "hle_android.h"
 #include "wc3_debug.h"
@@ -259,10 +260,101 @@ typedef struct RayTuning {
     _Atomic unsigned worker_cpu_mask;
 } RayTuning;
 
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+/* ------------------------------------------------------------------ */
+/* Debug-only SPMD phase runtime.                                      */
+/*                                                                    */
+/* A phase is one fork-join over a captured batch of independent       */
+/* L_6F749F90 requests.  The product path is not enabled by default:   */
+/* the shadow collector below captures real requests, replays them    */
+/* sequentially and through the pool, and compares the bits.  Release  */
+/* compiles none of this.                                              */
+/*                                                                    */
+/* The request snapshot holds the container bytes the function reads. */
+/* A product phase can drop the snapshot when the container is proven */
+/* stable; the shadow keeps it so the replay is independent of later  */
+/* game writes.                                                       */
+/* ------------------------------------------------------------------ */
+
+typedef struct Wc3PhaseJob {
+    Wc3PhaseRequest *req;
+    const CPU *cpu;              /* common base when req_cpu is NULL */
+    const CPU *req_cpu;          /* optional per-request base snapshot */
+    uint32_t total;
+    uint32_t chunks;
+    uint32_t chunk_start[WC3_PARALLEL_MAX_WORKERS];
+    uint32_t chunk_len[WC3_PARALLEL_MAX_WORKERS];
+    unsigned active;
+    int main_last;
+    wc3_lifted_fn fn;
+    unsigned stack_zero;
+    int failed;
+} Wc3PhaseJob;
+
+typedef struct Wc3PhaseState {
+    Wc3PhaseRequest req[WC3_PHASE_MAX_REQUESTS];
+    Wc3PhaseResult seq_result[WC3_PHASE_MAX_REQUESTS];
+    uint32_t count;
+    uint32_t reserved;
+    int enabled;
+    int shadow_enabled;
+    int shadow_busy;
+    int main_last;
+    int weighted;
+    int ran;
+    wc3_lifted_fn fn;
+    unsigned max_requests;
+    unsigned chunks;
+    unsigned stack_zero;
+    unsigned spin_us;
+    unsigned threshold;
+    unsigned long long captures;
+    unsigned long long applies;
+    unsigned long long flushes;
+    unsigned long long mismatches;
+    unsigned long long seq_ns_sum;
+    unsigned long long par_ns_sum;
+    uint64_t last_seq_ns;
+    uint64_t last_par_ns;
+    uint64_t last_wake_ns;
+    uint64_t last_join_ns;
+    uint64_t last_run_ns;
+    uint64_t last_reset_ns;
+    uint64_t last_max_slice_ns;
+} Wc3PhaseState;
+
+/* Caller continuation snapshot.  Level 0 is the innermost raycast and lives in
+ * g_phase_cpu; levels 1..3 are the caller frames saved by the collect chain.
+ * The frame is the live guest range [esp, ebp + 8) at the callee's post-call
+ * point: saved registers, locals, saved ebp and the return address.  The
+ * caller's own arguments live above ebp + 8 in the next outer frame, which is
+ * restored by that frame's level before this postfix runs. */
+typedef struct Wc3PhaseLevel {
+    CPU cpu;
+    uint32_t frame_va;
+    uint32_t frame_len;
+    uint8_t frame[WC3_PHASE_FRAME_MAX];
+} Wc3PhaseLevel;
+
+static Wc3PhaseState g_phase;
+static CPU g_phase_cpu[WC3_PHASE_MAX_REQUESTS];
+static Wc3PhaseLevel g_phase_level[WC3_PHASE_MAX_REQUESTS]
+                                 [WC3_PHASE_MAX_LEVELS];
+static uint8_t g_phase_level_count[WC3_PHASE_MAX_REQUESTS];
+static _Thread_local int t_phase_armed;
+/* Set while wc3_phase_apply_all() is running on this thread.  A loop boundary
+ * reached from an apply postfix must not run a nested apply: the outer drain
+ * owns the window and the nested boundary would reset it under the outer
+ * loop.  The nested boundary becomes a no-op and the new requests are drained
+ * by the outer apply_all after the postfix returns. */
+static _Thread_local int t_phase_apply_active;
+#endif
+
 typedef enum RayJobKind {
     RAY_JOB_RAYCAST = 0,
     RAY_JOB_VERTEX = 1,
-    RAY_JOB_TRIANGLE = 2
+    RAY_JOB_TRIANGLE = 2,
+    RAY_JOB_PHASE = 3
 } RayJobKind;
 
 /* Each dispatch initializes only the common fields and the fields for its
@@ -301,6 +393,12 @@ typedef struct RayJob {
     uint32_t triangle_best_ptr;
     uint32_t triangle_index_ptr;
     uint32_t triangle_orig_best;
+
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    /* RAY_JOB_PHASE points at the phase job.  The job owns the request array
+     * and the split; workers only read it after the job sequence is acquired. */
+    Wc3PhaseJob *phase;
+#endif
 } RayJob;
 
 /* One division per job instead of two per worker.  The split is contiguous and
@@ -453,6 +551,14 @@ typedef struct RayCtx {
     uint32_t triangle_index_addr;
     int triangle_failed;
 
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    /* Phase slice state.  phase_failed is published with done_seq; the main
+     * thread reads it only after the worker's completion store. */
+    int phase_failed;
+    uint64_t phase_slice_ns;
+    uint32_t phase_count;
+#endif
+
     int index;
     /* Set after this worker runs an active chunk.  The next wait then uses
      * the shared futex; workers outside the active set stay on their own
@@ -485,6 +591,13 @@ typedef struct RayCtx {
     sem_t wake;
     int wake_init;
 } RayCtx;
+
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+/* Sequential fallback context for the phase window.  RayCtx is defined below
+ * the early phase state block, so these two live here. */
+static RayCtx g_phase_seq_ctx;
+static int g_phase_seq_ctx_ready;
+#endif
 
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 /* Fast-path copy of the one-time init result.  The wrappers are hot; after the
@@ -552,6 +665,156 @@ static inline void par_gate_set_u(_Atomic unsigned *p, unsigned v)
 }
 static unsigned g_workers;
 static RayCtx *g_worker;
+
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+/* Live phase configuration.  The tuner thread only writes these atomics; the
+ * guest thread copies them into the plain g_phase fields at a safe boundary
+ * (empty window).  A split is therefore never changed while a phase job is in
+ * flight, and the hot path has no cross-thread plain-data race. */
+#define WC3_PHASE_AUTO_CHUNKS 4u
+
+typedef struct Wc3PhaseConfig {
+    _Atomic int enabled;
+    _Atomic int shadow;
+    _Atomic int main_last;
+    _Atomic int weighted;
+    _Atomic unsigned chunks;       /* 0 = auto: min(workers, 4) */
+    _Atomic unsigned max_requests; /* shadow capture window */
+    _Atomic unsigned threshold;    /* minimum requests for a fork-join */
+    _Atomic unsigned stack_zero;
+    _Atomic unsigned spin_us;
+    _Atomic int dirty;
+} Wc3PhaseConfig;
+
+static Wc3PhaseConfig g_phase_cfg;
+
+static unsigned phase_clamp_u(unsigned v, unsigned lo, unsigned hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static void phase_live_touch(void)
+{
+    atomic_store_explicit(&g_phase_cfg.dirty, 1, memory_order_release);
+}
+
+static void phase_live_set_enabled(int on)
+{
+    atomic_store_explicit(&g_phase_cfg.enabled, on ? 1 : 0,
+                          memory_order_relaxed);
+    phase_live_touch();
+}
+
+static void phase_live_set_shadow(int on)
+{
+    atomic_store_explicit(&g_phase_cfg.shadow, on ? 1 : 0,
+                          memory_order_relaxed);
+    phase_live_touch();
+}
+
+static void phase_live_set_main_last(int on)
+{
+    atomic_store_explicit(&g_phase_cfg.main_last, on ? 1 : 0,
+                          memory_order_relaxed);
+    phase_live_touch();
+}
+
+static void phase_live_set_weighted(int on)
+{
+    atomic_store_explicit(&g_phase_cfg.weighted, on ? 1 : 0,
+                          memory_order_relaxed);
+    phase_live_touch();
+}
+
+static void phase_live_set_chunks(unsigned v)
+{
+    atomic_store_explicit(&g_phase_cfg.chunks, v, memory_order_relaxed);
+    phase_live_touch();
+}
+
+static void phase_live_set_max(unsigned v)
+{
+    atomic_store_explicit(&g_phase_cfg.max_requests, v, memory_order_relaxed);
+    phase_live_touch();
+}
+
+static void phase_live_set_threshold(unsigned v)
+{
+    atomic_store_explicit(&g_phase_cfg.threshold, v, memory_order_relaxed);
+    phase_live_touch();
+}
+
+static void phase_live_set_stack_zero(unsigned v)
+{
+    atomic_store_explicit(&g_phase_cfg.stack_zero, v, memory_order_relaxed);
+    phase_live_touch();
+}
+
+static void phase_live_set_spin_us(unsigned v)
+{
+    atomic_store_explicit(&g_phase_cfg.spin_us, v, memory_order_relaxed);
+    phase_live_touch();
+}
+
+static void phase_log_config(const char *why)
+{
+    unsigned chunks = g_phase.chunks;
+    fprintf(stderr,
+            "[phase-tune] %s: enabled=%d shadow_cfg=%d shadow=%d "
+            "main_last=%d weighted=%d chunks=%u%s max=%u threshold=%u "
+            "stack_zero=%u spin_us=%u\n",
+            why, g_phase.enabled,
+            atomic_load_explicit(&g_phase_cfg.shadow, memory_order_relaxed),
+            g_phase.shadow_enabled, g_phase.main_last, g_phase.weighted,
+            chunks, chunks ? "" : "(auto)", g_phase.max_requests,
+            g_phase.threshold, g_phase.stack_zero, g_phase.spin_us);
+}
+
+static void phase_sync_config(void)
+{
+    if (!atomic_load_explicit(&g_phase_cfg.dirty, memory_order_acquire))
+        return;
+    if (g_phase.count || g_phase.reserved || g_phase.shadow_busy)
+        return;
+
+    int en = atomic_load_explicit(&g_phase_cfg.enabled, memory_order_relaxed);
+    int sh = atomic_load_explicit(&g_phase_cfg.shadow, memory_order_relaxed);
+    if (!g_phase_seq_ctx_ready) {
+        en = 0;
+        sh = 0;
+    }
+
+    unsigned chunks = atomic_load_explicit(&g_phase_cfg.chunks,
+                                           memory_order_relaxed);
+    if (chunks == 1u) chunks = 2u;
+    if (g_workers && chunks > g_workers) chunks = g_workers;
+
+    g_phase.enabled = en ? 1 : 0;
+    g_phase.shadow_enabled = (sh && !en) ? 1 : 0;
+    g_phase.main_last = atomic_load_explicit(&g_phase_cfg.main_last,
+                                             memory_order_relaxed) ? 1 : 0;
+    g_phase.weighted = atomic_load_explicit(&g_phase_cfg.weighted,
+                                            memory_order_relaxed) ? 1 : 0;
+    g_phase.chunks = chunks;
+    g_phase.max_requests = phase_clamp_u(
+        atomic_load_explicit(&g_phase_cfg.max_requests, memory_order_relaxed),
+        2u, WC3_PHASE_MAX_REQUESTS);
+    g_phase.threshold = phase_clamp_u(
+        atomic_load_explicit(&g_phase_cfg.threshold, memory_order_relaxed),
+        2u, WC3_PHASE_MAX_REQUESTS);
+    g_phase.stack_zero = phase_clamp_u(
+        atomic_load_explicit(&g_phase_cfg.stack_zero, memory_order_relaxed),
+        RAY_STACK_ZERO_MIN, RAY_STACK_ZERO_MAX);
+    g_phase.spin_us = phase_clamp_u(
+        atomic_load_explicit(&g_phase_cfg.spin_us, memory_order_relaxed),
+        0u, 1000000u);
+
+    atomic_store_explicit(&g_phase_cfg.dirty, 0, memory_order_release);
+    phase_log_config("reload");
+}
+#endif
 
 static inline int parallel_main_last(void);
 #if WC3_PAR_LAYOUT_DEBUG
@@ -758,6 +1021,12 @@ static int g_tune_missing_logged;
  * workers are neither woken nor allowed to read the stack job, so the caller
  * only waits for the chunks that actually run. */
 static _Atomic(uintptr_t) g_job_addr;
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+/* Set while a debug phase owns the pool.  The existing batch dispatchers
+ * check it before publishing so a shadow phase and a per-call job cannot
+ * share g_job_seq.  Release never sees this flag. */
+static _Atomic int g_phase_busy;
+#endif
 /* First published value is 1: done_seq starts at zero, so a bare increment
  * result would look like an already-finished first job.  Only the submit-lock
  * holder writes this counter. */
@@ -1797,6 +2066,21 @@ typedef struct ParEff {
     _Atomic unsigned long long ray_par_items;
     _Atomic unsigned long long ray_par_ns;
     _Atomic unsigned long long chunks_sum;
+    _Atomic unsigned long long phase_applies;
+    _Atomic unsigned long long phase_items;
+    _Atomic unsigned long long phase_par_runs;
+    _Atomic unsigned long long phase_seq_runs;
+    _Atomic unsigned long long phase_seq_ns;
+    _Atomic unsigned long long phase_apply_ns;
+    _Atomic unsigned long long phase_run_ns;
+    _Atomic unsigned long long phase_wake_ns;
+    _Atomic unsigned long long phase_join_ns;
+    _Atomic unsigned long long phase_slice_ns;
+    _Atomic unsigned long long phase_chunks_sum;
+    _Atomic unsigned long long phase_shadow_flushes;
+    _Atomic unsigned long long phase_shadow_mismatches;
+    _Atomic unsigned long long phase_shadow_seq_ns;
+    _Atomic unsigned long long phase_shadow_par_ns;
 } ParEff;
 
 static ParEff g_eff;
@@ -1829,6 +2113,21 @@ typedef struct ParEffSnap {
     unsigned long long ray_par_items;
     unsigned long long ray_par_ns;
     unsigned long long chunks_sum;
+    unsigned long long phase_applies;
+    unsigned long long phase_items;
+    unsigned long long phase_par_runs;
+    unsigned long long phase_seq_runs;
+    unsigned long long phase_seq_ns;
+    unsigned long long phase_apply_ns;
+    unsigned long long phase_run_ns;
+    unsigned long long phase_wake_ns;
+    unsigned long long phase_join_ns;
+    unsigned long long phase_slice_ns;
+    unsigned long long phase_chunks_sum;
+    unsigned long long phase_shadow_flushes;
+    unsigned long long phase_shadow_mismatches;
+    unsigned long long phase_shadow_seq_ns;
+    unsigned long long phase_shadow_par_ns;
 } ParEffSnap;
 
 static void par_eff_snapshot(ParEffSnap *o)
@@ -1855,6 +2154,40 @@ static void par_eff_snapshot(ParEffSnap *o)
         atomic_load_explicit(&g_eff.ray_par_ns, memory_order_relaxed);
     o->chunks_sum =
         atomic_load_explicit(&g_eff.chunks_sum, memory_order_relaxed);
+    o->phase_applies =
+        atomic_load_explicit(&g_eff.phase_applies, memory_order_relaxed);
+    o->phase_items =
+        atomic_load_explicit(&g_eff.phase_items, memory_order_relaxed);
+    o->phase_par_runs =
+        atomic_load_explicit(&g_eff.phase_par_runs, memory_order_relaxed);
+    o->phase_seq_runs =
+        atomic_load_explicit(&g_eff.phase_seq_runs, memory_order_relaxed);
+    o->phase_seq_ns =
+        atomic_load_explicit(&g_eff.phase_seq_ns, memory_order_relaxed);
+    o->phase_apply_ns =
+        atomic_load_explicit(&g_eff.phase_apply_ns, memory_order_relaxed);
+    o->phase_run_ns =
+        atomic_load_explicit(&g_eff.phase_run_ns, memory_order_relaxed);
+    o->phase_wake_ns =
+        atomic_load_explicit(&g_eff.phase_wake_ns, memory_order_relaxed);
+    o->phase_join_ns =
+        atomic_load_explicit(&g_eff.phase_join_ns, memory_order_relaxed);
+    o->phase_slice_ns =
+        atomic_load_explicit(&g_eff.phase_slice_ns, memory_order_relaxed);
+    o->phase_chunks_sum =
+        atomic_load_explicit(&g_eff.phase_chunks_sum, memory_order_relaxed);
+    o->phase_shadow_flushes =
+        atomic_load_explicit(&g_eff.phase_shadow_flushes,
+                             memory_order_relaxed);
+    o->phase_shadow_mismatches =
+        atomic_load_explicit(&g_eff.phase_shadow_mismatches,
+                             memory_order_relaxed);
+    o->phase_shadow_seq_ns =
+        atomic_load_explicit(&g_eff.phase_shadow_seq_ns,
+                             memory_order_relaxed);
+    o->phase_shadow_par_ns =
+        atomic_load_explicit(&g_eff.phase_shadow_par_ns,
+                             memory_order_relaxed);
 }
 
 static void par_note_wait(unsigned long long ns)
@@ -1893,6 +2226,58 @@ static void par_note_seq(unsigned long long items, unsigned long long ns)
     atomic_fetch_add_explicit(&g_eff.seq_items, items, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_eff.seq_ns, ns, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_eff.seq_calls, 1, memory_order_relaxed);
+}
+
+static void par_note_phase_apply(unsigned long long items,
+                                 unsigned long long ns)
+{
+    atomic_fetch_add_explicit(&g_eff.phase_items, items,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_apply_ns, ns,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_applies, 1,
+                              memory_order_relaxed);
+}
+
+static void par_note_phase_par(unsigned chunks, unsigned long long run_ns,
+                               unsigned long long wake_ns,
+                               unsigned long long join_ns,
+                               unsigned long long slice_ns)
+{
+    atomic_fetch_add_explicit(&g_eff.phase_par_runs, 1,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_chunks_sum, chunks,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_run_ns, run_ns,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_wake_ns, wake_ns,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_join_ns, join_ns,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_slice_ns, slice_ns,
+                              memory_order_relaxed);
+}
+
+static void par_note_phase_seq(unsigned long long ns)
+{
+    atomic_fetch_add_explicit(&g_eff.phase_seq_runs, 1,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_seq_ns, ns,
+                              memory_order_relaxed);
+}
+
+static void par_note_phase_shadow(unsigned long long mismatches,
+                                  unsigned long long seq_ns,
+                                  unsigned long long par_ns)
+{
+    atomic_fetch_add_explicit(&g_eff.phase_shadow_flushes, 1,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_shadow_mismatches, mismatches,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_shadow_seq_ns, seq_ns,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_eff.phase_shadow_par_ns, par_ns,
+                              memory_order_relaxed);
 }
 
 static unsigned par_clamp_u(unsigned v, unsigned lo, unsigned hi)
@@ -2057,6 +2442,56 @@ static void par_apply_key(const char *key, const char *value)
         if (parse_uint(value, &u))
             tune_set_uint(&g_tune.stats_every,
                           par_clamp_u(u, 1u, RAY_STATS_EVERY_MAX));
+        return;
+    }
+    if (!strcmp(key, "phase")) {
+        if (par_parse_bool(value, &b))
+            phase_live_set_enabled(b);
+        return;
+    }
+    if (!strcmp(key, "phase_shadow")) {
+        if (par_parse_bool(value, &b))
+            phase_live_set_shadow(b);
+        return;
+    }
+    if (!strcmp(key, "phase_chunks")) {
+        if (!strcmp(value, "auto")) {
+            phase_live_set_chunks(0u);
+        } else if (parse_uint(value, &u)) {
+            phase_live_set_chunks(u);
+        }
+        return;
+    }
+    if (!strcmp(key, "phase_max")) {
+        if (parse_uint(value, &u))
+            phase_live_set_max(par_clamp_u(u, 2u, WC3_PHASE_MAX_REQUESTS));
+        return;
+    }
+    if (!strcmp(key, "phase_threshold")) {
+        if (parse_uint(value, &u))
+            phase_live_set_threshold(
+                par_clamp_u(u, 2u, WC3_PHASE_MAX_REQUESTS));
+        return;
+    }
+    if (!strcmp(key, "phase_main_last")) {
+        if (par_parse_bool(value, &b))
+            phase_live_set_main_last(b);
+        return;
+    }
+    if (!strcmp(key, "phase_weighted")) {
+        if (par_parse_bool(value, &b))
+            phase_live_set_weighted(b);
+        return;
+    }
+    if (!strcmp(key, "phase_stack_zero")) {
+        if (parse_uint(value, &u))
+            phase_live_set_stack_zero(
+                par_clamp_u(u, RAY_STACK_ZERO_MIN, RAY_STACK_ZERO_MAX));
+        return;
+    }
+    if (!strcmp(key, "phase_spin_us")) {
+        if (parse_uint(value, &u))
+            phase_live_set_spin_us(par_clamp_u(u, 0u, 1000000u));
         return;
     }
     if (!strcmp(key, "report")) {
@@ -2228,19 +2663,96 @@ static void par_format_metrics(char *buf, size_t cap,
              speedup_x100);
 }
 
+static void par_format_phase_metrics(char *buf, size_t cap,
+                                     const ParEffSnap *cur,
+                                     const ParEffSnap *base,
+                                     unsigned long long interval_ns, int side)
+{
+    unsigned long long d_applies =
+        cur->phase_applies - base->phase_applies;
+    unsigned long long d_items = cur->phase_items - base->phase_items;
+    unsigned long long d_par_runs =
+        cur->phase_par_runs - base->phase_par_runs;
+    unsigned long long d_seq_runs =
+        cur->phase_seq_runs - base->phase_seq_runs;
+    unsigned long long d_apply_ns =
+        cur->phase_apply_ns - base->phase_apply_ns;
+    unsigned long long d_run_ns = cur->phase_run_ns - base->phase_run_ns;
+    unsigned long long d_wake_ns = cur->phase_wake_ns - base->phase_wake_ns;
+    unsigned long long d_join_ns = cur->phase_join_ns - base->phase_join_ns;
+    unsigned long long d_slice_ns =
+        cur->phase_slice_ns - base->phase_slice_ns;
+    unsigned long long d_chunks =
+        cur->phase_chunks_sum - base->phase_chunks_sum;
+    unsigned long long d_seq_ns = cur->phase_seq_ns - base->phase_seq_ns;
+    unsigned long long d_shadow_flushes =
+        cur->phase_shadow_flushes - base->phase_shadow_flushes;
+    unsigned long long d_shadow_mismatches =
+        cur->phase_shadow_mismatches - base->phase_shadow_mismatches;
+    unsigned long long d_shadow_seq_ns =
+        cur->phase_shadow_seq_ns - base->phase_shadow_seq_ns;
+    unsigned long long d_shadow_par_ns =
+        cur->phase_shadow_par_ns - base->phase_shadow_par_ns;
+
+    double avg_count = d_applies
+        ? (double)d_items / (double)d_applies : 0.0;
+    double chunks_avg = d_par_runs
+        ? (double)d_chunks / (double)d_par_runs : 0.0;
+    double apply_avg_us = d_applies
+        ? (double)d_apply_ns / (double)d_applies / 1000.0 : 0.0;
+    double run_avg_us = d_par_runs
+        ? (double)d_run_ns / (double)d_par_runs / 1000.0 : 0.0;
+    double wake_avg_us = d_par_runs
+        ? (double)d_wake_ns / (double)d_par_runs / 1000.0 : 0.0;
+    double join_avg_us = d_par_runs
+        ? (double)d_join_ns / (double)d_par_runs / 1000.0 : 0.0;
+    double slice_avg_us = d_par_runs
+        ? (double)d_slice_ns / (double)d_par_runs / 1000.0 : 0.0;
+    double seq_avg_us = d_seq_runs
+        ? (double)d_seq_ns / (double)d_seq_runs / 1000.0 : 0.0;
+    double shadow_seq_avg_us = d_shadow_flushes
+        ? (double)d_shadow_seq_ns / (double)d_shadow_flushes / 1000.0 : 0.0;
+    double shadow_par_avg_us = d_shadow_flushes
+        ? (double)d_shadow_par_ns / (double)d_shadow_flushes / 1000.0 : 0.0;
+    unsigned long long shadow_speedup_x100 =
+        d_shadow_par_ns ? d_shadow_seq_ns * 100ull / d_shadow_par_ns : 0ull;
+
+    snprintf(buf, cap,
+             "side=%c interval_ms=%llu phase_applies=%llu phase_items=%llu "
+             "phase_avg_count=%.1f phase_par_runs=%llu phase_seq_runs=%llu "
+             "phase_chunks_avg=%.2f phase_apply_avg_us=%.1f "
+             "phase_run_avg_us=%.1f phase_wake_avg_us=%.1f "
+             "phase_join_avg_us=%.1f phase_slice_avg_us=%.1f "
+             "phase_seq_avg_us=%.1f phase_shadow_flushes=%llu "
+             "phase_shadow_mismatches=%llu "
+             "phase_shadow_seq_avg_us=%.1f phase_shadow_par_avg_us=%.1f "
+             "phase_shadow_speedup_x100=%llu",
+             side ? 'B' : 'A', interval_ns / 1000000ull,
+             d_applies, d_items, avg_count, d_par_runs, d_seq_runs,
+             chunks_avg, apply_avg_us, run_avg_us, wake_avg_us,
+             join_avg_us, slice_avg_us, seq_avg_us,
+             d_shadow_flushes, d_shadow_mismatches,
+             shadow_seq_avg_us, shadow_par_avg_us, shadow_speedup_x100);
+}
+
 static void par_emit_metrics(const ParEffSnap *cur, const ParEffSnap *base,
                              unsigned long long interval_ns, int side)
 {
     char line[512];
+    char phase_line[768];
     par_format_metrics(line, sizeof line, cur, base, interval_ns, side);
+    par_format_phase_metrics(phase_line, sizeof phase_line, cur, base,
+                             interval_ns, side);
 
     FILE *f = fopen(g_par_metrics_path, "w");
     if (f) {
-        fprintf(f, "%s\n", line);
+        fprintf(f, "%s\n%s\n", line, phase_line);
         fclose(f);
     }
-    if (atomic_load_explicit(&g_par_report, memory_order_relaxed))
+    if (atomic_load_explicit(&g_par_report, memory_order_relaxed)) {
         fprintf(stderr, "[parallel-eff] %s\n", line);
+        fprintf(stderr, "[phase-eff] %s\n", phase_line);
+    }
 }
 
 static void *par_tuner_main(void *arg)
@@ -2895,6 +3407,12 @@ static void run_triangle_chunk(RayCtx *ctx, const RayJob *job)
     ctx->triangle_index = rd32(ctx->triangle_index_addr);
 }
 
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+static void run_phase_slice(RayCtx *ctx, const Wc3PhaseJob *pj, unsigned idx,
+                            int main_chunk);
+static int phase_run_job(Wc3PhaseJob *pj);
+#endif
+
 /* The caller executes the last chunk in that chunk's private context.  That
  * context is kept outside the published active set, so it never runs a chunk
  * concurrently with the caller; the context's CPU, stack, TEB, private frame
@@ -2928,6 +3446,10 @@ static inline void run_job_chunk(RayCtx *ctx, const RayJob *job)
         run_vertex_chunk(ctx, job);
     else if (job->kind == RAY_JOB_TRIANGLE)
         run_triangle_chunk(ctx, job);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    else if (job->kind == RAY_JOB_PHASE)
+        run_phase_slice(ctx, job->phase, (unsigned)ctx->index, 0);
+#endif
     else
         run_chunk(ctx, job);
 }
@@ -3240,15 +3762,27 @@ static void init_once(void)
         atomic_store_explicit(&g_init_ok, 1, memory_order_release);
         return;
     }
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    /* Debug phase run: the old chunked paths are opt-in.  The worker pool
+     * below is still created for the SPMD phase. */
+    g_raycast_enabled = env_on("WC3_PARALLEL_RAYCAST");
+    g_vertex_enabled = env_on("WC3_VERTEX");
+    g_triangle_enabled = env_on("WC3_TRIANGLE");
+#else
     g_raycast_enabled = !env_off("WC3_PARALLEL_RAYCAST");
     g_vertex_enabled = !env_off("WC3_VERTEX");
     g_triangle_enabled = !env_off("WC3_TRIANGLE");
+#endif
     if (!g_raycast_enabled && !g_vertex_enabled && !g_triangle_enabled) {
 #if WC3_PAR_LAYOUT_DEBUG
         fprintf(stderr, "[parallel] all guest paths disabled\n");
 #endif
+        /* The debug phase build still needs the worker pool for the SPMD
+         * phase; only a build without the phase can stop here. */
+#if !(WC3_DEBUG && WC3_DEBUG_PARALLEL)
         atomic_store_explicit(&g_init_ok, 1, memory_order_release);
         return;
+#endif
     }
 
 #if WC3_PAR_LAYOUT_DEBUG
@@ -3377,6 +3911,70 @@ static void init_once(void)
     load_tuning_file(0);
 #endif
 
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    /* Debug default: the SPMD phase is the parallel guest path; WC3_PHASE=0
+     * opts out.  The old chunked paths above are opt-in in this build.
+     * `parallel.cfg` can change every field below at runtime; the tuner writes
+     * the atomics and phase_sync_config() copies them at the next empty
+     * window. */
+    int phase_en = !env_off("WC3_PHASE");
+    int phase_sh = env_on("WC3_PHASE_SHADOW");
+    int phase_main_last = !env_off("WC3_PHASE_MAIN_LAST");
+    int phase_weighted = env_on("WC3_PHASE_WEIGHTED");
+    unsigned phase_chunks = env_u("WC3_PHASE_CHUNKS", 2u,
+                                  WC3_PARALLEL_MAX_WORKERS);
+    if (phase_chunks == 1u) phase_chunks = 2u;
+    unsigned phase_max = env_u("WC3_PHASE_MAX", 64u,
+                               WC3_PHASE_MAX_REQUESTS);
+    if (phase_max < 2u) phase_max = 2u;
+    unsigned phase_threshold = env_u("WC3_PHASE_THRESHOLD", 2u,
+                                     WC3_PHASE_MAX_REQUESTS);
+    if (phase_threshold < 2u) phase_threshold = 2u;
+    unsigned phase_stack = env_u("WC3_PHASE_STACK_ZERO", RAY_STACK_ZERO,
+                                 RAY_STACK_ZERO_MAX);
+    if (phase_stack < RAY_STACK_ZERO_MIN) phase_stack = RAY_STACK_ZERO_MIN;
+    unsigned phase_spin = env_u("WC3_PHASE_MAIN_SPIN_US", 1000u, 1000000u);
+
+    atomic_store_explicit(&g_phase_cfg.enabled, phase_en,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_phase_cfg.shadow, phase_sh,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_phase_cfg.main_last, phase_main_last,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_phase_cfg.weighted, phase_weighted,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_phase_cfg.chunks, phase_chunks,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_phase_cfg.max_requests, phase_max,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_phase_cfg.threshold, phase_threshold,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_phase_cfg.stack_zero, phase_stack,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_phase_cfg.spin_us, phase_spin,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_phase_cfg.dirty, 0, memory_order_release);
+
+    g_phase.enabled = phase_en;
+    g_phase.shadow_enabled = phase_sh && !phase_en;
+    g_phase.main_last = phase_main_last;
+    g_phase.weighted = phase_weighted;
+    g_phase.max_requests = phase_max;
+    g_phase.threshold = phase_threshold;
+    g_phase.chunks = phase_chunks;
+    g_phase.stack_zero = phase_stack;
+    g_phase.spin_us = phase_spin;
+    g_phase.ran = 0;
+    fprintf(stderr,
+            "[phase] enabled=%d shadow_cfg=%d shadow=%d main_last=%d "
+            "weighted=%d chunks=%u%s shadow_max=%u threshold=%u "
+            "stack_zero=%u spin_us=%u\n",
+            g_phase.enabled, phase_sh, g_phase.shadow_enabled,
+            g_phase.main_last, g_phase.weighted, g_phase.chunks,
+            g_phase.chunks ? "" : "(auto)", g_phase.max_requests,
+            g_phase.threshold, g_phase.stack_zero, g_phase.spin_us);
+#endif
+
     g_shared_wake = futex_probe();
     g_prev_active = 0;
 #if WC3_DEBUG && WC3_DEBUG_HLE
@@ -3401,6 +3999,24 @@ static void init_once(void)
         g_worker = NULL;
         atomic_store_explicit(&g_init_ok, 1, memory_order_release);
         return;
+    }
+#endif
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    /* The sequential oracle is also the shadow replay context and the
+     * fallback for a live-enabled phase.  Allocate it unconditionally so a
+     * `phase=1` or `phase_shadow=1` write to parallel.cfg can take effect
+     * without a relaunch. */
+    if (alloc_ctx(&g_phase_seq_ctx, g_workers)) {
+        g_phase_seq_ctx_ready = 1;
+    } else {
+        fprintf(stderr, "[phase] sequential context allocation failed\n");
+        g_phase.enabled = 0;
+        g_phase.shadow_enabled = 0;
+        atomic_store_explicit(&g_phase_cfg.enabled, 0,
+                              memory_order_relaxed);
+        atomic_store_explicit(&g_phase_cfg.shadow, 0,
+                              memory_order_relaxed);
+        atomic_store_explicit(&g_phase_cfg.dirty, 0, memory_order_release);
     }
 #endif
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
@@ -3546,6 +4162,13 @@ fail:
         sem_destroy(&g_verify_ctx.wake);
         g_verify_ctx.wake_init = 0;
     }
+#endif
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    if (g_phase_seq_ctx.wake_init) {
+        sem_destroy(&g_phase_seq_ctx.wake);
+        g_phase_seq_ctx.wake_init = 0;
+    }
+    g_phase_seq_ctx_ready = 0;
 #endif
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     if (g_triangle_ab_ctx.wake_init) {
@@ -3841,6 +4464,717 @@ static uint64_t publish_job(uintptr_t addr, unsigned active)
     return seq;
 }
 
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+/* ------------------------------------------------------------------ */
+/* Phase execution.                                                    */
+/*                                                                    */
+/* The phase is one fork-join: publish the request array and split,    */
+/* wake the active workers, run the last slice on the caller, wait for */
+/* done_seq, then let the caller apply the scratch results.  Workers   */
+/* never write guest memory; they only fill r->hit/dist/pos.           */
+/* ------------------------------------------------------------------ */
+
+static void phase_set_split(Wc3PhaseJob *pj, unsigned chunks)
+{
+    uint32_t total = pj->total;
+    if (chunks < 1u) chunks = 1u;
+    if (chunks > total) chunks = total;
+    if (chunks < 1u) chunks = 1u;
+    pj->chunks = chunks;
+
+    uint32_t base = total / chunks;
+    uint32_t rem = total % chunks;
+    uint32_t start = 0;
+    for (unsigned i = 0; i < chunks; i++) {
+        uint32_t len = base + (i < rem ? 1u : 0u);
+        pj->chunk_start[i] = start;
+        pj->chunk_len[i] = len;
+        start += len;
+    }
+}
+
+#if WC3_PAR_LAYOUT_DEBUG
+/* Measured weighted split for T>2.  The existing RayJob split is reused so
+ * the phase and the per-call pool share one allocation policy.  The caller
+ * must have already clamped chunks to the worker/thread limit. */
+static void phase_set_weighted_split(Wc3PhaseJob *pj, unsigned chunks)
+{
+    uint64_t weights[WC3_PARALLEL_MAX_WORKERS];
+    RayJob j;
+
+    parallel_chunk_weights(weights, chunks);
+    memset(&j, 0, sizeof j);
+    job_set_weighted_split(&j, pj->total, chunks, weights);
+    memcpy(pj->chunk_start, j.chunk_start, chunks * sizeof j.chunk_start[0]);
+    memcpy(pj->chunk_len, j.chunk_len, chunks * sizeof j.chunk_len[0]);
+    pj->chunks = chunks;
+}
+#else
+static void phase_set_weighted_split(Wc3PhaseJob *pj, unsigned chunks)
+{
+    phase_set_split(pj, chunks);
+}
+#endif
+
+static unsigned phase_active_chunks(const Wc3PhaseJob *pj)
+{
+    unsigned chunks = pj->chunks;
+    unsigned active = pj->main_last ? chunks - 1u : chunks;
+    while (active > 0u && pj->chunk_len[active - 1u] == 0u)
+        active--;
+    return active;
+}
+
+/* The main-last pool layout creates one thread fewer than g_workers.  A phase
+ * that opts out of main participation must not publish a chunk for that
+ * caller-only context. */
+static unsigned phase_worker_threads(void)
+{
+    unsigned n = g_workers;
+    if (parallel_main_last() && n >= 2u) n--;
+    return n;
+}
+
+/* Prepare one request on a private context.  The container snapshot is
+ * copied into the worker's scratch so the original guest container is never
+ * written.  The full CPU copy is deliberate: the shadow must reproduce the
+ * sequential call exactly, and a product phase can later replace it with a
+ * reset of only the fields the lifted chain is audited to dirty. */
+static int phase_prepare_request(RayCtx *ctx, const Wc3PhaseJob *pj,
+                                 uint32_t i)
+{
+    const Wc3PhaseRequest *r = &pj->req[i];
+    const CPU *src = pj->req_cpu ? &pj->req_cpu[i] : pj->cpu;
+
+    if (!src) return 0;
+    if (!hle_android_guest_ok(ctx->container, WC3_PHASE_CONTAINER_SNAP))
+        return 0;
+
+    memcpy(guest_host_ptr(ctx->container), r->snap, WC3_PHASE_CONTAINER_SNAP);
+    wr32(ctx->container + 0x110u, r->count);
+    wr32(ctx->container + 0x114u, r->array);
+
+    memset(guest_host_ptr(ctx->out_pos), 0, 12);
+    memset(guest_host_ptr(ctx->out_dist), 0, 4);
+
+    if (pj->stack_zero) {
+        if (ctx->stack_top <= ctx->stack_base + pj->stack_zero) return 0;
+        memset(guest_host_ptr(ctx->stack_top - pj->stack_zero), 0,
+               pj->stack_zero);
+    }
+
+    prepare_base(ctx, src, 1);
+    ctx->cpu.ecx = ctx->container;
+    push_arg(&ctx->cpu, r->user_ctx);
+    push_arg(&ctx->cpu, ctx->out_dist);
+    push_arg(&ctx->cpu, ctx->out_pos);
+    push_arg(&ctx->cpu, r->in2);
+    push_arg(&ctx->cpu, r->in1);
+    push_arg(&ctx->cpu, RAY_SENTINEL);
+    return 1;
+}
+
+static int phase_run_request(RayCtx *ctx, const Wc3PhaseJob *pj, uint32_t i)
+{
+    if (!phase_prepare_request(ctx, pj, i)) return 0;
+
+    WC3_DIRECT_CALL_CLEAN(pj->fn, &ctx->cpu);
+
+    Wc3PhaseRequest *r = &pj->req[i];
+    r->hit = (ctx->cpu.eax != 0) ? 1u : 0u;
+    if (r->hit) {
+        r->dist_bits = rd32(ctx->out_dist);
+        r->pos[0] = rd32(ctx->out_pos + 0u);
+        r->pos[1] = rd32(ctx->out_pos + 4u);
+        r->pos[2] = rd32(ctx->out_pos + 8u);
+    }
+    return 1;
+}
+
+static void run_phase_slice(RayCtx *ctx, const Wc3PhaseJob *pj, unsigned idx,
+                            int main_chunk)
+{
+    uint32_t start = pj->chunk_start[idx];
+    uint32_t end = start + pj->chunk_len[idx];
+    int saved_active = t_ray_active;
+
+    (void)main_chunk;
+    ctx->phase_failed = 0;
+    ctx->phase_slice_ns = 0;
+    ctx->phase_count = end - start;
+    t_ray_active = 1;
+
+    uint64_t t0 = now_ns();
+    for (uint32_t i = start; i < end; i++) {
+        if (!phase_run_request(ctx, pj, i)) {
+            ctx->phase_failed = 1;
+            break;
+        }
+    }
+    ctx->phase_slice_ns = now_ns() - t0;
+    t_ray_active = saved_active;
+}
+
+static int phase_run_job(Wc3PhaseJob *pj)
+{
+    if (!ready()) return 0;
+    if (!g_phase.enabled && !g_phase.shadow_busy) return 0;
+    if (pj->total < 2u) return 0;
+
+    uint64_t run_t0 = now_ns();
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_phase_busy, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire))
+        return 0;
+
+    unsigned chunks = g_phase.chunks;
+    if (!chunks) {
+        chunks = pj->total < g_workers ? pj->total : g_workers;
+        if (chunks > WC3_PHASE_AUTO_CHUNKS) chunks = WC3_PHASE_AUTO_CHUNKS;
+    }
+    if (chunks < 2u) chunks = 2u;
+    unsigned max_chunks = pj->main_last ? g_workers : phase_worker_threads();
+    if (max_chunks < 2u) {
+        atomic_store_explicit(&g_phase_busy, 0, memory_order_release);
+        return 0;
+    }
+    if (chunks > max_chunks) chunks = max_chunks;
+    if (g_phase.weighted)
+        phase_set_weighted_split(pj, chunks);
+    else
+        phase_set_split(pj, chunks);
+
+    unsigned active = phase_active_chunks(pj);
+    if (!active) {
+        atomic_store_explicit(&g_phase_busy, 0, memory_order_release);
+        return 0;
+    }
+
+    RayJob job;
+    memset(&job, 0, sizeof job);
+    job.kind = RAY_JOB_PHASE;
+    job.phase = pj;
+    pj->active = active;
+    pj->failed = 0;
+
+    int saved_active = t_ray_active;
+    t_ray_active = 1;
+
+    uint64_t seq = publish_job((uintptr_t)&job, active);
+    uint64_t t1 = now_ns();
+    wake_workers(active);
+    uint64_t t2 = now_ns();
+
+    if (pj->main_last) {
+        RayCtx *main_ctx = &g_worker[pj->chunks - 1u];
+        run_phase_slice(main_ctx, pj, pj->chunks - 1u, 1);
+    }
+
+    wait_for_workers(active, seq, g_phase.spin_us);
+    uint64_t t3 = now_ns();
+
+    atomic_store_explicit(&g_job_addr, 0, memory_order_release);
+    atomic_store_explicit(&g_phase_busy, 0, memory_order_release);
+    t_ray_active = saved_active;
+
+    int failed = 0;
+    for (unsigned i = 0; i < pj->chunks; i++) {
+        if (!pj->chunk_len[i]) continue;
+        if (g_worker[i].phase_failed) {
+            failed = 1;
+            break;
+        }
+    }
+    pj->failed = failed;
+
+    g_phase.last_wake_ns = t2 - t1;
+    g_phase.last_join_ns = t3 - t2;
+    g_phase.last_run_ns = t3 - run_t0;
+    g_phase.last_max_slice_ns = 0;
+    for (unsigned i = 0; i < active; i++) {
+        if (g_worker[i].phase_slice_ns > g_phase.last_max_slice_ns)
+            g_phase.last_max_slice_ns = g_worker[i].phase_slice_ns;
+    }
+    if (pj->main_last && pj->chunks) {
+        uint64_t main_ns = g_worker[pj->chunks - 1u].phase_slice_ns;
+        if (main_ns > g_phase.last_max_slice_ns)
+            g_phase.last_max_slice_ns = main_ns;
+    }
+    return !failed;
+}
+
+/* Product-facing debug API.  A future LiftPass collect/apply pair calls
+ * wc3_phase_reserve() before the stateful prefix and wc3_phase_commit()
+ * after it.  Reserving first keeps the failure path safe: when no slot is
+ * available the collect half runs the original lifted function instead of
+ * running the prefix and only then discovering that the phase cannot take
+ * the request.  The shadow below uses the same storage but does not go
+ * through this API. */
+int wc3_phase_reserve(void)
+{
+    phase_sync_config();
+    if (!g_phase.enabled) return 0;
+    if (!atomic_load_explicit(&g_phase_cfg.enabled, memory_order_relaxed))
+        return 0;
+    if (t_ray_active) return 0;
+    if (atomic_load_explicit(&g_phase_busy, memory_order_acquire)) return 0;
+    if (atomic_load_explicit(&g_job_addr, memory_order_acquire)) return 0;
+    if (g_phase.count + g_phase.reserved >= WC3_PHASE_MAX_REQUESTS)
+        return 0;
+    g_phase.reserved++;
+    return 1;
+}
+
+static void phase_commit_fail(const char *why)
+{
+    fprintf(stderr, "[phase] commit failed: %s\n", why);
+    abort();
+}
+
+void wc3_phase_commit(CPU *c, wc3_lifted_fn fn, uint32_t container,
+                      uint32_t array, uint32_t count, uint32_t in1,
+                      uint32_t in2, uint32_t out_pos, uint32_t out_dist,
+                      uint32_t user_ctx, uint32_t frame_va, uint32_t frame_len)
+{
+    Wc3PhaseRequest *r;
+    uint32_t index;
+    uint64_t bytes;
+
+    if (!g_phase.reserved) phase_commit_fail("no reserved slot");
+    index = g_phase.count + g_phase.reserved - 1u;
+    if (index >= WC3_PHASE_MAX_REQUESTS) phase_commit_fail("slot out of range");
+    if (!c || !fn || !container || count == 0u || count > 0x100000u)
+        phase_commit_fail("bad request");
+    if (!hle_android_guest_ok(container, WC3_PHASE_CONTAINER_SNAP))
+        phase_commit_fail("bad container range");
+
+    bytes = (uint64_t)count * 4u;
+    if (!array || bytes > 0xFFFFFFFFu ||
+        !hle_android_guest_ok(array, (uint32_t)bytes))
+        phase_commit_fail("bad array range");
+    if (!out_pos || !out_dist) phase_commit_fail("missing outputs");
+    if (!hle_android_guest_ok(out_pos, 12u) ||
+        !hle_android_guest_ok(out_dist, 4u))
+        phase_commit_fail("bad output range");
+    if (frame_len > WC3_PHASE_FRAME_MAX) phase_commit_fail("frame too large");
+    if (frame_len && (!frame_va ||
+                      !hle_android_guest_ok(frame_va, frame_len)))
+        phase_commit_fail("bad frame range");
+
+    r = &g_phase.req[index];
+    r->index = index;
+    r->container = container;
+    r->array = array;
+    r->count = count;
+    r->in1 = in1;
+    r->in2 = in2;
+    r->out_pos = out_pos;
+    r->out_dist = out_dist;
+    r->user_ctx = user_ctx;
+    r->hit = 0;
+    r->dist_bits = 0;
+    r->pos[0] = r->pos[1] = r->pos[2] = 0;
+    r->frame_va = frame_va;
+    r->frame_len = frame_len;
+    if (frame_len)
+        memcpy(r->frame, guest_host_ptr(frame_va), frame_len);
+    memcpy(r->snap, guest_host_ptr(container), WC3_PHASE_CONTAINER_SNAP);
+    g_phase_cpu[index] = *c;
+    g_phase_level_count[index] = 0;
+    g_phase.fn = fn;
+    g_phase.reserved--;
+    g_phase.count++;
+    g_phase.captures++;
+    g_phase.ran = 0;
+}
+
+int wc3_phase_run(void)
+{
+    Wc3PhaseJob pj;
+
+    if (!g_phase.enabled || g_phase.count < g_phase.threshold) return 0;
+    if (g_phase.reserved) return 0;
+    if (atomic_load_explicit(&g_phase_busy, memory_order_acquire)) return 0;
+
+    memset(&pj, 0, sizeof pj);
+    pj.req = g_phase.req;
+    pj.cpu = NULL;
+    pj.req_cpu = g_phase_cpu;
+    pj.total = g_phase.count;
+    pj.fn = g_phase.fn;
+    pj.stack_zero = g_phase.stack_zero;
+    pj.main_last = g_phase.main_last;
+
+    int ok = phase_run_job(&pj);
+    g_phase.ran = ok;
+    if (ok) {
+        par_note_phase_par(pj.chunks, g_phase.last_run_ns,
+                           g_phase.last_wake_ns, g_phase.last_join_ns,
+                           g_phase.last_max_slice_ns);
+    }
+    return ok;
+}
+
+const Wc3PhaseRequest *wc3_phase_result(unsigned index)
+{
+    if (!g_phase.ran || index >= g_phase.count) return NULL;
+    return &g_phase.req[index];
+}
+
+const CPU *wc3_phase_request_cpu(unsigned index)
+{
+    if (!g_phase.ran || index >= g_phase.count) return NULL;
+    return &g_phase_cpu[index];
+}
+
+void wc3_phase_restore_frame(unsigned index)
+{
+    const Wc3PhaseRequest *r;
+
+    if (!g_phase.ran || index >= g_phase.count) return;
+    r = &g_phase.req[index];
+    if (r->frame_len && r->frame_len <= WC3_PHASE_FRAME_MAX &&
+        r->frame_va && hle_android_guest_ok(r->frame_va, r->frame_len))
+        memcpy(guest_host_ptr(r->frame_va), r->frame, r->frame_len);
+}
+
+void wc3_phase_commit_level(CPU *c, unsigned level, uint32_t frame_va,
+                            uint32_t frame_len)
+{
+    Wc3PhaseLevel *lv;
+    uint32_t index;
+
+    if (!g_phase.enabled) phase_commit_fail("level commit with phase off");
+    if (!g_phase.count) phase_commit_fail("level commit without request");
+    if (level == 0u || level >= WC3_PHASE_MAX_LEVELS)
+        phase_commit_fail("bad level");
+    index = g_phase.count - 1u;
+    if (index >= WC3_PHASE_MAX_REQUESTS)
+        phase_commit_fail("level slot out of range");
+    if (!c) phase_commit_fail("null level cpu");
+    if (frame_len > WC3_PHASE_FRAME_MAX)
+        phase_commit_fail("level frame too large");
+    if (frame_len && (!frame_va || !hle_android_guest_ok(frame_va, frame_len)))
+        phase_commit_fail("bad level frame range");
+
+    lv = &g_phase_level[index][level];
+    lv->cpu = *c;
+    lv->frame_va = frame_va;
+    lv->frame_len = frame_len;
+    if (frame_len)
+        memcpy(lv->frame, guest_host_ptr(frame_va), frame_len);
+    if (g_phase_level_count[index] <= level)
+        g_phase_level_count[index] = (uint8_t)(level + 1u);
+}
+
+const CPU *wc3_phase_request_cpu_level(unsigned index, unsigned level)
+{
+    if (!g_phase.ran || index >= g_phase.count) return NULL;
+    if (level == 0u) return &g_phase_cpu[index];
+    if (level >= WC3_PHASE_MAX_LEVELS) return NULL;
+    if (level >= g_phase_level_count[index]) return NULL;
+    return &g_phase_level[index][level].cpu;
+}
+
+void wc3_phase_restore_frame_level(unsigned index, unsigned level)
+{
+    const Wc3PhaseLevel *lv;
+
+    if (!g_phase.ran || index >= g_phase.count) return;
+    if (level == 0u) {
+        wc3_phase_restore_frame(index);
+        return;
+    }
+    if (level >= WC3_PHASE_MAX_LEVELS) return;
+    if (level >= g_phase_level_count[index]) return;
+    lv = &g_phase_level[index][level];
+    if (lv->frame_len && lv->frame_len <= WC3_PHASE_FRAME_MAX &&
+        lv->frame_va && hle_android_guest_ok(lv->frame_va, lv->frame_len))
+        memcpy(guest_host_ptr(lv->frame_va), lv->frame, lv->frame_len);
+}
+
+unsigned wc3_phase_count(void)
+{
+    return g_phase.enabled ? g_phase.count : 0u;
+}
+
+int wc3_phase_window_full(void)
+{
+    if (!g_phase.enabled) return 0;
+    return g_phase.count + g_phase.reserved >= WC3_PHASE_MAX_REQUESTS;
+}
+
+int wc3_phase_arm(int on)
+{
+    int prev = t_phase_armed;
+    t_phase_armed = on ? 1 : 0;
+    return prev;
+}
+
+int wc3_phase_armed(void)
+{
+    return t_phase_armed;
+}
+
+int wc3_phase_run_or_seq(void)
+{
+    Wc3PhaseJob pj;
+
+    if (!g_phase.enabled || !g_phase.count) return 0;
+    if (wc3_phase_run()) return 1;
+    if (!g_phase_seq_ctx_ready) return 0;
+
+    memset(&pj, 0, sizeof pj);
+    pj.req = g_phase.req;
+    pj.cpu = NULL;
+    pj.req_cpu = g_phase_cpu;
+    pj.total = g_phase.count;
+    pj.fn = g_phase.fn;
+    pj.stack_zero = g_phase.stack_zero;
+    pj.main_last = g_phase.main_last;
+
+    uint64_t seq_t0 = now_ns();
+    for (uint32_t i = 0; i < pj.total; i++) {
+        if (!phase_run_request(&g_phase_seq_ctx, &pj, i))
+            return 0;
+    }
+    par_note_phase_seq(now_ns() - seq_t0);
+    g_phase.ran = 1;
+    return 1;
+}
+
+int wc3_phase_apply_all(CPU *c, Wc3PhaseApplyFn apply)
+{
+    CPU loop;
+    uint32_t n;
+    uint32_t applied;
+    uint32_t i;
+
+    if (!g_phase.enabled || !g_phase.count) return 0;
+    if (!c || !apply) phase_commit_fail("bad apply all");
+    if (t_phase_apply_active) return 0;
+
+    uint64_t apply_t0 = now_ns();
+    t_phase_apply_active = 1;
+    n = g_phase.count;
+    loop = *c;
+    applied = 0;
+    for (;;) {
+        if (n <= applied) break;
+        if (!wc3_phase_run_or_seq())
+            phase_commit_fail("phase run failed");
+        for (i = applied; i < n; i++) {
+            uint32_t before = g_phase.count;
+            apply(c, i);
+            c->disp_depth = loop.disp_depth;
+            c->disp_draining = loop.disp_draining;
+            WC3_CLEAN_DRAIN(c);
+            c->disp_depth = loop.disp_depth;
+            c->disp_draining = loop.disp_draining;
+            if (g_phase.count != before) {
+                /* The apply postfix re-entered the object loop and appended
+                 * requests.  Extend the slice and rerun before applying the
+                 * rest, so g_phase.ran covers every request. */
+                n = g_phase.count;
+                if (!wc3_phase_run_or_seq())
+                    phase_commit_fail("phase run failed");
+            }
+        }
+        applied = n;
+        if (g_phase.count > n) n = g_phase.count;
+    }
+    par_note_phase_apply((unsigned long long)applied,
+                         now_ns() - apply_t0);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    g_phase.applies++;
+    if (g_phase.applies == 1u || (g_phase.applies & 0xFFu) == 0u) {
+        unsigned long long par_runs =
+            atomic_load_explicit(&g_eff.phase_par_runs, memory_order_relaxed);
+        unsigned long long seq_runs =
+            atomic_load_explicit(&g_eff.phase_seq_runs, memory_order_relaxed);
+        fprintf(stderr,
+                "[phase] applies=%llu captures=%llu count=%u ran=%d "
+                "par=%llu seq=%llu wake_us=%llu join_us=%llu "
+                "max_slice_us=%llu\n",
+                g_phase.applies, g_phase.captures, g_phase.count,
+                g_phase.ran, par_runs, seq_runs,
+                (unsigned long long)(g_phase.last_wake_ns / 1000u),
+                (unsigned long long)(g_phase.last_join_ns / 1000u),
+                (unsigned long long)(g_phase.last_max_slice_ns / 1000u));
+    }
+#endif
+    *c = loop;
+    wc3_phase_reset();
+    t_phase_apply_active = 0;
+    return 1;
+}
+
+void wc3_phase_reset(void)
+{
+    g_phase.count = 0;
+    g_phase.reserved = 0;
+    g_phase.ran = 0;
+    phase_sync_config();
+}
+
+/* Replay the captured batch sequentially and through the phase pool, then
+ * compare every hit/dist/pos bit.  This is the mandatory first step before
+ * any product integration: it changes no guest state and no caller register.
+ * The sequential result is the definition of correct. */
+static void phase_shadow_flush(void)
+{
+    uint32_t n = g_phase.count;
+    if (!n) return;
+
+    g_phase.shadow_busy = 1;
+    if (!g_phase_seq_ctx_ready) {
+        g_phase.count = 0;
+        g_phase.reserved = 0;
+        g_phase.shadow_busy = 0;
+        phase_sync_config();
+        return;
+    }
+
+    Wc3PhaseJob pj;
+    memset(&pj, 0, sizeof pj);
+    pj.req = g_phase.req;
+    pj.cpu = NULL;
+    pj.req_cpu = g_phase_cpu;
+    pj.total = n;
+    pj.fn = g_phase.fn;
+    pj.stack_zero = g_phase.stack_zero;
+    pj.main_last = g_phase.main_last;
+
+    uint64_t seq_t0 = now_ns();
+    int seq_ok = 1;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!phase_run_request(&g_phase_seq_ctx, &pj, i)) {
+            seq_ok = 0;
+            break;
+        }
+        g_phase.seq_result[i].hit = g_phase.req[i].hit;
+        g_phase.seq_result[i].dist_bits = g_phase.req[i].dist_bits;
+        g_phase.seq_result[i].pos[0] = g_phase.req[i].pos[0];
+        g_phase.seq_result[i].pos[1] = g_phase.req[i].pos[1];
+        g_phase.seq_result[i].pos[2] = g_phase.req[i].pos[2];
+    }
+    uint64_t seq_ns = now_ns() - seq_t0;
+
+    uint64_t par_t0 = now_ns();
+    int par_ok = phase_run_job(&pj);
+    uint64_t par_ns = now_ns() - par_t0;
+
+    unsigned long long mismatch = 0;
+    int equal = par_ok && seq_ok;
+    if (par_ok && seq_ok) {
+        for (uint32_t i = 0; i < n; i++) {
+            if (g_phase.req[i].hit != g_phase.seq_result[i].hit ||
+                g_phase.req[i].dist_bits != g_phase.seq_result[i].dist_bits ||
+                g_phase.req[i].pos[0] != g_phase.seq_result[i].pos[0] ||
+                g_phase.req[i].pos[1] != g_phase.seq_result[i].pos[1] ||
+                g_phase.req[i].pos[2] != g_phase.seq_result[i].pos[2]) {
+                equal = 0;
+                mismatch++;
+            }
+        }
+    }
+
+    g_phase.flushes++;
+    g_phase.mismatches += mismatch;
+    g_phase.seq_ns_sum += seq_ns;
+    g_phase.par_ns_sum += par_ns;
+    g_phase.last_seq_ns = seq_ns;
+    g_phase.last_par_ns = par_ns;
+    par_note_phase_shadow(mismatch, seq_ns, par_ns);
+
+    unsigned long long speedup =
+        par_ns ? (seq_ns * 100ull) / par_ns : 0ull;
+    fprintf(stderr,
+            "[phase-shadow] n=%u chunks=%u seq_ok=%d par_ok=%d equal=%d "
+            "mismatch=%llu seq_ns=%llu par_ns=%llu speedup_x100=%llu "
+            "wake_ns=%llu join_ns=%llu max_slice_ns=%llu "
+            "captures=%llu flushes=%llu\n",
+            n, pj.chunks, seq_ok, par_ok, equal, mismatch,
+            (unsigned long long)seq_ns, (unsigned long long)par_ns, speedup,
+            (unsigned long long)g_phase.last_wake_ns,
+            (unsigned long long)g_phase.last_join_ns,
+            (unsigned long long)g_phase.last_max_slice_ns,
+            g_phase.captures, g_phase.flushes);
+
+    g_phase.count = 0;
+    g_phase.reserved = 0;
+    g_phase.shadow_busy = 0;
+    phase_sync_config();
+}
+
+static void phase_shadow_capture(CPU *c, wc3_lifted_fn fn, uint32_t container,
+                                 uint32_t total)
+{
+    phase_sync_config();
+    if (!g_phase_seq_ctx_ready) return;
+    if (g_phase.enabled) return;
+    if (g_phase.shadow_busy) return;
+
+    int cfg_enabled =
+        atomic_load_explicit(&g_phase_cfg.enabled, memory_order_relaxed);
+    int cfg_shadow =
+        atomic_load_explicit(&g_phase_cfg.shadow, memory_order_relaxed);
+    if (!cfg_shadow || cfg_enabled) {
+        /* The tuner changed the mode while a shadow window was pending.
+         * Finish that window first; phase_sync_config() applies the new mode
+         * after the window is empty. */
+        if (g_phase.count)
+            phase_shadow_flush();
+        return;
+    }
+    if (!g_phase.shadow_enabled) return;
+
+    if (t_ray_active) return;
+    if (atomic_load_explicit(&g_phase_busy, memory_order_acquire)) return;
+    if (atomic_load_explicit(&g_job_addr, memory_order_acquire)) return;
+    if (!container || total == 0u || total > 0x100000u) return;
+    if (!hle_android_guest_ok(container, WC3_PHASE_CONTAINER_SNAP)) return;
+
+    uint32_t sp = c->esp;
+    if (!hle_android_guest_ok(sp, 24u)) return;
+
+    uint32_t array = rd32(container + 0x114u);
+    uint64_t bytes = (uint64_t)total * 4u;
+    if (!array || bytes > 0xFFFFFFFFu ||
+        !hle_android_guest_ok(array, (uint32_t)bytes))
+        return;
+
+    if (g_phase.count >= g_phase.max_requests)
+        phase_shadow_flush();
+    if (g_phase.count >= WC3_PHASE_MAX_REQUESTS) return;
+
+    Wc3PhaseRequest *r = &g_phase.req[g_phase.count];
+    r->index = g_phase.count;
+    r->container = container;
+    r->array = array;
+    r->count = total;
+    r->in1 = rd32(sp + 4u);
+    r->in2 = rd32(sp + 8u);
+    r->out_pos = rd32(sp + 12u);
+    r->out_dist = rd32(sp + 16u);
+    r->user_ctx = rd32(sp + 20u);
+    r->hit = 0;
+    r->dist_bits = 0;
+    r->pos[0] = r->pos[1] = r->pos[2] = 0;
+    r->frame_va = 0;
+    r->frame_len = 0;
+    memcpy(r->snap, guest_host_ptr(container), WC3_PHASE_CONTAINER_SNAP);
+    g_phase_cpu[g_phase.count] = *c;
+    g_phase.fn = fn;
+    g_phase.count++;
+    g_phase.captures++;
+
+    if (g_phase.count >= g_phase.max_requests)
+        phase_shadow_flush();
+}
+#endif
+
 /* Dispatch a vertex batch.  All source and output ranges were validated by
  * the caller.  Returns 0 only when the pool could not be used; on 1 the
  * caller's frame and the real globals already match the sequential epilogue. */
@@ -3849,6 +5183,9 @@ static int run_vertex_batch(CPU *c, wc3_lifted_fn fn, unsigned kind,
                             const uint32_t *vg)
 {
     if (chunks < 2u || chunks > g_workers) return 0;
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    if (atomic_load_explicit(&g_phase_busy, memory_order_acquire)) return 0;
+#endif
     if (pthread_mutex_trylock(&g_submit_lock) != 0) return 0;
     if (t_ray_active || c->parallel_vertex_bypass) {
         pthread_mutex_unlock(&g_submit_lock);
@@ -4577,6 +5914,9 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
                               uint32_t orig_best WC3_TRIANGLE_VERIFY_PARAM)
 {
     if (chunks < 2u || chunks > g_workers) return 0;
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    if (atomic_load_explicit(&g_phase_busy, memory_order_acquire)) return 0;
+#endif
     if (pthread_mutex_trylock(&g_submit_lock) != 0) return 0;
     if (t_ray_active || c->parallel_vertex_bypass) {
         pthread_mutex_unlock(&g_submit_lock);
@@ -5187,6 +6527,9 @@ static int run_batch(CPU *c, wc3_lifted_fn fn, uint32_t container,
                      uint32_t out_dist, uint32_t user_ctx, RayCtx *merged)
 {
     if (limit < 2u || limit > g_workers) return 0;
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    if (atomic_load_explicit(&g_phase_busy, memory_order_acquire)) return 0;
+#endif
     if (pthread_mutex_trylock(&g_submit_lock) != 0) return 0;
     if (t_ray_active) {
         pthread_mutex_unlock(&g_submit_lock);
@@ -5454,6 +6797,15 @@ void wc3_parallel_raycast(CPU *c, wc3_lifted_fn fn)
     uint32_t total = rd32(container + 0x110u);
 #if WC3_DEBUG && WC3_DEBUG_PERF
     ray_note_total(total);
+#endif
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    /* Shadow capture runs before the real call so the snapshot sees the
+     * caller state and container as they are at the call site.  It is
+     * debug-only and does not change the normal path.  Sync first so a live
+     * `phase_shadow=1` write can take effect without a relaunch. */
+    phase_sync_config();
+    if (g_phase.shadow_enabled && !g_phase.shadow_busy)
+        phase_shadow_capture(c, fn, container, total);
 #endif
     unsigned threshold = tune_uint(&g_tune.threshold);
     if (total < threshold) {

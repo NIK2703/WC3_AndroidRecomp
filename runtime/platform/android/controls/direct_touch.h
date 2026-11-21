@@ -3,8 +3,8 @@
  *
  * This layer owns only touch classification.  It does not know about guest
  * addresses, Win32 messages, or the overlay profile; the controls adapter
- * decides whether a pointer belongs here and forwards the resulting tap or
- * long-press event to the guest-thread service.
+ * decides whether a pointer belongs here and forwards the resulting tap,
+ * long-press or portrait-follow event to the guest-thread service.
  */
 #ifndef WC3_DIRECT_TOUCH_H
 #define WC3_DIRECT_TOUCH_H
@@ -26,6 +26,7 @@ typedef struct {
     float last_x;
     float last_y;
     uint64_t down_ms;
+    uint32_t route;      /* Wc3DirectTouchRoute that owns the gesture */
     uint8_t active;
     uint8_t moved;
     uint8_t multi;
@@ -60,7 +61,14 @@ void wc3_direct_touch_set_sink(Wc3DirectTouch *dt, Wc3DirectTouchSink sink,
 
 void wc3_direct_touch_set_size(Wc3DirectTouch *dt, float width, float height);
 
-/* Feed one pointer.  x,y are surface pixels. */
+/* Feed one pointer.  x,y are surface pixels.  The route is attached to every
+ * semantic event the pointer produces; wc3_direct_touch_down() is the FIELD
+ * shorthand.  A PORTRAIT down emits FOLLOW_START immediately and keeps that
+ * pointer owned by the portrait until its UP, regardless of later movement.
+ * Raw pointer phases always carry NATIVE. */
+void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
+                                 float x, float y, uint64_t now_ms,
+                                 uint32_t route);
 void wc3_direct_touch_down(Wc3DirectTouch *dt, int pointer_id,
                            float x, float y, uint64_t now_ms);
 void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
@@ -68,7 +76,8 @@ void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
 void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
                          float x, float y, uint64_t now_ms);
 
-/* Cancel every active pointer and discard pending long presses. */
+/* Cancel every active pointer and discard pending long presses.  A PORTRAIT
+ * pointer emits HOLD_RELEASE so a camera follow cannot stay latched. */
 void wc3_direct_touch_reset(Wc3DirectTouch *dt);
 
 /*
@@ -87,6 +96,20 @@ int wc3_direct_touch_active_count(const Wc3DirectTouch *dt);
 /* Copy one active pointer's last position.  Returns 1 on success. */
 int wc3_direct_touch_pointer_at(const Wc3DirectTouch *dt, int index,
                                 int *pointer_id, float *x, float *y);
+
+/*
+ * Forward one raw pointer phase to the guest sink.  Native UI touches use
+ * this instead of the semantic recognizer: the guest-side service posts the
+ * same Win32 mouse messages a real mouse produces, so command-card clicks,
+ * menus and targeting/placement keep their native behaviour.  A minimap drag
+ * uses this path too, but the controls adapter clamps its phases to the
+ * published minimap rectangle so leaving the minimap does not end the drag.
+ * The portrait does not use this path; it has its own FOLLOW_START/
+ * HOLD_RELEASE events.  x,y are surface pixels, like the recognizer input.
+ */
+void wc3_direct_touch_emit_pointer(Wc3DirectTouch *dt,
+                                   Wc3DirectTouchKind kind, int pointer_id,
+                                   float x, float y, uint64_t now_ms);
 
 #ifdef __cplusplus
 }

@@ -11,6 +11,8 @@
 
 #include <stdint.h>
 
+#include "direct_touch_event.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -63,6 +65,32 @@ static inline float wc3_dt_pick_axis(float client_px, float scale)
     return (float)(int)client_px * scale;
 }
 
+/*
+ * Touch routing.  The controls layer runs on the Android input thread and
+ * cannot call guest code, so the guest service publishes this decision from
+ * a pointer-only snapshot.
+ *
+ * ui_ready is false only while the UI singleton is not readable or the game
+ * is still starting; then direct touch cannot claim the pointer yet.
+ * Otherwise the native UI is up: a battlefield touch is semantic only when
+ * CSelectMode is both stacked and the top input mode, and no targeting mode
+ * is active.  Everything else -- native HUD, menu, targeting/placement -- is
+ * forwarded as raw pointer phases to the native mouse path.  It is never
+ * handed to the overlay engine.
+ */
+static inline Wc3DirectTouchRoute wc3_dt_route(int ui_ready,
+                                               int select_active,
+                                               int target_active,
+                                               int select_is_active_mode)
+{
+    if (!ui_ready) return WC3_DIRECT_TOUCH_ROUTE_LEGACY;
+    if (target_active) return WC3_DIRECT_TOUCH_ROUTE_NATIVE;
+    if (select_active && select_is_active_mode) {
+        return WC3_DIRECT_TOUCH_ROUTE_FIELD;
+    }
+    return WC3_DIRECT_TOUCH_ROUTE_NATIVE;
+}
+
 typedef enum {
     WC3_DT_INTENT_NONE = 0,
     WC3_DT_INTENT_SELECT_UNIT,
@@ -76,27 +104,24 @@ typedef enum {
  * 0x6F21B730 no longer accepts the picked object; native treats that as a
  * terrain click.  A validated non-unit sprite is a no-op in phase 1.
  *
- * A friendly unit always selects; an enemy/neutral-hostile unit always
- * takes the ghost-order path.  With an empty selection that order is a
- * native no-op, not a request to select an enemy as if it were friendly.
- * selection_nonempty therefore only affects the terrain fallback.
+ * The discriminator is the current selection.  A controlled selection makes
+ * every unit tap the right-click analogue (smart order), including a tap on
+ * a friendly unit.  Without one, only a selectable target can become the new
+ * selection; a hostile target keeps the native terrain substitution below.
  */
 static inline Wc3DtTapIntent wc3_dt_tap_intent(int pick_result,
                                                int validated_object,
                                                int is_unit,
+                                               int target_selectable,
                                                int selection_nonempty,
-                                               int order_unit)
+                                               int selection_controlled)
 {
-    if (pick_result == WC3_DT_PICK_OBJECT) {
-        if (validated_object) {
-            if (!is_unit) return WC3_DT_INTENT_NONE;
-            if (order_unit) return WC3_DT_INTENT_ORDER_UNIT;
-            return WC3_DT_INTENT_SELECT_UNIT;
-        }
-        return selection_nonempty ? WC3_DT_INTENT_ORDER_GROUND
-                                  : WC3_DT_INTENT_CLEAR_SELECTION;
+    if (pick_result == WC3_DT_PICK_OBJECT && validated_object) {
+        if (!is_unit) return WC3_DT_INTENT_NONE;
+        if (selection_controlled) return WC3_DT_INTENT_ORDER_UNIT;
+        if (target_selectable) return WC3_DT_INTENT_SELECT_UNIT;
     }
-    if (pick_result == WC3_DT_PICK_TERRAIN)
+    if (pick_result == WC3_DT_PICK_OBJECT || pick_result == WC3_DT_PICK_TERRAIN)
         return selection_nonempty ? WC3_DT_INTENT_ORDER_GROUND
                                   : WC3_DT_INTENT_CLEAR_SELECTION;
     return WC3_DT_INTENT_NONE;
@@ -104,18 +129,29 @@ static inline Wc3DtTapIntent wc3_dt_tap_intent(int pick_result,
 
 typedef enum {
     WC3_DT_LONG_INTENT_NONE = 0,
+    WC3_DT_LONG_INTENT_SELECT_UNIT,
     WC3_DT_LONG_INTENT_ORDER_UNIT,
-    WC3_DT_LONG_INTENT_ORDER_GROUND
+    WC3_DT_LONG_INTENT_CLEAR_SELECTION
 } Wc3DtLongPressIntent;
 
-/* Long press is the right-click analogue: unit target -> ghost order,
- * terrain -> ground smart order. */
-static inline Wc3DtLongPressIntent wc3_dt_long_press_intent(int pick_result)
+/*
+ * Long press forces a selection change: a selectable unit replaces the
+ * current selection even when a controlled unit is already selected.  A
+ * hostile unit keeps the force-attack order (selecting an enemy would be a
+ * different game action), and terrain clears the selection.
+ */
+static inline Wc3DtLongPressIntent wc3_dt_long_press_intent(int pick_result,
+                                                            int validated_object,
+                                                            int is_unit,
+                                                            int target_selectable)
 {
-    if (pick_result == WC3_DT_PICK_OBJECT)
+    if (pick_result == WC3_DT_PICK_OBJECT && validated_object) {
+        if (!is_unit) return WC3_DT_LONG_INTENT_NONE;
+        if (target_selectable) return WC3_DT_LONG_INTENT_SELECT_UNIT;
         return WC3_DT_LONG_INTENT_ORDER_UNIT;
+    }
     if (pick_result == WC3_DT_PICK_TERRAIN)
-        return WC3_DT_LONG_INTENT_ORDER_GROUND;
+        return WC3_DT_LONG_INTENT_CLEAR_SELECTION;
     return WC3_DT_LONG_INTENT_NONE;
 }
 

@@ -8091,6 +8091,12 @@ static int mouse_button_bit(int button)
     return button == 0 ? 0x1 : button == 1 ? 0x2 : button == 2 ? 0x4 : 0;
 }
 
+int hle_android_mouse_is_down(int button)
+{
+    const int bit = mouse_button_bit(button);
+    return bit && (g_mouse_buttons & bit) != 0;
+}
+
 static uint32_t mouse_button_mk(int button)
 {
     return button == 0 ? 0x0001u : button == 1 ? 0x0010u : button == 2 ? 0x0002u : 0u;
@@ -8172,14 +8178,14 @@ static uint32_t mouse_button_up_msg(int button)
            button == 1 ? WM_MBUTTONUP : WM_RBUTTONUP;
 }
 
-void hle_android_mouse_button_ex(int button, int down)
+static void mouse_button_ex(int button, int down, int force)
 {
     int bit = mouse_button_bit(button);
     if (!bit) return;
 
     uint32_t lp = ((uint32_t)g_mouse_y << 16) | (uint16_t)g_mouse_x;
     if (down) {
-        if (g_mouse_buttons & bit) return;
+        if ((g_mouse_buttons & bit) && !force) return;
         /* Logical state is raised at press time so a poll between the press
          * and its dispatch still observes a held button.  The release is
          * different: it must not clear the state until the UP message is
@@ -8204,6 +8210,16 @@ void hle_android_mouse_button_ex(int button, int down)
     RES_LOG("button %d %s at %d,%d win=%d,%d %ux%u",
             button, down ? "down" : "up", g_mouse_x, g_mouse_y,
             g_win_x, g_win_y, g_win_w, g_win_h);
+}
+
+void hle_android_mouse_button_ex(int button, int down)
+{
+    mouse_button_ex(button, down, 0);
+}
+
+void hle_android_mouse_button_down_force(int button)
+{
+    mouse_button_ex(button, 1, 1);
 }
 
 void hle_android_mouse_button(int down)
