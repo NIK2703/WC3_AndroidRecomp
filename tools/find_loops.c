@@ -43,7 +43,9 @@
  * With no path it scans build/android_app/debug/cmake/relifted/game and, if
  * present, loads build/corpus-full/game/functions.txt automatically.
  *
- * -p accepts a simpleperf flat report (self samples).  -c accepts a function
+ * -p accepts a simpleperf flat report.  A report made with --children has
+ * both inclusive and self columns; the inclusive percentage is reported as
+ * incl% and is not clipped to the loop body.  -c accepts a function
  * entry-count profile: an LLVM .profdata (converted with llvm-profdata show
  * --counts --all-functions; llvm-profdata comes from PATH or LLVM_PROFDATA)
  * or a text table with L_* names and counts.  The call profile adds a
@@ -78,6 +80,7 @@ typedef struct {
     uint32_t stackops;
     uint8_t prologue;
     double self_pct;
+    double incl_pct;     /* simpleperf Children percentage for this function */
     uint64_t call_count; /* function entry count from a call/entry profile */
     char name[NAME_CAP];
     char file[PATH_CAP];
@@ -91,6 +94,7 @@ typedef struct {
 typedef struct {
     char name[NAME_CAP];
     double pct;
+    double incl_pct;
 } ProfileRec;
 
 typedef struct {
@@ -130,8 +134,10 @@ typedef struct {
     uint8_t parallel_class; /* 0=A pure, 1=B low-effect, 2=C candidate, 3=D serial */
     uint64_t call_count;    /* entry count of the loop's header L_* function */
     double hot_pct;         /* sum of self samples in the loop body, percent */
+    double incl_pct;        /* header function inclusive samples, percent */
     double score;
     double call_score;      /* body_instr * call_count / serial_ops */
+    double incl_score;      /* body_instr * incl_pct / serial_ops */
 } LoopRec;
 
 static FuncRec *g_funcs;
@@ -172,7 +178,9 @@ static ProfileRec *g_prof;
 static size_t g_nprof;
 static size_t g_cappprof;
 static int g_profile_loaded;
+static int g_profile_children;
 static unsigned long g_profile_matches;
+static unsigned long g_profile_incl_matches;
 static const char *g_profile_file;
 
 static CallRec *g_callprof;
@@ -627,7 +635,8 @@ static void load_start_file(const char *path)
     }
 }
 
-static void push_profile(const char *name, size_t len, double pct)
+static void push_profile(const char *name, size_t len, double pct,
+                         double incl_pct)
 {
     if (len == 0 || len >= NAME_CAP) return;
     if (g_nprof == g_cappprof) {
@@ -643,13 +652,15 @@ static void push_profile(const char *name, size_t len, double pct)
     memcpy(g_prof[g_nprof].name, name, len);
     g_prof[g_nprof].name[len] = '\0';
     g_prof[g_nprof].pct = pct;
+    g_prof[g_nprof].incl_pct = incl_pct;
     ++g_nprof;
 }
 
 /*
  * simpleperf flat report: one line per symbol, first token is percent.
- * We use self samples, not inclusive children, to avoid double counting the
- * call tree.  Non-L_* symbols are ignored.
+ * With --children the first two columns are Children and Self; keep both.
+ * The inclusive value is the header function's whole call tree and is not
+ * clipped to the loop body.  Non-L_* symbols are ignored.
  */
 static void load_profile(const char *path)
 {
@@ -664,9 +675,28 @@ static void load_profile(const char *path)
     char *line = NULL;
     size_t cap = 0;
     while (getline(&line, &cap, f) != -1) {
+        if (strstr(line, "Children") && strstr(line, "Self")) {
+            g_profile_children = 1;
+            continue;
+        }
+
         char *end = NULL;
-        double pct = strtod(line, &end);
+        double first = strtod(line, &end);
         if (end == line) continue;
+
+        double self_pct = first;
+        double incl_pct = 0.0;
+        if (g_profile_children) {
+            const char *q = end;
+            if (*q == '%') ++q;
+            while (*q == ' ' || *q == '\t') ++q;
+            char *end2 = NULL;
+            double second = strtod(q, &end2);
+            if (end2 != q) {
+                incl_pct = first;
+                self_pct = second;
+            }
+        }
 
         const char *p = line;
         const char *name = NULL;
@@ -680,7 +710,7 @@ static void load_profile(const char *path)
         while (name[len] && !isspace((unsigned char)name[len]) &&
                name[len] != '(')
             ++len;
-        push_profile(name, len, pct);
+        push_profile(name, len, self_pct, incl_pct);
     }
     free(line);
     fclose(f);
@@ -693,15 +723,14 @@ static int cmp_profile_name(const void *a, const void *b)
     return strcmp(x->name, y->name);
 }
 
-static double profile_lookup(const char *name)
+static const ProfileRec *profile_lookup(const char *name)
 {
-    if (!g_profile_loaded || g_nprof == 0) return 0.0;
+    if (!g_profile_loaded || g_nprof == 0) return NULL;
     ProfileRec key;
     memset(&key, 0, sizeof(key));
     snprintf(key.name, sizeof(key.name), "%s", name);
-    ProfileRec *r = (ProfileRec *)bsearch(&key, g_prof, g_nprof,
-                                         sizeof(*g_prof), cmp_profile_name);
-    return r ? r->pct : 0.0;
+    return (const ProfileRec *)bsearch(&key, g_prof, g_nprof,
+                                       sizeof(*g_prof), cmp_profile_name);
 }
 
 static void apply_profile(void)
@@ -709,9 +738,12 @@ static void apply_profile(void)
     if (!g_profile_loaded) return;
     qsort(g_prof, g_nprof, sizeof(*g_prof), cmp_profile_name);
     for (size_t i = 0; i < g_nfuncs; ++i) {
-        double pct = profile_lookup(g_funcs[i].name);
-        g_funcs[i].self_pct = pct;
-        if (pct > 0.0) ++g_profile_matches;
+        const ProfileRec *p = profile_lookup(g_funcs[i].name);
+        if (!p) continue;
+        g_funcs[i].self_pct = p->pct;
+        g_funcs[i].incl_pct = p->incl_pct;
+        if (p->pct > 0.0) ++g_profile_matches;
+        if (p->incl_pct > 0.0) ++g_profile_incl_matches;
     }
 }
 
@@ -858,7 +890,7 @@ static int has_llvm_profdata_magic(const char *path)
  * llvm-profdata (PATH or LLVM_PROFDATA); a text report is read directly.
  * Function entry counts weight loops by how often their containing L_*
  * function is called.  This is not a loop-iteration count; use the flat
- * self-sample profile (-p) for measured hotness.
+ * profile (-p) for measured self hotness and inclusive call-tree weight.
  */
 static void load_call_profile(const char *path)
 {
@@ -1087,6 +1119,7 @@ static void finish_loop_stats(LoopRec *r, const uint32_t *order,
     r->body_funcs = 0;
     r->body_instr = 0;
     r->hot_pct = 0.0;
+    r->incl_pct = 0.0;
     r->writes = r->calls = r->atomics = r->reads = r->jumps = r->stackops = 0;
 
     for (size_t i = body_lo; i < hi; ++i) {
@@ -1117,6 +1150,7 @@ static void finish_loop_stats(LoopRec *r, const uint32_t *order,
     r->header_func = hf;
     r->header_off = r->target - g_funcs[hf].base;
     r->call_count = g_funcs[hf].call_count;
+    r->incl_pct = g_funcs[hf].incl_pct;
 
     if (r->body_instr == 0) {
         r->parallel_class = 3;
@@ -1146,6 +1180,8 @@ static void finish_loop_stats(LoopRec *r, const uint32_t *order,
     if (r->call_count > 0)
         r->call_score = (double)r->body_instr *
                         (double)r->call_count / serial;
+    if (r->incl_pct > 0.0)
+        r->incl_score = (double)r->body_instr * r->incl_pct / serial;
 }
 
 static int cmp_loop_nesting(const void *a, const void *b)
@@ -1189,6 +1225,19 @@ static int cmp_loop_call_score(const void *a, const void *b)
     const LoopRec *y = (const LoopRec *)b;
     if (x->call_score != y->call_score)
         return (x->call_score < y->call_score) ? 1 : -1;
+    if (x->body_instr != y->body_instr)
+        return (x->body_instr < y->body_instr) ? 1 : -1;
+    if (x->own_instr != y->own_instr)
+        return (x->own_instr < y->own_instr) ? 1 : -1;
+    return (x->span < y->span) ? 1 : -1;
+}
+
+static int cmp_loop_incl_score(const void *a, const void *b)
+{
+    const LoopRec *x = (const LoopRec *)a;
+    const LoopRec *y = (const LoopRec *)b;
+    if (x->incl_score != y->incl_score)
+        return (x->incl_score < y->incl_score) ? 1 : -1;
     if (x->body_instr != y->body_instr)
         return (x->body_instr < y->body_instr) ? 1 : -1;
     if (x->own_instr != y->own_instr)
@@ -1303,14 +1352,14 @@ static void write_loops_tsv(const char *path)
                "body_instr\tnested_instr\town_instr\tcall_count\tcall_score\t"
                "writes\tcalls\tatomics\treads\tjumps\tstackops\thot_pct\t"
                "class\tscore\texact\tfunc_start\theader_lfunc\theader_off\t"
-               "src_func\tsrc_file\tsrc_line\n");
+               "src_func\tsrc_file\tsrc_line\tincl_pct\n");
     for (size_t i = 0; i < g_nloops; ++i) {
         const LoopRec *r = &g_loops[i];
         const FuncRec *h = &g_funcs[r->header_func];
         const FuncRec *s = &g_funcs[r->src];
         fprintf(f, "%08X\t%08X\t%u\t%u\t%u\t%u\t%llu\t%llu\t%llu\t%llu\t"
                    "%.2f\t%u\t%u\t%u\t%u\t%u\t%u\t%.4f\t%s\t%.2f\t%u\t"
-                   "%08X\t%s\t%u\t%s\t%s\t%u\n",
+                   "%08X\t%s\t%u\t%s\t%s\t%u\t%.4f\n",
                 r->target, r->max_current, r->span, r->depth, r->edges,
                 r->body_funcs, (unsigned long long)r->body_instr,
                 (unsigned long long)r->nested_instr,
@@ -1319,7 +1368,7 @@ static void write_loops_tsv(const char *path)
                 r->calls, r->atomics, r->reads, r->jumps, r->stackops,
                 r->hot_pct, class_name(r->parallel_class), r->score, r->exact,
                 r->func_start, h->name, r->header_off, s->name, s->file,
-                r->src_line);
+                r->src_line, r->incl_pct);
     }
     fclose(f);
 }
@@ -1356,11 +1405,11 @@ static void write_edges_tsv(const char *path, const uint32_t *order,
 
 static void print_table_header(void)
 {
-    printf("%-10s %-18s %-10s %7s %7s %7s %10s %4s %4s %4s %6s %3s %3s "
+    printf("%-10s %-18s %-10s %7s %7s %7s %10s %4s %4s %4s %6s %6s %3s %3s "
            "%6s %8s\n",
            "loop_top", "header_lfunc", "func_start", "instr", "nested", "own",
-           "freq", "wr", "call", "atom", "hot%", "cls", "dep", "edges",
-           "span");
+           "freq", "wr", "call", "atom", "hot%", "incl%", "cls", "dep",
+           "edges", "span");
 }
 
 static void print_loop_row(const LoopRec *r, const uint32_t *order,
@@ -1375,13 +1424,13 @@ static void print_loop_row(const LoopRec *r, const uint32_t *order,
         snprintf(fst, sizeof(fst), "%08X", r->func_start);
 
     printf("%08X   %-18s %-10s %7llu %7llu %7llu %10llu %4u %4u %4u "
-           "%6.2f %3s %3u %6u %8u\n",
+           "%6.2f %6.2f %3s %3u %6u %8u\n",
            r->target, hdr, fst, (unsigned long long)r->body_instr,
            (unsigned long long)r->nested_instr,
            (unsigned long long)r->own_instr,
            (unsigned long long)r->call_count, r->writes, r->calls,
-           r->atomics, r->hot_pct, class_name(r->parallel_class), r->depth,
-           r->edges, r->span);
+           r->atomics, r->hot_pct, r->incl_pct,
+           class_name(r->parallel_class), r->depth, r->edges, r->span);
 }
 
 int main(int argc, char **argv)
@@ -1669,8 +1718,9 @@ int main(int argc, char **argv)
     if (g_seed_file)
         printf("seed_file=%s\n", g_seed_file);
     if (g_profile_loaded)
-        printf("profile=%s matched_lfuncs=%lu\n", g_profile_file,
-               g_profile_matches);
+        printf("profile=%s matched_lfuncs=%lu incl_lfuncs=%lu%s\n",
+               g_profile_file, g_profile_matches, g_profile_incl_matches,
+               g_profile_children ? " columns=children+self" : "");
     int profile_active = g_profile_loaded && g_profile_matches > 0;
     if (g_profile_loaded && !profile_active)
         printf("profile has no L_* matches; profile ranking disabled\n");
@@ -1684,6 +1734,9 @@ int main(int argc, char **argv)
            "D=serial/atomic-bound; static_rank=body_instr/serial_ops\n");
     if (profile_active)
         printf("profile_rank=profile_self_pct*sqrt(body_instr)/serial_ops\n");
+    if (g_profile_incl_matches > 0)
+        printf("profile_incl_rank=body_instr*header_incl_pct/serial_ops "
+               "(header function call tree, not clipped to body)\n");
     if (call_active)
         printf("call_rank=body_instr*entry_calls/serial_ops\n");
 
@@ -1701,6 +1754,26 @@ int main(int argc, char **argv)
             ++hot_shown;
         }
         if (hot_shown == 0) printf("(none)\n");
+    }
+
+    if (g_profile_incl_matches > 0) {
+        qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_incl_score);
+        size_t incl_shown = 0;
+        printf("\nProfile-inclusive loop tops (up to 40, header function "
+               "call tree):\n");
+        print_table_header();
+        for (size_t i = 0; i < g_nloops && incl_shown < 40; ++i) {
+            const LoopRec *r = &g_loops[i];
+            if (r->incl_pct <= 0.0) break;
+            if (r->body_instr < 16) continue;
+            print_loop_row(r, order, bases, g_nfuncs);
+            if (verbose)
+                print_members(r, order, bases, region, g_nfuncs);
+            ++incl_shown;
+        }
+        if (incl_shown == 0) printf("(none)\n");
+        printf("note: incl%% is the header L_* function's whole call tree, "
+               "not clipped to the loop body; class remains static.\n");
     }
 
     qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_body);
