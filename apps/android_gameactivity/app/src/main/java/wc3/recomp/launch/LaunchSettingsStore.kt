@@ -18,17 +18,16 @@ class LaunchSettingsStore(context: Context) {
         val gridEnabled = prefs.getBoolean(
             KEY_GRID_ENABLED, LaunchContract.DEFAULT_GRID_ENABLED
         )
-        /* The product default is the most performant available core: the game
-         * runs on it with the sequential path, and the table never starts with
-         * several cores active.  A saved list from the old multi-select screen
-         * is reduced to the most performant saved core. */
+        /* The product default is the most performant available core: one core
+         * keeps the guest sequential, the main thread is pinned to it, and the
+         * table never starts with every CPU active.  An absent, empty or fully
+         * invalid saved list falls back to it. */
         val availableCores = CpuTopology.availableCores()
-        val savedIds = parseWorkerCpus(
+        val availableIds = availableCores.map { it.id }.toSet()
+        val savedWorkerCpus = parseWorkerCpus(
             prefs.getString(KEY_WORKER_CPUS, null)
-        ).toSet()
-        val workerCpus = CpuTopology.pickBest(
-            availableCores.filter { it.id in savedIds }
-        )?.let { listOf(it.id) }.orEmpty().ifEmpty {
+        ).filter { it in availableIds }
+        val workerCpus = savedWorkerCpus.ifEmpty {
             CpuTopology.pickBest(availableCores)
                 ?.let { listOf(it.id) }
                 .orEmpty()
@@ -108,8 +107,15 @@ class LaunchSettingsStore(context: Context) {
                     LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT
                 }
             },
-            /* The single core selected in the table.  The old preference
-             * could contain several ids; only the best one survives. */
+            /* There is no separate switch: two or more selected cores enable
+             * the parallel paths, one core keeps them sequential.  This also
+             * overrides an old preference that still contains the removed
+             * switch value. */
+            parallelExecution = workerCpus.size >= 2,
+            /* The default is the most performant allowed core.  A saved list
+             * is intersected with the CPUs this process is allowed to use;
+             * the settings screen repeats the intersection when it builds the
+             * table. */
             workerCpus = workerCpus,
             /* The grid layer is opt-in.  The darken percent is clamped to the
              * slider range; an absent or negative cycle is the OLED-aware auto
@@ -166,7 +172,7 @@ class LaunchSettingsStore(context: Context) {
     }
 
     fun save(settings: LaunchSettings): Boolean {
-        val workerCpus = normalizedWorkerCpus(settings.workerCpus).take(1)
+        val workerCpus = normalizedWorkerCpus(settings.workerCpus)
         val selectionCap =
             LaunchContract.normalizeSelectionCap(settings.selectionCap)
         return prefs.edit()
@@ -191,9 +197,7 @@ class LaunchSettingsStore(context: Context) {
             .putInt(KEY_SELECTION_CAP, selectionCap)
             .remove(LEGACY_KEY_SELECTION_24)
             .putBoolean(KEY_HIDE_CURSOR, settings.hideCursor)
-            /* The core table has no parallel switch.  Writing false clears a
-             * preference left by an older multi-select build. */
-            .putBoolean(KEY_PARALLEL_EXECUTION, false)
+            .putBoolean(KEY_PARALLEL_EXECUTION, workerCpus.size >= 2)
             .putString(KEY_WORKER_CPUS, workerCpus.joinToString(","))
             .putBoolean(KEY_GRID_ENABLED, settings.gridEnabled)
             .putInt(

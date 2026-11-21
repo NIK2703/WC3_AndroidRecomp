@@ -1478,7 +1478,7 @@ Java_wc3_recomp_Wc3GameActivity_nativeApplyLaunchSettings(
      * order identical to Wc3GameActivity.nativeApplyLaunchSettings: id before
      * root, DXVK version and config path, then the two gesture flags and
      * timers, the SIMPLE tap delay, the selection cap (12/24/40), the hideCursor
-     * toggle, the always-false parallelExecution flag, the overlay opacity percent,
+     * toggle, the derived parallelExecution flag, the overlay opacity percent,
      * then
      * the grid toggle, darken percent and cycle seconds, the presentation
      * scale string, the screen present mode string plus buffering count, the

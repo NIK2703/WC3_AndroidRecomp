@@ -82,8 +82,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         LaunchContract.SELECTION_CAP_40
     )
     private lateinit var hideCursorSwitch: SwitchCompat
-    private lateinit var gameCpuGrid: GridLayout
-    private lateinit var gameCpuHint: TextView
+    private lateinit var parallelCpuGrid: GridLayout
+    private lateinit var parallelCpuHint: TextView
     private var availableCpuCores: List<CpuCore> = emptyList()
     private val cpuCoreCells = mutableListOf<TextView>()
     private lateinit var gridOptionsGroup: LinearLayout
@@ -277,8 +277,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         dxvkConfigImportButton = findViewById(R.id.dxvk_config_import)
         selectionCapSpinner = findViewById(R.id.selection_cap_spinner)
         hideCursorSwitch = findViewById(R.id.hide_cursor_switch)
-        gameCpuGrid = findViewById(R.id.parallel_cpu_grid)
-        gameCpuHint = findViewById(R.id.parallel_cpu_hint)
+        parallelCpuGrid = findViewById(R.id.parallel_cpu_grid)
+        parallelCpuHint = findViewById(R.id.parallel_cpu_hint)
         gridOptionsGroup = findViewById(R.id.grid_options_group)
         gridDarkenSlider = findViewById(R.id.grid_darken_slider)
         gridDarkenValue = findViewById(R.id.grid_darken_value)
@@ -441,32 +441,38 @@ class LaunchSettingsActivity : AppCompatActivity() {
         updateGestureModeHint()
     }
 
-    /* The core table selects exactly one core: the game's main thread runs on
-     * it, and no parallel worker pool is created.  Tapping another cell moves
-     * the selection; tapping the active cell keeps it.  A fresh install uses
-     * the most performant allowed CPU. */
+    /* The core table is the only parallel control.  Two or more selected
+     * cells enable the worker pool; one selected cell keeps the guest
+     * sequential.  The default is the most performant allowed CPU, so a fresh
+     * install starts without parallelism and pins the main thread there. */
     private fun bindCpuCores(saved: List<Int>) {
-        gameCpuGrid.removeAllViews()
+        parallelCpuGrid.removeAllViews()
         cpuCoreCells.clear()
 
         val availableIds = availableCpuCores.map { it.id }.toSet()
-        val selectedId = saved.firstOrNull { it in availableIds }
-            ?: CpuTopology.pickBest(availableCpuCores)?.id
+        val savedIds = saved.filter { it in availableIds }.toSet()
+        val selected = if (savedIds.isEmpty()) {
+            CpuTopology.pickBest(availableCpuCores)
+                ?.let { setOf(it.id) }
+                .orEmpty()
+        } else {
+            savedIds
+        }
 
         /* Two rows, not two columns: all cores fill the first row and spill
          * into the second one.  The column count is derived from the core
          * count so the grid stays two rows on every device. */
         val columns = (availableCpuCores.size + 1) / 2
         if (columns > 0) {
-            gameCpuGrid.columnCount = columns
-            gameCpuGrid.rowCount = minOf(2, availableCpuCores.size)
+            parallelCpuGrid.columnCount = columns
+            parallelCpuGrid.rowCount = minOf(2, availableCpuCores.size)
         }
 
         for ((index, core) in availableCpuCores.withIndex()) {
             val cell = TextView(this).apply {
                 tag = core.id
                 text = core.id.toString()
-                isSelected = core.id == selectedId
+                isSelected = core.id in selected
                 gravity = Gravity.CENTER
                 textSize = 16f
                 minHeight = dp(48)
@@ -482,7 +488,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 tooltipText = core.label
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { selectCpuCore(this@apply) }
+                setOnClickListener { toggleCpuCore(this@apply) }
             }
             val column = index % columns
             val row = index / columns
@@ -499,35 +505,60 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 rowSpec = GridLayout.spec(row)
                 setMargins(dp(4), dp(4), dp(4), dp(4))
             }
-            gameCpuGrid.addView(cell, params)
+            parallelCpuGrid.addView(cell, params)
             cpuCoreCells.add(cell)
         }
-        updateGameCpuHint()
+        updateParallelCpuHint()
     }
 
-    private fun selectCpuCore(cell: TextView) {
-        if (cell.isSelected) return
-        cpuCoreCells.forEach { it.isSelected = false }
-        cell.isSelected = true
-        updateGameCpuHint()
+    private fun toggleCpuCore(cell: TextView) {
+        if (cell.isSelected) {
+            if (selectedCpuCores().size <= 1) {
+                Toast.makeText(
+                    this,
+                    R.string.launch_cpu_cores_required,
+                    Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+            cell.isSelected = false
+        } else {
+            cell.isSelected = true
+        }
+        updateParallelCpuHint()
         refreshValidation()
         saveIfValid()
     }
 
-    private fun selectedCpuCore(): Int? =
-        cpuCoreCells.firstOrNull { it.isSelected }?.tag as? Int
+    private fun selectedCpuCores(): List<Int> =
+        cpuCoreCells
+            .filter { it.isSelected }
+            .mapNotNull { it.tag as? Int }
+            .sorted()
 
-    private fun updateGameCpuHint() {
+    private fun updateParallelCpuHint() {
         if (availableCpuCores.isEmpty()) {
-            gameCpuHint.text = getString(R.string.launch_cpu_cores_unavailable)
+            parallelCpuHint.text = getString(R.string.launch_cpu_cores_unavailable)
             return
         }
-        val selected = selectedCpuCore()
-        if (selected == null) {
-            gameCpuHint.text = getString(R.string.launch_cpu_cores_required)
+        val selected = selectedCpuCores()
+        if (selected.isEmpty()) {
+            parallelCpuHint.text = getString(R.string.launch_cpu_cores_required)
             return
         }
-        gameCpuHint.text = getString(R.string.launch_cpu_cores_selected, selected)
+        val mainCpu = CpuTopology.pickBest(
+            availableCpuCores.filter { it.id in selected }
+        )?.id ?: selected.maxOrNull() ?: return
+        parallelCpuHint.text = if (selected.size <= 1) {
+            getString(R.string.launch_cpu_cores_single, mainCpu)
+        } else {
+            getString(
+                R.string.launch_cpu_cores_hint,
+                selected.size,
+                availableCpuCores.size,
+                mainCpu
+            )
+        }
     }
 
     private fun dp(value: Int): Int =
@@ -1441,8 +1472,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
         val resolution = currentResolutionOption()
             ?: resolutionOptions.lastOrNull()
             ?: ResolutionOption(0, 0, "")
-        val selectedCpu = selectedCpuCore()
-        val workerCpus = if (selectedCpu != null) listOf(selectedCpu) else emptyList()
+        val workerCpus = selectedCpuCores()
 
         return LaunchSettings(
             mode = mode,
@@ -1468,6 +1498,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
             overlayOpacityPercent = overlayOpacityFromProgress(
                 overlayOpacitySlider.progress
             ),
+            parallelExecution = workerCpus.size >= 2,
             workerCpus = workerCpus,
             gridEnabled = resolution.grid,
             gridDarkenPercent =

@@ -49,10 +49,16 @@ data class LaunchSettings(
      * exposes 10..50; the native controls layer clamps the same range and
      * replaces the authored per-element opacity. */
     val overlayOpacityPercent: Int = LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT,
-    /* The single core selected in the product settings table.  The game's
-     * main thread is pinned to it; no worker pool is published.  Empty means
-     * no allowed core was detected and the host leaves affinity untouched.
-     * Applied on the next game launch. */
+    /* Derived from workerCpus: two or more selected cores enable the
+     * deterministic chunked raycast/vertex/triangle paths, one core keeps
+     * every wrapper on the original sequential guest function.  There is no
+     * separate switch in the product settings screen.  Applied on the next
+     * game launch. */
+    val parallelExecution: Boolean = LaunchContract.DEFAULT_PARALLEL_EXECUTION,
+    /* CPU ids selected for the parallel worker pool.  The pool creates one
+     * worker per id and pins that worker to the same core.  Empty disables
+     * the pool; the product settings screen always keeps at least one core
+     * selected.  Applied on the next game launch. */
     val workerCpus: List<Int> = emptyList(),
     /* Half-resolution grid presentation.  Off creates no extra SurfaceView
      * and no native renderer.  The darken percent follows the source slider
@@ -72,30 +78,67 @@ data class LaunchSettings(
      * half-surface path; every other case stays on the compositor. */
 ) {
     fun toBundle(): Bundle = Bundle().apply {
-        /* The core table selects one CPU and never enables the worker pool.
+        /* The core table is the only parallel control: two or more selected
+         * cores enable the pool, one core keeps every guest path sequential.
          * Normalise here as well as in the settings screen so every launch
          * path, including a caller that constructs LaunchSettings directly,
-         * publishes the same sequential bundle. */
-        val requestedCpu = workerCpus
+         * gets the same rule. */
+        val requestedCpus = workerCpus
             .filter { it in 0..CpuTopology.MAX_CPU_ID }
-            .firstOrNull()
-        /* Repeat the cpuset filter here because a caller can construct
+            .distinct()
+            .sorted()
+        /* The settings store and the core table already drop CPUs outside the
+         * process cpuset.  Repeat it here because a caller can construct
          * LaunchSettings directly or the cpuset can change between the
-         * settings screen and the launch. */
-        val availableCores = if (requestedCpu == null) {
+         * settings screen and the launch.  A saved core that is no longer
+         * allowed is dropped: with no cores left the pool stays off and the
+         * main thread still pins to the best available core. */
+        val availableCores: List<CpuCore> = if (requestedCpus.isEmpty()) {
             emptyList()
         } else {
             CpuTopology.availableCores()
         }
-        val selectedCore = availableCores.firstOrNull { it.id == requestedCpu }
-        /* Pin the game's main thread to the selected core.  A stale selected
-         * id that the game process can no longer use falls back to the best
-         * currently available core instead of leaving it unpinned. */
-        val mainCpu = when {
-            requestedCpu == null -> -1
-            selectedCore != null -> selectedCore.id
-            else -> CpuTopology.pickBest(availableCores)?.id ?: requestedCpu
+        val selectedCores = availableCores.filter { it.id in requestedCpus }
+        /* The native pool runs the active prefix of this list and keeps the
+         * last slot outside the active set for the caller's last chunk.  Order
+         * the pool from the most to the least performant core so the prefix
+         * contains the fastest cores; appending the caller's core last then
+         * leaves the caller on the best core and the critical path on the
+         * slowest *active* core, not on the slowest selected core.  The order
+         * is topology data, not a predictive cost model. */
+        val useCapacity = selectedCores.all { (it.capacity ?: 0) > 0 }
+        val performanceOrder = if (useCapacity) {
+            compareByDescending<CpuCore> { it.capacity ?: 0 }
+                .thenByDescending { it.maxFrequencyMhz ?: -1 }
+                .thenBy { it.id }
+        } else {
+            compareByDescending<CpuCore> { it.maxFrequencyMhz ?: -1 }
+                .thenBy { it.id }
         }
+        val orderedCores = selectedCores.sortedWith(performanceOrder)
+        /* The game's main thread always runs on the most performant selected
+         * core.  Capacity/frequency come from sysfs; if topology is hidden,
+         * the highest selected id is the big-core fallback.  A stale selected
+         * id that the game process can no longer use falls back to the best
+         * currently available core instead of leaving the main thread
+         * unpinned. */
+        val mainCpu = if (requestedCpus.isEmpty()) {
+            -1
+        } else {
+            CpuTopology.pickBest(selectedCores)?.id
+                ?: CpuTopology.pickBest(availableCores)?.id
+                ?: requestedCpus.last()
+        }
+        val launchCores = buildList {
+            for (core in orderedCores) {
+                if (core.id != mainCpu) add(core)
+            }
+            if (mainCpu >= 0 && selectedCores.any { it.id == mainCpu }) {
+                add(orderedCores.first { it.id == mainCpu })
+            }
+        }
+        val launchCpus = launchCores.map { it.id }
+        val effectiveParallel = launchCpus.size >= 2
         putString(LaunchContract.KEY_GAME_DIR, gameDir)
         putInt(LaunchContract.KEY_WIDTH, width)
         putInt(LaunchContract.KEY_HEIGHT, height)
@@ -121,10 +164,13 @@ data class LaunchSettings(
         )
         putBoolean(LaunchContract.KEY_HIDE_CURSOR, hideCursor)
         putInt(LaunchContract.KEY_OVERLAY_OPACITY_PERCENT, overlayOpacityPercent)
-        putBoolean(LaunchContract.KEY_PARALLEL_EXECUTION, false)
-        /* A single selected core is the sequential product path: publish no
-         * worker list, so a stale pool from an earlier launch cannot survive. */
-        putString(LaunchContract.KEY_WORKER_CPUS, "")
+        putBoolean(LaunchContract.KEY_PARALLEL_EXECUTION, effectiveParallel)
+        /* One core is the sequential product path: publish no worker list,
+         * so the native side cannot mistake the caller's core for a pool. */
+        putString(
+            LaunchContract.KEY_WORKER_CPUS,
+            if (effectiveParallel) launchCpus.joinToString(",") else ""
+        )
         putInt(LaunchContract.KEY_MAIN_CPU, mainCpu)
         putBoolean(LaunchContract.KEY_GRID_ENABLED, gridEnabled)
         putInt(LaunchContract.KEY_GRID_DARKEN_PERCENT, gridDarkenPercent)
