@@ -81,6 +81,23 @@ static bool g_button_down[8];
 #define DIRECT_OWNER_NONE 0
 #define DIRECT_OWNER_VENDOR 1
 #define DIRECT_OWNER_FIELD 2
+/* Raw pointer phases for native UI: command card, resource bar, menus,
+ * targeting/placement.  The minimap has its own owner so its pointer can be
+ * clamped to the minimap rectangle for the whole drag.  The portrait has its
+ * own owner because it uses the portrait-follow events. */
+#define DIRECT_OWNER_NATIVE 3
+/* A second pointer that arrived while a native gesture was active.  It is
+ * swallowed instead of being handed to the overlay engine: the native HUD
+ * gesture is single-pointer, and mixing it with the vendor path would make
+ * the same touch produce two different actions. */
+#define DIRECT_OWNER_IGNORED 4
+/* A gesture inside the visible portrait frame.  It starts the native camera
+ * follow immediately and keeps it until the owning finger is released. */
+#define DIRECT_OWNER_PORTRAIT 5
+/* A gesture that started inside the visible minimap frame.  Its native
+ * pointer phases stay clamped to the minimap until the finger is released,
+ * even when the finger moves across the rest of the screen. */
+#define DIRECT_OWNER_MINIMAP 6
 
 typedef struct {
     int pointer_id;
@@ -92,6 +109,12 @@ typedef struct {
 static bool g_direct_touch_enabled;
 static Wc3DirectTouchSink g_direct_touch_sink;
 static void *g_direct_touch_user;
+static Wc3DirectTouchRouteGate g_direct_touch_route_gate;
+static void *g_direct_touch_route_gate_user;
+static Wc3DirectTouchPortraitRectGate g_direct_touch_portrait_gate;
+static void *g_direct_touch_portrait_gate_user;
+static Wc3DirectTouchMinimapRectGate g_direct_touch_minimap_gate;
+static void *g_direct_touch_minimap_gate_user;
 static Wc3DirectTouch g_direct_touch;
 static DirectOwner g_direct_owners[DIRECT_OWNER_SLOTS];
 
@@ -521,6 +544,10 @@ static int controls_apply_profile(const ProfileData *profile, int width,
 
     g_width = width;
     g_height = height;
+    /* The recognizer is sized in surface pixels and has no active pointers
+     * here: init, mode switch and resize all cancel input (or are the first
+     * initialisation) before applying a profile. */
+    direct_touch_configure(width, height);
     if (initial) g_last_engine_tick = 0;
     g_layout_id++;
     g_overlay_mode = mode;
@@ -590,7 +617,6 @@ int controls_init_ex(const char *profile_json, int width, int height,
     g_profile_json = copy;
     g_simple_build_rc = simple_rc;
     g_simple_esc_build_rc = simple_esc_rc;
-    direct_touch_configure(width, height);
     return 0;
 }
 
@@ -653,13 +679,36 @@ static int direct_owner_any_vendor(void) {
     return 0;
 }
 
+/* A native HUD gesture and any extra pointers swallowed while it was active
+ * form one unit: a new gesture must not start until every one of them is up.
+ * A minimap drag is a native gesture too. */
+static int direct_owner_native_gesture(void) {
+    for (int i = 0; i < DIRECT_OWNER_SLOTS; i++) {
+        if (g_direct_owners[i].owner == DIRECT_OWNER_NATIVE ||
+            g_direct_owners[i].owner == DIRECT_OWNER_MINIMAP ||
+            g_direct_owners[i].owner == DIRECT_OWNER_IGNORED) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The portrait follow belongs to one finger.  A second finger must not
+ * cancel it; the caller either leaves an overlay press to the legacy engine
+ * or swallows the extra pointer. */
+static int direct_owner_portrait_active(void) {
+    for (int i = 0; i < DIRECT_OWNER_SLOTS; i++) {
+        if (g_direct_owners[i].owner == DIRECT_OWNER_PORTRAIT) return 1;
+    }
+    return 0;
+}
+
 /*
- * Phase 1 keeps direct touch out of the native HUD.  The overlay profile
- * already covers its own elements; the command card, minimap, portrait and
- * resource bar are native frames whose exact guest-side hit test is not yet
- * confirmed.  Until it is, a conservative central viewport is the only field
- * region allowed to produce direct actions.  This is deliberately a product
- * boundary, not a guessed substitute for a missing native call.
+ * The field rectangle is a product boundary, not a native hit test.  It is
+ * the central battlefield region; everything outside it is native HUD
+ * (minimap, command card, resource bar, top menu).  The overlay hit test and
+ * the portrait rectangle run first, so an on-screen control keeps the legacy
+ * engine and the portrait keeps its own camera semantics.
  */
 static int direct_touch_field_contains(float x, float y) {
     if (g_width <= 0 || g_height <= 0) return 0;
@@ -677,13 +726,85 @@ static int direct_touch_ui_contains(float x, float y) {
     return hit;
 }
 
-static int direct_touch_wants(float x, float y) {
+/*
+ * The portrait and minimap gates are lock-free snapshots published by the
+ * guest thread.  They are checked before the field rectangle because both
+ * sit in the native HUD area and must keep their own semantics instead of raw
+ * pointer phases.  A missing or empty rectangle means the frame is not on
+ * screen; the touch keeps its normal FIELD/NATIVE route.
+ */
+static int direct_touch_rect_contains(Wc3DirectTouchRectGate gate, void *user,
+                                      float x, float y) {
+    if (!gate || g_width <= 0 || g_height <= 0) return 0;
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+    if (!gate(&left, &top, &right, &bottom, user)) return 0;
+    if (!(right > left) || !(bottom > top)) return 0;
+    const float nx = x / (float)g_width;
+    const float ny = y / (float)g_height;
+    return nx >= left && nx <= right && ny >= top && ny <= bottom;
+}
+
+static int direct_touch_portrait_contains(float x, float y) {
+    return direct_touch_rect_contains(g_direct_touch_portrait_gate,
+                                      g_direct_touch_portrait_gate_user,
+                                      x, y);
+}
+
+static int direct_touch_minimap_contains(float x, float y) {
+    return direct_touch_rect_contains(g_direct_touch_minimap_gate,
+                                      g_direct_touch_minimap_gate_user,
+                                      x, y);
+}
+
+/*
+ * Decide who owns a non-overlay touch.  In FULL direct mode the legacy
+ * engine is only for overlay elements: a battlefield touch in CSelectMode
+ * uses the semantic recognizer, and every other touch (native HUD, menu,
+ * targeting/placement) is forwarded as raw pointer phases to the guest-side
+ * native mouse path.  The guest publishes the route lock-free; the input
+ * thread never calls guest code.
+ */
+static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
     if (!g_initialized || !g_direct_touch_enabled || !g_direct_touch.sink) {
-        return 0;
+        return WC3_DIRECT_TOUCH_ROUTE_LEGACY;
     }
-    if (g_overlay_mode != WC3_OVERLAY_MODE_FULL) return 0;
-    if (!direct_touch_field_contains(x, y)) return 0;
-    return !direct_touch_ui_contains(x, y);
+    if (g_overlay_mode != WC3_OVERLAY_MODE_FULL) {
+        return WC3_DIRECT_TOUCH_ROUTE_LEGACY;
+    }
+    if (direct_touch_ui_contains(x, y)) {
+        return WC3_DIRECT_TOUCH_ROUTE_LEGACY;
+    }
+    /* A NULL gate is the unit-test/host-only mode: preserve the phase-1
+     * semantic field behavior. */
+    const Wc3DirectTouchRoute route = g_direct_touch_route_gate
+        ? g_direct_touch_route_gate(g_direct_touch_route_gate_user)
+        : WC3_DIRECT_TOUCH_ROUTE_FIELD;
+    if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) {
+        return WC3_DIRECT_TOUCH_ROUTE_LEGACY;
+    }
+    /* The portrait and minimap are native panels, but the portrait frame has
+     * no click action of its own and the minimap drag must stay owned by the
+     * minimap when the finger leaves it.  Claim both before the field
+     * rectangle; the guest executor starts the portrait follow, while the
+     * minimap keeps posting native mouse messages with clamped coordinates. */
+    if (direct_touch_portrait_contains(x, y)) {
+        return WC3_DIRECT_TOUCH_ROUTE_PORTRAIT;
+    }
+    if (direct_touch_minimap_contains(x, y)) {
+        return WC3_DIRECT_TOUCH_ROUTE_MINIMAP;
+    }
+    if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD &&
+        direct_touch_field_contains(x, y)) {
+        return WC3_DIRECT_TOUCH_ROUTE_FIELD;
+    }
+    if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD ||
+        route == WC3_DIRECT_TOUCH_ROUTE_NATIVE) {
+        return WC3_DIRECT_TOUCH_ROUTE_NATIVE;
+    }
+    return WC3_DIRECT_TOUCH_ROUTE_LEGACY;
 }
 
 static void direct_touch_configure(int width, int height) {
@@ -704,9 +825,36 @@ void controls_set_direct_touch_enabled(bool enabled) {
 void controls_set_direct_touch_sink(Wc3DirectTouchSink sink, void *user) {
     g_direct_touch_sink = sink;
     g_direct_touch_user = user;
+    if (!sink) {
+        /* No sink means no direct owner; do not keep a stale guest gate. */
+        g_direct_touch_route_gate = NULL;
+        g_direct_touch_route_gate_user = NULL;
+        g_direct_touch_portrait_gate = NULL;
+        g_direct_touch_portrait_gate_user = NULL;
+        g_direct_touch_minimap_gate = NULL;
+        g_direct_touch_minimap_gate_user = NULL;
+    }
     if (g_initialized) {
         wc3_direct_touch_set_sink(&g_direct_touch, sink, user);
     }
+}
+
+void controls_set_direct_touch_route_gate(Wc3DirectTouchRouteGate gate,
+                                           void *user) {
+    g_direct_touch_route_gate = gate;
+    g_direct_touch_route_gate_user = user;
+}
+
+void controls_set_direct_touch_portrait_gate(
+    Wc3DirectTouchPortraitRectGate gate, void *user) {
+    g_direct_touch_portrait_gate = gate;
+    g_direct_touch_portrait_gate_user = user;
+}
+
+void controls_set_direct_touch_minimap_gate(
+    Wc3DirectTouchMinimapRectGate gate, void *user) {
+    g_direct_touch_minimap_gate = gate;
+    g_direct_touch_minimap_gate_user = user;
 }
 
 /*
@@ -761,19 +909,75 @@ static void direct_touch_handoff(int new_pointer_id, float new_x, float new_y,
 static int direct_touch_begin(int pointer_id, float x, float y,
                               uint64_t event_time_ms) {
     /* Once any pointer belongs to the vendor engine, the gesture is a
-     * camera/pinch or an overlay interaction.  Keep later field pointers on
-     * that path until every pointer is up; starting a fresh semantic tap in
-     * the middle of a two-finger gesture would mix an order into a pan. */
+     * camera/pinch or an overlay interaction.  Keep later pointers on that
+     * path until every pointer is up; starting a fresh direct gesture in the
+     * middle of a two-finger gesture would mix an order into a pan. */
     if (direct_owner_any_vendor()) return 0;
+
+    /* Resolve the route before swallowing a second native pointer: an
+     * overlay element pressed while a HUD gesture is active must still reach
+     * the legacy engine, not become an ignored direct pointer. */
+    const Wc3DirectTouchRoute route = direct_touch_route_for(x, y);
+
+    if (direct_owner_native_gesture()) {
+        /* Native HUD gestures are single-pointer.  Swallow the extra pointer
+         * instead of handing it to the vendor engine: a second finger on the
+         * minimap or command card must not turn the first click into a
+         * camera gesture.  An overlay element is the exception: it still
+         * belongs to the legacy engine. */
+        if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) return 0;
+        (void)direct_owner_add(pointer_id, DIRECT_OWNER_IGNORED, x, y);
+        return 1;
+    }
+    if (direct_owner_portrait_active()) {
+        /* The follow belongs to the finger that landed on the portrait.  A
+         * second finger must not reset it.  Overlay controls still work, so
+         * an overlay press goes to the legacy engine; any other extra
+         * pointer is swallowed until the portrait finger is released. */
+        if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) return 0;
+        (void)direct_owner_add(pointer_id, DIRECT_OWNER_IGNORED, x, y);
+        return 1;
+    }
     if (wc3_direct_touch_active_count(&g_direct_touch) > 0) {
+        /* A second finger cancels the semantic gesture and becomes a
+         * camera/zoom candidate, even if that finger landed on an overlay
+         * element.  Without the handoff the first finger would still emit a
+         * tap/order in the middle of a camera gesture. */
         direct_touch_handoff(pointer_id, x, y,
                              engine_tick_from_ms(event_time_ms));
         return 1;
     }
-    if (!direct_touch_wants(x, y)) return 0;
-    if (!direct_owner_add(pointer_id, DIRECT_OWNER_FIELD, x, y)) return 0;
-    wc3_direct_touch_down(&g_direct_touch, pointer_id, x, y,
-                          event_time_ms);
+
+    if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) return 0;
+    if (route == WC3_DIRECT_TOUCH_ROUTE_MINIMAP) {
+        if (!direct_owner_add(pointer_id, DIRECT_OWNER_MINIMAP, x, y)) {
+            return 0;
+        }
+        wc3_direct_touch_emit_pointer(&g_direct_touch,
+                                      WC3_DIRECT_TOUCH_POINTER_DOWN,
+                                      pointer_id, x, y, event_time_ms);
+        return 1;
+    }
+    if (route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
+        if (!direct_owner_add(pointer_id, DIRECT_OWNER_PORTRAIT, x, y)) {
+            return 0;
+        }
+        wc3_direct_touch_down_route(&g_direct_touch, pointer_id, x, y,
+                                    event_time_ms,
+                                    WC3_DIRECT_TOUCH_ROUTE_PORTRAIT);
+        return 1;
+    }
+    if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD) {
+        if (!direct_owner_add(pointer_id, DIRECT_OWNER_FIELD, x, y)) return 0;
+        wc3_direct_touch_down(&g_direct_touch, pointer_id, x, y,
+                              event_time_ms);
+        return 1;
+    }
+
+    if (!direct_owner_add(pointer_id, DIRECT_OWNER_NATIVE, x, y)) return 0;
+    wc3_direct_touch_emit_pointer(&g_direct_touch,
+                                  WC3_DIRECT_TOUCH_POINTER_DOWN,
+                                  pointer_id, x, y, event_time_ms);
     return 1;
 }
 
@@ -782,6 +986,41 @@ static uint64_t engine_tick_from_ms(uint64_t time_ms) {
     uint64_t tick = time_ms / (uint64_t)interval;
     if (tick < g_last_engine_tick) tick = g_last_engine_tick;
     return tick;
+}
+
+/*
+ * Keep a minimap-owned pointer inside the published minimap rectangle.  The
+ * native minimap handler only receives mouse moves while the cursor is over
+ * the minimap frame, so a finger that leaves the rectangle would otherwise
+ * stop dragging.  Clamping keeps the drag alive and drives the camera to the
+ * edge; the pointer remains owned by the minimap until it is released.
+ */
+static void direct_touch_clamp_minimap(float *x, float *y,
+                                       const DirectOwner *owner) {
+    if (g_width <= 0 || g_height <= 0) return;
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+    if (!g_direct_touch_minimap_gate ||
+        !g_direct_touch_minimap_gate(&left, &top, &right, &bottom,
+                                     g_direct_touch_minimap_gate_user) ||
+        !(right > left) || !(bottom > top)) {
+        /* The frame disappeared while the drag was active (UI transition).
+         * Keep the last in-rect position so the native handler still sees a
+         * coherent release instead of a jump. */
+        *x = owner->last_x;
+        *y = owner->last_y;
+        return;
+    }
+    const float px_left = left * (float)g_width;
+    const float px_right = right * (float)g_width;
+    const float px_top = top * (float)g_height;
+    const float px_bottom = bottom * (float)g_height;
+    if (*x < px_left) *x = px_left;
+    if (*x > px_right) *x = px_right;
+    if (*y < px_top) *y = px_top;
+    if (*y > px_bottom) *y = px_bottom;
 }
 
 int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
@@ -801,9 +1040,28 @@ int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
     } else {
         DirectOwner *owner = direct_owner_find(pointer_id);
         if (owner) {
+            if (owner->owner == DIRECT_OWNER_MINIMAP) {
+                float cx = x;
+                float cy = y;
+                direct_touch_clamp_minimap(&cx, &cy, owner);
+                owner->last_x = cx;
+                owner->last_y = cy;
+                if (phase == WC3_TOUCH_MOVE) {
+                    wc3_direct_touch_emit_pointer(
+                        &g_direct_touch, WC3_DIRECT_TOUCH_POINTER_MOVE,
+                        pointer_id, cx, cy, event_time_ms);
+                } else if (phase == WC3_TOUCH_UP) {
+                    wc3_direct_touch_emit_pointer(
+                        &g_direct_touch, WC3_DIRECT_TOUCH_POINTER_UP,
+                        pointer_id, cx, cy, event_time_ms);
+                    direct_owner_remove(pointer_id);
+                }
+                return 0;
+            }
             owner->last_x = x;
             owner->last_y = y;
-            if (owner->owner == DIRECT_OWNER_FIELD) {
+            if (owner->owner == DIRECT_OWNER_FIELD ||
+                owner->owner == DIRECT_OWNER_PORTRAIT) {
                 if (phase == WC3_TOUCH_MOVE) {
                     wc3_direct_touch_move(&g_direct_touch, pointer_id, x, y,
                                           event_time_ms);
@@ -812,6 +1070,23 @@ int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
                                         event_time_ms);
                     direct_owner_remove(pointer_id);
                 }
+                return 0;
+            }
+            if (owner->owner == DIRECT_OWNER_NATIVE) {
+                if (phase == WC3_TOUCH_MOVE) {
+                    wc3_direct_touch_emit_pointer(
+                        &g_direct_touch, WC3_DIRECT_TOUCH_POINTER_MOVE,
+                        pointer_id, x, y, event_time_ms);
+                } else if (phase == WC3_TOUCH_UP) {
+                    wc3_direct_touch_emit_pointer(
+                        &g_direct_touch, WC3_DIRECT_TOUCH_POINTER_UP,
+                        pointer_id, x, y, event_time_ms);
+                    direct_owner_remove(pointer_id);
+                }
+                return 0;
+            }
+            if (owner->owner == DIRECT_OWNER_IGNORED) {
+                if (phase == WC3_TOUCH_UP) direct_owner_remove(pointer_id);
                 return 0;
             }
         }
@@ -912,9 +1187,28 @@ uint64_t controls_next_deadline_ms(uint64_t now_ms) {
     return deadline_ms;
 }
 
+static void direct_touch_native_cancel(void) {
+    for (int i = 0; i < DIRECT_OWNER_SLOTS; i++) {
+        DirectOwner *slot = &g_direct_owners[i];
+        if (slot->owner != DIRECT_OWNER_NATIVE &&
+            slot->owner != DIRECT_OWNER_MINIMAP) {
+            continue;
+        }
+        wc3_direct_touch_emit_pointer(&g_direct_touch,
+                                      WC3_DIRECT_TOUCH_POINTER_CANCEL,
+                                      slot->pointer_id, slot->last_x,
+                                      slot->last_y, 0);
+    }
+}
+
 void controls_cancel_all(void) {
     if (!g_initialized) return;
 
+    /* Release a native mouse button before the pointer table disappears.
+     * The guest-side service turns this into WM_LBUTTONUP; without it a
+     * cancelled minimap drag or command-card press could leave the button
+     * logically held. */
+    direct_touch_native_cancel();
     wc3_direct_touch_reset(&g_direct_touch);
     direct_owners_clear();
 
@@ -932,6 +1226,7 @@ void controls_cancel_all(void) {
 int controls_switch_safe(void) {
     if (!g_initialized) return 0;
     if (wc3_direct_touch_active_count(&g_direct_touch) != 0) return 0;
+    if (direct_owner_native_gesture()) return 0;
 
     TP_STATE_LOCK();
     int safe = g_state.active_finger_count == 0 &&

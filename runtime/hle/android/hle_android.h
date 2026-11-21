@@ -198,6 +198,15 @@ void hle_android_mouse_move_delta(int dx, int dy);
 void hle_android_mouse_button(int down);
 /* button: 0=left, 1=middle, 2=right (Winlator order). */
 void hle_android_mouse_button_ex(int button, int down);
+/* 1 when the HLE's logical mouse button state is down.  The direct path uses
+ * this to avoid posting a second DOWN while the overlay engine owns the
+ * button, and to release only the press it actually posted. */
+int hle_android_mouse_is_down(int button);
+/* Post a button press even when the logical state is still down because an
+ * earlier release is queued but not dispatched.  The direct path uses this
+ * for a second tap that follows its own pending release; the message order
+ * still pairs DOWN with UP.  Do not use it for the overlay engine. */
+void hle_android_mouse_button_down_force(int button);
 /* delta is in Windows wheel units: +/-120 per notch. */
 void hle_android_mouse_wheel(int delta);
 /* vk may be a specific left/right modifier VK; the HLE maps it to the generic

@@ -1306,6 +1306,32 @@ def test_gs_cookie_call() -> int:
     return run([str(exe)])
 
 
+def test_guest_base_local() -> int:
+    """Explicit-base guest access: widths, stack, scalar and vector helpers."""
+    cc = gcc()
+    if not cc:
+        print("guest_base_local: unavailable (no host C compiler)")
+        return 2
+    BUILD.mkdir(parents=True, exist_ok=True)
+    exe = BUILD / "guest_base_local_test.exe"
+    rc = run([
+        cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(ROOT / "runtime" / "cpu"),
+        "-I" + str(ROOT / "runtime" / "guest"),
+        str(ROOT / "tests" / "guest_base_local_test.c"),
+        str(ROOT / "runtime" / "cpu" / "guest_host.c"),
+        "-o", str(exe),
+    ])
+    if rc != 0:
+        return rc
+    return run([str(exe)])
+
+
+def test_guest_base_pass() -> int:
+    """Source check: only canonical lifted functions with memory helpers."""
+    return run_host_tool("guest_base", ["--self-test"])
+
+
 def test_devirtualize_pass() -> int:
     """P0-1/G-15 source check: only constant dispatch sites are rewritten."""
     return run_host_tool("devirtualize", ["--self-test"])
@@ -3626,6 +3652,8 @@ TESTS = {
     "direct_call": test_direct_call,
     "direct_call_multi_tu": test_direct_call_multi_tu,
     "gs_cookie_call": test_gs_cookie_call,
+    "guest_base_local": test_guest_base_local,
+    "guest_base_pass": test_guest_base_pass,
     "devirtualize_pass": test_devirtualize_pass,
     "dead_flags_pass": test_dead_flags_pass,
     "patch_pipeline": test_patch_pipeline,

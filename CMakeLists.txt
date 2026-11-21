@@ -671,6 +671,19 @@ if(WC3_LEAF_GS_COOKIE AND NOT WC3_PATCH_PIPELINE)
         "WC3_LEAF_GS_COOKIE=ON requires WC3_PATCH_PIPELINE=ON")
 endif()
 
+# Cache the write-once guest window base once per lifted function.  The pass is
+# an optimization candidate, not a new addressing model: the snapshot is taken
+# from g_guest_host_base after boot and the pointer arithmetic is unchanged.
+# Default-off until a PM-19 device A/B measures the added base load and the
+# removed reloads together.
+option(WC3_GUEST_BASE_LOCAL
+       "Snapshot the write-once guest window base per lifted function (requires device A/B)"
+       OFF)
+if(WC3_GUEST_BASE_LOCAL AND NOT WC3_PATCH_PIPELINE)
+    message(FATAL_ERROR
+        "WC3_GUEST_BASE_LOCAL=ON requires WC3_PATCH_PIPELINE=ON")
+endif()
+
 # Optional post-lift parallel raycast.  The pass rewrites exactly one call to
 # L_6F749F90 in the generated leaf corpus; it needs a generated corpus, the
 # Android app target and the as-built HLE library that owns the runtime pool.

@@ -35,6 +35,10 @@
     "w3l_compat.json",
     "selection.json",
     "leaf_call.json",
+    {
+      "manifest": "local_base.json",
+      "enabled": false
+    },
     "parallel_raycast.json"
   ],
   "reserved": [

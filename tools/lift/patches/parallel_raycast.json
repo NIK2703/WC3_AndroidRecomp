@@ -1,8 +1,8 @@
 {
   "schema": 2,
   "id": "parallel_raycast",
-  "rev": 1,
-  "description": "Whole-corpus batch transform after leaf_call; direct-call macros from leaf_call are an input.",
+  "rev": 5,
+  "description": "Whole-corpus batch transform after leaf_call; direct-call macros from leaf_call are an input. Generates the debug-only L_6F78D9B0 collect/apply split and the caller continuation chain (L_6F376490, L_6F395888/L_6F39588A, L_6F654BD0, 0055 loop boundaries, 0000 effect tail).",
   "engine": "parallel_raycast",
   "kind": "transform",
   "mode": "batch",
@@ -31,6 +31,12 @@
       "--vertex-counter",
       "--expect-vertex-counter-sites",
       "1",
+      "--phase-split",
+      "--expect-phase-sites",
+      "1",
+      "--phase-chain",
+      "--expect-phase-chain-sites",
+      "18",
       "--quiet"
     ]
   },
@@ -48,7 +54,7 @@
     {
       "kind": "field_equals",
       "path": "files_rewritten",
-      "equals": 3
+      "equals": 7
     },
     {
       "kind": "field_equals",
@@ -69,6 +75,26 @@
       "kind": "field_equals",
       "path": "triangle_functions",
       "equals": 1
+    },
+    {
+      "kind": "field_equals",
+      "path": "phase_split_functions",
+      "equals": 1
+    },
+    {
+      "kind": "field_equals",
+      "path": "phase_chain_sites",
+      "equals": 18
+    },
+    {
+      "kind": "field_equals",
+      "path": "g15_change_set",
+      "equals": 22
+    },
+    {
+      "kind": "field_equals",
+      "path": "g15_status",
+      "equals": "report_only"
     }
   ]
 }

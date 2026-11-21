@@ -51,6 +51,14 @@
  * prefix.  A rejected trailing chunk leaves the active set and merge skips
  * zero-length chunks.  WC3_PERF_NOTES=0 removes per-call PERF counters from
  * an A/B run.  Release compiles the main-last, equal-floor layout only.
+ *
+ * Debug PARALLEL builds additionally contain the SPMD phase runtime and a
+ * shadow collector (WC3_PHASE=1, WC3_PHASE_SHADOW=1).  The shadow captures
+ * real L_6F749F90 requests, replays them sequentially and through one
+ * fork-join phase, and compares hit/dist/pos bits.  It changes no guest
+ * state and is off unless both variables are set.  A product phase still
+ * requires the LiftPass collect/apply split of the stateful caller; the
+ * stable request/API contract for that split is in parallel_phase.h.
  */
 #ifndef WC3_PARALLEL_RAYCAST_H
 #define WC3_PARALLEL_RAYCAST_H

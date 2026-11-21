@@ -42,6 +42,52 @@ typedef void (*Wc3ActionSink)(const TouchAction *actions, int count,
 void controls_set_direct_touch_enabled(bool enabled);
 void controls_set_direct_touch_sink(Wc3DirectTouchSink sink, void *user);
 
+/*
+ * Lock-free routing predicate supplied by the host.  The input thread cannot
+ * call guest code, so the guest side publishes where a non-overlay touch
+ * belongs.  FIELD means the semantic battlefield recognizer; NATIVE means
+ * raw pointer phases for the native UI (HUD, menus, targeting/placement);
+ * PORTRAIT and MINIMAP are claimed by their separate rectangle gates;
+ * LEGACY means the touch stays on the legacy overlay path, either because it
+ * hit an overlay control element or because direct touch cannot claim the
+ * pointer yet (UI singleton not up).
+ *
+ * Legacy is only for overlay control elements.  In direct mode a native HUD
+ * or targeting touch must not be sent through the overlay engine; it is
+ * forwarded as pointer phases and the guest side posts the native mouse
+ * messages itself.  A NULL gate keeps the phase-1 FIELD behavior for tests
+ * and host-only builds.
+ */
+typedef Wc3DirectTouchRoute (*Wc3DirectTouchRouteGate)(void *user);
+void controls_set_direct_touch_route_gate(Wc3DirectTouchRouteGate gate,
+                                          void *user);
+
+/*
+ * Lock-free portrait rectangle supplied by the host.  The input thread calls
+ * this for every non-overlay touch; the guest side publishes the visible
+ * portrait frame in surface-normalised coordinates (0..1).  Returns 1 and
+ * fills all four values when the portrait exists; 0 means "no portrait
+ * gesture here" and the touch keeps its FIELD/NATIVE route.  The gate must
+ * not call guest code and must be safe on the Android input thread.
+ */
+typedef int (*Wc3DirectTouchRectGate)(float *left, float *top,
+                                      float *right, float *bottom,
+                                      void *user);
+typedef Wc3DirectTouchRectGate Wc3DirectTouchPortraitRectGate;
+void controls_set_direct_touch_portrait_gate(
+    Wc3DirectTouchPortraitRectGate gate, void *user);
+
+/*
+ * Lock-free minimap rectangle supplied by the host, same contract as the
+ * portrait gate.  The input thread claims a touch that starts inside this
+ * rectangle for the minimap and clamps every later pointer phase to it, so a
+ * finger that leaves the minimap keeps dragging the camera until it is
+ * released.
+ */
+typedef Wc3DirectTouchRectGate Wc3DirectTouchMinimapRectGate;
+void controls_set_direct_touch_minimap_gate(
+    Wc3DirectTouchMinimapRectGate gate, void *user);
+
 /* Profile JSON must stay valid only for the duration of this call. */
 int controls_init(const char *profile_json, int width, int height);
 
