@@ -65,11 +65,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var doubleTapDelayValue: TextView
     private lateinit var longPressDelaySlider: SeekBar
     private lateinit var longPressDelayValue: TextView
-    private lateinit var tapClickDelaySlider: SeekBar
-    private lateinit var tapClickDelayValue: TextView
     private lateinit var overlayOpacitySlider: SeekBar
     private lateinit var overlayOpacityValue: TextView
-    private lateinit var argsInput: EditText
     private lateinit var driverStore: VulkanDriverStore
     private lateinit var driverSpinner: Spinner
     private lateinit var driverRemoveButton: Button
@@ -85,8 +82,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         LaunchContract.SELECTION_CAP_40
     )
     private lateinit var hideCursorSwitch: SwitchCompat
-    private lateinit var parallelCpuGrid: GridLayout
-    private lateinit var parallelCpuHint: TextView
+    private lateinit var gameCpuGrid: GridLayout
+    private lateinit var gameCpuHint: TextView
     private var availableCpuCores: List<CpuCore> = emptyList()
     private val cpuCoreCells = mutableListOf<TextView>()
     private lateinit var gridOptionsGroup: LinearLayout
@@ -269,11 +266,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         doubleTapDelayValue = findViewById(R.id.double_tap_delay_value)
         longPressDelaySlider = findViewById(R.id.long_press_delay_slider)
         longPressDelayValue = findViewById(R.id.long_press_delay_value)
-        tapClickDelaySlider = findViewById(R.id.tap_click_delay_slider)
-        tapClickDelayValue = findViewById(R.id.tap_click_delay_value)
         overlayOpacitySlider = findViewById(R.id.overlay_opacity_slider)
         overlayOpacityValue = findViewById(R.id.overlay_opacity_value)
-        argsInput = findViewById(R.id.args_input)
         driverSpinner = findViewById(R.id.driver_spinner)
         driverRemoveButton = findViewById(R.id.driver_remove_button)
         driverImportButton = findViewById(R.id.driver_import_button)
@@ -283,8 +277,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         dxvkConfigImportButton = findViewById(R.id.dxvk_config_import)
         selectionCapSpinner = findViewById(R.id.selection_cap_spinner)
         hideCursorSwitch = findViewById(R.id.hide_cursor_switch)
-        parallelCpuGrid = findViewById(R.id.parallel_cpu_grid)
-        parallelCpuHint = findViewById(R.id.parallel_cpu_hint)
+        gameCpuGrid = findViewById(R.id.parallel_cpu_grid)
+        gameCpuHint = findViewById(R.id.parallel_cpu_hint)
         gridOptionsGroup = findViewById(R.id.grid_options_group)
         gridDarkenSlider = findViewById(R.id.grid_darken_slider)
         gridDarkenValue = findViewById(R.id.grid_darken_value)
@@ -413,9 +407,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
             longPressDelayValue,
             settings.longPressTimeoutMs
         )
-        bindTapClickDelaySlider(settings.tapClickDelayMs)
         bindOverlayOpacitySlider(settings.overlayOpacityPercent)
-        argsInput.setText(settings.extraArgs)
         rebuildDriverOptions(settings.driverId)
         updateDriverState()
 
@@ -449,38 +441,32 @@ class LaunchSettingsActivity : AppCompatActivity() {
         updateGestureModeHint()
     }
 
-    /* The core table is the only parallel control.  Two or more selected
-     * cells enable the worker pool; one selected cell keeps the guest
-     * sequential.  The default is the most performant allowed CPU, so a fresh
-     * install starts without parallelism and pins the main thread there. */
+    /* The core table selects exactly one core: the game's main thread runs on
+     * it, and no parallel worker pool is created.  Tapping another cell moves
+     * the selection; tapping the active cell keeps it.  A fresh install uses
+     * the most performant allowed CPU. */
     private fun bindCpuCores(saved: List<Int>) {
-        parallelCpuGrid.removeAllViews()
+        gameCpuGrid.removeAllViews()
         cpuCoreCells.clear()
 
         val availableIds = availableCpuCores.map { it.id }.toSet()
-        val savedIds = saved.filter { it in availableIds }.toSet()
-        val selected = if (savedIds.isEmpty()) {
-            CpuTopology.pickBest(availableCpuCores)
-                ?.let { setOf(it.id) }
-                .orEmpty()
-        } else {
-            savedIds
-        }
+        val selectedId = saved.firstOrNull { it in availableIds }
+            ?: CpuTopology.pickBest(availableCpuCores)?.id
 
         /* Two rows, not two columns: all cores fill the first row and spill
          * into the second one.  The column count is derived from the core
          * count so the grid stays two rows on every device. */
         val columns = (availableCpuCores.size + 1) / 2
         if (columns > 0) {
-            parallelCpuGrid.columnCount = columns
-            parallelCpuGrid.rowCount = minOf(2, availableCpuCores.size)
+            gameCpuGrid.columnCount = columns
+            gameCpuGrid.rowCount = minOf(2, availableCpuCores.size)
         }
 
         for ((index, core) in availableCpuCores.withIndex()) {
             val cell = TextView(this).apply {
                 tag = core.id
                 text = core.id.toString()
-                isSelected = core.id in selected
+                isSelected = core.id == selectedId
                 gravity = Gravity.CENTER
                 textSize = 16f
                 minHeight = dp(48)
@@ -496,7 +482,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 tooltipText = core.label
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { toggleCpuCore(this@apply) }
+                setOnClickListener { selectCpuCore(this@apply) }
             }
             val column = index % columns
             val row = index / columns
@@ -513,60 +499,35 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 rowSpec = GridLayout.spec(row)
                 setMargins(dp(4), dp(4), dp(4), dp(4))
             }
-            parallelCpuGrid.addView(cell, params)
+            gameCpuGrid.addView(cell, params)
             cpuCoreCells.add(cell)
         }
-        updateParallelCpuHint()
+        updateGameCpuHint()
     }
 
-    private fun toggleCpuCore(cell: TextView) {
-        if (cell.isSelected) {
-            if (selectedCpuCores().size <= 1) {
-                Toast.makeText(
-                    this,
-                    R.string.launch_cpu_cores_required,
-                    Toast.LENGTH_SHORT
-                ).show()
-                return
-            }
-            cell.isSelected = false
-        } else {
-            cell.isSelected = true
-        }
-        updateParallelCpuHint()
+    private fun selectCpuCore(cell: TextView) {
+        if (cell.isSelected) return
+        cpuCoreCells.forEach { it.isSelected = false }
+        cell.isSelected = true
+        updateGameCpuHint()
         refreshValidation()
         saveIfValid()
     }
 
-    private fun selectedCpuCores(): List<Int> =
-        cpuCoreCells
-            .filter { it.isSelected }
-            .mapNotNull { it.tag as? Int }
-            .sorted()
+    private fun selectedCpuCore(): Int? =
+        cpuCoreCells.firstOrNull { it.isSelected }?.tag as? Int
 
-    private fun updateParallelCpuHint() {
+    private fun updateGameCpuHint() {
         if (availableCpuCores.isEmpty()) {
-            parallelCpuHint.text = getString(R.string.launch_cpu_cores_unavailable)
+            gameCpuHint.text = getString(R.string.launch_cpu_cores_unavailable)
             return
         }
-        val selected = selectedCpuCores()
-        if (selected.isEmpty()) {
-            parallelCpuHint.text = getString(R.string.launch_cpu_cores_required)
+        val selected = selectedCpuCore()
+        if (selected == null) {
+            gameCpuHint.text = getString(R.string.launch_cpu_cores_required)
             return
         }
-        val mainCpu = CpuTopology.pickBest(
-            availableCpuCores.filter { it.id in selected }
-        )?.id ?: selected.maxOrNull() ?: return
-        parallelCpuHint.text = if (selected.size <= 1) {
-            getString(R.string.launch_cpu_cores_single, mainCpu)
-        } else {
-            getString(
-                R.string.launch_cpu_cores_hint,
-                selected.size,
-                availableCpuCores.size,
-                mainCpu
-            )
-        }
+        gameCpuHint.text = getString(R.string.launch_cpu_cores_selected, selected)
     }
 
     private fun dp(value: Int): Int =
@@ -582,10 +543,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
 
     private fun wireListeners() {
         folderInput.afterTextChanged { if (!binding) refreshValidation() }
-        argsInput.afterTextChanged { if (!binding) refreshValidation() }
 
         folderInput.setOnFocusChangeListener { _, focused -> if (!focused) saveIfValid() }
-        argsInput.setOnFocusChangeListener { _, focused -> if (!focused) saveIfValid() }
 
         soundSwitch.setOnCheckedChangeListener { _, _ ->
             if (!binding) {
@@ -637,7 +596,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
 
         wireDelaySlider(doubleTapDelaySlider, doubleTapDelayValue)
         wireDelaySlider(longPressDelaySlider, longPressDelayValue)
-        wireTapClickDelaySlider()
         wireOverlayOpacitySlider()
         wireGridDarkenSlider()
         wireGridCycleSlider()
@@ -1455,11 +1413,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
     }
 
     private fun updateFolderStatus(settings: LaunchSettings) {
-        val folderSettings = settings.copy(
-            width = 0,
-            height = 0,
-            extraArgs = ""
-        )
+        val folderSettings = settings.copy(width = 0, height = 0)
         when (val folderResult = LaunchValidator.validate(this, folderSettings)) {
             is LaunchValidator.Result.Ok -> {
                 val folder = LaunchValidator.resolveGameDir(this, settings)
@@ -1487,7 +1441,8 @@ class LaunchSettingsActivity : AppCompatActivity() {
         val resolution = currentResolutionOption()
             ?: resolutionOptions.lastOrNull()
             ?: ResolutionOption(0, 0, "")
-        val workerCpus = selectedCpuCores()
+        val selectedCpu = selectedCpuCore()
+        val workerCpus = if (selectedCpu != null) listOf(selectedCpu) else emptyList()
 
         return LaunchSettings(
             mode = mode,
@@ -1495,7 +1450,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
             width = resolution.width,
             height = resolution.height,
             sound = soundSwitch.isChecked,
-            extraArgs = argsInput.text.toString().trim(),
             driverId = currentDriverId(),
             dxvkVersion = currentDxvkVersion(),
             dxvkConfig = readDxvkConfig(),
@@ -1504,7 +1458,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 ?: GestureMode.DOUBLE_TAP,
             doubleTapTimeoutMs = progressToDelay(doubleTapDelaySlider.progress),
             longPressTimeoutMs = progressToDelay(longPressDelaySlider.progress),
-            tapClickDelayMs = tapClickDelayFromProgress(tapClickDelaySlider.progress),
             selectionCap = selectionCapValues[
                 selectionCapSpinner.selectedItemPosition.coerceIn(
                     0,
@@ -1515,7 +1468,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
             overlayOpacityPercent = overlayOpacityFromProgress(
                 overlayOpacitySlider.progress
             ),
-            parallelExecution = workerCpus.size >= 2,
             workerCpus = workerCpus,
             gridEnabled = resolution.grid,
             gridDarkenPercent =
@@ -1619,54 +1571,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
         })
     }
-
-    private fun bindTapClickDelaySlider(ms: Int) {
-        tapClickDelaySlider.max =
-            LaunchContract.MAX_TAP_CLICK_DELAY_MS - LaunchContract.MIN_TAP_CLICK_DELAY_MS
-        val progress = tapClickDelayToProgress(ms)
-        tapClickDelaySlider.progress = progress
-        tapClickDelayValue.text = getString(
-            R.string.launch_gesture_delay_value,
-            tapClickDelayFromProgress(progress)
-        )
-    }
-
-    private fun wireTapClickDelaySlider() {
-        tapClickDelaySlider.setOnSeekBarChangeListener(
-            object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(
-                    seekBar: SeekBar?,
-                    progress: Int,
-                    fromUser: Boolean
-                ) {
-                    tapClickDelayValue.text = getString(
-                        R.string.launch_gesture_delay_value,
-                        tapClickDelayFromProgress(progress)
-                    )
-                    if (fromUser && !binding) {
-                        refreshValidation()
-                        saveIfValid()
-                    }
-                }
-
-                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-
-                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
-            }
-        )
-    }
-
-    private fun tapClickDelayToProgress(ms: Int): Int =
-        ms.coerceIn(
-            LaunchContract.MIN_TAP_CLICK_DELAY_MS,
-            LaunchContract.MAX_TAP_CLICK_DELAY_MS
-        ) - LaunchContract.MIN_TAP_CLICK_DELAY_MS
-
-    private fun tapClickDelayFromProgress(progress: Int): Int =
-        LaunchContract.MIN_TAP_CLICK_DELAY_MS + progress.coerceIn(
-            0,
-            LaunchContract.MAX_TAP_CLICK_DELAY_MS - LaunchContract.MIN_TAP_CLICK_DELAY_MS
-        )
 
     /*
      * The opacity slider is an index into the 10..50 percent range: the

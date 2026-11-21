@@ -521,6 +521,10 @@ static int controls_apply_profile(const ProfileData *profile, int width,
 
     g_width = width;
     g_height = height;
+    /* The recognizer is sized in surface pixels and has no active pointers
+     * here: init, mode switch and resize all cancel input (or are the first
+     * initialisation) before applying a profile. */
+    direct_touch_configure(width, height);
     if (initial) g_last_engine_tick = 0;
     g_layout_id++;
     g_overlay_mode = mode;
@@ -590,7 +594,6 @@ int controls_init_ex(const char *profile_json, int width, int height,
     g_profile_json = copy;
     g_simple_build_rc = simple_rc;
     g_simple_esc_build_rc = simple_esc_rc;
-    direct_touch_configure(width, height);
     return 0;
 }
 

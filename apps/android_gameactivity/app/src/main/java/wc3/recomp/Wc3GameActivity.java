@@ -72,7 +72,7 @@ public class Wc3GameActivity extends GameActivity {
     /* JNI matches by name only; host_shell.c must keep the same parameter
      * order (driver id before driver root, DXVK version and config path, then
      * the two gesture flags and timers, the SIMPLE tap delay, the selection
-     * cap (12/24/40), the hideCursor toggle, the derived parallelExecution
+     * cap (12/24/40), the hideCursor toggle, the always-false parallelExecution
      * flag, the overlay opacity percent, the grid toggle, darken percent and
      * cycle seconds, the presentation scale string, the screen present mode
      * string and buffering count, the comma-separated worker CPU list, and
@@ -381,7 +381,7 @@ public class Wc3GameActivity extends GameActivity {
                         LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS),
                 settings.getInt(
                         LaunchContract.KEY_TAP_CLICK_DELAY_MS,
-                        LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS),
+                        LaunchContract.TAP_CLICK_DELAY_MS),
                 settings.getInt(
                         LaunchContract.KEY_SELECTION_CAP,
                         LaunchContract.DEFAULT_SELECTION_CAP),

@@ -28,10 +28,9 @@
     <string name="launch_selection_40">40 units</string>
     <string name="launch_hide_cursor_label">Hide game cursor</string>
     <string name="launch_cpu_cores_label">CPU cores</string>
-    <string name="launch_cpu_cores_hint">%1$d of %2$d cores selected · main thread: CPU %3$d · parallel execution is on, workers: %1$d · applied on next launch</string>
-    <string name="launch_cpu_cores_single">One core selected · main thread: CPU %1$d · parallel execution is off · select two or more cores for workers · applied on next launch</string>
-    <string name="launch_cpu_cores_unavailable">Could not detect the allowed CPU cores · parallel execution is off</string>
-    <string name="launch_cpu_cores_required">Select at least one core.</string>
+    <string name="launch_cpu_cores_selected">Game runs on CPU %1$d · tap another core to switch · applied on next launch</string>
+    <string name="launch_cpu_cores_unavailable">Could not detect the allowed CPU cores · game CPU is not pinned</string>
+    <string name="launch_cpu_cores_required">Select a core.</string>
     <string name="launch_cpu_core_description">CPU core %1$d</string>
     <string name="launch_gesture_mode_label">Touchscreen control gestures</string>
     <string name="launch_gesture_mode_double">Double tap, single tap with delay</string>
@@ -47,8 +46,6 @@
     <string name="launch_gesture_hint_direct">• Tap a friendly unit — select\n• Tap an enemy or the ground with units selected — smart order\n• Long press — force smart order\n• Two-finger gestures — camera\n• Overlay buttons keep the existing controls path; native HUD panels are excluded until their hit test is exact</string>
     <string name="launch_double_tap_delay_label">Double-tap delay</string>
     <string name="launch_long_press_delay_label">Long-press delay</string>
-    <string name="launch_tap_click_delay_label">Click press delay in simplified profile</string>
-    <string name="launch_tap_click_delay_hint">Increase this if the click happens before the cursor moves on a tap in the game main menu</string>
     <string name="launch_gesture_delay_value">%1$d ms</string>
     <string name="launch_overlay_opacity_label">Control overlay opacity</string>
     <string name="launch_overlay_opacity_value">%1$d %%</string>
@@ -106,7 +103,6 @@
     <string name="launch_dxvk_config_import_empty">The file has no active variables. Remove “#” from the lines you want to import.</string>
     <string name="launch_dxvk_config_import_done">Loaded variables: %1$d</string>
 
-    <string name="launch_args_label">Extra arguments</string>
 
     <string name="launch_play">Play</string>
     <string name="launch_grant">Grant access</string>
@@ -126,7 +122,6 @@
     <string name="launch_error_not_writable">Game folder is not writable: %1$s</string>
     <string name="launch_error_missing_files">Missing required files: %1$s</string>
     <string name="launch_error_resolution">Resolution must be 0 × 0 or both values within 320–7680 × 240–4320.</string>
-    <string name="launch_error_args">Arguments: up to 200 printable ASCII characters, no line breaks.</string>
     <string name="launch_error_save">Could not save settings.</string>
 
     <string name="launch_toast_permission">No storage access. Long-press the game icon → Launch settings.</string>

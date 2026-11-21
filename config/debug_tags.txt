@@ -1,5 +1,6 @@
 # Debug build tags.  Read and validated by tools/android/build_app.sh and
-# build_app.ps1.  Only the parallel-execution counters and the live tuner are
-# enabled: the set is deliberately minimal so measurement runs do not spend
-# CPU on diagnostics.  Release enables none.
+# build_app.ps1.  PARALLEL enables the parallel-execution counters and the
+# live tuner; INPUT exposes the direct-touch executor and the legacy input
+# path.  Release enables none.
 PARALLEL
+INPUT

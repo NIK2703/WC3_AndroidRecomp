@@ -7768,7 +7768,8 @@ static void u_get_message(CPU *c)
         int got;
         pthread_mutex_lock(&g_uq_lock);
         got = u_msg_take_locked(out, hwnd, lo, hi, 1);
-        if (!got && wc3_direct_touch_pending() == 0) {
+        if (!got && (wc3_direct_touch_pending() == 0 ||
+                     !wc3_hle_direct_touch_can_service())) {
             /* Real GetMessage blocks until a message arrives.  The movie
              * window's own pump depends on that: a zero return means WM_QUIT,
              * and returning it for an empty queue made the pump exit before

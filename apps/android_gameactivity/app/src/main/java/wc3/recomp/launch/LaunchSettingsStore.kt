@@ -18,16 +18,17 @@ class LaunchSettingsStore(context: Context) {
         val gridEnabled = prefs.getBoolean(
             KEY_GRID_ENABLED, LaunchContract.DEFAULT_GRID_ENABLED
         )
-        /* The product default is the most performant available core: one core
-         * keeps the guest sequential, the main thread is pinned to it, and the
-         * table never starts with every CPU active.  An absent, empty or fully
-         * invalid saved list falls back to it. */
+        /* The product default is the most performant available core: the game
+         * runs on it with the sequential path, and the table never starts with
+         * several cores active.  A saved list from the old multi-select screen
+         * is reduced to the most performant saved core. */
         val availableCores = CpuTopology.availableCores()
-        val availableIds = availableCores.map { it.id }.toSet()
-        val savedWorkerCpus = parseWorkerCpus(
+        val savedIds = parseWorkerCpus(
             prefs.getString(KEY_WORKER_CPUS, null)
-        ).filter { it in availableIds }
-        val workerCpus = savedWorkerCpus.ifEmpty {
+        ).toSet()
+        val workerCpus = CpuTopology.pickBest(
+            availableCores.filter { it.id in savedIds }
+        )?.let { listOf(it.id) }.orEmpty().ifEmpty {
             CpuTopology.pickBest(availableCores)
                 ?.let { listOf(it.id) }
                 .orEmpty()
@@ -66,7 +67,6 @@ class LaunchSettingsStore(context: Context) {
             width = prefs.getInt(KEY_WIDTH, 0),
             height = prefs.getInt(KEY_HEIGHT, 0),
             sound = prefs.getBoolean(KEY_SOUND, true),
-            extraArgs = prefs.getString(KEY_EXTRA_ARGS, "").orEmpty().trim(),
             driverId = prefs.getString(KEY_DRIVER_ID, "").orEmpty().trim(),
             /* An absent preference is the first launch and gets DXVK 1.10.3.  A
              * present empty string is the explicit "Auto" choice and stays auto. */
@@ -88,18 +88,6 @@ class LaunchSettingsStore(context: Context) {
                 KEY_LONG_PRESS_TIMEOUT_MS,
                 LaunchContract.DEFAULT_LONG_PRESS_TIMEOUT_MS
             ),
-            tapClickDelayMs = prefs.getInt(
-                KEY_TAP_CLICK_DELAY_MS,
-                LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS
-            ).let {
-                if (it >= LaunchContract.MIN_TAP_CLICK_DELAY_MS &&
-                    it <= LaunchContract.MAX_TAP_CLICK_DELAY_MS
-                ) {
-                    it
-                } else {
-                    LaunchContract.DEFAULT_TAP_CLICK_DELAY_MS
-                }
-            },
             /* An absent preference keeps the original 12-unit cap; 24 and 40
              * are opt-in through the settings dropdown. */
             selectionCap = selectionCap,
@@ -120,15 +108,8 @@ class LaunchSettingsStore(context: Context) {
                     LaunchContract.DEFAULT_OVERLAY_OPACITY_PERCENT
                 }
             },
-            /* There is no separate switch: two or more selected cores enable
-             * the parallel paths, one core keeps them sequential.  This also
-             * overrides an old preference that still contains the removed
-             * switch value. */
-            parallelExecution = workerCpus.size >= 2,
-            /* The default is the most performant allowed core.  A saved list
-             * is intersected with the CPUs this process is allowed to use;
-             * the settings screen repeats the intersection when it builds the
-             * table. */
+            /* The single core selected in the table.  The old preference
+             * could contain several ids; only the best one survives. */
             workerCpus = workerCpus,
             /* The grid layer is opt-in.  The darken percent is clamped to the
              * slider range; an absent or negative cycle is the OLED-aware auto
@@ -185,7 +166,7 @@ class LaunchSettingsStore(context: Context) {
     }
 
     fun save(settings: LaunchSettings): Boolean {
-        val workerCpus = normalizedWorkerCpus(settings.workerCpus)
+        val workerCpus = normalizedWorkerCpus(settings.workerCpus).take(1)
         val selectionCap =
             LaunchContract.normalizeSelectionCap(settings.selectionCap)
         return prefs.edit()
@@ -193,7 +174,7 @@ class LaunchSettingsStore(context: Context) {
             .putInt(KEY_WIDTH, settings.width)
             .putInt(KEY_HEIGHT, settings.height)
             .putBoolean(KEY_SOUND, settings.sound)
-            .putString(KEY_EXTRA_ARGS, settings.extraArgs)
+            .remove(LEGACY_KEY_EXTRA_ARGS)
             .putString(KEY_DRIVER_ID, settings.driverId)
             .putString(KEY_DXVK_VERSION, settings.dxvkVersion)
             .putString(KEY_DXVK_CONFIG, settings.dxvkConfig)
@@ -207,17 +188,12 @@ class LaunchSettingsStore(context: Context) {
             )
             .putInt(KEY_DOUBLE_TAP_TIMEOUT_MS, settings.doubleTapTimeoutMs)
             .putInt(KEY_LONG_PRESS_TIMEOUT_MS, settings.longPressTimeoutMs)
-            .putInt(
-                KEY_TAP_CLICK_DELAY_MS,
-                settings.tapClickDelayMs.coerceIn(
-                    LaunchContract.MIN_TAP_CLICK_DELAY_MS,
-                    LaunchContract.MAX_TAP_CLICK_DELAY_MS
-                )
-            )
             .putInt(KEY_SELECTION_CAP, selectionCap)
             .remove(LEGACY_KEY_SELECTION_24)
             .putBoolean(KEY_HIDE_CURSOR, settings.hideCursor)
-            .putBoolean(KEY_PARALLEL_EXECUTION, workerCpus.size >= 2)
+            /* The core table has no parallel switch.  Writing false clears a
+             * preference left by an older multi-select build. */
+            .putBoolean(KEY_PARALLEL_EXECUTION, false)
             .putString(KEY_WORKER_CPUS, workerCpus.joinToString(","))
             .putBoolean(KEY_GRID_ENABLED, settings.gridEnabled)
             .putInt(
@@ -264,7 +240,7 @@ class LaunchSettingsStore(context: Context) {
         const val KEY_WIDTH = "width"
         const val KEY_HEIGHT = "height"
         const val KEY_SOUND = "sound"
-        const val KEY_EXTRA_ARGS = "args"
+        const val LEGACY_KEY_EXTRA_ARGS = "args"
         const val KEY_DRIVER_ID = "vulkan_driver_id"
         const val KEY_DXVK_VERSION = "dxvk_version"
         const val KEY_DXVK_CONFIG = "dxvk_config"
@@ -272,7 +248,6 @@ class LaunchSettingsStore(context: Context) {
         const val KEY_DIRECT_TOUCH_ENABLED = "direct_touch_enabled"
         const val KEY_DOUBLE_TAP_TIMEOUT_MS = "double_tap_timeout_ms"
         const val KEY_LONG_PRESS_TIMEOUT_MS = "long_press_timeout_ms"
-        const val KEY_TAP_CLICK_DELAY_MS = "tap_click_delay_ms"
         const val KEY_SELECTION_CAP = "selection_cap"
         const val LEGACY_KEY_SELECTION_24 = "selection_24"
         const val KEY_HIDE_CURSOR = "hide_cursor"

@@ -18,10 +18,9 @@
     <string name="launch_selection_40">40 юнитов</string>
     <string name="launch_hide_cursor_label">Скрыть игровой курсор</string>
     <string name="launch_cpu_cores_label">Ядра CPU</string>
-    <string name="launch_cpu_cores_hint">Выбрано %1$d из %2$d ядер · основной поток: CPU %3$d · параллелизм включён, воркеров: %1$d · применится при следующем запуске</string>
-    <string name="launch_cpu_cores_single">Выбрано одно ядро · основной поток: CPU %1$d · параллелизм выключен · выберите два и более ядра для воркеров · применится при следующем запуске</string>
-    <string name="launch_cpu_cores_unavailable">Не удалось определить доступные ядра · параллелизм выключен</string>
-    <string name="launch_cpu_cores_required">Выберите хотя бы одно ядро.</string>
+    <string name="launch_cpu_cores_selected">Игра исполняется на CPU %1$d · нажмите другое ядро, чтобы переключиться · применится при следующем запуске</string>
+    <string name="launch_cpu_cores_unavailable">Не удалось определить доступные ядра CPU · ядро игры не закреплено</string>
+    <string name="launch_cpu_cores_required">Выберите ядро.</string>
     <string name="launch_cpu_core_description">Ядро CPU %1$d</string>
     <string name="launch_gesture_mode_label">Жесты тачскрин управления</string>
     <string name="launch_gesture_mode_double">Двойное касание, одиночное с задержкой</string>
@@ -37,8 +36,6 @@
     <string name="launch_gesture_hint_direct">• Тап по своему юниту — выбор\n• Тап по врагу или земле при выбранных юнитах — умный приказ\n• Долгое нажатие — принудительный приказ\n• Жесты двумя пальцами — камера\n• Кнопки оверлея работают по прежней схеме; нативные панели HUD исключены, пока их hit test не точен</string>
     <string name="launch_double_tap_delay_label">Задержка двойного касания</string>
     <string name="launch_long_press_delay_label">Задержка долгого нажатия</string>
-    <string name="launch_tap_click_delay_label">Задержка зажатия клика в упрощённом профиле</string>
-    <string name="launch_tap_click_delay_hint">Увеличьте, если клик происходит до перемещения курсора по тапу в главном меню игры</string>
     <string name="launch_gesture_delay_value">%1$d мс</string>
     <string name="launch_overlay_opacity_label">Непрозрачность элементов управления</string>
     <string name="launch_overlay_opacity_value">%1$d %%</string>
@@ -90,7 +87,6 @@
     <string name="launch_dxvk_config_import_empty">В файле нет активных переменных. Уберите «#» в начале нужных строк.</string>
     <string name="launch_dxvk_config_import_done">Загружено переменных: %1$d</string>
 
-    <string name="launch_args_label">Дополнительные аргументы</string>
 
     <string name="launch_play">Играть</string>
     <string name="launch_grant">Разрешить</string>
@@ -110,7 +106,6 @@
     <string name="launch_error_not_writable">Каталог игры недоступен для записи: %1$s</string>
     <string name="launch_error_missing_files">Не хватает обязательных файлов: %1$s</string>
     <string name="launch_error_resolution">Разрешение должно быть 0 × 0 или оба значения в диапазоне 320–7680 × 240–4320.</string>
-    <string name="launch_error_args">Аргументы: до 200 печатных ASCII-символов, без переносов строк.</string>
     <string name="launch_error_save">Не удалось сохранить настройки.</string>
 
     <string name="launch_toast_permission">Нет доступа к файлам. Долгое нажатие на иконку → «Настройки запуска».</string>

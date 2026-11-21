@@ -16,7 +16,6 @@ import java.io.File
  */
 object LaunchValidator {
     const val MAX_PATH_BYTES = 1000
-    const val MAX_ARGS_CHARS = 200
     const val MIN_WIDTH = 320
     const val MAX_WIDTH = 7680
     const val MIN_HEIGHT = 240
@@ -32,8 +31,7 @@ object LaunchValidator {
         FOLDER,
         FILES,
         WRITABLE,
-        RESOLUTION,
-        ARGS
+        RESOLUTION
     }
 
     fun validate(context: Context, settings: LaunchSettings): Result {
@@ -92,16 +90,6 @@ object LaunchValidator {
             return Result.Error(
                 Kind.RESOLUTION,
                 context.getString(R.string.launch_error_resolution)
-            )
-        }
-
-        val args = settings.extraArgs
-        if (args.length > MAX_ARGS_CHARS ||
-            args.any { it.code < 0x20 || it.code > 0x7E }
-        ) {
-            return Result.Error(
-                Kind.ARGS,
-                context.getString(R.string.launch_error_args)
             )
         }
 

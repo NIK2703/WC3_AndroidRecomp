@@ -1,30 +1,29 @@
 /*
  * hle_cursor127.c - optional suppression of the guest's own cursor sprite.
  *
- * The cursor is a set of named images
- * -----------------------------------
- * The game draws its mouse pointer with sprites whose draw target is an image
- * that it resolves by name in the sprite registry (L_6F342220) and hands to
- * the sprite submit function (L_6F1A47B0).  Six names of the corpus are used
- * that way; five of them are the cursor:
+ * The cursor is one named image
+ * -----------------------------
+ * The game draws its mouse pointer with a sprite whose draw target is an
+ * image that it resolves by name in the sprite registry (L_6F342220) and
+ * hands to the sprite submit function (L_6F1A47B0):
  *
- *   GVA(0x6FAA9C1C)  the pointer of the menu and of the game UI.  One image
- *                    that carries the cursor animation, submitted by
- *                    L_6F2E0340 (menu), by the four cursor setups
- *                    L_6F2DD126/32/48/5D and by L_6F367B43/45 (game UI).
+ *   GVA(0x6FAA9C1C) = "Cursor".  One image that carries the cursor
+ *   animation, submitted by L_6F2E0340 (menu), by the four cursor setups
+ *   L_6F2DD126/32/48/5D and by L_6F367B43/45 (game UI).
  *
- *   GVA(0x6FAC03D0)  the four states of the in-game cursor (pointer, move,
- *   GVA(0x6FAC03E4)  attack, drag).  L_6F39F8C0 builds the animation cells of
- *   GVA(0x6FAC03F4)  every state and gives each cell an image; the state
- *   GVA(0x6FAC0408)  renders are L_6F3DBEE0, L_6F3D6100, L_6F3D61F4,
- *                    L_6F3D6395 and L_6F3D6400.
+ * Do not confuse it with the adjacent names in the same read-only block:
  *
- * The artwork of the four in-game images is the one of the player's race, so
- * the race changes the pictures and not the names.
+ *   0x6FAC03D0 = "MinimapIndicator"
+ *   0x6FAC03E4 = "MinimapWaypoint"
+ *   0x6FAC03F4 = "MinimapCreepCamp"
+ *   0x6FAC0408 = "MinimapCreepCampTough"
+ *   0x6FABB838 = "TargetPointConfirm"
  *
- * The sixth name of that group, GVA(0x6FABB838), is not the cursor: it is
- * submitted by L_6F384900, one of the four sibling UI element constructors
- * L_6F3846A0/6F3847D0/6F384900/6F384950, and it is left alone.
+ * The first four are the player's point markers and the creep-camp icons on
+ * the minimap; L_6F39F8C0 builds their cells with the same
+ * resolve-name-then-submit sequence as the cursor.  Suppressing those names
+ * removes the minimap icons as well, which is not what this option is for.
+ * Only "Cursor" is in the suppression table.
  *
  * How a cursor draw is recognised
  * -------------------------------
@@ -34,12 +33,12 @@
  *     ecx = name;      L_6F342220()      // image = the guest's own lookup
  *     edx = image;     L_6F1A47B0()      // submit it as the draw target
  *
- * so the draw is recognised by that sequence alone.  A resolution of a cursor
- * name marks the next submission, which is dropped; a resolution of any other
- * name clears the mark, so a sprite submitted without being the cursor is
- * never touched.  On the device this catches every cursor draw there is: the
- * menu at 0x6F2E0375, the game UI at 0x6F367E7B and the four cells of the
- * in-game pointer at 0x6F3A05DE/0641/06FE/07BE.
+ * so the draw is recognised by that sequence alone.  A resolution of the
+ * cursor name marks the next submission, which is dropped; a resolution of
+ * any other name clears the mark, so a sprite submitted without being the
+ * cursor is never touched.  On the device this catches every cursor draw:
+ * the menu at 0x6F2E0375, the game UI at 0x6F367E7B and the four setups at
+ * 0x6F2DD282.  The minimap names clear the mark instead of setting it.
  *
  * Two other signals were tried and are deliberately not used.
  *
@@ -48,17 +47,15 @@
  *     other leaves through dispatch_jmp(c, 0x6F342258), a deferred tail that
  *     produces the image only after the lifted body has returned.  A wrapper
  *     therefore still sees the old EAX - on the device the lookup of
- *     0x6FAA9C1C reported 0 while the next submit drew 0x61E63F08, and the
- *     four in-game images reported 0 while their cells were submitted with
- *     0x61E68440, 0x61E68468, 0x61E68490 and 0x61E684C0.
+ *     0x6FAA9C1C reported 0 while the next submit drew 0x61E63F08.
  *
  *   - The objects of a cursor draw cannot identify later draws either.  The
  *     guest reuses both image objects and sprite objects: the menu cursor
  *     submits 0x61E63F08 through sprite 0x628E008C, and the loading screen
  *     later submits its own elements (0x61E63B50, 0x61E67798, 0x61E677E0)
  *     through those same sprite objects.  Filtering on them turned the
- *     loading screen black, and it never matched a single cursor draw that the
- *     sequence above had not matched already.
+ *     loading screen black, and it never matched a single cursor draw that
+ *     the sequence above had not matched already.
  *
  * How the drawing is cut
  * ----------------------
@@ -70,11 +67,11 @@
  * and otherwise builds the render element, uploads the geometry and issues
  * the draw call.  A NULL target is therefore the guest's own "draw nothing"
  * case: the sprite is reset, no render element is built, no geometry is
- * uploaded and no draw call reaches the renderer.  The cursor is not drawn at
- * all.
+ * uploaded and no draw call reaches the renderer.  The cursor is not drawn
+ * at all.
  *
- * Nothing about the guest's data structures is changed.  The images stay
- * registered, the sprites are still created, still advanced, still stored in
+ * Nothing about the guest's data structures is changed.  The image stays
+ * registered, the sprite is still created, still advanced, still stored in
  * the frame cell and still released - only the submission is dropped.
  *
  * What must keep running
@@ -97,16 +94,13 @@
 void __real_L_6F342220(CPU *c);
 void __real_L_6F1A47B0(CPU *c);
 
-/* The cursor image names in game.dll's read-only data.  The values are the
- * absolute VAs of the strings; the live addresses are GVA() of them, so the
- * table stays usable in a relocatable build. */
-#define WC3_CURSOR_NAME_COUNT 5
+/* The real cursor image name in game.dll's read-only data.  The value is the
+ * absolute VA of the "Cursor" string; the live address is GVA() of it, so the
+ * table stays usable in a relocatable build.  The adjacent Minimap* names are
+ * deliberately absent: they are minimap sprites, not cursor states. */
+#define WC3_CURSOR_NAME_COUNT 1
 static const uint32_t g_cursor_names[WC3_CURSOR_NAME_COUNT] = {
-    0x6FAA9C1Cu, /* menu and game UI pointer */
-    0x6FAC03D0u, /* in-game pointer */
-    0x6FAC03E4u, /* in-game move */
-    0x6FAC03F4u, /* in-game attack */
-    0x6FAC0408u, /* in-game drag */
+    0x6FAA9C1Cu, /* Cursor: menu and game UI pointer */
 };
 
 /* Build invariant: the product link forces this member in and checks the

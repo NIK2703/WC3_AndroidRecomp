@@ -28,7 +28,7 @@ typedef struct {
     uint32_t pointer_id; /* source pointer, diagnostics only */
     float x;             /* normalised surface x, 0..1, top-left origin */
     float y;             /* normalised surface y, 0..1, top-left origin */
-    uint64_t time_ms;    /* CLOCK_MONOTONIC at recognition */
+    uint64_t time_ms;    /* monotonic ms (uptimeMillis/CLOCK_MONOTONIC) */
 } Wc3DirectTouchEvent;
 
 /* The recognizer publishes through this sink.  It runs on the Android input
@@ -60,7 +60,9 @@ int wc3_direct_touch_pop(Wc3DirectTouchEvent *event);
 uint32_t wc3_direct_touch_pending(void);
 
 /* Drop all queued events.  Used when the game leaves the in-game UI or the
- * guest UI singleton changes, so a stale tap cannot hit the next map. */
+ * guest UI singleton changes, so a stale tap cannot hit the next map.
+ * Consumer-only: call from the main guest thread, or while the producer is
+ * stopped.  The producer must not clear a queue it is concurrently pushing. */
 void wc3_direct_touch_clear(void);
 
 #ifdef __cplusplus

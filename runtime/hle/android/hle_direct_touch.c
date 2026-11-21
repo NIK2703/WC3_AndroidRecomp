@@ -87,6 +87,8 @@ typedef struct {
 
 static pthread_t g_main_thread;
 static int g_main_thread_valid;
+/* Re-entrancy guard, written only by the main guest thread but read by worker
+ * GetMessageA callers through wc3_hle_direct_touch_can_service(). */
 static int g_busy;
 /* Last context the service dispatched against.  A change means the queue may
  * still hold events from the previous map/menu even if the transition itself
@@ -232,13 +234,41 @@ static int dt_context(DtContext *ctx)
     return 1;
 }
 
+/*
+ * Track the live UI/world pointers while the queue is empty.  Calling this
+ * only when an event is queued would leave g_last_* at the previous map:
+ * the first tap after a transition would then look like a stale event and
+ * be discarded.  The queue is empty here, so adopting a new pointer cannot
+ * rescue a stale event; it only keeps the next comparison honest.
+ *
+ * Pointer-only: no guest calls, no dispatch.  Runs on the main guest thread
+ * through wc3_hle_direct_touch_can_service().
+ */
+static void dt_sync_idle_context(void)
+{
+    uint32_t ui = 0;
+    uint32_t world = 0;
+    if (!dt_guest_readable(DT_UI_GLOBAL, 4) ||
+        !dt_guest_readable(DT_WORLD_GLOBAL, 4)) {
+        return;
+    }
+    ui = wc3_rd32g(DT_UI_GLOBAL);
+    world = wc3_rd32g(DT_WORLD_GLOBAL);
+    /* A partial context is a transition in progress.  Keep the previous
+     * marker: an event produced now (for example a tap on the loading
+     * screen) must still compare against the old map and be dropped. */
+    if (!ui || !world) return;
+    g_last_ui = ui;
+    g_last_world = world;
+}
+
 static int dt_world_ready(CPU *c, DtContext *ctx)
 {
     if (!dt_context(ctx)) return 0;
     if (!dt_call_ui_bool(c, ctx->ui, DT_FN_IN_GAME)) return 0;
     /* The direct actions reproduce CSelectMode.  If another mode owns input
-     * (targeting, drag, a modal UI), leave the click to the native path and
-     * drop the queued event instead of inventing an order. */
+     * (targeting, drag, a modal UI), drop the queued event; phase 1 has no
+     * legacy fallback for a field tap and must not invent an order. */
     return dt_mode_active(c, ctx->ui, ctx->mode);
 }
 
@@ -609,15 +639,21 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
     }
 }
 
+static void dt_request_main_thread_wake(void *user)
+{
+    (void)user;
+    wc3_android_request_direct_touch();
+}
+
 void wc3_hle_direct_touch_start(void)
 {
     g_main_thread = pthread_self();
     g_main_thread_valid = 1;
-    g_busy = 0;
+    __atomic_store_n(&g_busy, 0, __ATOMIC_RELEASE);
     g_last_ui = 0;
     g_last_world = 0;
     wc3_direct_touch_clear();
-    wc3_direct_touch_set_wake(wc3_android_request_direct_touch, NULL);
+    wc3_direct_touch_set_wake(dt_request_main_thread_wake, NULL);
 }
 
 void wc3_hle_direct_touch_enqueue(const Wc3DirectTouchEvent *event, void *user)
@@ -632,14 +668,22 @@ void wc3_hle_direct_touch_reset(void)
     wc3_direct_touch_clear();
 }
 
+int wc3_hle_direct_touch_can_service(void)
+{
+    if (!g_main_thread_valid) return 0;
+    if (!pthread_equal(pthread_self(), g_main_thread)) return 0;
+    return !__atomic_load_n(&g_busy, __ATOMIC_ACQUIRE);
+}
+
 void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
 {
-    if (!c || !g_main_thread_valid) return;
-    if (!pthread_equal(pthread_self(), g_main_thread)) return;
-    if (g_busy) return;
-    if (wc3_direct_touch_pending() == 0) return;
+    if (!c || !wc3_hle_direct_touch_can_service()) return;
+    if (wc3_direct_touch_pending() == 0) {
+        dt_sync_idle_context();
+        return;
+    }
 
-    g_busy = 1;
+    __atomic_store_n(&g_busy, 1, __ATOMIC_RELEASE);
     DtContext ctx;
     if (!dt_world_ready(c, &ctx)) {
         /* Menu, loading, or a UI singleton transition: a queued tap belongs
@@ -647,7 +691,7 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
         g_last_ui = 0;
         g_last_world = 0;
         wc3_direct_touch_clear();
-        g_busy = 0;
+        __atomic_store_n(&g_busy, 0, __ATOMIC_RELEASE);
         return;
     }
 
@@ -700,5 +744,5 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
             break;
         }
     }
-    g_busy = 0;
+    __atomic_store_n(&g_busy, 0, __ATOMIC_RELEASE);
 }

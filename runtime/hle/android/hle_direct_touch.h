@@ -37,6 +37,12 @@ void wc3_hle_direct_touch_enqueue(const Wc3DirectTouchEvent *event,
  * 0x6F8B38A0 conversion the native mouse path uses before picking. */
 void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height);
 
+/* True when a queued event can be consumed by the calling thread right now:
+ * it is the main guest thread and no direct dispatch is already in progress.
+ * GetMessageA uses this to avoid spinning on the queue from a worker thread or
+ * from a nested pump inside a direct guest call. */
+int wc3_hle_direct_touch_can_service(void);
+
 /* Drop any queued events when the game leaves the in-game UI. */
 void wc3_hle_direct_touch_reset(void);
 

@@ -14,6 +14,8 @@ object LaunchContract {
     const val KEY_WIDTH = "width"
     const val KEY_HEIGHT = "height"
     const val KEY_SOUND = "sound"
+    /* Always empty in the product bundle.  Kept so a diagnostic launch can
+     * still pass guest command-line arguments through the same key. */
     const val KEY_EXTRA_ARGS = "args"
     const val KEY_DRIVER_ID = "vulkan_driver_id"
     const val KEY_DXVK_VERSION = "dxvk_version"
@@ -34,14 +36,14 @@ object LaunchContract {
     const val KEY_SELECTION_CAP = "selection_cap"
     const val KEY_HIDE_CURSOR = "hide_cursor"
     const val KEY_OVERLAY_OPACITY_PERCENT = "overlay_opacity_percent"
+    /* Always false in the product bundle.  Kept as a bundle key so the native
+     * host still publishes WC3_PARALLEL_GAMEPLAY=0 to every diagnostic path. */
     const val KEY_PARALLEL_EXECUTION = "parallel_execution"
-    /* Comma-separated CPU ids selected for the parallel worker pool.  The
-     * worker count equals the number of ids.  An empty value means no pool;
-     * the product settings screen always keeps at least one core selected. */
+    /* Always empty: selecting a core never creates a worker pool. */
     const val KEY_WORKER_CPUS = "worker_cpus"
-    /* Derived best selected core for the game's main thread.  -1 means no
-     * selected core; if the topology is hidden, the highest requested id is
-     * the fallback pin. */
+    /* The single core selected in the settings table.  -1 means no core was
+     * selected; if the topology is hidden, the requested id is the fallback
+     * pin. */
     const val KEY_MAIN_CPU = "main_cpu"
     const val KEY_GRID_ENABLED = "grid_enabled"
     const val KEY_GRID_DARKEN_PERCENT = "grid_darken_percent"
@@ -56,11 +58,9 @@ object LaunchContract {
     const val DEFAULT_LONG_PRESS_TIMEOUT_MS = 120
 
     /* Wall-clock delay between a pointer move and the LMB press in the
-     * simplified (non-gameplay) overlay.  The settings screen exposes the
-     * native clamp range 8..40 ms in 1 ms steps. */
-    const val DEFAULT_TAP_CLICK_DELAY_MS = 10
-    const val MIN_TAP_CLICK_DELAY_MS = 8
-    const val MAX_TAP_CLICK_DELAY_MS = 40
+     * simplified overlay.  There is no settings control and no per-launch
+     * override: this constant is the single source for every launch bundle. */
+    const val TAP_CLICK_DELAY_MS = 40
 
     /* 12 is the original product cap.  The settings dropdown offers 24 and
      * 40 as additional modes; the corpus itself is built with the 40-unit
@@ -143,11 +143,9 @@ object LaunchContract {
     const val MIN_PRESENT_BUFFERS = 0
     const val MAX_PRESENT_BUFFERS = 2
 
-    /* Parallel guest gameplay loops are derived from the CPU-core table, not
-     * a separate switch: two or more selected cores enable the deterministic
-     * multi-core paths for the next launch; one core keeps every wrapper on
-     * the original sequential function (WC3_PARALLEL_GAMEPLAY=0).  The
-     * product default is one core, the most performant available CPU. */
+    /* The product never enables parallel guest gameplay from the core table:
+     * the chosen core runs the game sequentially (WC3_PARALLEL_GAMEPLAY=0).
+     * The constant remains the default for a bundle without the key. */
     const val DEFAULT_PARALLEL_EXECUTION = false
 
     /* The product default is DXVK 1.10.3 ("1").  An empty version is the
