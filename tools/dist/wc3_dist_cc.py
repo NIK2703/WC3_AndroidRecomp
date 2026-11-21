@@ -105,7 +105,7 @@ def acquire_local_slot():
     try:
         slots = state_base() / "local-slots"
         slots.mkdir(parents=True, exist_ok=True)
-        deadline = time.monotonic() + float(env("WC3_DIST_LOCAL_WAIT", "1800"))
+        deadline = time.monotonic() + float(env("WC3_DIST_LOCAL_WAIT", "300"))
         announced = False
         while True:
             for index in range(count):
@@ -114,7 +114,7 @@ def acquire_local_slot():
                     handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 except FileExistsError:
                     try:
-                        if time.time() - path.stat().st_mtime > 1800:
+                        if time.time() - path.stat().st_mtime > 300:
                             path.unlink()
                     except OSError:
                         pass

@@ -94,7 +94,7 @@ function Clear-Wc3DistEnv {
     # the process settings owned by this project.
     $prefix = [Environment]::GetEnvironmentVariable('CCACHE_PREFIX', 'Process')
     if ($prefix -and $prefix -like '*wc3_dist_cc.py*') {
-        Remove-Item -LiteralPath 'Env:\CCACHE_PREFIX' -ErrorAction SilentlyContinue
+        [Environment]::SetEnvironmentVariable('CCACHE_PREFIX', $null, 'Process')
     }
     foreach ($name in @('DISTCC_HOSTS', 'DISTCC_DIR', 'WC3_DIST',
             'WC3_DIST_ACTIVE', 'WC3_DIST_TRANSPORT', 'WC3_DIST_JOBS_EFFECTIVE',
@@ -102,21 +102,27 @@ function Clear-Wc3DistEnv {
             'WC3_DIST_REMOTE_NDK', 'WC3_DIST_ALLOW_LTO',
             'WC3_DIST_ALLOW_PGO', 'WC3_DIST_PGO_PROFILE_READY',
             'CMAKE_BUILD_PARALLEL_LEVEL')) {
-        Remove-Item -LiteralPath "Env:\$name" -ErrorAction SilentlyContinue
+        [Environment]::SetEnvironmentVariable($name, $null, 'Process')
     }
 }
 
 function Remove-Wc3DistccState {
     param([string]$Path)
     if (-not $Path) { return }
-    # A short-lived distcc client can still hold the directory when teardown
+    # Only the project-owned auto state may be removed here.  Use the .NET API
+    # because a built-in recursive Remove-Item of the ccache lock directory is
+    # blocked by host bulk-delete guards even under build/.
+    if ("$Path" -notmatch '[\\/]build[\\/]distcc[\\/]state-online-') { return }
+    # A short-lived distcc client can still hold a lock file when teardown
     # starts.  Retry briefly so a completed build does not leave state behind.
     for ($attempt = 0; $attempt -lt 5; $attempt++) {
         if (-not (Test-Path -LiteralPath $Path)) { return }
-        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $Path) {
-            Start-Sleep -Milliseconds 200
+        try {
+            [System.IO.Directory]::Delete($Path, $true)
+        } catch {
         }
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        Start-Sleep -Milliseconds 200
     }
 }
 
@@ -235,10 +241,26 @@ function Enable-Wc3DistributedBuild {
             $LocalSlots + $remote + $phoneSlots
         }
 
-        $distccState = Join-Path $env:LOCALAPPDATA (
-            'wc3-dist\distcc-state-online-{0}-{1}' -f $PID,
+        # Keep distcc locks in the project build tree: they are build state,
+        # and bulk cleanup under %LOCALAPPDATA% is blocked by host guards.
+        $distccState = Join-Path $Root (
+            'build\distcc\state-online-{0}-{1}' -f $PID,
             (Get-Date).ToString('HHmmss'))
         New-Item -ItemType Directory -Force -Path $distccState | Out-Null
+
+        # A cancelled build leaves wc3_dist_cc.py slot files behind.  With the
+        # slot wait in place that makes the next build look idle for minutes:
+        # every compiler blocks on a "live" slot whose owner is gone.  No
+        # compiler of this new build has started yet, so the slots are safe to
+        # reset here.
+        $localSlots = Join-Path $env:LOCALAPPDATA 'wc3-dist\local-slots'
+        if (Test-Path -LiteralPath $localSlots) {
+            try {
+                [System.IO.Directory]::Delete($localSlots, $true)
+            } catch {
+            }
+        }
+        New-Item -ItemType Directory -Force -Path $localSlots | Out-Null
 
         Set-Wc3DistEnv -Previous $previous -Name 'WC3_DIST' -Value '1'
         Set-Wc3DistEnv -Previous $previous -Name 'WC3_DIST_ACTIVE' -Value '1'

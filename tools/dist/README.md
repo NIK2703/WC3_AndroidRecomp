@@ -323,6 +323,10 @@ $env:TMPDIR = $env:TEMP
 & C:\msys64\ucrt64\bin\ninja.exe -C build\android_app\release\cmake -j 24 <target>
 ```
 
+The automatic transport (`Invoke-Wc3AutoDistributedBuild`) uses the same
+variables but puts `DISTCC_DIR` under `build\distcc\state-online-*` so client
+locks live in the project build tree and are cleaned there.
+
 Drop the phone term and use `-j 16` when only IDEAPAD is in use; drop the
 IDEAPAD term for phone-only, or drop both remote terms for a local build. The
 phone-only host list is `127.0.0.1:<phone-port>/8 localhost/4 ...`.

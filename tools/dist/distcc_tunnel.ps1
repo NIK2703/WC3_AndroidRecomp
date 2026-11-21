@@ -50,6 +50,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Windows PowerShell builds a case-insensitive environment dictionary when it
+# starts a child process.  An inherited HTTP_PROXY/http_proxy pair therefore
+# fails with "element already added" before ssh is launched.  Keep one
+# spelling of every variable; Windows environment names are case-insensitive.
+function Resolve-Wc3ProcessEnvCaseCollisions {
+    $seen = @{}
+    foreach ($key in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
+        if ($seen.ContainsKey($key)) {
+            [Environment]::SetEnvironmentVariable($key, $null, 'Process')
+        } else {
+            $seen[$key] = $true
+        }
+    }
+}
+Resolve-Wc3ProcessEnvCaseCollisions
+
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $ssh = 'C:\Program Files\Git\usr\bin\ssh.exe'
 $scp = 'C:\Program Files\Git\usr\bin\scp.exe'

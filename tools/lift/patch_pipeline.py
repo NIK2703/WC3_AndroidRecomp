@@ -17,6 +17,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,25 @@ FUNC_RE = re.compile(rb"^void (L_[0-9A-Fa-f]+)\(CPU \*restrict c\)", re.M)
 CHUNK_RE = re.compile(r"^([A-Za-z0-9]+)_(seed|closed)_\d+\.c$")
 HEX_RE = re.compile(r"^[0-9A-Fa-f]+$")
 PATH_TOKEN_RE = re.compile(r"([A-Za-z0-9_]+)|\[(\d+)\]")
+
+
+def retire_dir(path: Path) -> None:
+    """Move a previous build output aside instead of bulk-deleting it.
+
+    A patch overlay contains thousands of generated files.  Deleting them on
+    every --force configure is both slow and blocked by host guards on bulk
+    deletes; a rename keeps the old artifact inspectable and gives the new run
+    a clean directory.
+    """
+    if not path.exists():
+        return
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    candidate = path.with_name(f"{path.name}.stale-{stamp}")
+    suffix = 0
+    while candidate.exists():
+        suffix += 1
+        candidate = path.with_name(f"{path.name}.stale-{stamp}-{suffix}")
+    path.rename(candidate)
 
 class PipelineError(RuntimeError):
     """A fail-closed pipeline condition."""
@@ -1625,7 +1645,7 @@ def apply_pipeline(args: argparse.Namespace) -> dict[str, Any]:
                 raise PipelineError(
                     f"output directory is not empty: {out}; use --force"
                 )
-            shutil.rmtree(out)
+            retire_dir(out)
     out.mkdir(parents=True, exist_ok=True)
     work_root = out / ".work"
     report_dir = out / "reports"
@@ -1812,7 +1832,7 @@ def apply_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         encoding="utf-8",
     )
     if not args.keep_work:
-        shutil.rmtree(work_root, ignore_errors=True)
+        retire_dir(work_root)
     return overlay_payload
 
 def cmd_index(args: argparse.Namespace) -> int:
