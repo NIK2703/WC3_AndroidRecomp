@@ -1433,6 +1433,32 @@ static void print_loop_row(const LoopRec *r, const uint32_t *order,
            class_name(r->parallel_class), r->depth, r->edges, r->span);
 }
 
+/*
+ * Top-level loop bodies are disjoint, so their self-sample percentages can
+ * be summed without double counting.  Nested loops are already inside their
+ * parent body and are not added again.
+ */
+static void print_profile_coverage(void)
+{
+    if (!g_profile_loaded || g_profile_matches == 0) return;
+    double top = 0.0;
+    double by_class[4] = {0.0, 0.0, 0.0, 0.0};
+    size_t top_loops = 0;
+    for (size_t i = 0; i < g_nloops; ++i) {
+        const LoopRec *r = &g_loops[i];
+        if (r->depth != 0) continue;
+        top += r->hot_pct;
+        uint8_t cls = r->parallel_class;
+        if (cls > 3) cls = 3;
+        by_class[cls] += r->hot_pct;
+        ++top_loops;
+    }
+    printf("loop_self_coverage: top_level=%.2f%% "
+           "(A=%.2f B=%.2f C=%.2f D=%.2f) top_level_loops=%zu\n",
+           top, by_class[0], by_class[1], by_class[2], by_class[3],
+           top_loops);
+}
+
 int main(int argc, char **argv)
 {
     const char *out = NULL;
@@ -1734,6 +1760,8 @@ int main(int argc, char **argv)
            "D=serial/atomic-bound; static_rank=body_instr/serial_ops\n");
     if (profile_active)
         printf("profile_rank=profile_self_pct*sqrt(body_instr)/serial_ops\n");
+    if (profile_active)
+        print_profile_coverage();
     if (g_profile_incl_matches > 0)
         printf("profile_incl_rank=body_instr*header_incl_pct/serial_ops "
                "(header function call tree, not clipped to body)\n");
