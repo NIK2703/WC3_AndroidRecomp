@@ -111,8 +111,10 @@ static inline void wc3_guest_drain(CPU *c)
  * docs/CODEGEN_EXPANSION_ANALYSIS_2026-11-20.md.  The inline clean frame
  * spends most of its code on the drain loop; one noinline copy per
  * translation unit cuts the game-chunk instruction count by 14.86% while
- * keeping the direct callee call.  Default off until a PM-19 device A/B
- * proves the extra host call is not a runtime regression. */
+ * keeping the direct callee call.  Product builds define it to 1 via
+ * -DWC3_OUTLINE_CLEAN_DRAIN=ON (adopted 2026-11-21 by user request; the
+ * PM-19 device A/B is still outstanding).  Standalone consumers keep the
+ * inline drain unless they define the macro themselves. */
 #ifndef WC3_OUTLINE_CLEAN_DRAIN
 #define WC3_OUTLINE_CLEAN_DRAIN 0
 #endif

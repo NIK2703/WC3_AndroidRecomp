@@ -110,6 +110,7 @@ $targets = @(
     @{ out = 'xmm_local.exe'; src = @('xmm_local.c'); dir = $csrcLocal },
     @{ out = 'xmm_lane.exe'; src = @('xmm_lane.c'); dir = $csrcLocal },
     @{ out = 'leaf_call.exe'; src = @('leaf_call.c'); dir = $csrcLocal },
+    @{ out = 'guest_base.exe'; src = @('guest_base.c'); dir = $csrcLocal },
     @{ out = 'parallel_raycast.exe'; src = @('parallel_raycast.c'); dir = $csrcLocal },
     @{ out = 'return_address_elide.exe'; src = @('return_address_elide.c', 'sha256.c'); dir = $csrcLocal },
     @{ out = 'w3l_compat.exe'; src = @('w3l_compat.c', 'sha256.c'); dir = $csrcLocal },
@@ -409,6 +410,12 @@ void L_00401000(CPU *c)
     if ($LASTEXITCODE -ne 0 -or -not ($lcOut -match 'self-test: OK')) {
         $lcOut | ForEach-Object { Write-Host $_ }
         throw 'leaf_call self-test failed'
+    }
+    $gb = Join-Path $bin 'guest_base.exe'
+    $gbOut = & $gb --self-test 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not ($gbOut -match 'self-test: OK')) {
+        $gbOut | ForEach-Object { Write-Host $_ }
+        throw 'guest_base self-test failed'
     }
     $ray = Join-Path $bin 'parallel_raycast.exe'
     $rayOut = & $ray --self-test 2>&1

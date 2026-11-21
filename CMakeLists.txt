@@ -658,17 +658,44 @@ if(WC3_SELECTION)
         "6x2 for <=12, 8x3 for 13..24, 10x4 for 25..40")
 endif()
 
-# MSVC /GS guard specialization is a measured static candidate: three guard
-# functions, 24 651 call sites, default-off until a PM-19 device A/B confirms
-# the helper redirect is not a runtime regression.  It is a leaf_call stage
-# parameter, not a corpus/target change; the legacy prebuilt path cannot apply
-# it.
+# MSVC /GS guard specialization: three guard functions, 24 651 call sites.
+# Enabled in the product configuration on 2026-11-21 by explicit user request.
+# No PM-19 device A/B has been run yet, so this is an adoption by request, not
+# a measured speed claim.  It is a leaf_call stage parameter, not a corpus or
+# target change; the legacy prebuilt path cannot apply it.
 option(WC3_LEAF_GS_COOKIE
-       "Enable leaf_call MSVC /GS guard specialization (requires device A/B)"
-       OFF)
+       "Enable leaf_call MSVC /GS guard specialization"
+       ON)
 if(WC3_LEAF_GS_COOKIE AND NOT WC3_PATCH_PIPELINE)
     message(FATAL_ERROR
         "WC3_LEAF_GS_COOKIE=ON requires WC3_PATCH_PIPELINE=ON")
+endif()
+
+# Cache the write-once guest window base once per lifted function.  The pass
+# is an optimization, not a new addressing model: the snapshot is taken from
+# g_guest_host_base after boot and the pointer arithmetic is unchanged.
+# Enabled in the product configuration on 2026-11-21 by explicit user request;
+# the PM-19 device A/B is still outstanding, so no speed claim follows from
+# the static instruction-count reduction alone.
+option(WC3_GUEST_BASE_LOCAL
+       "Snapshot the write-once guest window base per lifted function"
+       ON)
+if(WC3_GUEST_BASE_LOCAL AND NOT WC3_PATCH_PIPELINE)
+    message(FATAL_ERROR
+        "WC3_GUEST_BASE_LOCAL=ON requires WC3_PATCH_PIPELINE=ON")
+endif()
+
+# The inline WC3_DIRECT_CALL_CLEAN frame spends most of its code on the drain
+# loop.  One noinline copy per translation unit cuts the game-chunk instruction
+# count by 14.86% while keeping the direct callee call.  Enabled in the product
+# configuration on 2026-11-21 by explicit user request; the PM-19 device A/B
+# is still outstanding.  Standalone consumers of direct_call.h keep the inline
+# form unless they define the macro themselves.
+option(WC3_OUTLINE_CLEAN_DRAIN
+       "Outline the WC3_DIRECT_CALL_CLEAN drain helper"
+       ON)
+if(WC3_OUTLINE_CLEAN_DRAIN)
+    add_compile_definitions(WC3_OUTLINE_CLEAN_DRAIN=1)
 endif()
 
 # Optional post-lift parallel raycast.  The pass rewrites exactly one call to
@@ -750,7 +777,7 @@ target_include_directories(wc3_platform PUBLIC
     "${WC3_ROOT}/third_party/dxvk/shim")
 target_compile_definitions(wc3_platform PUBLIC WC3_DEBUG=${WC3_DEBUG_DEFINE})
 target_compile_definitions(wc3_platform PRIVATE
-    "WC3_BUILD_VARIANT=\"${WC3_BUILD_VARIANT}\"")
+    WC3_BUILD_VARIANT=${WC3_BUILD_VARIANT})
 if(WC3_PRODUCT_COMPILE_OPTIONS)
     target_compile_options(wc3_platform PRIVATE ${WC3_PRODUCT_COMPILE_OPTIONS})
 endif()
@@ -890,7 +917,7 @@ if(WC3_BUILD_APP)
         "${WC3_ROOT}/runtime/app"
         "${WC3_FFMPEG_ROOT}/include")
     target_compile_definitions(wc3gameactivity PRIVATE
-        "WC3_BUILD_VARIANT=\"${WC3_BUILD_VARIANT}\"")
+        WC3_BUILD_VARIANT=${WC3_BUILD_VARIANT})
     # Link every FFmpeg archive the movie module uses directly: static link
     # order is avformat -> avcodec -> swscale -> avutil, and an archive that
     # only arrives transitively is easy to miss.

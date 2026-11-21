@@ -138,6 +138,7 @@ build_target dead_flags.exe  "" "$local/dead_flags.c $local/sha256.c"
 build_target xmm_local.exe   "" "$local/xmm_local.c"
 build_target xmm_lane.exe    "" "$local/xmm_lane.c"
 build_target leaf_call.exe   "" "$local/leaf_call.c"
+build_target guest_base.exe  "" "$local/guest_base.c"
 build_target parallel_raycast.exe "" "$local/parallel_raycast.c"
 build_target return_address_elide.exe "" "$local/return_address_elide.c $local/sha256.c"
 build_target w3l_compat.exe  "" "$local/w3l_compat.c $local/sha256.c"
@@ -166,7 +167,7 @@ for f in "$bin"/*.exe; do
 done
 
 if [ "$smoke" = 1 ]; then
-    for t in parallel_raycast dxvk_isolate_archive_elf flag_read_audit audit_tls dxvk_android_probe jobpool; do
+    for t in guest_base parallel_raycast dxvk_isolate_archive_elf flag_read_audit audit_tls dxvk_android_probe jobpool; do
         echo "smoke: $t"
         "$bin/$t.exe" --self-test
     done

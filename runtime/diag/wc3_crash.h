@@ -21,10 +21,17 @@ extern "C" {
  * overwrite each other in Download.  CMake passes WC3_BUILD_VARIANT from
  * WC3_VARIANT; standalone builds behave like release. */
 #ifndef WC3_BUILD_VARIANT
-#define WC3_BUILD_VARIANT "release"
+#define WC3_BUILD_VARIANT release
 #endif
 
-#define WC3_CRASH_LOG_FILE "wc3_log_" WC3_BUILD_VARIANT ".txt"
+/* CMake passes the variant as a bare token.  Stringify it here instead of
+ * embedding quotes in the compile definition: a local Ninja build goes through
+ * cmd.exe and drops the inner quotes, which turns the definition into a bare
+ * identifier.  Stringification survives both direct and cmd.exe launches. */
+#define WC3_CRASH_STRINGIFY_IMPL(x) #x
+#define WC3_CRASH_STRINGIFY(x) WC3_CRASH_STRINGIFY_IMPL(x)
+#define WC3_CRASH_LOG_FILE \
+    "wc3_log_" WC3_CRASH_STRINGIFY(WC3_BUILD_VARIANT) ".txt"
 #define WC3_CRASH_DOWNLOAD_LOG \
     "/storage/emulated/0/Download/" WC3_CRASH_LOG_FILE
 

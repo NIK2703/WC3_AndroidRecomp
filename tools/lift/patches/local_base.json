@@ -1,0 +1,43 @@
+{
+  "schema": 2,
+  "id": "local_base",
+  "rev": 1,
+  "description": "Cache the write-once guest window base once per lifted function; default-off optimization candidate.",
+  "engine": "guest_base",
+  "kind": "transform",
+  "mode": "batch",
+  "scope": "all",
+  "order": 70,
+  "after": [
+    "leaf_call"
+  ],
+  "output_layout": "flat",
+  "command": {
+    "args": [
+      "--inputs",
+      "{inputs}",
+      "--out-dir",
+      "{out_dir}",
+      "--report",
+      "{report}",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "verdict",
+      "equals": "pass"
+    },
+    {
+      "kind": "field_equals",
+      "path": "inputs",
+      "equals_chunk_count": true
+    },
+    {
+      "kind": "field_equals",
+      "path": "files_skipped_existing",
+      "equals": 0
+    }
+  ]
+}

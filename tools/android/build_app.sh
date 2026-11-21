@@ -388,6 +388,11 @@ configure=(
     -DWC3_W3L_COMPAT=ON -DWC3_W3L_PROFILE=rubattle -DWC3_W3L_LATENCY=100
     -DWC3_SELECTION=ON
     -DWC3_PATCH_PIPELINE=ON
+    # Codegen optimizations adopted on 2026-11-21 by explicit user request.
+    # -CMakeArgs, appended below, can still override any of them for A/B.
+    -DWC3_OUTLINE_CLEAN_DRAIN=ON
+    -DWC3_LEAF_GS_COOKIE=ON
+    -DWC3_GUEST_BASE_LOCAL=ON
     -DWC3_CORPUS_WERROR=OFF
     "-DWC3_CORPUS_JOBS=$jobs"
     -DWC3_CORPUS_RETRIES=5

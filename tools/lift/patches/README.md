@@ -64,6 +64,7 @@ and reserved future stages:
     "w3l_compat.json",
     "selection.json",
     "leaf_call.json",
+    {"manifest": "local_base.json", "enabled": false},
     "parallel_raycast.json"
   ],
   "pipelines": {
@@ -195,13 +196,19 @@ The manifest form writes a text file with one report path per line and passes
 | `selection` | per_chunk | all | 12/24/40 selection delta; union coverage. |
 | `leaf_call` | batch | all | Direct-call rewriting over the whole corpus. |
 | `parallel_raycast` | batch | all | Parallel-raycast rewriting after `leaf_call`. |
+| `local_base` | batch | all | Per-function snapshot of the write-once guest base; enabled in the product build. |
 
 `xmm_local`, `xmm_lane`, `devirtualize`, `return_address_elide` and
 `dead_flags` are present but disabled by default because the current build base
 may already contain them.  `save_list_display` is disabled for the same reason:
-the project's split base is already post-save.  Select the stages explicitly, or
-use the `raw` pipeline for a pre-save split base.  Guest-data and link-map
-stages remain reserved.
+the project's split base is already post-save.  `local_base` was an
+optimization candidate awaiting a device A/B; on 2026-11-21 it was enabled in
+the product build by explicit user request together with
+`-DWC3_GUEST_BASE_LOCAL=ON` (which also selects the stage).  The standalone
+`--all` selection still skips it because the registry entry stays disabled;
+CMake passes the stage explicitly.  Select the other stages explicitly, or use
+the `raw` pipeline for a pre-save split base.
+Guest-data and link-map stages remain reserved.
 
 ## Proof status
 
@@ -240,8 +247,9 @@ ladder, and runs:
 1. `patch_pipeline.py index` over `build/<variant>/cmake/relifted`.
 2. `patch_pipeline.py apply` with stages selected from the existing CMake flags
    (`devirtualize`, `return_address_elide`, `dead_flags`, `xmm_local`,
-   `xmm_lane`, `w3l_compat`, `selection`, `leaf_call`,
-   `parallel_raycast`).
+   `xmm_lane`, `w3l_compat`, `selection`, `leaf_call`, `local_base`,
+   `parallel_raycast`; `local_base` is appended when
+   `WC3_GUEST_BASE_LOCAL=ON`, which the product build now selects).
 3. The chunk list from `patch-overlay/overlay.json` becomes
    `WC3_RELIFTED_SOURCES`.
 

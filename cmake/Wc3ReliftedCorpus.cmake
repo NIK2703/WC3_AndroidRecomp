@@ -114,6 +114,16 @@ if(NOT WC3_LEAF_CALL_EXE)
         "before configuring")
 endif()
 
+find_program(WC3_GUEST_BASE_EXE
+    NAMES guest_base guest_base.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+if(WC3_GUEST_BASE_LOCAL AND NOT WC3_GUEST_BASE_EXE)
+    message(FATAL_ERROR
+        "guest_base.exe missing; run tools/lift/build_tools.ps1 "
+        "before configuring with -DWC3_GUEST_BASE_LOCAL=ON")
+endif()
+
 find_program(WC3_PARALLEL_RAYCAST_EXE
     NAMES parallel_raycast parallel_raycast.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -792,6 +802,10 @@ if(WC3_PATCH_PIPELINE)
         "${WC3_ROOT}/tools/lift/csrc_local/xmm_lane.c")
     wc3_require_fresh_pass("${WC3_LEAF_CALL_EXE}"
         "${WC3_ROOT}/tools/lift/csrc_local/leaf_call.c")
+    if(WC3_GUEST_BASE_LOCAL)
+        wc3_require_fresh_pass("${WC3_GUEST_BASE_EXE}"
+            "${WC3_ROOT}/tools/lift/csrc_local/guest_base.c")
+    endif()
     if(WC3_RETURN_ADDRESS_ELIDE_P0_6)
         wc3_require_fresh_pass("${WC3_RETURN_ADDRESS_ELIDE_EXE}"
             "${WC3_ROOT}/tools/lift/csrc_local/return_address_elide.c")
@@ -839,6 +853,9 @@ if(WC3_PATCH_PIPELINE)
     list(APPEND _patch_stage_args --patch leaf_call)
     if(WC3_PARALLEL_RAYCAST)
         list(APPEND _patch_stage_args --patch parallel_raycast)
+    endif()
+    if(WC3_GUEST_BASE_LOCAL)
+        list(APPEND _patch_stage_args --patch local_base)
     endif()
     set(_patch_param_args)
     file(SHA256 "${WC3_ROOT}/tools/lift/patch_pipeline.py" _patch_pipeline_sha)

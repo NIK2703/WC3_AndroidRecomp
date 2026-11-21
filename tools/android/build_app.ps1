@@ -722,6 +722,11 @@ $configure += "-DWC3_SELECTION=$selectionValue"
 # existing build command; the explicit -CMakeArgs override below can still
 # select the old fallback for an A/B check.
 $configure += '-DWC3_PATCH_PIPELINE=ON'
+# Codegen optimizations adopted on 2026-11-21 by explicit user request.
+# -CMakeArgs, appended below, can still override any of them for A/B.
+$configure += '-DWC3_OUTLINE_CLEAN_DRAIN=ON'
+$configure += '-DWC3_LEAF_GS_COOKIE=ON'
+$configure += '-DWC3_GUEST_BASE_LOCAL=ON'
 $configure += '-DWC3_CORPUS_WERROR=OFF'
 # Release is the optimized product.  The final release build (PGO use and the
 # explicit -Pgo off A/B mode) uses ThinLTO; the internal training pass skips LTO

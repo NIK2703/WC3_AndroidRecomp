@@ -151,8 +151,8 @@
  * of candidate work; a 50 us wake would still leave it ahead of the two
  * sequential chunks.  That is a model, not an A/B: the 16..31 bucket was not
  * observed and must still be measured before changing the floor. */
-#define RAY_MIN_CHUNK            8u
-#define RAY_AUTO_THRESHOLD_CHUNK 2u
+#define RAY_MIN_CHUNK            24u
+#define RAY_AUTO_THRESHOLD_CHUNK 8u
 #define RAY_MAX_THRESHOLD        1000000u
 #define RAY_SENTINEL             0x6F78D9F2u
 #define RAY_TUNE_PATH_MAX        1024u

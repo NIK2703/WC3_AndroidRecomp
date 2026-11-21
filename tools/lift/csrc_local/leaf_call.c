@@ -40,9 +40,10 @@
  * specialized clean-frame helper.  A generated call site must have the form
  * `push32(ret); [xmm spill;] WC3_DIRECT_CALL[_CLEAN](guard, c)`.  The helper
  * is shared (external) below 20 guard sites in a TU and static above that
- * threshold, where constant propagation amortizes its body.  The switch is
- * default-off until a PM-19 device A/B confirms the redirect is not a runtime
- * regression.
+ * threshold, where constant propagation amortizes its body.  The standalone
+ * tool switch stays off unless --gs-cookie=1 is passed; the product build
+ * selects it with -DWC3_LEAF_GS_COOKIE=ON (adopted 2026-11-21 by user
+ * request; no PM-19 device A/B has been run yet).
  *
  * This pass runs once over all final relifted chunks, after every other
  * corpus text pass.  Its sets are global because splitcorpus can place a
