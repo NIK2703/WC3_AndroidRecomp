@@ -1406,10 +1406,10 @@ static void write_edges_tsv(const char *path, const uint32_t *order,
 static void print_table_header(void)
 {
     printf("%-10s %-18s %-10s %7s %7s %7s %10s %4s %4s %4s %6s %6s %3s %3s "
-           "%6s %8s\n",
+           "%6s %8s %8s\n",
            "loop_top", "header_lfunc", "func_start", "instr", "nested", "own",
            "freq", "wr", "call", "atom", "hot%", "incl%", "cls", "dep",
-           "edges", "span");
+           "edges", "span", "iscore");
 }
 
 static void print_loop_row(const LoopRec *r, const uint32_t *order,
@@ -1424,13 +1424,14 @@ static void print_loop_row(const LoopRec *r, const uint32_t *order,
         snprintf(fst, sizeof(fst), "%08X", r->func_start);
 
     printf("%08X   %-18s %-10s %7llu %7llu %7llu %10llu %4u %4u %4u "
-           "%6.2f %6.2f %3s %3u %6u %8u\n",
+           "%6.2f %6.2f %3s %3u %6u %8u %8.2f\n",
            r->target, hdr, fst, (unsigned long long)r->body_instr,
            (unsigned long long)r->nested_instr,
            (unsigned long long)r->own_instr,
            (unsigned long long)r->call_count, r->writes, r->calls,
            r->atomics, r->hot_pct, r->incl_pct,
-           class_name(r->parallel_class), r->depth, r->edges, r->span);
+           class_name(r->parallel_class), r->depth, r->edges, r->span,
+           r->incl_score);
 }
 
 /*
