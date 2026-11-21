@@ -27,7 +27,7 @@
 #include "sha256.h"
 
 #define PASS "selection"
-#define PASS_REV 54
+#define PASS_REV 57
 
 /* The pass always emits the product 40-entry layout.  The site table is
  * authored against the 24-reference displacements and mapped once below. */
@@ -181,8 +181,8 @@ static const unsigned expected_total[K_COUNT] = {
     2, /* order_group_full */
     1, /* trace_evrelease */
     1, /* slot_unlink */
-    209, /* layout */
-    9, /* trace_formation */
+    211, /* layout: +2 solver-limit sites (PASS_REV 57) */
+    17, /* trace_formation: +5 type 0x11 traces (PASS_REV 55), +3 formunit */
     0, /* order_cursor: removed - global formation carry corrupted orders */
     1, /* formation_single */
 };
@@ -233,7 +233,7 @@ static const unsigned expected_seed[K_COUNT] = {
     0, /* trace_evrelease */
     0, /* slot_unlink */
     48, /* layout */
-    2, /* trace_formation */
+    3, /* trace_formation: +1 type 0x11 entry (PASS_REV 55) */
     0, /* order_cursor */
     0, /* formation_single */
 };
@@ -285,8 +285,9 @@ static const unsigned expected_closed[K_COUNT] = {
     2, /* order_group_full */
     1, /* trace_evrelease */
     1, /* slot_unlink */
-    161, /* layout */
-    7, /* trace_formation */
+    163, /* layout: +2 solver-limit sites (PASS_REV 57) */
+    14, /* trace_formation: +2 constructors, +2 walk copies (PASS_REV 55),
+           +3 formunit target/move (PASS_REV 56) */
     0, /* order_cursor */
     1, /* formation_single */
 };
@@ -893,6 +894,51 @@ static const char *const INSERT_TRACE_SLOTS_C[] = {
     "    /* selection order slots trace C */",
     "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
     "    wc3_sel_trace_order_slots(c, 3u, c->ebx, c->esi);",
+    "    wc3_sel_trace_h11(c, 4u, c->ebx, c->esi, 0u);",
+    "#endif"
+};
+
+/*
+ * The type 0x11 point-order handler 0x6F6BB980 is a separate function from
+ * the 0x14/0x15 handlers, not a continuation of 0x6F6BB050.  It owns a
+ * container at ebp-0x1E0 and constructs it through 0x6F6B8960 with
+ * this = container+0x24; that constructor still writes capacity 12 at
+ * [this+0x28] (= container+0x4C).  The pass widens the other constructor
+ * 0x6F6B8720 at 0x6F6B879A, so the two constructor traces below show which
+ * one the current order actually used.  The entry and walk traces print the
+ * request fields, the record count and the room left before the security
+ * cookie.  All four are read-only and disappear from a release build.
+ */
+#define VA_TRACE_H11_ENTER  0x6F6BB9AEu
+#define VA_TRACE_H11_CTOR   0x6F6B89CBu
+#define VA_TRACE_H11_CTOR_B 0x6F6B87A1u
+#define VA_TRACE_H11_WALK   0x6F6BBD71u
+
+static const char *const INSERT_TRACE_H11_ENTER[] = {
+    "    /* selection type 0x11 handler entry trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_h11(c, 0u, c->ecx, 0u, 0u);",
+    "#endif"
+};
+
+static const char *const INSERT_TRACE_H11_CTOR[] = {
+    "    /* selection type 0x11 constructor trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_h11(c, 1u, c->esi, rd32((c->ebp + 0x00000004u)), 0u);",
+    "#endif"
+};
+
+static const char *const INSERT_TRACE_H11_CTOR_B[] = {
+    "    /* selection order constructor trace B */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_h11(c, 5u, c->esi, rd32((c->ebp + 0x00000004u)), 0u);",
+    "#endif"
+};
+
+static const char *const INSERT_TRACE_H11_WALK[] = {
+    "    /* selection type 0x11 array walk trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_h11(c, 3u, c->ecx, c->edx, c->ebp);",
     "#endif"
 };
 
@@ -1067,10 +1113,11 @@ static const char *const INSERT_TRACE_ORDER_EXEC_2[] = {
  * single-unit shortcut at 0x6F16CF60 is selected from the *batch* size, so a
  * trailing remainder of one unit (40 units with the 3-wide compact formation:
  * 13*3 + 1) sends that unit straight to the order point instead of placing it
- * in the formation.  With 24 units both column rules divide the group exactly,
- * which is why 24 never showed the defect.  Compare the total group count
- * instead: the shortcut stays exact for a real one-unit selection, while a
- * one-unit remainder of a larger group goes through the normal formation loop.
+ * in the formation.  With 24 units both column rules divide the
+ * group exactly, which is why 24 never showed the defect.  Compare the total
+ * group count instead: the shortcut stays exact for a real one-unit
+ * selection, while a one-unit remainder of a larger group goes through the
+ * normal formation loop.
  */
 #define VA_FORMATION_SINGLE 0x6F16CF60u
 
@@ -1138,6 +1185,32 @@ static const char *const INSERT_TRACE_ORDER_BASE[] = {
 };
 
 /*
+ * Per-unit formation target and move result.  The target write in 0x6F16E250
+ * ends at 0x6F16E297, where ebx is the cluster member record and record+0x14
+ * is the unit.  The move call in 0x6F16A883 is 0x6F16FBD0; its result is in
+ * eax immediately after the call, before the next instruction reloads eax.
+ * Both lines are diagnostic-only and disappear from a release build.
+ */
+#define VA_TRACE_FORMUNIT_TGT  0x6F16E297u
+#define VA_TRACE_FORMUNIT_MOVE 0x6F16A91Au
+
+static const char *const INSERT_TRACE_FORMUNIT_TGT[] = {
+    "    /* selection formation target trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_formation_unit(c, 0u, c->ebx,",
+    "        rd32((c->ebx + 0x00000014u)), 0u);",
+    "#endif"
+};
+
+static const char *const INSERT_TRACE_FORMUNIT_MOVE[] = {
+    "    /* selection formation move result trace */",
+    "#if WC3_DEBUG && WC3_DEBUG_SELECTION",
+    "    wc3_sel_trace_formation_unit(c, 1u, c->ebx,",
+    "        rd32((c->ebx + 0x00000014u)), c->eax);",
+    "#endif"
+};
+
+/*
  * 0x6F6B93A0(unit, event) delivers the per-unit order event in two phases.
  * Each phase calls 0x6F04CDD0 and skips the unit entirely when the result is
  * zero, which is the only silent per-unit drop in the order path.  The trace
@@ -1185,7 +1258,7 @@ static const char *const TRACE_ORDER_APPLY_ELIDED =
 #define VA_ORDER_GROUP_FULL 0x6F67DDF1u
 
 static const char *const INSERT_ORDER_GROUP_FULL[] = {
-    "    flags_sub(c, c->eax, wc3_sel_cap(), 4); /* selection group-full threshold */"
+    "    flags_sub_mask(c, c->eax, wc3_sel_cap(), 4, 0x1Cu); /* selection group-full threshold */"
 };
 
 /*
@@ -2269,6 +2342,13 @@ static const SelectionSite SELECTION_SITES[] = {
     { 0x6F16E127u, "0x00000038u", "0x00000068u" },
     { 0x6F16E137u, "0x00000034u", "0x00000064u" },
     { 0x6F16E13Eu, "0x00000038u", "0x00000068u" },
+    /* 6F16E3D5: the 1.27 formation solver rejects a slot whose distance from
+     * the order point is above 0x14; L_6F16E3FB then writes the order point
+     * into the slot and sets record+0x28 |= 0x40000.  The 40-unit profile
+     * keeps the original spacing, whose outer slots reach ~28, so the limit
+     * is widened to 0x80 (128 world units) for this profile.  The -1 invalid
+     * slot and the fallback for distances above the new limit are unchanged. */
+    { 0x6F16E3D5u, "0x14u", "0x80u" },
 };
 
 /* The call-macro spelling of the two helper call sites depends on the
@@ -2733,8 +2813,8 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 break;
             case VA_CAP_GROUP_STORE_C:
                 if (handle_subst(out, p, le,
-                                 "flags_sub(c, c->eax, 0xCu, 4);",
-                                 "flags_sub(c, c->eax, wc3_sel_cap(), 4);",
+                                 "flags_sub_mask(c, c->eax, 0xCu, 4, 0x13u);",
+                                 "flags_sub_mask(c, c->eax, wc3_sel_cap(), 4, 0x13u);",
                                  NULL, NULL,
                                  K_CAP_GROUP_STORE, va, line, counts, sites,
                                  &handled, err, errsz) != 0)
@@ -2900,10 +2980,10 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 break;
             case VA_ORDER_MSG10_FRAME:
                 if (handle_subst(out, p, le,
-                                 "c->esp = flags_sub(c, c->esp, "
-                                 "0x17Cu, 4);",
-                                 "c->esp = flags_sub(c, c->esp, "
-                                 "0x48Cu, 4);",
+                                 "c->esp = flags_sub_mask(c, c->esp, "
+                                 "0x17Cu, 4, 0x10u);",
+                                 "c->esp = flags_sub_mask(c, c->esp, "
+                                 "0x48Cu, 4, 0x10u);",
                                  "sub esp, 0x17c */",
                                  "sub esp, 0x48c */",
                                  K_LAYOUT, va, line, counts, sites,
@@ -2923,7 +3003,7 @@ static int process_buffer(const char *data, size_t n, const char *profile,
             case VA_TRACE_EVT2:
                 next = p;
                 if (handle_insert(out, &next, end,
-                                  "c->esp = flags_sub(c, c->esp, 0xCu, 4);",
+                                  "c->esp = flags_sub_mask(c, c->esp, 0xCu, 4, 0x10u);",
                                   NULL,
                                   "selection evt2 trace",
                                   INSERT_TRACE_EVT2, 4,
@@ -3190,6 +3270,32 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
+            case VA_TRACE_FORMUNIT_TGT:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "wr32((c->ebx + 0x00000028u), and32(rd32((c->ebx + 0x00000028u)), 0xFFF8FFFFu, 4));",
+                                  NULL,
+                                  "selection formation target trace",
+                                  INSERT_TRACE_FORMUNIT_TGT, 5,
+                                  K_TRACE_FORMATION, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_TRACE_FORMUNIT_MOVE:
+                next = p;
+                /* Selection runs after w3l_compat, so the call is still a
+                 * WC3_DIRECT_CALL there; leaf_call, which runs later, is what
+                 * rewrites it to WC3_DIRECT_CALL_CLEAN.  Accept both forms so
+                 * a profile without w3l_compat also matches. */
+                if (handle_insert(out, &next, end,
+                                  "push32(c, 0x6F16A91Fu); WC3_DIRECT_CALL(L_6F16FBD0, c);",
+                                  "push32(c, 0x6F16A91Fu); WC3_DIRECT_CALL_CLEAN(L_6F16FBD0, c);",
+                                  "selection formation move result trace",
+                                  INSERT_TRACE_FORMUNIT_MOVE, 5,
+                                  K_TRACE_FORMATION, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
             case VA_TRACE_ORDER_UNIT_B:
                 next = p;
                 if (handle_insert(out, &next, end,
@@ -3262,15 +3368,59 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   "wr32((c->esi + 0x0000002Cu), c->eax);",
                                   NULL,
                                   "selection order slots trace C",
-                                  INSERT_TRACE_SLOTS_C, 4,
+                                  INSERT_TRACE_SLOTS_C, 5,
                                   K_TRACE_ORDER_SLOTS, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_TRACE_H11_ENTER:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "c->ebx = c->ecx;",
+                                  NULL,
+                                  "selection type 0x11 handler entry trace",
+                                  INSERT_TRACE_H11_ENTER, 4,
+                                  K_TRACE_FORMATION, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_TRACE_H11_CTOR:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "wr32((c->esi + 0x00000028u), 0xCu);",
+                                  NULL,
+                                  "selection type 0x11 constructor trace",
+                                  INSERT_TRACE_H11_CTOR, 4,
+                                  K_TRACE_FORMATION, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_TRACE_H11_CTOR_B:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "c->eax = rd32((c->esi + 0x0000004Cu));",
+                                  NULL,
+                                  "selection order constructor trace B",
+                                  INSERT_TRACE_H11_CTOR_B, 4,
+                                  K_TRACE_FORMATION, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_TRACE_H11_WALK:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "push32(c, GVA(0x6F6BCC40));",
+                                  NULL,
+                                  "selection type 0x11 array walk trace",
+                                  INSERT_TRACE_H11_WALK, 4,
+                                  K_TRACE_FORMATION, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
             case VA_ORDER_GROUP_FULL:
                 next = p;
                 if (handle_insert(out, &next, end,
-                                  "flags_sub(c, c->eax, 0xCu, 4);",
+                                  "flags_sub_mask(c, c->eax, 0xCu, 4, 0x1Cu);",
                                   NULL,
                                   "selection group-full threshold",
                                   INSERT_ORDER_GROUP_FULL, 1,
@@ -3987,12 +4137,12 @@ static const char SELF_FIXTURE[] =
 "    c->esi = (uint32_t)((c->edi + c->eax*4));                    /* 6F6BAA00: lea esi, [edi + eax*4] */\n"
 "    wr32((c->edi + c->ecx*4 + 0x00000048u), c->eax);             /* 6F6BAA73: mov dword ptr [edi + ecx*4 + 0x48], eax */\n"
 "    wr32((c->edi + c->ecx*4 + 0x00000048u), c->eax);             /* 6F6BAA73: mov dword ptr [edi + ecx*4 + 0x48], eax */\n"
-"    c->esp = flags_sub(c, c->esp, 0xCu, 4);                      /* 6F146D33: sub esp, 0xc */\n"
+"    c->esp = flags_sub_mask(c, c->esp, 0xCu, 4, 0x10u);          /* 6F146D33: sub esp, 0xc */\n"
 "    c->ecx = rd32((c->eax));                                     /* 6F04D9E7: mov ecx, dword ptr [eax] */\n"
 "    c->edi = c->eax;                                             /* 6F04D9F3: mov edi, eax */\n"
 "    flags_sub(c, c->esi, 0xCu, 4);                               /* 6F293020: cmp esi, 0xc */\n"
 "    flags_sub(c, c->esi, 0xCu, 4);                               /* 6F293080: cmp esi, 0xc */\n"
-"    flags_sub(c, c->eax, 0xCu, 4);                               /* 6F6B915A: cmp eax, 0xc */\n"
+"    flags_sub_mask(c, c->eax, 0xCu, 4, 0x13u);                   /* 6F6B915A: cmp eax, 0xc */\n"
 "    c->edx = 0xCu;                                               /* 6F6BC1AF: mov edx, 0xc */\n"
 "    wr32((c->ebp + 0xFFFFFFD8u), 0xCu);                          /* 6F6BC1BC: mov dword ptr [ebp - 0x28], 0xc */\n"
 "    c->ecx = 0xCu;                                               /* 6F396916: mov ecx, 0xc */\n"
@@ -4005,7 +4155,7 @@ static const char SELF_FIXTURE[] =
 "    wr32((c->edi + 0x00000050u), c->eax);                        /* 6F6BB731: mov dword ptr [edi + 0x50], eax */\n"
 "    wr32((c->edi + 0x00000050u), c->eax);                        /* 6F6BB90C: mov dword ptr [edi + 0x50], eax */\n"
 "    wr32((c->esi + 0x0000002Cu), c->eax);                        /* 6F6BBFCC: mov dword ptr [esi + 0x2c], eax */\n"
-"    flags_sub(c, c->eax, 0xCu, 4);                               /* 6F67DDF1: cmp eax, 0xc */\n"
+"    flags_sub_mask(c, c->eax, 0xCu, 4, 0x1Cu);                   /* 6F67DDF1: cmp eax, 0xc */\n"
 "    c->edx = rd32((c->ebp + 0x00000008u));                       /* 6F1CBFB3: mov edx, dword ptr [ebp + 8] */\n"
 "    c->edi = (uint32_t)(pop32(c));                               /* 6F1CBE99: pop edi */\n"
 "    push32(c, 0x6F6B93F3u); WC3_DIRECT_CALL(L_6F04CDD0, c);      /* 6F6B93EE: call 0x6f04cdd0 */\n"
@@ -4276,10 +4426,10 @@ fail40:
     }
 
     {
-        /* Mirrors a current report: PASS_REV 54 (359 sites). */
+        /* Mirrors a current report: PASS_REV 57 (369 sites). */
         const char json[] =
             "{\"pass\":\"" PASS "\","
-            "\"pass_rev\":54,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
+            "\"pass_rev\":57,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
             "\"cap_outer\":2,\"cap_inner\":2,\"fill_block\":2,\"fill_grid\":1,"
             "\"note_selection\":1,\"hide_all\":1,\"addunit_cap\":1,\"cap_local_list\":5,"
             "\"cap_copy_list\":3,\"cap_sync_add\":1,\"cap_net_recv\":1,\"cap_net_apply\":5,"
@@ -4292,9 +4442,9 @@ fail40:
             "\"trace_tasknull\":1,\"trace_evinit\":1,\"trace_orderdrop\":1,"
             "\"order_obj_container\":44,\"order_msg10\":5,\"trace_order_slots\":3,"
             "\"order_group_full\":2,\"trace_evrelease\":1,\"slot_unlink\":1,"
-            "\"layout\":209,\"trace_formation\":9,\"order_cursor\":0,"
+            "\"layout\":211,\"trace_formation\":17,\"order_cursor\":0,"
             "\"formation_single\":1},"
-            "\"total\":359};";
+            "\"total\":369};";
         Counts c3;
 
         if (json_counts_parse(json, &c3, err2, sizeof(err2)) != 0 ||
@@ -4360,6 +4510,64 @@ fail40:
                    count_occurrences(out.p, out.n, "[ebp - 0x14]") != 1 ||
                    count_occurrences(out.p, out.n, "0xFFFFFA28u") != 0) {
             snprintf(err, errsz, "self-test B appender was shifted");
+            ok = 0;
+        }
+        buf_free(&out);
+        free(sites.v);
+        if (!ok) {
+            goto done;
+        }
+    }
+
+    /* Regression: the type 0x11 handler has its own container and its own
+     * constructor 0x6F6B8960.  The traces must land on the entry, both
+     * constructors, the array walk and the third writer without moving any
+     * offset; the pass must still leave the standalone appender alone. */
+    {
+        static const char h11[] =
+            "void L_6F6BB980(CPU *restrict c)\n"
+            "{\n"
+            "    c->ebx = c->ecx; /* 6F6BB9AE: mov ebx, ecx */\n"
+            "}\n"
+            "void L_6F6B8960(CPU *restrict c)\n"
+            "{\n"
+            "    wr32((c->esi + 0x00000028u), 0xCu); /* 6F6B89CB: mov dword ptr [esi + 0x28], 0xc */\n"
+            "}\n"
+            "void L_6F6B8720(CPU *restrict c)\n"
+            "{\n"
+            "    c->eax = rd32((c->esi + 0x0000004Cu)); /* 6F6B87A1: mov eax, dword ptr [esi + 0x4c] */\n"
+            "}\n"
+            "void L_6F6BBD60(CPU *restrict c)\n"
+            "{\n"
+            "    push32(c, GVA(0x6F6BCC40)); /* 6F6BBD71: push 0x6f6bcc40 */\n"
+            "}\n"
+            "void L_6F6BBEB0(CPU *restrict c)\n"
+            "{\n"
+            "    wr32((c->esi + 0x0000002Cu), c->eax); /* 6F6BBFCC: mov dword ptr [esi + 0x2c], eax */\n"
+            "}\n";
+        Buf out = {0};
+        Counts counts;
+        Sites sites = {0};
+
+        if (process_buffer(h11, strlen(h11), NULL,
+                           &out, &counts, &sites, err2, sizeof(err2)) != 0) {
+            snprintf(err, errsz, "self-test type 0x11 pass failed: %s", err2);
+            ok = 0;
+        } else if (counts.n[K_TRACE_FORMATION] != 4 ||
+                   counts.n[K_TRACE_ORDER_SLOTS] != 1 ||
+                   count_occurrences(out.p, out.n,
+                       "wc3_sel_trace_h11(c, 0u, c->ecx, 0u, 0u);") != 1 ||
+                   count_occurrences(out.p, out.n,
+                       "wc3_sel_trace_h11(c, 1u, c->esi, rd32((c->ebp + 0x00000004u)), 0u);") != 1 ||
+                   count_occurrences(out.p, out.n,
+                       "wc3_sel_trace_h11(c, 5u, c->esi, rd32((c->ebp + 0x00000004u)), 0u);") != 1 ||
+                   count_occurrences(out.p, out.n,
+                       "wc3_sel_trace_h11(c, 3u, c->ecx, c->edx, c->ebp);") != 1 ||
+                   count_occurrences(out.p, out.n,
+                       "wc3_sel_trace_h11(c, 4u, c->ebx, c->esi, 0u);") != 1 ||
+                   count_occurrences(out.p, out.n,
+                       "wc3_sel_trace_order_slots(c, 3u, c->ebx, c->esi);") != 1) {
+            snprintf(err, errsz, "self-test type 0x11 trace mismatch");
             ok = 0;
         }
         buf_free(&out);

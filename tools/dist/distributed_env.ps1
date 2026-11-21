@@ -250,17 +250,36 @@ function Enable-Wc3DistributedBuild {
 
         # A cancelled build leaves wc3_dist_cc.py slot files behind.  With the
         # slot wait in place that makes the next build look idle for minutes:
-        # every compiler blocks on a "live" slot whose owner is gone.  No
-        # compiler of this new build has started yet, so the slots are safe to
-        # reset here.
-        $localSlots = Join-Path $env:LOCALAPPDATA 'wc3-dist\local-slots'
-        if (Test-Path -LiteralPath $localSlots) {
-            try {
-                [System.IO.Directory]::Delete($localSlots, $true)
-            } catch {
+        # every compiler blocks on a "live" slot whose owner is gone.  Remove
+        # only slots whose owner process is gone; a concurrent build keeps its
+        # live slots.
+        #
+        # PowerShell variable names are case-insensitive: this path must not be
+        # called $localSlots, because that is the [int]$LocalSlots parameter
+        # above and the assignment would fail with "cannot convert ... to
+        # System.Int32" before any compiler starts.
+        $localSlotsDir = Join-Path $env:LOCALAPPDATA 'wc3-dist\local-slots'
+        if (Test-Path -LiteralPath $localSlotsDir) {
+            # Drop only slots whose owner process is gone.  Deleting the whole
+            # directory would also erase the slots of a concurrent build.
+            # An empty or malformed slot is left for the wrapper's own
+            # five-minute stale check, so a slot that is being created right
+            # now is not removed by mistake.
+            Get-ChildItem -LiteralPath $localSlotsDir -Filter 'slot*' -File `
+                -ErrorAction SilentlyContinue | ForEach-Object {
+                $ownerPid = 0
+                try {
+                    $ownerPid = [int](Get-Content -LiteralPath $_.FullName -Raw).Trim()
+                } catch {
+                }
+                if ($ownerPid -gt 0 -and
+                    -not (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)) {
+                    Remove-Item -LiteralPath $_.FullName -Force `
+                        -ErrorAction SilentlyContinue
+                }
             }
         }
-        New-Item -ItemType Directory -Force -Path $localSlots | Out-Null
+        New-Item -ItemType Directory -Force -Path $localSlotsDir | Out-Null
 
         Set-Wc3DistEnv -Previous $previous -Name 'WC3_DIST' -Value '1'
         Set-Wc3DistEnv -Previous $previous -Name 'WC3_DIST_ACTIVE' -Value '1'
@@ -323,11 +342,11 @@ function Enable-Wc3DistributedBuild {
                 'DISTCC_DIR', 'TMPDIR', 'CMAKE_BUILD_PARALLEL_LEVEL')) {
             Restore-Wc3DistEnv -Previous $previous -Name $name
         }
-        if ($env:WC3_DIST_DEBUG -eq '1') {
-            Write-Warning "[dist] distributed build unavailable: $message"
-        } else {
-            Write-Warning '[dist] no distributed worker available; building locally (set WC3_DIST_DEBUG=1 for details)'
-        }
+        if (-not $message) { $message = 'unknown error' }
+        # Always name the real failure.  The old generic "no worker available"
+        # text hid a local script bug (a PowerShell variable-name collision)
+        # behind a worker-connectivity message and cost a full debugging cycle.
+        Write-Warning "[dist] distributed build unavailable: $message; building locally"
         return $null
     }
 }

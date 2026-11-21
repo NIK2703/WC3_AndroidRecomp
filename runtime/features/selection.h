@@ -284,6 +284,23 @@ void wc3_sel_trace_order_slots(CPU *c, uint32_t tag, uint32_t list,
                                  uint32_t element);
 
 /*
+ * Debug-only trace of the type 0x11 point-order handler 0x6F6BB980 and its
+ * own order container.  The handler is a separate function with its own
+ * 0x200 frame and its own container at ebp-0x1E0; the container is the same
+ * class as the 0x14/0x15 one (count +0x4C, 0x20-byte records +0x50) but is
+ * constructed through 0x6F6B8960 with this = container+0x24, which still
+ * writes capacity 12 at [this+0x28].  The trace stages are:
+ *   0  entry 0x6F6BB9AE: request fields, order type, target point
+ *   1  constructor 0x6F6B89CB (subobject at container+0x24)
+ *   3  array walk 0x6F6BBD71: count, array, room before the cookie, records
+ *   4  append 0x6F6BBFCC: list, element, index, count, unit
+ *   5  constructor 0x6F6B87A1 (container at this)
+ * The helper is read-only and preserves the guest CPU state, including flags.
+ */
+void wc3_sel_trace_h11(CPU *c, uint32_t stage, uint32_t a, uint32_t b,
+                       uint32_t d);
+
+/*
  * Inserted in 0x6F6B93A0 after the two calls to 0x6F04CDD0.  Those calls are
  * the last points where a per-unit order can still be rejected: the function
  * returns without touching the unit when the result is zero.  The unit is the
@@ -342,6 +359,19 @@ void wc3_sel_trace_cluster_try(CPU *c, uint32_t vector, uint32_t add);
 void wc3_sel_trace_cluster_insert(CPU *c, uint32_t cluster, uint32_t unit,
                                     uint32_t list, uint32_t slot,
                                     uint32_t result);
+
+/*
+ * Per-unit formation target and move result, inserted in the ground-order
+ * loop.  Stage 0 sits after the target write at 0x6F16E297: record is the
+ * cluster member record (stride 0x2C), unit is record+0x14, and the line
+ * prints record+0xC/+0x10 (the writer offset), record+0x18/+0x1C (the final
+ * target), record+0x20/+0x24 and the flags at +0x28.  Stage 1 sits after the
+ * move call at 0x6F16A91F and prints the same record with the move result in
+ * the last field.  Both are compiled only under WC3_DEBUG && WC3_DEBUG_SELECTION
+ * and preserve the guest CPU state, including flags.
+ */
+void wc3_sel_trace_formation_unit(CPU *c, uint32_t stage, uint32_t record,
+                                    uint32_t unit, uint32_t result);
 
 /*
  * Inserted in 0x6F28EEF0, the function that removes one unit from the

@@ -1538,8 +1538,15 @@ void wc3_sel_trace_order_base(CPU *c, uint32_t sel, uint32_t group,
         vcnt = sel_rd(vec, 0x1Cu);
         vgrow = sel_rd(vec, 0x14u);
     }
-    if (sel_readable(group) && idx < 64u)
-        gidx = sel_rd(group, 4u + idx * 4u);
+    if (sel_readable(group) && idx < 64u) {
+        /* The batch writer increments its loop counter before the trace, so
+         * idx is 1-based and the slot it just consumed is cursor+idx-1.  The
+         * builder-entry call passes idx 0 and reads slot 0. */
+        uint32_t slot = (idx == 0u) ? 0u : cursor + idx - 1u;
+
+        if (slot < 64u)
+            gidx = sel_rd(group, 4u + slot * 4u);
+    }
     fprintf(SEL_OUT,
             "[select24] orderbase seq=%u sel=%08X base=%08X vec=%08X "
             "vcap=%u vcnt=%u vgrow=%08X group=%08X cur=%u idx=%u gidx=%08X\n",
@@ -1711,6 +1718,107 @@ void wc3_sel_trace_order_slots(CPU *c, uint32_t tag, uint32_t list,
             (sel_rd(command, 0x14u) >> 8) & 0xFFu,
             sel_rd(command, 0x18u) & 0xFFFFu,
             sel_rd(list, 0x28u), sel_rd(list, 0x4Cu), unit);
+    sel_restore_state(c, &saved);
+}
+
+/*
+ * Type 0x11 point-order handler (0x6F6BB980) and its own order container.
+ *
+ * This is a separate function from the type 0x14/0x15 handlers.  It has its
+ * own 0x200 frame, its own security cookie at ebp-0x10 and its own container
+ * at ebp-0x1E0.  The container is the same class as the 0x14/0x15 one
+ * (descriptor at +0, count at +0x4C, 0x20-byte records at +0x50), but it is
+ * constructed through 0x6F6B8960 with this = container+0x24, and that
+ * constructor still writes the original capacity 12 at [this+0x28]
+ * (= container+0x4C).  The selection pass widens the 0x14/0x15 constructor
+ * 0x6F6B8720, not this one.
+ *
+ * Stages:
+ *   0  entry 0x6F6BB9AE: request fields, order type, command, target point
+ *   1  constructor 0x6F6B89CB: this = container+0x24, capacity +0x28
+ *   3  array walk 0x6F6BBD71: count, array, distance to the cookie, records
+ *   4  append 0x6F6BBFCC: list, element, index, count, unit
+ *   5  constructor 0x6F6B87A1: this = container, capacity +0x4C
+ *
+ * Stages 1 and 5 also print the caller frame distance (caller_ebp - base).
+ * That one number shows whether a container moved without its frame, or the
+ * frame grew without the container: the original type 0x11 distance is
+ * 0x1E0 (frame 0x200), the 40-unit distance is 0x7A4 (frame 0x7C4).
+ */
+void wc3_sel_trace_h11(CPU *c, uint32_t stage, uint32_t a, uint32_t b,
+                       uint32_t d)
+{
+    Sel24CpuState saved;
+    uint32_t base;
+    uint32_t cap;
+    uint32_t array;
+    uint32_t count;
+    uint32_t caller_ebp;
+    uint32_t dist;
+    uint32_t room;
+    uint32_t i;
+
+    sel_save_state(c, &saved);
+    if (stage == 0u) {
+        fprintf(SEL_OUT,
+                "[select24] h11 enter seq=%u req=%08X t15=%02X flags=%04X "
+                "cmd=%08X o20=%08X o24=%08X pt=%08X,%08X "
+                "o30=%08X o34=%08X o38=%08X o3C=%08X "
+                "o40=%08X o44=%08X o48=%08X o4C=%08X o50=%08X o54=%08X\n",
+                g_sel_order_seq, a,
+                (sel_rd(a, 0x14u) >> 8) & 0xFFu,
+                sel_rd(a, 0x18u) & 0xFFFFu, sel_rd(a, 0x1Cu),
+                sel_rd(a, 0x20u), sel_rd(a, 0x24u),
+                sel_rd(a, 0x28u), sel_rd(a, 0x2Cu),
+                sel_rd(a, 0x30u), sel_rd(a, 0x34u),
+                sel_rd(a, 0x38u), sel_rd(a, 0x3Cu),
+                sel_rd(a, 0x40u), sel_rd(a, 0x44u),
+                sel_rd(a, 0x48u), sel_rd(a, 0x4Cu),
+                sel_rd(a, 0x50u), sel_rd(a, 0x54u));
+    } else if (stage == 1u || stage == 5u) {
+        base = (stage == 1u) ? a - 0x24u : a;
+        cap = (stage == 1u) ? sel_rd(a, 0x28u) : sel_rd(a, 0x4Cu);
+        array = (stage == 1u) ? a + 0x2Cu : a + 0x50u;
+        caller_ebp = sel_rd(c->ebp, 0x00u);
+        dist = (caller_ebp > base) ? caller_ebp - base : 0u;
+        fprintf(SEL_OUT,
+                "[select24] h11 ctor seq=%u stage=%u this=%08X base=%08X "
+                "cap=%u array=%08X ret=%08X caller_ebp=%08X dist=%u\n",
+                g_sel_order_seq, stage, a, base, cap, array, b,
+                caller_ebp, dist);
+    } else if (stage == 3u) {
+        count = b;
+        array = a;
+        room = (d > 0x10u && array < d - 0x10u)
+                   ? (d - 0x10u - array) / 0x20u
+                   : 0u;
+        fprintf(SEL_OUT,
+                "[select24] h11 walk seq=%u array=%08X count=%u room=%u "
+                "over=%u ebp=%08X\n",
+                g_sel_order_seq, array, count, room,
+                count > room ? 1u : 0u, d);
+        for (i = 0u; i < count && i < 48u; ++i) {
+            uint32_t elem = array + i * 0x20u;
+            fprintf(SEL_OUT,
+                    "[select24] h11 elem seq=%u idx=%u addr=%08X "
+                    "f00=%08X f04=%08X f08=%08X f0C=%08X "
+                    "f10=%08X f14=%08X f18=%08X f1C=%08X\n",
+                    g_sel_order_seq, i, elem,
+                    sel_rd(elem, 0x00u), sel_rd(elem, 0x04u),
+                    sel_rd(elem, 0x08u), sel_rd(elem, 0x0Cu),
+                    sel_rd(elem, 0x10u), sel_rd(elem, 0x14u),
+                    sel_rd(elem, 0x18u), sel_rd(elem, 0x1Cu));
+        }
+    } else if (stage == 4u) {
+        count = sel_rd(a, 0x28u);
+        fprintf(SEL_OUT,
+                "[select24] h11 append seq=%u list=%08X elem=%08X idx=%u "
+                "count=%u unit=%08X f04=%08X f08=%08X f0C=%08X\n",
+                g_sel_order_seq, a, b + 0x2Cu,
+                (b >= a) ? (b - a) >> 5 : 0u, count,
+                sel_rd(b, 0x2Cu), sel_rd(b, 0x30u),
+                sel_rd(b, 0x34u), sel_rd(b, 0x38u));
+    }
     sel_restore_state(c, &saved);
 }
 
@@ -1934,6 +2042,34 @@ void wc3_sel_trace_evrelease(CPU *c, uint32_t table, uint32_t handle)
             "[select24] evrelease table=%08X handle=%08X index=%u head=%08X "
             "count=%u slotval=%08X %s\n",
             table, handle, index, head, count, slotval, probe);
+    sel_restore_state(c, &saved);
+}
+
+/*
+ * Formation order application.  0x6F16E250 writes record+0x18/+0x1C from the
+ * order point plus the writer's record+0xC/+0x10 offset; 0x6F16A790 then
+ * hands that point to the unit.  Stage 0 is inserted after the target write
+ * at 0x6F16E297 and prints the final target, the offset and the flags.
+ * Stage 1 is inserted after the move call at 0x6F16A91F and prints the move
+ * result in eax.  record is the cluster member record (stride 0x2C), unit is
+ * record+0x14.  This trace is deliberately not gated by WC3_SEL_VERBOSE: it
+ * is two lines per unit and is the only place that shows whether the
+ * formation target was actually accepted.
+ */
+void wc3_sel_trace_formation_unit(CPU *c, uint32_t stage, uint32_t record,
+                                    uint32_t unit, uint32_t result)
+{
+    Sel24CpuState saved;
+
+    sel_save_state(c, &saved);
+    fprintf(SEL_OUT,
+            "[select24] formunit seq=%u stage=%u rec=%08X unit=%08X "
+            "off=%08X,%08X tgt=%08X,%08X a20=%08X a24=%08X a28=%08X res=%08X\n",
+            g_sel_order_seq, stage, record, unit,
+            sel_rd(record, 0x0Cu), sel_rd(record, 0x10u),
+            sel_rd(record, 0x18u), sel_rd(record, 0x1Cu),
+            sel_rd(record, 0x20u), sel_rd(record, 0x24u),
+            sel_rd(record, 0x28u), result);
     sel_restore_state(c, &saved);
 }
 #endif

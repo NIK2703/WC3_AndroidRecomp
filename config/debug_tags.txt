@@ -1,6 +1,7 @@
 # Debug build tags.  Read and validated by tools/android/build_app.sh and
 # build_app.ps1.  PARALLEL enables the parallel-execution counters and the
 # live tuner; INPUT exposes the direct-touch executor and the legacy input
-# path.  Release enables none.
+# path; SELECTION enables the selection/order traces.  Release enables none.
 PARALLEL
 INPUT
+SELECTION
