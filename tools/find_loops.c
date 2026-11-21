@@ -25,11 +25,18 @@
  * range.  The score is a triage filter, not proof that iterations are
  * independent.
  *
+ * Loops are nested by address containment inside one original function.
+ * body_instr is the whole body, nested_instr is the union of immediate child
+ * loop bodies, and own_instr is body_instr minus nested_instr.  The top body
+ * list is sorted by body_instr; the candidate list is sorted by
+ * body_instr/serial_ops and keeps classes A/B/C.  Use -n to change the list
+ * length.  These are static triage metrics, not an independence proof.
+ *
  * Build:
  *   ccache gcc -std=c11 -O2 -pthread tools/find_loops.c -o build/host/find_loops -lm
  *
  * Usage:
- *   find_loops [-v] [-f functions.txt] [-p flat_report.txt] \
+ *   find_loops [-v] [-f functions.txt] [-p flat_report.txt] [-n top] \
  *              [-o loops.tsv] [-e edges.tsv] <dir|file>...
  *
  * With no path it scans build/android_app/debug/cmake/relifted/game and, if
@@ -95,6 +102,8 @@ typedef struct {
     uint32_t edges;
     uint32_t body_funcs;
     uint64_t body_instr;
+    uint64_t nested_instr; /* immediate child loop bodies, instructions */
+    uint64_t own_instr;    /* body_instr - nested_instr */
     uint32_t writes;
     uint32_t calls;
     uint32_t atomics;
@@ -792,6 +801,30 @@ static size_t instr_upper(const FuncRec *f, uint32_t addr)
     return lo;
 }
 
+static uint64_t count_instr_range(uint32_t func_start, uint32_t lo_addr,
+                                  uint32_t hi_addr, const uint32_t *order,
+                                  const uint32_t *bases,
+                                  const uint32_t *region, size_t n)
+{
+    size_t lb = lower_bound_u32(bases, n, lo_addr);
+    int exact = (lb < n && bases[lb] == lo_addr);
+    size_t body_lo = lb;
+    if (!exact && body_lo > 0) --body_lo;
+    size_t hi = upper_bound_u32(bases, n, hi_addr);
+    if (hi < body_lo) return 0;
+
+    uint64_t total = 0;
+    for (size_t i = body_lo; i < hi; ++i) {
+        uint32_t fi = order[i];
+        if (region[fi] != func_start) continue;
+        const FuncRec *f = &g_funcs[fi];
+        size_t a = instr_lower(f, lo_addr);
+        size_t b = instr_upper(f, hi_addr);
+        if (b > a) total += (uint64_t)(b - a);
+    }
+    return total;
+}
+
 static void finish_loop_stats(LoopRec *r, const uint32_t *order,
                               const uint32_t *bases, const uint32_t *region,
                               size_t n)
@@ -862,7 +895,42 @@ static void finish_loop_stats(LoopRec *r, const uint32_t *order,
     if (g_profile_loaded && g_profile_matches > 0)
         r->score = r->hot_pct * sqrt((double)r->body_instr) / serial;
     else
-        r->score = (double)r->body_instr * sqrt((double)r->body_instr) / serial;
+        r->score = (double)r->body_instr / serial;
+}
+
+static int cmp_loop_nesting(const void *a, const void *b)
+{
+    const LoopRec *x = (const LoopRec *)a;
+    const LoopRec *y = (const LoopRec *)b;
+    if (x->func_start != y->func_start)
+        return (x->func_start > y->func_start) - (x->func_start < y->func_start);
+    if (x->target != y->target)
+        return (x->target > y->target) - (x->target < y->target);
+    if (x->max_current != y->max_current)
+        return (x->max_current < y->max_current) ? 1 : -1;
+    return 0;
+}
+
+static double loop_static_score(const LoopRec *r)
+{
+    double serial = 1.0 + 2.0 * (double)r->writes +
+                    4.0 * (double)r->calls + 16.0 * (double)r->atomics;
+    return (double)r->body_instr / serial;
+}
+
+static int cmp_loop_static_score(const void *a, const void *b)
+{
+    const LoopRec *x = (const LoopRec *)a;
+    const LoopRec *y = (const LoopRec *)b;
+    double sx = loop_static_score(x);
+    double sy = loop_static_score(y);
+    if (sx != sy)
+        return (sx < sy) ? 1 : -1;
+    if (x->body_instr != y->body_instr)
+        return (x->body_instr < y->body_instr) ? 1 : -1;
+    if (x->own_instr != y->own_instr)
+        return (x->own_instr < y->own_instr) ? 1 : -1;
+    return (x->span < y->span) ? 1 : -1;
 }
 
 static int cmp_loop_body(const void *a, const void *b)
@@ -969,19 +1037,22 @@ static void write_loops_tsv(const char *path)
         return;
     }
     fprintf(f, "loop_top\tloop_bottom\tspan\tdepth\tedges\tbody_funcs\t"
-               "body_instr\twrites\tcalls\tatomics\treads\tjumps\tstackops\t"
-               "hot_pct\tclass\tscore\texact\tfunc_start\theader_lfunc\t"
-               "header_off\tsrc_func\tsrc_file\tsrc_line\n");
+               "body_instr\tnested_instr\town_instr\twrites\tcalls\tatomics\t"
+               "reads\tjumps\tstackops\thot_pct\tclass\tscore\texact\t"
+               "func_start\theader_lfunc\theader_off\tsrc_func\tsrc_file\t"
+               "src_line\n");
     for (size_t i = 0; i < g_nloops; ++i) {
         const LoopRec *r = &g_loops[i];
         const FuncRec *h = &g_funcs[r->header_func];
         const FuncRec *s = &g_funcs[r->src];
-        fprintf(f, "%08X\t%08X\t%u\t%u\t%u\t%u\t%llu\t%u\t%u\t%u\t%u\t%u\t%u\t"
-                   "%.4f\t%s\t%.2f\t%u\t%08X\t%s\t%u\t%s\t%s\t%u\n",
+        fprintf(f, "%08X\t%08X\t%u\t%u\t%u\t%u\t%llu\t%llu\t%llu\t%u\t%u\t%u\t"
+                   "%u\t%u\t%u\t%.4f\t%s\t%.2f\t%u\t%08X\t%s\t%u\t%s\t%s\t%u\n",
                 r->target, r->max_current, r->span, r->depth, r->edges,
-                r->body_funcs, (unsigned long long)r->body_instr, r->writes,
-                r->calls, r->atomics, r->reads, r->jumps, r->stackops,
-                r->hot_pct, class_name(r->parallel_class), r->score, r->exact,
+                r->body_funcs, (unsigned long long)r->body_instr,
+                (unsigned long long)r->nested_instr,
+                (unsigned long long)r->own_instr, r->writes, r->calls,
+                r->atomics, r->reads, r->jumps, r->stackops, r->hot_pct,
+                class_name(r->parallel_class), r->score, r->exact,
                 r->func_start, h->name, r->header_off, s->name, s->file,
                 r->src_line);
     }
@@ -1020,9 +1091,9 @@ static void write_edges_tsv(const char *path, const uint32_t *order,
 
 static void print_table_header(void)
 {
-    printf("%-10s %-18s %-10s %7s %4s %4s %4s %6s %3s %3s %6s %8s\n",
-           "loop_top", "header_lfunc", "func_start", "instr", "wr", "call",
-           "atom", "hot%", "cls", "dep", "edges", "span");
+    printf("%-10s %-18s %-10s %7s %7s %7s %4s %4s %4s %6s %3s %3s %6s %8s\n",
+           "loop_top", "header_lfunc", "func_start", "instr", "nested", "own",
+           "wr", "call", "atom", "hot%", "cls", "dep", "edges", "span");
 }
 
 static void print_loop_row(const LoopRec *r, const uint32_t *order,
@@ -1036,10 +1107,13 @@ static void print_loop_row(const LoopRec *r, const uint32_t *order,
     if (g_funcs[fi].base != r->func_start)
         snprintf(fst, sizeof(fst), "%08X", r->func_start);
 
-    printf("%08X   %-18s %-10s %7llu %4u %4u %4u %6.2f %3s %3u %6u %8u\n",
-           r->target, hdr, fst, (unsigned long long)r->body_instr, r->writes,
-           r->calls, r->atomics, r->hot_pct,
-           class_name(r->parallel_class), r->depth, r->edges, r->span);
+    printf("%08X   %-18s %-10s %7llu %7llu %7llu %4u %4u %4u %6.2f "
+           "%3s %3u %6u %8u\n",
+           r->target, hdr, fst, (unsigned long long)r->body_instr,
+           (unsigned long long)r->nested_instr,
+           (unsigned long long)r->own_instr, r->writes, r->calls,
+           r->atomics, r->hot_pct, class_name(r->parallel_class), r->depth,
+           r->edges, r->span);
 }
 
 int main(int argc, char **argv)
@@ -1049,6 +1123,7 @@ int main(int argc, char **argv)
     const char *profile_path = NULL;
     int verbose = 0;
     int seed_loaded = 0;
+    int top_n = 80;
     int argi = 1;
 
     while (argi < argc && argv[argi][0] == '-') {
@@ -1063,6 +1138,16 @@ int main(int argc, char **argv)
             profile_path = argv[argi + 1];
             load_profile(profile_path);
             argi += 2;
+        } else if (strcmp(argv[argi], "-n") == 0 && argi + 1 < argc) {
+            char *end = NULL;
+            long v = strtol(argv[argi + 1], &end, 10);
+            if (!end || *end || v <= 0 || v > 1000000) {
+                fprintf(stderr, "find_loops: invalid top count %s\n",
+                        argv[argi + 1]);
+                return 2;
+            }
+            top_n = (int)v;
+            argi += 2;
         } else if (strcmp(argv[argi], "-o") == 0 && argi + 1 < argc) {
             out = argv[argi + 1];
             argi += 2;
@@ -1072,8 +1157,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "-h") == 0 ||
                    strcmp(argv[argi], "--help") == 0) {
             printf("usage: %s [-v] [-f functions.txt] [-p flat_report.txt] "
-                   "[-o loops.tsv] [-e edges.tsv] <file.c|dir> [...]\n",
-                   argv[0]);
+                   "[-n top] [-o loops.tsv] [-e edges.tsv] "
+                   "<file.c|dir> [...]\n", argv[0]);
             return 0;
         } else {
             fprintf(stderr, "find_loops: unknown option %s\n", argv[argi]);
@@ -1180,21 +1265,129 @@ int main(int argc, char **argv)
         i = j;
     }
 
-    /* Nesting depth: number of other loops in the same original function whose
-     * address range strictly contains this one. */
-    if (g_nloops <= 20000) {
-        for (size_t i = 0; i < g_nloops; ++i) {
-            LoopRec *b = &g_loops[i];
-            for (size_t j = 0; j < g_nloops; ++j) {
-                if (i == j) continue;
-                const LoopRec *a = &g_loops[j];
-                if (a->func_start != b->func_start) continue;
-                if (a->target <= b->target && b->max_current <= a->max_current &&
-                    (a->target < b->target || b->max_current < a->max_current))
-                    ++b->depth;
-            }
+    /* Nesting is interval containment within one original guest function.
+     * Sorting by top and then by longest span lets a stack find the immediate
+     * parent in O(n log n).  Immediate children can overlap (multiple entries
+     * into the same code), so nested_instr is the union of their address
+     * ranges, not a plain sum.  own_instr is the parent body outside that
+     * union. */
+    uint32_t *parent = NULL;
+    size_t *child_count = NULL;
+    size_t *child_off = NULL;
+    uint32_t *child_list = NULL;
+    size_t *stack = NULL;
+    if (g_nloops > 0) {
+        stack = (size_t *)malloc(g_nloops * sizeof(*stack));
+        parent = (uint32_t *)malloc(g_nloops * sizeof(*parent));
+        child_count = (size_t *)calloc(g_nloops, sizeof(*child_count));
+        if (!stack || !parent || !child_count) {
+            fprintf(stderr, "find_loops: out of memory (nesting)\n");
+            free(stack);
+            free(parent);
+            free(child_count);
+            return 1;
         }
     }
+    for (size_t i = 0; i < g_nloops; ++i) {
+        g_loops[i].depth = 0;
+        g_loops[i].nested_instr = 0;
+        g_loops[i].own_instr = 0;
+        parent[i] = UINT32_MAX;
+    }
+    qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_nesting);
+    size_t sp = 0;
+    uint32_t stack_func = 0;
+    int have_func = 0;
+    for (size_t i = 0; i < g_nloops; ++i) {
+        LoopRec *r = &g_loops[i];
+        if (!have_func || r->func_start != stack_func) {
+            sp = 0;
+            stack_func = r->func_start;
+            have_func = 1;
+        }
+        while (sp > 0) {
+            const LoopRec *p = &g_loops[stack[sp - 1]];
+            if (p->target <= r->target && r->max_current <= p->max_current &&
+                (p->target < r->target || r->max_current < p->max_current))
+                break;
+            --sp;
+        }
+        if (sp > 0) {
+            uint32_t pi = (uint32_t)stack[sp - 1];
+            parent[i] = pi;
+            r->depth = g_loops[pi].depth + 1;
+            ++child_count[pi];
+        }
+        stack[sp++] = i;
+    }
+    free(stack);
+    stack = NULL;
+
+    child_off = (size_t *)malloc((g_nloops + 1) * sizeof(*child_off));
+    if (!child_off) {
+        fprintf(stderr, "find_loops: out of memory (nesting offsets)\n");
+        free(parent);
+        free(child_count);
+        return 1;
+    }
+    child_off[0] = 0;
+    for (size_t i = 0; i < g_nloops; ++i)
+        child_off[i + 1] = child_off[i] + child_count[i];
+    size_t total_children = child_off[g_nloops];
+    if (total_children > 0) {
+        child_list = (uint32_t *)malloc(total_children * sizeof(*child_list));
+        if (!child_list) {
+            fprintf(stderr, "find_loops: out of memory (nesting children)\n");
+            free(parent);
+            free(child_count);
+            free(child_off);
+            return 1;
+        }
+    }
+    if (g_nloops > 0)
+        memset(child_count, 0, g_nloops * sizeof(*child_count));
+    for (size_t i = 0; i < g_nloops; ++i) {
+        uint32_t pi = parent[i];
+        if (pi != UINT32_MAX)
+            child_list[child_off[pi] + child_count[pi]++] = (uint32_t)i;
+    }
+    for (size_t i = 0; i < g_nloops; ++i) {
+        LoopRec *r = &g_loops[i];
+        uint64_t nested = 0;
+        size_t begin = child_off[i];
+        size_t end = child_off[i + 1];
+        if (begin < end) {
+            uint32_t lo = 0, hi_addr = 0;
+            int have_range = 0;
+            for (size_t k = begin; k < end; ++k) {
+                const LoopRec *c = &g_loops[child_list[k]];
+                uint32_t l = c->target;
+                uint32_t h = c->max_current;
+                if (!have_range) {
+                    lo = l;
+                    hi_addr = h;
+                    have_range = 1;
+                } else if (l <= hi_addr) {
+                    if (h > hi_addr) hi_addr = h;
+                } else {
+                    nested += count_instr_range(r->func_start, lo, hi_addr,
+                                                order, bases, region,
+                                                g_nfuncs);
+                    lo = l;
+                    hi_addr = h;
+                }
+            }
+            if (have_range)
+                nested += count_instr_range(r->func_start, lo, hi_addr,
+                                            order, bases, region, g_nfuncs);
+        }
+        r->nested_instr = nested;
+        r->own_instr = r->body_instr > nested ? r->body_instr - nested : 0;
+    }
+    free(parent);
+    free(child_count);
+    free(child_off);
+    free(child_list);
 
     printf("files=%lu functions=%zu instructions=%llu backward_edges=%zu "
            "loop_headers=%zu starts=%zu seeds=%lu duplicate_bases=%lu "
@@ -1208,11 +1401,11 @@ int main(int argc, char **argv)
                g_profile_matches);
     int profile_active = g_profile_loaded && g_profile_matches > 0;
     if (g_profile_loaded && !profile_active)
-        printf("profile has no L_* matches; using static ranking\n");
+        printf("profile has no L_* matches; profile ranking disabled\n");
     printf("parallel classes: A=pure, B=low writes/calls, C=candidate, "
-           "D=serial/atomic-bound; ranking=%s\n",
-           profile_active ? "profile_self_pct*sqrt(body_instr)/serial_ops"
-                          : "static_body_instr^1.5/serial_ops");
+           "D=serial/atomic-bound; static_rank=body_instr/serial_ops\n");
+    if (profile_active)
+        printf("profile_rank=profile_self_pct*sqrt(body_instr)/serial_ops\n");
 
     if (profile_active) {
         qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_hot);
@@ -1231,48 +1424,58 @@ int main(int argc, char **argv)
     }
 
     qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_body);
-    size_t top = g_nloops < 80 ? g_nloops : 80;
-    printf("\nTop %zu loop tops by lifted body instructions:\n", top);
+    size_t top = g_nloops < (size_t)top_n ? g_nloops : (size_t)top_n;
+    printf("\nTop %zu loop tops by body instructions (nested included):\n", top);
     print_table_header();
     for (size_t i = 0; i < top; ++i) {
         print_loop_row(&g_loops[i], order, bases, g_nfuncs);
         if (verbose) print_members(&g_loops[i], order, bases, region, g_nfuncs);
     }
 
-    qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_score);
-    top = g_nloops < 80 ? g_nloops : 80;
-    size_t min_body = profile_active ? 16 : 200;
-    printf("\n%s parallelization candidates (%s, class A/B):\n",
-           profile_active ? "Hot" : "Static",
-           profile_active ? "profile-weighted, hot%>0"
-                          : "body_instr>=200");
+    qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_static_score);
+    top = g_nloops < (size_t)top_n ? g_nloops : (size_t)top_n;
+    printf("\nTop %zu parallelization candidates by instruction work "
+           "(body/serial, class A/B/C):\n", top);
     print_table_header();
     size_t shown = 0;
     for (size_t i = 0; i < g_nloops && shown < top; ++i) {
         const LoopRec *r = &g_loops[i];
-        if (profile_active && r->hot_pct <= 0.0) break;
-        if (profile_active && r->body_instr < min_body) continue;
-        if (!profile_active && r->body_instr < 200) continue;
-        if (r->parallel_class > 1) continue;
+        if (r->body_instr < 200 || r->parallel_class > 2) continue;
         print_loop_row(r, order, bases, g_nfuncs);
         if (verbose) print_members(r, order, bases, region, g_nfuncs);
         ++shown;
     }
-    if (shown == 0)
-        printf("(none)\n");
-    if (profile_active)
-        printf("note: hot%% is self samples clipped to [loop_top,loop_bottom]; "
-               "class is static. Verify independence and same-scene A/B.\n");
+    if (shown == 0) printf("(none)\n");
+    printf("note: instr is the whole loop body, nested is immediate child "
+           "loop bodies, own is instr-nested. Class is static; verify "
+           "independence and same-scene A/B.\n");
+
+    if (profile_active) {
+        qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_score);
+        top = g_nloops < (size_t)top_n ? g_nloops : (size_t)top_n;
+        printf("\nProfile-weighted candidates (class A/B, hot%%>0):\n");
+        print_table_header();
+        size_t hot_candidates = 0;
+        for (size_t i = 0; i < g_nloops && hot_candidates < top; ++i) {
+            const LoopRec *r = &g_loops[i];
+            if (r->hot_pct <= 0.0) break;
+            if (r->body_instr < 16 || r->parallel_class > 1) continue;
+            print_loop_row(r, order, bases, g_nfuncs);
+            if (verbose) print_members(r, order, bases, region, g_nfuncs);
+            ++hot_candidates;
+        }
+        if (hot_candidates == 0) printf("(none)\n");
+    }
 
     qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_span);
-    top = g_nloops < 40 ? g_nloops : 40;
+    top = g_nloops < (size_t)top_n ? g_nloops : (size_t)top_n;
     printf("\nTop %zu loop tops by backward span:\n", top);
     print_table_header();
     for (size_t i = 0; i < top; ++i)
         print_loop_row(&g_loops[i], order, bases, g_nfuncs);
 
     qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_edges);
-    top = g_nloops < 40 ? g_nloops : 40;
+    top = g_nloops < (size_t)top_n ? g_nloops : (size_t)top_n;
     printf("\nTop %zu loop tops by back-edge count:\n", top);
     print_table_header();
     for (size_t i = 0; i < top; ++i)
