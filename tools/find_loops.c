@@ -36,11 +36,18 @@
  *   ccache gcc -std=c11 -O2 -pthread tools/find_loops.c -o build/host/find_loops -lm
  *
  * Usage:
- *   find_loops [-v] [-f functions.txt] [-p flat_report.txt] [-n top] \
- *              [-o loops.tsv] [-e edges.tsv] <dir|file>...
+ *   find_loops [-v] [-f functions.txt] [-p flat_report.txt]
+ *              [-c call_profile] [-n top] [-o loops.tsv] [-e edges.tsv]
+ *              <dir|file>...
  *
  * With no path it scans build/android_app/debug/cmake/relifted/game and, if
  * present, loads build/corpus-full/game/functions.txt automatically.
+ *
+ * -p accepts a simpleperf flat report (self samples).  -c accepts a function
+ * entry-count profile: an LLVM .profdata (converted with llvm-profdata show
+ * --counts --all-functions; llvm-profdata comes from PATH or LLVM_PROFDATA)
+ * or a text table with L_* names and counts.  The call profile adds a
+ * call-frequency-weighted candidate ranking.
  */
 #include <ctype.h>
 #include <dirent.h>
@@ -71,6 +78,7 @@ typedef struct {
     uint32_t stackops;
     uint8_t prologue;
     double self_pct;
+    uint64_t call_count; /* function entry count from a call/entry profile */
     char name[NAME_CAP];
     char file[PATH_CAP];
 } FuncRec;
@@ -84,6 +92,11 @@ typedef struct {
     char name[NAME_CAP];
     double pct;
 } ProfileRec;
+
+typedef struct {
+    char name[NAME_CAP];
+    uint64_t calls;
+} CallRec;
 
 typedef struct {
     uint32_t src;
@@ -115,8 +128,10 @@ typedef struct {
     uint32_t src;
     uint32_t src_line;
     uint8_t parallel_class; /* 0=A pure, 1=B low-effect, 2=C candidate, 3=D serial */
+    uint64_t call_count;    /* entry count of the loop's header L_* function */
     double hot_pct;         /* sum of self samples in the loop body, percent */
     double score;
+    double call_score;      /* body_instr * call_count / serial_ops */
 } LoopRec;
 
 static FuncRec *g_funcs;
@@ -159,6 +174,13 @@ static size_t g_cappprof;
 static int g_profile_loaded;
 static unsigned long g_profile_matches;
 static const char *g_profile_file;
+
+static CallRec *g_callprof;
+static size_t g_ncallprof;
+static size_t g_capcallprof;
+static int g_call_loaded;
+static unsigned long g_call_matches;
+static const char *g_call_file;
 
 static unsigned long g_files;
 static unsigned long g_duplicate_bases;
@@ -693,6 +715,230 @@ static void apply_profile(void)
     }
 }
 
+static void push_call_profile(const char *name, size_t len, uint64_t calls)
+{
+    if (len < 3 || len >= NAME_CAP) return;
+    if (name[0] != 'L' || name[1] != '_') return;
+    if (g_ncallprof == g_capcallprof) {
+        size_t cap = g_capcallprof ? g_capcallprof * 2 : 512;
+        CallRec *p = (CallRec *)realloc(g_callprof, cap * sizeof(*p));
+        if (!p) {
+            fprintf(stderr, "find_loops: out of memory (call profile)\n");
+            exit(1);
+        }
+        g_callprof = p;
+        g_capcallprof = cap;
+    }
+    memcpy(g_callprof[g_ncallprof].name, name, len);
+    g_callprof[g_ncallprof].name[len] = '\0';
+    g_callprof[g_ncallprof].calls = calls;
+    ++g_ncallprof;
+}
+
+static int parse_u64_token(const char *p, uint64_t *out)
+{
+    while (*p == ' ' || *p == '\t') ++p;
+    if (!isdigit((unsigned char)*p)) return 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(p, &end, 10);
+    if (end == p) return 0;
+    *out = (uint64_t)v;
+    return 1;
+}
+
+/*
+ * Parse either:
+ *   - llvm-profdata show --counts --all-functions text:
+ *       L_6F123456:
+ *         Function count: N          (Front-end profiles only)
+ *         Block counts: [...]
+ *   - a simple text table with one L_* symbol and a count per line.
+ * IR profiles do not print Function count; their first block count is the
+ * entry-count proxy used by LLVM's own ProfileSummaryBuilder.
+ */
+static void parse_call_profile_stream(FILE *f)
+{
+    char *line = NULL;
+    size_t cap = 0;
+    char current[NAME_CAP];
+    current[0] = '\0';
+    uint64_t pending = 0;
+    int has_pending = 0;
+    while (getline(&line, &cap, f) != -1) {
+        char *s = line;
+        while (*s == ' ' || *s == '\t') ++s;
+        if (!*s) continue;
+
+        const char *name = NULL;
+        if (s[0] == 'L' && s[1] == '_')
+            name = s;
+        if (name) {
+            size_t len = 0;
+            while (name[len] && !isspace((unsigned char)name[len]) &&
+                   name[len] != ':' && name[len] != '(')
+                ++len;
+            const char *rest = name + len;
+            while (*rest == ' ' || *rest == '\t') ++rest;
+            if (*rest == ':') {
+                ++rest;
+                while (*rest == ' ' || *rest == '\t') ++rest;
+                uint64_t v = 0;
+                if (parse_u64_token(rest, &v)) {
+                    push_call_profile(name, len, v);
+                    current[0] = '\0';
+                    has_pending = 0;
+                } else if (len < NAME_CAP) {
+                    memcpy(current, name, len);
+                    current[len] = '\0';
+                    has_pending = 0;
+                }
+                continue;
+            }
+            uint64_t v = 0;
+            if (parse_u64_token(rest, &v))
+                push_call_profile(name, len, v);
+            continue;
+        }
+
+        if (current[0] && strncmp(s, "Function count:", 15) == 0) {
+            uint64_t v = 0;
+            if (parse_u64_token(s + 15, &v)) {
+                pending = v;
+                has_pending = 1;
+            }
+            continue;
+        }
+
+        if (current[0] && strstr(s, "Block counts:")) {
+            if (has_pending) {
+                push_call_profile(current, strlen(current), pending);
+                has_pending = 0;
+            } else {
+                const char *bracket = strchr(s, '[');
+                uint64_t v = 0;
+                if (bracket && parse_u64_token(bracket + 1, &v))
+                    push_call_profile(current, strlen(current), v);
+            }
+            current[0] = '\0';
+        }
+    }
+    free(line);
+}
+
+static void shell_quote(char *dst, size_t cap, const char *src)
+{
+    size_t n = 0;
+    if (cap == 0) return;
+    dst[n++] = '\'';
+    while (*src && n + 5 < cap) {
+        if (*src == '\'') {
+            memcpy(dst + n, "'\\''", 4);
+            n += 4;
+        } else {
+            dst[n++] = *src;
+        }
+        ++src;
+    }
+    dst[n++] = '\'';
+    dst[n] = '\0';
+}
+
+static int has_llvm_profdata_magic(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    unsigned char magic[8];
+    size_t n = fread(magic, 1, sizeof(magic), f);
+    fclose(f);
+    return n >= 7 && memcmp(magic, "\xfflprofi", 7) == 0;
+}
+
+/*
+ * Call/entry profile.  A raw LLVM .profdata is converted with the NDK's
+ * llvm-profdata (PATH or LLVM_PROFDATA); a text report is read directly.
+ * Function entry counts weight loops by how often their containing L_*
+ * function is called.  This is not a loop-iteration count; use the flat
+ * self-sample profile (-p) for measured hotness.
+ */
+static void load_call_profile(const char *path)
+{
+    g_call_loaded = 1;
+    g_call_file = path;
+
+    if (has_llvm_profdata_magic(path)) {
+        const char *tool = getenv("LLVM_PROFDATA");
+        if (!tool || !*tool) tool = "llvm-profdata";
+        char qtool[512];
+        char qpath[512];
+        char cmd[1200];
+        shell_quote(qtool, sizeof(qtool), tool);
+        shell_quote(qpath, sizeof(qpath), path);
+        snprintf(cmd, sizeof(cmd),
+                 "%s show --counts --all-functions %s 2>/dev/null",
+                 qtool, qpath);
+        FILE *f = popen(cmd, "r");
+        if (!f) {
+            fprintf(stderr, "find_loops: cannot run llvm-profdata for %s\n",
+                    path);
+            return;
+        }
+        parse_call_profile_stream(f);
+        int rc = pclose(f);
+        if (rc != 0 && g_ncallprof == 0)
+            fprintf(stderr, "find_loops: llvm-profdata failed for %s "
+                    "(set LLVM_PROFDATA to the NDK tool)\n", path);
+        return;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "find_loops: cannot read %s\n", path);
+        return;
+    }
+    parse_call_profile_stream(f);
+    fclose(f);
+}
+
+static int cmp_call_name(const void *a, const void *b)
+{
+    const CallRec *x = (const CallRec *)a;
+    const CallRec *y = (const CallRec *)b;
+    return strcmp(x->name, y->name);
+}
+
+static uint64_t call_lookup(const char *name)
+{
+    if (!g_call_loaded || g_ncallprof == 0) return 0;
+    CallRec key;
+    memset(&key, 0, sizeof(key));
+    snprintf(key.name, sizeof(key.name), "%s", name);
+    CallRec *r = (CallRec *)bsearch(&key, g_callprof, g_ncallprof,
+                                    sizeof(*g_callprof), cmp_call_name);
+    return r ? r->calls : 0;
+}
+
+static void apply_call_profile(void)
+{
+    if (!g_call_loaded) return;
+    if (g_ncallprof > 1)
+        qsort(g_callprof, g_ncallprof, sizeof(*g_callprof), cmp_call_name);
+    size_t w = 0;
+    for (size_t i = 0; i < g_ncallprof; ++i) {
+        if (w > 0 && strcmp(g_callprof[w - 1].name, g_callprof[i].name) == 0) {
+            if (g_callprof[i].calls > g_callprof[w - 1].calls)
+                g_callprof[w - 1].calls = g_callprof[i].calls;
+        } else {
+            g_callprof[w++] = g_callprof[i];
+        }
+    }
+    g_ncallprof = w;
+    for (size_t i = 0; i < g_nfuncs; ++i) {
+        uint64_t calls = call_lookup(g_funcs[i].name);
+        g_funcs[i].call_count = calls;
+        if (calls > 0) ++g_call_matches;
+    }
+}
+
 static int cmp_u32(const void *a, const void *b)
 {
     uint32_t x = *(const uint32_t *)a;
@@ -870,6 +1116,7 @@ static void finish_loop_stats(LoopRec *r, const uint32_t *order,
     uint32_t hf = lfunc_containing(r->target, order, bases, n);
     r->header_func = hf;
     r->header_off = r->target - g_funcs[hf].base;
+    r->call_count = g_funcs[hf].call_count;
 
     if (r->body_instr == 0) {
         r->parallel_class = 3;
@@ -896,6 +1143,9 @@ static void finish_loop_stats(LoopRec *r, const uint32_t *order,
         r->score = r->hot_pct * sqrt((double)r->body_instr) / serial;
     else
         r->score = (double)r->body_instr / serial;
+    if (r->call_count > 0)
+        r->call_score = (double)r->body_instr *
+                        (double)r->call_count / serial;
 }
 
 static int cmp_loop_nesting(const void *a, const void *b)
@@ -926,6 +1176,19 @@ static int cmp_loop_static_score(const void *a, const void *b)
     double sy = loop_static_score(y);
     if (sx != sy)
         return (sx < sy) ? 1 : -1;
+    if (x->body_instr != y->body_instr)
+        return (x->body_instr < y->body_instr) ? 1 : -1;
+    if (x->own_instr != y->own_instr)
+        return (x->own_instr < y->own_instr) ? 1 : -1;
+    return (x->span < y->span) ? 1 : -1;
+}
+
+static int cmp_loop_call_score(const void *a, const void *b)
+{
+    const LoopRec *x = (const LoopRec *)a;
+    const LoopRec *y = (const LoopRec *)b;
+    if (x->call_score != y->call_score)
+        return (x->call_score < y->call_score) ? 1 : -1;
     if (x->body_instr != y->body_instr)
         return (x->body_instr < y->body_instr) ? 1 : -1;
     if (x->own_instr != y->own_instr)
@@ -1037,22 +1300,24 @@ static void write_loops_tsv(const char *path)
         return;
     }
     fprintf(f, "loop_top\tloop_bottom\tspan\tdepth\tedges\tbody_funcs\t"
-               "body_instr\tnested_instr\town_instr\twrites\tcalls\tatomics\t"
-               "reads\tjumps\tstackops\thot_pct\tclass\tscore\texact\t"
-               "func_start\theader_lfunc\theader_off\tsrc_func\tsrc_file\t"
-               "src_line\n");
+               "body_instr\tnested_instr\town_instr\tcall_count\tcall_score\t"
+               "writes\tcalls\tatomics\treads\tjumps\tstackops\thot_pct\t"
+               "class\tscore\texact\tfunc_start\theader_lfunc\theader_off\t"
+               "src_func\tsrc_file\tsrc_line\n");
     for (size_t i = 0; i < g_nloops; ++i) {
         const LoopRec *r = &g_loops[i];
         const FuncRec *h = &g_funcs[r->header_func];
         const FuncRec *s = &g_funcs[r->src];
-        fprintf(f, "%08X\t%08X\t%u\t%u\t%u\t%u\t%llu\t%llu\t%llu\t%u\t%u\t%u\t"
-                   "%u\t%u\t%u\t%.4f\t%s\t%.2f\t%u\t%08X\t%s\t%u\t%s\t%s\t%u\n",
+        fprintf(f, "%08X\t%08X\t%u\t%u\t%u\t%u\t%llu\t%llu\t%llu\t%llu\t"
+                   "%.2f\t%u\t%u\t%u\t%u\t%u\t%u\t%.4f\t%s\t%.2f\t%u\t"
+                   "%08X\t%s\t%u\t%s\t%s\t%u\n",
                 r->target, r->max_current, r->span, r->depth, r->edges,
                 r->body_funcs, (unsigned long long)r->body_instr,
                 (unsigned long long)r->nested_instr,
-                (unsigned long long)r->own_instr, r->writes, r->calls,
-                r->atomics, r->reads, r->jumps, r->stackops, r->hot_pct,
-                class_name(r->parallel_class), r->score, r->exact,
+                (unsigned long long)r->own_instr,
+                (unsigned long long)r->call_count, r->call_score, r->writes,
+                r->calls, r->atomics, r->reads, r->jumps, r->stackops,
+                r->hot_pct, class_name(r->parallel_class), r->score, r->exact,
                 r->func_start, h->name, r->header_off, s->name, s->file,
                 r->src_line);
     }
@@ -1091,9 +1356,11 @@ static void write_edges_tsv(const char *path, const uint32_t *order,
 
 static void print_table_header(void)
 {
-    printf("%-10s %-18s %-10s %7s %7s %7s %4s %4s %4s %6s %3s %3s %6s %8s\n",
+    printf("%-10s %-18s %-10s %7s %7s %7s %10s %4s %4s %4s %6s %3s %3s "
+           "%6s %8s\n",
            "loop_top", "header_lfunc", "func_start", "instr", "nested", "own",
-           "wr", "call", "atom", "hot%", "cls", "dep", "edges", "span");
+           "freq", "wr", "call", "atom", "hot%", "cls", "dep", "edges",
+           "span");
 }
 
 static void print_loop_row(const LoopRec *r, const uint32_t *order,
@@ -1107,11 +1374,12 @@ static void print_loop_row(const LoopRec *r, const uint32_t *order,
     if (g_funcs[fi].base != r->func_start)
         snprintf(fst, sizeof(fst), "%08X", r->func_start);
 
-    printf("%08X   %-18s %-10s %7llu %7llu %7llu %4u %4u %4u %6.2f "
-           "%3s %3u %6u %8u\n",
+    printf("%08X   %-18s %-10s %7llu %7llu %7llu %10llu %4u %4u %4u "
+           "%6.2f %3s %3u %6u %8u\n",
            r->target, hdr, fst, (unsigned long long)r->body_instr,
            (unsigned long long)r->nested_instr,
-           (unsigned long long)r->own_instr, r->writes, r->calls,
+           (unsigned long long)r->own_instr,
+           (unsigned long long)r->call_count, r->writes, r->calls,
            r->atomics, r->hot_pct, class_name(r->parallel_class), r->depth,
            r->edges, r->span);
 }
@@ -1138,6 +1406,9 @@ int main(int argc, char **argv)
             profile_path = argv[argi + 1];
             load_profile(profile_path);
             argi += 2;
+        } else if (strcmp(argv[argi], "-c") == 0 && argi + 1 < argc) {
+            load_call_profile(argv[argi + 1]);
+            argi += 2;
         } else if (strcmp(argv[argi], "-n") == 0 && argi + 1 < argc) {
             char *end = NULL;
             long v = strtol(argv[argi + 1], &end, 10);
@@ -1157,8 +1428,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "-h") == 0 ||
                    strcmp(argv[argi], "--help") == 0) {
             printf("usage: %s [-v] [-f functions.txt] [-p flat_report.txt] "
-                   "[-n top] [-o loops.tsv] [-e edges.tsv] "
-                   "<file.c|dir> [...]\n", argv[0]);
+                   "[-c call_profile] [-n top] [-o loops.tsv] "
+                   "[-e edges.tsv] <file.c|dir> [...]\n", argv[0]);
             return 0;
         } else {
             fprintf(stderr, "find_loops: unknown option %s\n", argv[argi]);
@@ -1193,6 +1464,7 @@ int main(int argc, char **argv)
     }
 
     apply_profile();
+    apply_call_profile();
 
     uint64_t total_instr = 0;
     for (size_t i = 0; i < g_nfuncs; ++i)
@@ -1402,10 +1674,18 @@ int main(int argc, char **argv)
     int profile_active = g_profile_loaded && g_profile_matches > 0;
     if (g_profile_loaded && !profile_active)
         printf("profile has no L_* matches; profile ranking disabled\n");
+    if (g_call_loaded)
+        printf("call_profile=%s entries=%zu matched_lfuncs=%lu\n",
+               g_call_file, g_ncallprof, g_call_matches);
+    int call_active = g_call_loaded && g_call_matches > 0;
+    if (g_call_loaded && !call_active)
+        printf("call_profile has no L_* matches; call ranking disabled\n");
     printf("parallel classes: A=pure, B=low writes/calls, C=candidate, "
            "D=serial/atomic-bound; static_rank=body_instr/serial_ops\n");
     if (profile_active)
         printf("profile_rank=profile_self_pct*sqrt(body_instr)/serial_ops\n");
+    if (call_active)
+        printf("call_rank=body_instr*entry_calls/serial_ops\n");
 
     if (profile_active) {
         qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_hot);
@@ -1449,6 +1729,27 @@ int main(int argc, char **argv)
     printf("note: instr is the whole loop body, nested is immediate child "
            "loop bodies, own is instr-nested. Class is static; verify "
            "independence and same-scene A/B.\n");
+
+    if (call_active) {
+        qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_call_score);
+        top = g_nloops < (size_t)top_n ? g_nloops : (size_t)top_n;
+        printf("\nTop %zu call-frequency-weighted candidates "
+               "(body*entry_calls/serial, class A/B/C):\n", top);
+        print_table_header();
+        size_t call_shown = 0;
+        for (size_t i = 0; i < g_nloops && call_shown < top; ++i) {
+            const LoopRec *r = &g_loops[i];
+            if (r->body_instr < 200 || r->parallel_class > 2) continue;
+            if (r->call_count == 0) continue;
+            print_loop_row(r, order, bases, g_nfuncs);
+            if (verbose) print_members(r, order, bases, region, g_nfuncs);
+            ++call_shown;
+        }
+        if (call_shown == 0) printf("(none)\n");
+        printf("note: freq is the profile entry count of the loop's header "
+               "L_* function; it is not the loop iteration count. Use -p "
+               "for measured self samples.\n");
+    }
 
     if (profile_active) {
         qsort(g_loops, g_nloops, sizeof(*g_loops), cmp_loop_score);
