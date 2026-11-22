@@ -356,9 +356,57 @@ static int g_cmd_long_pending;
 static int g_cmd_long_fired;
 
 #if WC3_DEBUG && WC3_DEBUG_INPUT
+#include <stdarg.h>
+#include <stdlib.h>
+
 #define DT_LOG_TAG "Wc3DirectTouch"
-#define dt_log(...) \
-    __android_log_print(ANDROID_LOG_INFO, DT_LOG_TAG, __VA_ARGS__)
+
+/*
+ * Debug-only direct-touch log.  logcat is a ring buffer: a long guest run
+ * overwrites the trace before it can be pulled, and the game log is a
+ * different stream.  Mirror every line to dt_trace.txt in WC3_DATA_DIR, the
+ * same way selection.c writes sel_trace.txt.  The file is truncated per
+ * process, line buffered and opened once.
+ */
+static FILE *g_dt_log;
+static pthread_once_t g_dt_log_once = PTHREAD_ONCE_INIT;
+
+static void dt_open_log(void)
+{
+    const char *dir = getenv("WC3_DATA_DIR");
+    char path[1024];
+
+    if (dir && *dir)
+        snprintf(path, sizeof(path), "%s/dt_trace.txt", dir);
+    else
+        snprintf(path, sizeof(path), "dt_trace.txt");
+    g_dt_log = fopen(path, "w");
+    if (!g_dt_log)
+        return;
+    setvbuf(g_dt_log, NULL, _IOLBF, 0);
+    fprintf(g_dt_log, "[dt] trace start\n");
+}
+
+static void dt_log_write(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    __android_log_vprint(ANDROID_LOG_INFO, DT_LOG_TAG, fmt, ap);
+    va_end(ap);
+
+    pthread_once(&g_dt_log_once, dt_open_log);
+    if (!g_dt_log)
+        return;
+
+    va_start(ap, fmt);
+    fputs("[dt] ", g_dt_log);
+    vfprintf(g_dt_log, fmt, ap);
+    fputc('\n', g_dt_log);
+    va_end(ap);
+}
+
+#define dt_log(...) dt_log_write(__VA_ARGS__)
 
 static const char *dt_route_name(int route)
 {
