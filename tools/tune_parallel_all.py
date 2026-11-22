@@ -68,10 +68,10 @@ DEFAULT_SAMPLES = 3
 DEFAULT_MIN_SAMPLES = 2
 
 BASELINE = {
-    "phase_chunks": 2,
+    "phase_chunks": 4,
     "phase_main_last": 1,
-    "phase_weighted": 0,
-    "phase_spin_us": 1000,
+    "phase_weighted": 1,
+    "phase_spin_us": 5000,
     "phase_stack_zero": 256,
     "phase_threshold": 2,
 }
@@ -153,16 +153,16 @@ def _int_field(pairs: dict[str, str], key: str, default: int) -> int:
 
 
 def _current_values(pairs: dict[str, str], workers: int) -> dict[str, int]:
-    chunks = _int_field(pairs, "chunks", 2)
+    chunks = _int_field(pairs, "chunks", 4)
     if chunks == 0:
         chunks = min(workers, 4)
     return {
         "phase_chunks": max(2, min(chunks, workers)),
         "phase_main_last": _int_field(pairs, "main_last", 1),
-        "phase_weighted": _int_field(pairs, "weighted", 0),
+        "phase_weighted": _int_field(pairs, "weighted", 1),
         "phase_threshold": _int_field(pairs, "threshold", 2),
         "phase_stack_zero": _int_field(pairs, "stack_zero", 256),
-        "phase_spin_us": _int_field(pairs, "spin_us", 1000),
+        "phase_spin_us": _int_field(pairs, "spin_us", 5000),
     }
 
 
@@ -293,10 +293,8 @@ def _baseline_row(param: Param, rows: list[dict[str, Any]],
 
 def _should_apply(param: Param, best: dict[str, Any] | None,
                   baseline: dict[str, Any] | None, current: int,
-                  pass_no: int, history: dict[str, Any] | None,
-                  min_improvement: float,
-                  consistency_margin: float) -> tuple[bool, str]:
-    """Return (apply, reason) using noise and pass-consistency guards."""
+                  min_improvement: float) -> tuple[bool, str]:
+    """Return (apply, reason) using the noise guard."""
     if best is None:
         return False, "no complete samples; keep current"
     if param.kind == "safety":
@@ -319,13 +317,6 @@ def _should_apply(param: Param, best: dict[str, Any] | None,
     if improvement < min_improvement:
         return False, (f"within noise ({improvement:.1f}% < "
                        f"{min_improvement:.1f}%)")
-    if (pass_no > 1 and history is not None
-            and int(history["value"]) != value):
-        if improvement < consistency_margin:
-            return False, (
-                f"pass-1 best {history['value']} differs; "
-                f"{improvement:.1f}% < {consistency_margin:.1f}% "
-                f"consistency margin")
     return True, f"improvement {improvement:.1f}%"
 
 
@@ -562,9 +553,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- Samples/value: `{report['settings']['samples']}`, "
                  f"settle `{report['settings']['settle_s']}s`")
     lines.append(f"- Min improvement: "
-                 f"`{report['settings']['min_improvement_pct']}%`, "
-                 f"pass-2 consistency margin: "
-                 f"`{report['settings']['consistency_margin_pct']}%`")
+                 f"`{report['settings']['min_improvement_pct']}%`")
     lines.append(f"- Reset to baseline: "
                  f"`{report['settings']['reset']}`")
     lines.append("")
@@ -656,9 +645,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-improvement", type=float, default=2.0,
                         help="minimum median apply improvement, percent "
                              "(default: 2.0)")
-    parser.add_argument("--consistency-margin", type=float, default=10.0,
-                        help="pass-2 improvement needed to overturn a "
-                             "different pass-1 best, percent (default: 10.0)")
     parser.add_argument("--reset", action="store_true",
                         help="write the baseline phase values before pass 1")
     parser.add_argument("--out-dir", default="reports/generated")
@@ -676,8 +662,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--min-samples must be >= 1")
     if args.min_improvement < 0:
         parser.error("--min-improvement must be >= 0")
-    if args.consistency_margin < 0:
-        parser.error("--consistency-margin must be >= 0")
 
     adb = _which_adb(args.adb)
     serial = _resolve_serial(adb, args.serial, args.verbose)
@@ -748,7 +732,6 @@ def main(argv: list[str] | None = None) -> int:
             "interval_s": args.interval,
             "min_samples": args.min_samples,
             "min_improvement_pct": args.min_improvement,
-            "consistency_margin_pct": args.consistency_margin,
             "reset": args.reset,
         },
         "passes": [],
@@ -797,10 +780,9 @@ def main(argv: list[str] | None = None) -> int:
                 note = _note(param, best, baseline, current_value, values,
                              workers)
                 next_idea = _next_idea(param, best, values, workers)
-                history = best_history.get(param.key)
                 apply, decision = _should_apply(
-                    param, best, baseline, current_value, pass_no, history,
-                    args.min_improvement, args.consistency_margin)
+                    param, best, baseline, current_value,
+                    args.min_improvement)
                 chosen = int(best["value"]) if (apply and best) else current_value
                 if apply:
                     config_text = _with_key(

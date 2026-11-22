@@ -1018,8 +1018,8 @@ static int phase_chain_split_one(const char *text, size_t n, Buf *out,
                 "    wc3_phase_restore_frame_level(index, ");
         snprintf(num, sizeof num, "%uu", spec->level);
         buf_str(&res, num);
+        buf_str(&res, ");\n");
         buf_str(&res,
-                ");\n"
                 "    _depth = c->disp_depth;\n"
                 "    _draining = c->disp_draining;\n"
                 "    ");

@@ -37,13 +37,15 @@
 #if WC3_DEBUG && WC3_DEBUG_PARALLEL
 
 #define WC3_PHASE_MAX_REQUESTS   256u
-#define WC3_PHASE_CONTAINER_SNAP 0x00000200u
-#define WC3_PHASE_SNAP_WORDS     (WC3_PHASE_CONTAINER_SNAP / 4u)
+/* The raycast chain reads container+0x110, container+0x114 and the hit path
+ * reads container+0x14c.  Copy only through the end of the last observed
+ * word; the old 0x200 window copied 176 bytes that no caller reads. */
+#define WC3_PHASE_CONTAINER_SNAP 0x00000150u
 
-/* Largest guest frame a collect level may save.  L_6F376730 is about 0xd8
- * bytes; 0x200 leaves room for the SEH frames without hiding a runaway
- * `ebp - esp` computation. */
-#define WC3_PHASE_FRAME_MAX      0x00000200u
+/* Largest guest frame a collect level may save.  The deepest chain frame is
+ * below 0xd8 bytes; 0x100 keeps the full live frame and SEH record with
+ * headroom while halving the per-level copy from the old 0x200 window. */
+#define WC3_PHASE_FRAME_MAX      0x00000100u
 
 /* Level 0 is the innermost raycast and lives in the request slot itself.
  * Levels 1..WC3_PHASE_MAX_LEVELS-1 are the caller continuations. */
@@ -57,11 +59,11 @@
 
 typedef struct Wc3PhaseRequest {
     uint32_t index;
-    uint32_t container;          /* original VA, diagnostics only */
+    uint32_t container;          /* private container snapshot VA */
     uint32_t array;
     uint32_t count;
-    uint32_t in1;
-    uint32_t in2;
+    uint32_t in1;                /* original VA, read by the replay */
+    uint32_t in2;                /* original VA, read by the replay */
     uint32_t out_pos;
     uint32_t out_dist;
     uint32_t user_ctx;
@@ -71,7 +73,6 @@ typedef struct Wc3PhaseRequest {
     uint32_t frame_va;           /* saved guest frame range, for apply */
     uint32_t frame_len;
     uint8_t frame[WC3_PHASE_FRAME_MAX];
-    uint32_t snap[WC3_PHASE_SNAP_WORDS];
 } Wc3PhaseRequest;
 
 typedef struct Wc3PhaseResult {

@@ -270,10 +270,10 @@ typedef struct RayTuning {
 /* sequentially and through the pool, and compares the bits.  Release  */
 /* compiles none of this.                                              */
 /*                                                                    */
-/* The request snapshot holds the container bytes the function reads. */
-/* A product phase can drop the snapshot when the container is proven */
-/* stable; the shadow keeps it so the replay is independent of later  */
-/* game writes.                                                       */
+/* Each request owns a private guest container slot holding the bytes the */
+/* function reads.  The collect half fills it once; both the parallel and */
+/* sequential replays read it, so later game writes cannot change a     */
+/* captured request.                                                    */
 /* ------------------------------------------------------------------ */
 
 typedef struct Wc3PhaseJob {
@@ -341,6 +341,16 @@ static CPU g_phase_cpu[WC3_PHASE_MAX_REQUESTS];
 static Wc3PhaseLevel g_phase_level[WC3_PHASE_MAX_REQUESTS]
                                  [WC3_PHASE_MAX_LEVELS];
 static uint8_t g_phase_level_count[WC3_PHASE_MAX_REQUESTS];
+/* Minimal phase mailbox: one 64-bit word with a 32-bit sequence and a
+ * 32-bit done mask.  The main publishes a new sequence with a release
+ * store; each active worker sets its bit with a release RMW.  The job
+ * parameters live in a static slot that the worker reads after the
+ * acquire load, so the publish itself is one store. */
+#define WC3_PHASE_MAILBOX_MAX_WORKERS 32u
+static _Atomic uint64_t g_phase_mailbox;
+static const Wc3PhaseJob *g_phase_job;
+static uint32_t g_phase_seq;
+static int g_phase_pool_ready;
 static _Thread_local int t_phase_armed;
 /* Set while wc3_phase_apply_all() is running on this thread.  A loop boundary
  * reached from an apply postfix must not run a nested apply: the outer drain
@@ -353,8 +363,7 @@ static _Thread_local int t_phase_apply_active;
 typedef enum RayJobKind {
     RAY_JOB_RAYCAST = 0,
     RAY_JOB_VERTEX = 1,
-    RAY_JOB_TRIANGLE = 2,
-    RAY_JOB_PHASE = 3
+    RAY_JOB_TRIANGLE = 2
 } RayJobKind;
 
 /* Each dispatch initializes only the common fields and the fields for its
@@ -393,12 +402,6 @@ typedef struct RayJob {
     uint32_t triangle_best_ptr;
     uint32_t triangle_index_ptr;
     uint32_t triangle_orig_best;
-
-#if WC3_DEBUG && WC3_DEBUG_PARALLEL
-    /* RAY_JOB_PHASE points at the phase job.  The job owns the request array
-     * and the split; workers only read it after the job sequence is acquired. */
-    Wc3PhaseJob *phase;
-#endif
 } RayJob;
 
 /* One division per job instead of two per worker.  The split is contiguous and
@@ -557,6 +560,11 @@ typedef struct RayCtx {
     int phase_failed;
     uint64_t phase_slice_ns;
     uint32_t phase_count;
+    /* Acknowledgement of the mailbox sequence.  The worker stores it only
+     * after it has consumed the published job pointer (or decided it is
+     * inactive), so the publisher can prove that no worker still needs the
+     * job frame before it returns. */
+    _Atomic uint32_t phase_ack;
 #endif
 
     int index;
@@ -584,6 +592,10 @@ typedef struct RayCtx {
     uint64_t call_ns;
 #endif
     uint64_t seen_seq;
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    /* Minimal phase mailbox: last sequence this worker consumed. */
+    uint32_t phase_seen;
+#endif
     /* Published by the worker after it finishes the job sequence.  The caller
      * scans only the active workers; no shared locked counter is needed. */
     _Atomic uint64_t done_seq;
@@ -597,6 +609,24 @@ typedef struct RayCtx {
  * the early phase state block, so these two live here. */
 static RayCtx g_phase_seq_ctx;
 static int g_phase_seq_ctx_ready;
+/* Dedicated phase worker pool.  The phase communicates only through
+ * g_phase_mailbox; it does not use the generic g_job_seq/g_job_addr path. */
+static RayCtx *g_phase_ctx;
+static pthread_t *g_phase_thread;
+static unsigned g_phase_thread_count;
+static _Atomic int g_phase_shutdown;
+/* One private guest container per request slot.  The collect half copies the
+ * live container into its slot once; workers and the sequential oracle read
+ * that slot directly.  This removes the per-run 0x150-byte copy into a
+ * worker scratch while keeping the original container untouched. */
+#define WC3_PHASE_SLOT_STRIDE  WC3_PHASE_CONTAINER_SNAP
+static uint32_t g_phase_container_base;
+static int g_phase_container_ready;
+
+static inline uint32_t phase_container_slot(uint32_t index)
+{
+    return g_phase_container_base + index * WC3_PHASE_SLOT_STRIDE;
+}
 #endif
 
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
@@ -781,7 +811,7 @@ static void phase_sync_config(void)
 
     int en = atomic_load_explicit(&g_phase_cfg.enabled, memory_order_relaxed);
     int sh = atomic_load_explicit(&g_phase_cfg.shadow, memory_order_relaxed);
-    if (!g_phase_seq_ctx_ready) {
+    if (!g_phase_seq_ctx_ready || !g_phase_container_ready) {
         en = 0;
         sh = 0;
     }
@@ -3410,6 +3440,8 @@ static void run_triangle_chunk(RayCtx *ctx, const RayJob *job)
 #if WC3_DEBUG && WC3_DEBUG_PARALLEL
 static void run_phase_slice(RayCtx *ctx, const Wc3PhaseJob *pj, unsigned idx,
                             int main_chunk);
+static void *phase_worker_main(void *arg);
+static void wake_phase_workers(void);
 static int phase_run_job(Wc3PhaseJob *pj);
 #endif
 
@@ -3446,10 +3478,6 @@ static inline void run_job_chunk(RayCtx *ctx, const RayJob *job)
         run_vertex_chunk(ctx, job);
     else if (job->kind == RAY_JOB_TRIANGLE)
         run_triangle_chunk(ctx, job);
-#if WC3_DEBUG && WC3_DEBUG_PARALLEL
-    else if (job->kind == RAY_JOB_PHASE)
-        run_phase_slice(ctx, job->phase, (unsigned)ctx->index, 0);
-#endif
     else
         run_chunk(ctx, job);
 }
@@ -3920,8 +3948,8 @@ static void init_once(void)
     int phase_en = !env_off("WC3_PHASE");
     int phase_sh = env_on("WC3_PHASE_SHADOW");
     int phase_main_last = !env_off("WC3_PHASE_MAIN_LAST");
-    int phase_weighted = env_on("WC3_PHASE_WEIGHTED");
-    unsigned phase_chunks = env_u("WC3_PHASE_CHUNKS", 2u,
+    int phase_weighted = !env_off("WC3_PHASE_WEIGHTED");
+    unsigned phase_chunks = env_u("WC3_PHASE_CHUNKS", 4u,
                                   WC3_PARALLEL_MAX_WORKERS);
     if (phase_chunks == 1u) phase_chunks = 2u;
     unsigned phase_max = env_u("WC3_PHASE_MAX", 64u,
@@ -3933,7 +3961,7 @@ static void init_once(void)
     unsigned phase_stack = env_u("WC3_PHASE_STACK_ZERO", RAY_STACK_ZERO,
                                  RAY_STACK_ZERO_MAX);
     if (phase_stack < RAY_STACK_ZERO_MIN) phase_stack = RAY_STACK_ZERO_MIN;
-    unsigned phase_spin = env_u("WC3_PHASE_MAIN_SPIN_US", 1000u, 1000000u);
+    unsigned phase_spin = env_u("WC3_PHASE_MAIN_SPIN_US", 5000u, 1000000u);
 
     atomic_store_explicit(&g_phase_cfg.enabled, phase_en,
                           memory_order_relaxed);
@@ -4008,6 +4036,25 @@ static void init_once(void)
      * without a relaunch. */
     if (alloc_ctx(&g_phase_seq_ctx, g_workers)) {
         g_phase_seq_ctx_ready = 1;
+        uint32_t bytes =
+            WC3_PHASE_MAX_REQUESTS * WC3_PHASE_SLOT_STRIDE;
+        g_phase_container_base = hle_guest_alloc(bytes);
+        if (g_phase_container_base &&
+            hle_android_guest_ok(g_phase_container_base, bytes)) {
+            memset(guest_host_ptr(g_phase_container_base), 0, bytes);
+            g_phase_container_ready = 1;
+        } else {
+            fprintf(stderr,
+                    "[phase] container snapshot allocation failed\n");
+            g_phase.enabled = 0;
+            g_phase.shadow_enabled = 0;
+            atomic_store_explicit(&g_phase_cfg.enabled, 0,
+                                  memory_order_relaxed);
+            atomic_store_explicit(&g_phase_cfg.shadow, 0,
+                                  memory_order_relaxed);
+            atomic_store_explicit(&g_phase_cfg.dirty, 0,
+                                  memory_order_release);
+        }
     } else {
         fprintf(stderr, "[phase] sequential context allocation failed\n");
         g_phase.enabled = 0;
@@ -4081,6 +4128,38 @@ static void init_once(void)
         g_worker[i].thread_started = 1;
     }
 
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    /* Dedicated phase pool: the phase communicates only through its own
+     * mailbox and does not use the generic job path.  It is allocated
+     * unconditionally so a live phase=0 -> phase=1 tune change does not
+     * need a relaunch. */
+    g_phase_ctx = calloc((size_t)g_workers, sizeof *g_phase_ctx);
+    g_phase_thread = calloc((size_t)g_workers, sizeof *g_phase_thread);
+    if (!g_phase_ctx || !g_phase_thread) {
+        fprintf(stderr, "[phase] worker pool allocation failed\n");
+        goto fail;
+    }
+    for (unsigned i = 0; i < g_workers; i++) {
+        if (!alloc_ctx(&g_phase_ctx[i], i)) {
+            fprintf(stderr,
+                    "[phase] cannot allocate worker %u context\n", i);
+            goto fail;
+        }
+        g_phase_ctx[i].assigned_cpu = g_worker[i].assigned_cpu;
+    }
+    for (unsigned i = 0; i < g_workers; i++) {
+        if (pthread_create(&g_phase_thread[i], NULL, phase_worker_main,
+                           &g_phase_ctx[i]) != 0) {
+            fprintf(stderr, "[phase] cannot create worker %u\n", i);
+            goto fail;
+        }
+    }
+    g_phase_thread_count = g_workers;
+    g_phase_pool_ready = 1;
+    fprintf(stderr, "[phase] mailbox pool: %u worker(s)\n",
+            g_phase_thread_count);
+#endif
+
     g_parallel_ok = 1;
     atomic_store_explicit(&g_init_ok, 1, memory_order_release);
 #if WC3_DEBUG && WC3_DEBUG_PARALLEL
@@ -4143,6 +4222,28 @@ static void init_once(void)
 
 fail:
     atomic_store_explicit(&g_shutdown, 1, memory_order_release);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    atomic_store_explicit(&g_phase_shutdown, 1, memory_order_release);
+    if (g_phase_thread_count) {
+        wake_phase_workers();
+        for (unsigned i = 0; i < g_phase_thread_count; i++)
+            pthread_join(g_phase_thread[i], NULL);
+    }
+    if (g_phase_ctx) {
+        for (unsigned i = 0; i < g_phase_thread_count; i++) {
+            if (g_phase_ctx[i].wake_init) {
+                sem_destroy(&g_phase_ctx[i].wake);
+                g_phase_ctx[i].wake_init = 0;
+            }
+        }
+    }
+    free(g_phase_ctx);
+    free(g_phase_thread);
+    g_phase_ctx = NULL;
+    g_phase_thread = NULL;
+    g_phase_thread_count = 0;
+    g_phase_pool_ready = 0;
+#endif
     for (unsigned i = 0; i < g_workers; i++) {
         if (g_worker[i].thread_started)
             sem_post(&g_worker[i].wake);
@@ -4169,6 +4270,7 @@ fail:
         g_phase_seq_ctx.wake_init = 0;
     }
     g_phase_seq_ctx_ready = 0;
+    g_phase_container_ready = 0;
 #endif
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     if (g_triangle_ab_ctx.wake_init) {
@@ -4535,11 +4637,13 @@ static unsigned phase_worker_threads(void)
     return n;
 }
 
-/* Prepare one request on a private context.  The container snapshot is
- * copied into the worker's scratch so the original guest container is never
- * written.  The full CPU copy is deliberate: the shadow must reproduce the
- * sequential call exactly, and a product phase can later replace it with a
- * reset of only the fields the lifted chain is audited to dirty. */
+/* Prepare one request on a private context.  The request already owns a
+ * private guest container snapshot, so execution reads it directly and never
+ * touches the live container.  The hit path writes every output word before
+ * returning; a miss leaves the outputs unread, so no pre-clear is needed.
+ * The full CPU copy is deliberate: the shadow must reproduce the sequential
+ * call exactly, and a product phase can later replace it with a reset of only
+ * the fields the lifted chain is audited to dirty. */
 static int phase_prepare_request(RayCtx *ctx, const Wc3PhaseJob *pj,
                                  uint32_t i)
 {
@@ -4547,15 +4651,6 @@ static int phase_prepare_request(RayCtx *ctx, const Wc3PhaseJob *pj,
     const CPU *src = pj->req_cpu ? &pj->req_cpu[i] : pj->cpu;
 
     if (!src) return 0;
-    if (!hle_android_guest_ok(ctx->container, WC3_PHASE_CONTAINER_SNAP))
-        return 0;
-
-    memcpy(guest_host_ptr(ctx->container), r->snap, WC3_PHASE_CONTAINER_SNAP);
-    wr32(ctx->container + 0x110u, r->count);
-    wr32(ctx->container + 0x114u, r->array);
-
-    memset(guest_host_ptr(ctx->out_pos), 0, 12);
-    memset(guest_host_ptr(ctx->out_dist), 0, 4);
 
     if (pj->stack_zero) {
         if (ctx->stack_top <= ctx->stack_base + pj->stack_zero) return 0;
@@ -4564,7 +4659,7 @@ static int phase_prepare_request(RayCtx *ctx, const Wc3PhaseJob *pj,
     }
 
     prepare_base(ctx, src, 1);
-    ctx->cpu.ecx = ctx->container;
+    ctx->cpu.ecx = r->container;
     push_arg(&ctx->cpu, r->user_ctx);
     push_arg(&ctx->cpu, ctx->out_dist);
     push_arg(&ctx->cpu, ctx->out_pos);
@@ -4615,10 +4710,96 @@ static void run_phase_slice(RayCtx *ctx, const Wc3PhaseJob *pj, unsigned idx,
     t_ray_active = saved_active;
 }
 
+/* Wait for a new mailbox sequence.  The futex word is the low 32 bits of
+ * the mailbox (the sequence), so every publish changes the word the kernel
+ * compares.  A done bit in the high half does not need to wake this thread;
+ * a spurious wake is still safe because the loop re-checks the sequence. */
+static void phase_worker_wait(RayCtx *ctx, uint64_t word)
+{
+    (void)ctx;
+    uint64_t deadline = now_ns() + 100000ull;
+    while (atomic_load_explicit(&g_phase_mailbox,
+                                memory_order_acquire) == word) {
+        if (atomic_load_explicit(&g_phase_shutdown, memory_order_acquire))
+            return;
+        if (now_ns() >= deadline) break;
+        cpu_relax();
+    }
+    if (atomic_load_explicit(&g_phase_mailbox, memory_order_acquire) != word)
+        return;
+#if defined(__NR_futex)
+    if (g_shared_wake) {
+        (void)syscall(__NR_futex, (int *)(uintptr_t)&g_phase_mailbox,
+                      WC3_FUTEX_WAIT_PRIVATE, (int)(uint32_t)word,
+                      NULL, NULL, 0);
+        return;
+    }
+#endif
+    while (atomic_load_explicit(&g_phase_mailbox,
+                                memory_order_acquire) == word) {
+        if (atomic_load_explicit(&g_phase_shutdown, memory_order_acquire))
+            return;
+        cpu_relax();
+    }
+}
+
+static void wake_phase_workers(void)
+{
+#if defined(__NR_futex)
+    if (g_shared_wake)
+        (void)syscall(__NR_futex, (int *)(uintptr_t)&g_phase_mailbox,
+                      WC3_FUTEX_WAKE_PRIVATE, INT_MAX, NULL, NULL, 0);
+#else
+    (void)g_shared_wake;
+#endif
+}
+
+static void *phase_worker_main(void *arg)
+{
+    RayCtx *ctx = (RayCtx *)arg;
+    char name[16];
+    snprintf(name, sizeof name, "wc3-phase-%d", ctx->index);
+    (void)pthread_setname_np(pthread_self(), name);
+    apply_worker_affinity(ctx);
+
+    for (;;) {
+        if (atomic_load_explicit(&g_phase_shutdown, memory_order_acquire))
+            break;
+        uint64_t word = atomic_load_explicit(&g_phase_mailbox,
+                                             memory_order_acquire);
+        uint32_t seq = (uint32_t)word;
+        if (seq == ctx->phase_seen) {
+            phase_worker_wait(ctx, word);
+            continue;
+        }
+        ctx->phase_seen = seq;
+        const Wc3PhaseJob *pj = g_phase_job;
+        uint32_t active = pj->active;
+        if ((unsigned)ctx->index >= active) {
+            atomic_store_explicit(&ctx->phase_ack, seq, memory_order_release);
+            continue;
+        }
+        run_phase_slice(ctx, pj, (unsigned)ctx->index, 0);
+        uint32_t bit = 1u << ctx->index;
+        if (active == 1u) {
+            atomic_store_explicit(&g_phase_mailbox,
+                                  (uint64_t)seq | ((uint64_t)bit << 32),
+                                  memory_order_release);
+        } else {
+            atomic_fetch_or_explicit(&g_phase_mailbox,
+                                     (uint64_t)bit << 32,
+                                     memory_order_release);
+        }
+        atomic_store_explicit(&ctx->phase_ack, seq, memory_order_release);
+    }
+    return NULL;
+}
+
 static int phase_run_job(Wc3PhaseJob *pj)
 {
     if (!ready()) return 0;
     if (!g_phase.enabled && !g_phase.shadow_busy) return 0;
+    if (!g_phase_pool_ready) return 0;
     if (pj->total < 2u) return 0;
 
     uint64_t run_t0 = now_ns();
@@ -4646,45 +4827,98 @@ static int phase_run_job(Wc3PhaseJob *pj)
         phase_set_split(pj, chunks);
 
     unsigned active = phase_active_chunks(pj);
-    if (!active) {
+    if (!active || active > WC3_PHASE_MAILBOX_MAX_WORKERS) {
         atomic_store_explicit(&g_phase_busy, 0, memory_order_release);
         return 0;
     }
 
-    RayJob job;
-    memset(&job, 0, sizeof job);
-    job.kind = RAY_JOB_PHASE;
-    job.phase = pj;
     pj->active = active;
     pj->failed = 0;
 
     int saved_active = t_ray_active;
     t_ray_active = 1;
 
-    uint64_t seq = publish_job((uintptr_t)&job, active);
+    /* One publish: publish the job pointer, then release-store the mailbox
+     * sequence.  The job lives on the caller's frame until this function
+     * returns, and the caller waits for every active worker before returning,
+     * so the pointer is valid for the whole slice.  The sequence is the
+     * low 32 bits and the futex word; the done mask is the high 32 bits. */
+    g_phase_job = pj;
+    uint32_t seq = ++g_phase_seq;
+    atomic_store_explicit(&g_phase_mailbox, (uint64_t)seq,
+                          memory_order_release);
+
     uint64_t t1 = now_ns();
-    wake_workers(active);
+    wake_phase_workers();
     uint64_t t2 = now_ns();
 
     if (pj->main_last) {
-        RayCtx *main_ctx = &g_worker[pj->chunks - 1u];
-        run_phase_slice(main_ctx, pj, pj->chunks - 1u, 1);
+        RayCtx *main_ctx = &g_worker[chunks - 1u];
+        run_phase_slice(main_ctx, pj, chunks - 1u, 1);
     }
 
-    wait_for_workers(active, seq, g_phase.spin_us);
+    uint32_t mask = active >= 32u ? 0xFFFFFFFFu : ((1u << active) - 1u);
+    uint64_t deadline = now_ns() + (uint64_t)g_phase.spin_us * 1000ull;
+    unsigned loops = 0;
+    for (;;) {
+        uint64_t w = atomic_load_explicit(&g_phase_mailbox,
+                                          memory_order_acquire);
+        if ((uint32_t)w == seq && (uint32_t)(w >> 32) == mask)
+            break;
+        if (g_phase.spin_us &&
+            ((++loops & 0x7Fu) != 0u || now_ns() < deadline)) {
+            cpu_relax();
+            continue;
+        }
+        break;
+    }
+    while (1) {
+        uint64_t w = atomic_load_explicit(&g_phase_mailbox,
+                                          memory_order_acquire);
+        if ((uint32_t)w == seq && (uint32_t)(w >> 32) == mask)
+            break;
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = RAY_WAIT_SLEEP_NS;
+        (void)nanosleep(&ts, NULL);
+    }
+
+    /* The done mask covers only active workers.  An inactive worker still has
+     * to read the published job pointer to learn that it is inactive, and the
+     * publisher does not wait for it in the mask loop above.  Wait for every
+     * worker to acknowledge the sequence before the caller's job frame can go
+     * away; otherwise a descheduled inactive worker can dereference a stale
+     * pointer after the frame has been reused. */
+    for (;;) {
+        int all = 1;
+        for (unsigned i = 0; i < g_phase_thread_count; i++) {
+            if (atomic_load_explicit(&g_phase_ctx[i].phase_ack,
+                                     memory_order_acquire) != seq) {
+                all = 0;
+                break;
+            }
+        }
+        if (all)
+            break;
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = RAY_WAIT_SLEEP_NS;
+        (void)nanosleep(&ts, NULL);
+    }
+    g_phase_job = NULL;
     uint64_t t3 = now_ns();
 
-    atomic_store_explicit(&g_job_addr, 0, memory_order_release);
-    atomic_store_explicit(&g_phase_busy, 0, memory_order_release);
-    t_ray_active = saved_active;
-
     int failed = 0;
-    for (unsigned i = 0; i < pj->chunks; i++) {
+    for (unsigned i = 0; i < active; i++) {
         if (!pj->chunk_len[i]) continue;
-        if (g_worker[i].phase_failed) {
+        if (g_phase_ctx[i].phase_failed) {
             failed = 1;
             break;
         }
+    }
+    if (!failed && pj->main_last && chunks) {
+        if (g_worker[chunks - 1u].phase_failed)
+            failed = 1;
     }
     pj->failed = failed;
 
@@ -4693,14 +4927,17 @@ static int phase_run_job(Wc3PhaseJob *pj)
     g_phase.last_run_ns = t3 - run_t0;
     g_phase.last_max_slice_ns = 0;
     for (unsigned i = 0; i < active; i++) {
-        if (g_worker[i].phase_slice_ns > g_phase.last_max_slice_ns)
-            g_phase.last_max_slice_ns = g_worker[i].phase_slice_ns;
+        if (g_phase_ctx[i].phase_slice_ns > g_phase.last_max_slice_ns)
+            g_phase.last_max_slice_ns = g_phase_ctx[i].phase_slice_ns;
     }
-    if (pj->main_last && pj->chunks) {
-        uint64_t main_ns = g_worker[pj->chunks - 1u].phase_slice_ns;
+    if (pj->main_last && chunks) {
+        uint64_t main_ns = g_worker[chunks - 1u].phase_slice_ns;
         if (main_ns > g_phase.last_max_slice_ns)
             g_phase.last_max_slice_ns = main_ns;
     }
+
+    atomic_store_explicit(&g_phase_busy, 0, memory_order_release);
+    t_ray_active = saved_active;
     return !failed;
 }
 
@@ -4742,6 +4979,8 @@ void wc3_phase_commit(CPU *c, wc3_lifted_fn fn, uint32_t container,
     uint64_t bytes;
 
     if (!g_phase.reserved) phase_commit_fail("no reserved slot");
+    if (!g_phase_container_ready)
+        phase_commit_fail("container snapshot unavailable");
     index = g_phase.count + g_phase.reserved - 1u;
     if (index >= WC3_PHASE_MAX_REQUESTS) phase_commit_fail("slot out of range");
     if (!c || !fn || !container || count == 0u || count > 0x100000u)
@@ -4764,22 +5003,28 @@ void wc3_phase_commit(CPU *c, wc3_lifted_fn fn, uint32_t container,
 
     r = &g_phase.req[index];
     r->index = index;
-    r->container = container;
     r->array = array;
     r->count = count;
-    r->in1 = in1;
-    r->in2 = in2;
     r->out_pos = out_pos;
     r->out_dist = out_dist;
+    r->in1 = in1;
+    r->in2 = in2;
     r->user_ctx = user_ctx;
-    r->hit = 0;
-    r->dist_bits = 0;
-    r->pos[0] = r->pos[1] = r->pos[2] = 0;
     r->frame_va = frame_va;
     r->frame_len = frame_len;
     if (frame_len)
         memcpy(r->frame, guest_host_ptr(frame_va), frame_len);
-    memcpy(r->snap, guest_host_ptr(container), WC3_PHASE_CONTAINER_SNAP);
+
+    /* One copy at collect time replaces the per-run copy into a worker
+     * scratch.  The slot is private to this request and is read-only while
+     * the phase runs. */
+    uint32_t slot = phase_container_slot(index);
+    memcpy(guest_host_ptr(slot), guest_host_ptr(container),
+           WC3_PHASE_CONTAINER_SNAP);
+    wr32(slot + 0x110u, count);
+    wr32(slot + 0x114u, array);
+    r->container = slot;
+
     g_phase_cpu[index] = *c;
     g_phase_level_count[index] = 0;
     g_phase.fn = fn;
@@ -4923,7 +5168,7 @@ int wc3_phase_run_or_seq(void)
 
     if (!g_phase.enabled || !g_phase.count) return 0;
     if (wc3_phase_run()) return 1;
-    if (!g_phase_seq_ctx_ready) return 0;
+    if (!g_phase_seq_ctx_ready || !g_phase_container_ready) return 0;
 
     memset(&pj, 0, sizeof pj);
     pj.req = g_phase.req;
@@ -5028,7 +5273,7 @@ static void phase_shadow_flush(void)
     if (!n) return;
 
     g_phase.shadow_busy = 1;
-    if (!g_phase_seq_ctx_ready) {
+    if (!g_phase_seq_ctx_ready || !g_phase_container_ready) {
         g_phase.count = 0;
         g_phase.reserved = 0;
         g_phase.shadow_busy = 0;
@@ -5069,11 +5314,18 @@ static void phase_shadow_flush(void)
     int equal = par_ok && seq_ok;
     if (par_ok && seq_ok) {
         for (uint32_t i = 0; i < n; i++) {
-            if (g_phase.req[i].hit != g_phase.seq_result[i].hit ||
-                g_phase.req[i].dist_bits != g_phase.seq_result[i].dist_bits ||
-                g_phase.req[i].pos[0] != g_phase.seq_result[i].pos[0] ||
-                g_phase.req[i].pos[1] != g_phase.seq_result[i].pos[1] ||
-                g_phase.req[i].pos[2] != g_phase.seq_result[i].pos[2]) {
+            const Wc3PhaseRequest *p = &g_phase.req[i];
+            const Wc3PhaseResult *s = &g_phase.seq_result[i];
+            /* A miss has no defined dist/pos.  Compare those words only on
+             * a hit; otherwise a stale value from an earlier request in the
+             * same chunk would look like a mismatch even though apply never
+             * reads it. */
+            if (p->hit != s->hit ||
+                (p->hit &&
+                 (p->dist_bits != s->dist_bits ||
+                  p->pos[0] != s->pos[0] ||
+                  p->pos[1] != s->pos[1] ||
+                  p->pos[2] != s->pos[2]))) {
                 equal = 0;
                 mismatch++;
             }
@@ -5112,7 +5364,7 @@ static void phase_shadow_capture(CPU *c, wc3_lifted_fn fn, uint32_t container,
                                  uint32_t total)
 {
     phase_sync_config();
-    if (!g_phase_seq_ctx_ready) return;
+    if (!g_phase_seq_ctx_ready || !g_phase_container_ready) return;
     if (g_phase.enabled) return;
     if (g_phase.shadow_busy) return;
 
@@ -5149,23 +5401,25 @@ static void phase_shadow_capture(CPU *c, wc3_lifted_fn fn, uint32_t container,
         phase_shadow_flush();
     if (g_phase.count >= WC3_PHASE_MAX_REQUESTS) return;
 
-    Wc3PhaseRequest *r = &g_phase.req[g_phase.count];
-    r->index = g_phase.count;
-    r->container = container;
+    uint32_t index = g_phase.count;
+    uint32_t slot = phase_container_slot(index);
+    Wc3PhaseRequest *r = &g_phase.req[index];
+    r->index = index;
     r->array = array;
     r->count = total;
-    r->in1 = rd32(sp + 4u);
-    r->in2 = rd32(sp + 8u);
     r->out_pos = rd32(sp + 12u);
     r->out_dist = rd32(sp + 16u);
+    r->in1 = rd32(sp + 4u);
+    r->in2 = rd32(sp + 8u);
     r->user_ctx = rd32(sp + 20u);
-    r->hit = 0;
-    r->dist_bits = 0;
-    r->pos[0] = r->pos[1] = r->pos[2] = 0;
     r->frame_va = 0;
     r->frame_len = 0;
-    memcpy(r->snap, guest_host_ptr(container), WC3_PHASE_CONTAINER_SNAP);
-    g_phase_cpu[g_phase.count] = *c;
+    memcpy(guest_host_ptr(slot), guest_host_ptr(container),
+           WC3_PHASE_CONTAINER_SNAP);
+    wr32(slot + 0x110u, total);
+    wr32(slot + 0x114u, array);
+    r->container = slot;
+    g_phase_cpu[index] = *c;
     g_phase.fn = fn;
     g_phase.count++;
     g_phase.captures++;
