@@ -23,6 +23,10 @@ typedef enum {
     /* Semantic battlefield gestures: resolved by the guest-side executor
      * against the live selection/world state. */
     WC3_DIRECT_TOUCH_TAP = 1,
+    /* Reserved.  The field long press is now a native left-button press
+     * expressed as FIELD_SELECT_BEGIN at the deadline.  Keep the value for
+     * queued events from an older build; the executor no longer runs a
+     * semantic selection for it. */
     WC3_DIRECT_TOUCH_LONG_PRESS = 2,
     /* Raw pointer phases for native UI: minimap, command card, resource
      * bar, menus, and targeting/placement.  The guest-side service turns
@@ -58,13 +62,13 @@ typedef enum {
     WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN = 9,
     WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE = 10,
     WC3_DIRECT_TOUCH_FIELD_CAMERA_END = 11,
-    /* Field selection drag.  A long press that is still held when the finger
-     * moves starts the native left-button drag (legacy longPressDragAction),
-     * so the game draws and commits its own selection rectangle.  BEGIN is
-     * emitted at the point where the drag crossed the threshold, MOVE for
-     * later positions, and END on release.  The long-press haptic already
-     * fired on the deadline; the semantic LONG_PRESS event is not emitted
-     * for this gesture.  These events are only valid on the FIELD route. */
+    /* Field selection press.  BEGIN is emitted at the long-press deadline:
+     * the executor posts WM_LBUTTONDOWN and keeps it down.  MOVE carries
+     * every later finger position and END carries the release, which posts
+     * the matching WM_LBUTTONUP.  A stationary release is therefore a native
+     * left click that selects one unit; a drag is the native selection
+     * rectangle (legacy longPressDragAction).  These events are only valid
+     * on the FIELD route. */
     WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN = 12,
     WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE = 13,
     WC3_DIRECT_TOUCH_FIELD_SELECT_END = 14
@@ -79,9 +83,11 @@ typedef enum {
  *         the host has no sink), or the touch hits an overlay control
  *         element.  This is not a per-feature fallback.
  * FIELD:  the touch is in the battlefield and CSelectMode owns input.  Use
- *         the semantic tap/long-press recognizer, plus the native middle-
- *         button camera drag for a quick swipe and the native left-button
- *         selection drag for a long press that keeps moving.
+ *         the semantic tap recognizer, the native middle-button camera drag
+ *         for a quick swipe, and the native left-button selection press at
+ *         the long-press deadline.  The left button stays down until the
+ *         finger is released, so a stationary hold is a native click and a
+ *         drag is a native box selection.
  * NATIVE: the touch belongs to the native UI (HUD, menu, targeting or
  *         placement).  Forward raw pointer phases so the guest-side service
  *         can post native mouse messages.  The service claims a gesture that

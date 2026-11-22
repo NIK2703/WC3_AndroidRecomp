@@ -117,6 +117,8 @@ static Wc3DirectTouchMinimapRectGate g_direct_touch_minimap_gate;
 static void *g_direct_touch_minimap_gate_user;
 static Wc3DirectTouchBeaconRectGate g_direct_touch_beacon_gate;
 static void *g_direct_touch_beacon_gate_user;
+static Wc3DirectTouchCommandRectGate g_direct_touch_command_gate;
+static void *g_direct_touch_command_gate_user;
 static Wc3DirectTouchHapticSink g_direct_touch_haptic_sink;
 static void *g_direct_touch_haptic_user;
 /* Legacy profile default; direct_touch_configure() replaces it with the
@@ -766,17 +768,21 @@ static int direct_owner_portrait_active(void) {
 
 /*
  * The field rectangle is a product boundary, not a native hit test.  It is
- * the central battlefield region; everything outside it is native HUD
- * (minimap, command card, resource bar, top menu).  The overlay hit test and
- * the portrait rectangle run first, so an on-screen control keeps the legacy
- * engine and the portrait keeps its own camera semantics.
+ * the battlefield region down to the console's top edge; everything below
+ * it is native HUD (minimap, portrait, command card, resource bar, top
+ * menu).  In surface coordinates the minimap starts at about 0.855 and the
+ * command card at 0.782, so the card's top row overlaps the field; the
+ * command gate claims it for NATIVE before the field test.  A 0.72 bottom
+ * dropped real world releases above the console.  The overlay hit test and
+ * the portrait/minimap/beacon/command rect gates run first, so an on-screen
+ * control keeps its own semantics.
  */
 static int direct_touch_field_contains(float x, float y) {
     if (g_width <= 0 || g_height <= 0) return 0;
     const float left = (float)g_width * 0.03f;
     const float right = (float)g_width * 0.97f;
     const float top = (float)g_height * 0.10f;
-    const float bottom = (float)g_height * 0.72f;
+    const float bottom = (float)g_height * 0.85f;
     return x >= left && x <= right && y >= top && y <= bottom;
 }
 
@@ -826,6 +832,12 @@ static int direct_touch_beacon_contains(float x, float y) {
                                       x, y);
 }
 
+static int direct_touch_command_contains(float x, float y) {
+    return direct_touch_rect_contains(g_direct_touch_command_gate,
+                                      g_direct_touch_command_gate_user,
+                                      x, y);
+}
+
 /*
  * Decide who owns a non-overlay touch.  In FULL direct mode the legacy
  * engine is only for overlay elements: a battlefield touch in CSelectMode
@@ -856,7 +868,7 @@ static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
         const float fl = (float)g_width * 0.03f;
         const float fr = (float)g_width * 0.97f;
         const float ft = (float)g_height * 0.10f;
-        const float fb = (float)g_height * 0.72f;
+        const float fb = (float)g_height * 0.85f;
         WC3_CTRL_LOG("dt route-in px=%.1f,%.1f n=%.4f,%.4f "
                      "size=%dx%d overlay=%d enabled=%d sink=%d "
                      "gate=%s field=%d field_rect=%.1f,%.1f..%.1f,%.1f",
@@ -870,6 +882,8 @@ static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
                                 g_direct_touch_portrait_gate_user);
         direct_touch_trace_gate("minimap", g_direct_touch_minimap_gate,
                                 g_direct_touch_minimap_gate_user);
+        direct_touch_trace_gate("command", g_direct_touch_command_gate,
+                                g_direct_touch_command_gate_user);
     }
 #endif
     if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) {
@@ -888,6 +902,12 @@ static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
     }
     if (direct_touch_minimap_contains(x, y)) {
         DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_MINIMAP, "minimap");
+    }
+    /* The command card's top row starts above the field bottom, so the
+     * generic FIELD test would claim it.  Claim the whole card for NATIVE
+     * first; the guest command handler then hit-tests the real buttons. */
+    if (direct_touch_command_contains(x, y)) {
+        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "command");
     }
     if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD &&
         direct_touch_field_contains(x, y)) {
@@ -956,6 +976,8 @@ void controls_set_direct_touch_sink(Wc3DirectTouchSink sink, void *user) {
         g_direct_touch_minimap_gate_user = NULL;
         g_direct_touch_beacon_gate = NULL;
         g_direct_touch_beacon_gate_user = NULL;
+        g_direct_touch_command_gate = NULL;
+        g_direct_touch_command_gate_user = NULL;
     }
     if (g_initialized) {
         wc3_direct_touch_set_sink(&g_direct_touch, sink, user);
@@ -984,6 +1006,12 @@ void controls_set_direct_touch_beacon_gate(
     Wc3DirectTouchBeaconRectGate gate, void *user) {
     g_direct_touch_beacon_gate = gate;
     g_direct_touch_beacon_gate_user = user;
+}
+
+void controls_set_direct_touch_command_gate(
+    Wc3DirectTouchCommandRectGate gate, void *user) {
+    g_direct_touch_command_gate = gate;
+    g_direct_touch_command_gate_user = user;
 }
 
 /*

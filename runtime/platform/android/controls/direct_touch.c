@@ -48,7 +48,6 @@ static const char *dt_mode_name(uint8_t mode)
 {
     switch (mode) {
     case WC3_DIRECT_TOUCH_FIELD_PENDING: return "PENDING";
-    case WC3_DIRECT_TOUCH_FIELD_HOLD: return "HOLD";
     case WC3_DIRECT_TOUCH_FIELD_CAMERA: return "CAMERA";
     case WC3_DIRECT_TOUCH_FIELD_SELECT: return "SELECT";
     default: return "?";
@@ -106,10 +105,10 @@ static void fire_haptic(Wc3DirectTouch *dt)
         dt->haptic(dt->haptic_effect, dt->haptic_user);
 }
 
-/* Only a field pointer can become a semantic hold.  The deadline is checked
- * in both tick() and move(): a batch can deliver a MOVE after the deadline
- * but before the next tick, and that move must become a selection drag, not
- * a camera swipe. */
+/* Only a field pointer can become a native selection press.  The deadline is
+ * checked in both tick() and move(): a batch can deliver a MOVE after the
+ * deadline but before the next tick, and that move must become a selection
+ * move, not a camera swipe. */
 static int hold_due(const Wc3DirectTouch *dt,
                     const Wc3DirectTouchPointer *pointer, uint64_t now_ms)
 {
@@ -124,13 +123,22 @@ static int hold_due(const Wc3DirectTouch *dt,
            now_ms - pointer->down_ms >= timeout;
 }
 
-static void arm_hold(Wc3DirectTouch *dt, Wc3DirectTouchPointer *pointer)
+static void arm_hold(Wc3DirectTouch *dt, Wc3DirectTouchPointer *pointer,
+                     float x, float y, uint64_t now_ms)
 {
     pointer->long_fired = 1;
-    pointer->mode = WC3_DIRECT_TOUCH_FIELD_HOLD;
+    pointer->mode = WC3_DIRECT_TOUCH_FIELD_SELECT;
     /* The legacy engine plays gestureLongPressHaptic exactly when the
      * long-press timer expires, before any drag. */
     fire_haptic(dt);
+    /* The long press is the native left-button press-and-hold.  Emit the
+     * BEGIN at the deadline so the executor posts WM_LBUTTONDOWN and keeps
+     * it down; moves in between are the native selection rectangle and the
+     * release posts the matching UP.  A stationary release is therefore a
+     * native click that selects one unit. */
+    DT_LOG("hold ptr=%d -> SELECT_BEGIN", pointer->pointer_id);
+    emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN, pointer->pointer_id,
+               x, y, now_ms, pointer->route);
 }
 
 static int active_count(const Wc3DirectTouch *dt)
@@ -297,7 +305,7 @@ void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
      * as a selection drag, not as a camera swipe. */
     if (hold_due(dt, pointer, now_ms)) {
         DT_LOG("move ptr=%d hold-due -> arm", pointer_id);
-        arm_hold(dt, pointer);
+        arm_hold(dt, pointer, x, y, now_ms);
     }
 
     const float moved_sq =
@@ -314,18 +322,6 @@ void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
     case WC3_DIRECT_TOUCH_FIELD_SELECT:
         emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE, pointer_id,
                    x, y, now_ms, pointer->route);
-        break;
-    case WC3_DIRECT_TOUCH_FIELD_HOLD:
-        if (moved_sq > drag_threshold_sq(dt)) {
-            /* The legacy long-press drag binding is the left button: start
-             * the native selection rectangle at the point where the finger
-             * crossed the threshold.  The deferred long-press action is
-             * cancelled. */
-            pointer->mode = WC3_DIRECT_TOUCH_FIELD_SELECT;
-            DT_LOG("move ptr=%d HOLD -> SELECT", pointer_id);
-            emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN, pointer_id,
-                       x, y, now_ms, pointer->route);
-        }
         break;
     case WC3_DIRECT_TOUCH_FIELD_PENDING:
     default:
@@ -371,7 +367,7 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
     }
     if (pointer->route != WC3_DIRECT_TOUCH_ROUTE_FIELD) {
         /* Raw NATIVE/MINIMAP ownership ends here; controls.c already sent
-         * the matching raw UP.  Never turn it into TAP or LONG_PRESS. */
+         * the matching raw UP.  Never turn it into TAP or a field selection. */
         DT_LOG("up ptr=%d route=%s raw -> no semantic", pointer_id,
                dt_route_name(pointer->route));
         memset(pointer, 0, sizeof(*pointer));
@@ -399,28 +395,18 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
                    x, y, now_ms, pointer->route);
         memset(pointer, 0, sizeof(*pointer));
         return;
-    case WC3_DIRECT_TOUCH_FIELD_HOLD:
-        if (!pointer->multi) {
-            DT_LOG("up ptr=%d HOLD -> LONG_PRESS", pointer_id);
-            /* The hold was armed by the deadline tick (or by a late UP).
-             * Without a drag it keeps the previous semantic long-press
-             * action; a drag would have emitted SELECT_BEGIN instead. */
-            emit_event(dt, WC3_DIRECT_TOUCH_LONG_PRESS, pointer_id,
-                       x, y, now_ms, pointer->route);
-        }
-        memset(pointer, 0, sizeof(*pointer));
-        return;
     case WC3_DIRECT_TOUCH_FIELD_PENDING:
     default:
         if (!pointer->multi) {
             if (held_long) {
-                /* The tick was late.  Arm the hold, fire its haptic and
-                 * emit the semantic action instead of degrading into a tap
-                 * at the release point. */
-                DT_LOG("up ptr=%d late-hold -> LONG_PRESS", pointer_id);
-                fire_haptic(dt);
-                emit_event(dt, WC3_DIRECT_TOUCH_LONG_PRESS, pointer_id,
-                           x, y, now_ms, pointer->route);
+                /* The tick was late.  The finger is already up, so press
+                 * and release the native left button in one step instead of
+                 * degrading into a tap or leaving the button latched. */
+                DT_LOG("up ptr=%d late-hold -> SELECT_BEGIN/END",
+                       pointer_id);
+                arm_hold(dt, pointer, x, y, now_ms);
+                emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END,
+                           pointer_id, x, y, now_ms, pointer->route);
             } else if (moved_sq <= drag_threshold_sq(dt)) {
                 /* A fast flick can arrive as DOWN+UP with no MOVE at all;
                  * the release point must still be inside the legacy drag
@@ -470,7 +456,7 @@ int wc3_direct_touch_tick(Wc3DirectTouch *dt, uint64_t now_ms)
         Wc3DirectTouchPointer *pointer = &dt->pointers[i];
         if (!pointer->active || !hold_due(dt, pointer, now_ms)) continue;
         DT_LOG("tick ptr=%d hold-due -> arm", pointer->pointer_id);
-        arm_hold(dt, pointer);
+        arm_hold(dt, pointer, pointer->last_x, pointer->last_y, now_ms);
         armed++;
     }
     return armed;

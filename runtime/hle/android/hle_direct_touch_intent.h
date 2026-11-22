@@ -26,16 +26,6 @@ enum {
 };
 
 /*
- * Phase-1 owner rule: the local player and the three neutral non-hostile
- * owners select; every other owner is an order target.  This is deliberately
- * not an alliance query (see the analysis document, section 4.4).
- */
-static inline int wc3_dt_owner_is_friendly(uint16_t owner, uint16_t local)
-{
-    return owner == local || owner == 12u || owner == 14u || owner == 15u;
-}
-
-/*
  * Surface-normalised coordinate to client pixel float.  This is the same
  * clamp+offset the existing mouse path uses: nx*(win-1)+0.5.  The native
  * producer truncates the float when it builds the input event; use
@@ -54,6 +44,25 @@ static inline float wc3_dt_surface_to_client(float fraction, uint32_t win)
 static inline float wc3_dt_client_pixel(float fraction, uint32_t win)
 {
     return (float)(int)wc3_dt_surface_to_client(fraction, win);
+}
+
+/*
+ * Command card, inventory and selected-unit grid frames live in the game's
+ * 800x600 console space, not in surface fractions.  The native input
+ * producer 0x6F8B38A0 scales the surface point by 0.8 horizontally and 0.6
+ * vertically before the frame hit-test, and CFrame+0x44 stores the rect in
+ * that same space.  dt_frame_rect_read() already flips the raw bottom-left
+ * rect onto the overlay top-left axis, so this only undoes the remaining
+ * console scale: x/0.8 and (y - 0.4)/0.6.  The minimap, portrait and beacon
+ * are full-surface frames and must not go through this.
+ */
+static inline void wc3_dt_console_rect_scale(float *left, float *top,
+                                             float *right, float *bottom)
+{
+    if (left) *left /= 0.8f;
+    if (right) *right /= 0.8f;
+    if (top) *top = (*top - 0.4f) / 0.6f;
+    if (bottom) *bottom = (*bottom - 0.4f) / 0.6f;
 }
 
 /*
@@ -144,34 +153,6 @@ static inline Wc3DtTapIntent wc3_dt_tap_intent(int pick_result,
     return WC3_DT_INTENT_NONE;
 }
 
-typedef enum {
-    WC3_DT_LONG_INTENT_NONE = 0,
-    WC3_DT_LONG_INTENT_SELECT_UNIT,
-    WC3_DT_LONG_INTENT_ORDER_UNIT,
-    WC3_DT_LONG_INTENT_CLEAR_SELECTION
-} Wc3DtLongPressIntent;
-
-/*
- * Long press forces a selection change: a selectable unit replaces the
- * current selection even when a controlled unit is already selected.  A
- * hostile unit keeps the force-attack order (selecting an enemy would be a
- * different game action), and terrain clears the selection.
- */
-static inline Wc3DtLongPressIntent wc3_dt_long_press_intent(int pick_result,
-                                                            int validated_object,
-                                                            int is_unit,
-                                                            int target_selectable)
-{
-    if (pick_result == WC3_DT_PICK_OBJECT && validated_object) {
-        if (!is_unit) return WC3_DT_LONG_INTENT_NONE;
-        if (target_selectable) return WC3_DT_LONG_INTENT_SELECT_UNIT;
-        return WC3_DT_LONG_INTENT_ORDER_UNIT;
-    }
-    if (pick_result == WC3_DT_PICK_TERRAIN)
-        return WC3_DT_LONG_INTENT_CLEAR_SELECTION;
-    return WC3_DT_LONG_INTENT_NONE;
-}
-
 /* Beacon button (MinimapSignal) release decision.  A release on the button
  * arms the next minimap tap; a release over the minimap places there; a
  * release over the field places at the world point; any other drag cancels. */
@@ -202,9 +183,26 @@ static inline Wc3DtBeaconRelease wc3_dt_beacon_release(int inside_button,
 }
 
 /*
- * Command-card release.  The DOWN already selected the command, so a release
- * only confirms a targeted/area command when the drag ended over the field.
- * A tap, a non-targeted command, or a release outside the field is a no-op.
+ * Command-card movement threshold.  The recognizer routes a MOVE that leaves
+ * the HUD over the field path, so the command handler may not see every MOVE
+ * of a drag.  Recompute movement from the DOWN and UP points; otherwise a
+ * drag into the field looks like a tap and the target click is lost.
+ */
+static inline int wc3_dt_command_moved(float down_x, float down_y,
+                                       float up_x, float up_y,
+                                       float slop)
+{
+    const float dx = up_x - down_x;
+    const float dy = up_y - down_y;
+    return dx * dx + dy * dy > slop * slop;
+}
+
+/*
+ * Command-card release.  The DOWN click selects the command and, for a
+ * targeted/area command, enters the game's target mode; the drag only moves
+ * the cursor.  `targeted` is the live target mode at release.  The release
+ * confirms the target only when the drag ended over the field.  A tap, an
+ * unarmed command, or a release outside the field posts no field click.
  */
 typedef enum {
     WC3_DT_COMMAND_NONE = 0,

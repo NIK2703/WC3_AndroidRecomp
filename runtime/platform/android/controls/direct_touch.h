@@ -25,7 +25,6 @@ extern "C" {
  * long-press slop. */
 typedef enum {
     WC3_DIRECT_TOUCH_FIELD_PENDING = 0,
-    WC3_DIRECT_TOUCH_FIELD_HOLD,
     WC3_DIRECT_TOUCH_FIELD_CAMERA,
     WC3_DIRECT_TOUCH_FIELD_SELECT
 } Wc3DirectTouchFieldMode;
@@ -91,8 +90,13 @@ void wc3_direct_touch_set_size(Wc3DirectTouch *dt, float width, float height);
  * shorthand.  A PORTRAIT down emits FOLLOW_START immediately and keeps that
  * pointer owned by the portrait until its UP, regardless of later movement.
  * A FIELD down stays pending: a move beyond drag_threshold_px before the
- * long-press deadline emits FIELD_CAMERA_BEGIN, and a move after the hold
- * fired emits FIELD_SELECT_BEGIN.  Raw pointer phases always carry NATIVE. */
+ * long-press deadline emits FIELD_CAMERA_BEGIN.  At the deadline the pointer
+ * emits FIELD_SELECT_BEGIN and stays in FIELD_SELECT until the finger is
+ * released; every move in between emits FIELD_SELECT_MOVE and the release
+ * emits FIELD_SELECT_END.  The executor turns BEGIN into a native left-button
+ * DOWN, each MOVE into a native mouse move, and END into the matching UP, so a
+ * stationary hold is a native click and a drag is a native box selection.
+ * Raw pointer phases always carry NATIVE. */
 void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
                                  float x, float y, uint64_t now_ms,
                                  uint32_t route);
@@ -109,10 +113,11 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
 void wc3_direct_touch_reset(Wc3DirectTouch *dt);
 
 /*
- * Arm field holds whose deadline has expired and fire the haptic once per
- * pointer.  Returns the number of holds armed.  The semantic LONG_PRESS is
- * emitted on UP if the finger never crossed the drag threshold; a move after
- * the hold emits FIELD_SELECT_BEGIN instead.
+ * Arm field holds whose deadline has expired, fire the haptic once per
+ * pointer, and emit FIELD_SELECT_BEGIN at the hold point.  Returns the number
+ * of holds armed.  The pointer then stays in FIELD_SELECT: moves emit
+ * FIELD_SELECT_MOVE and the release emits FIELD_SELECT_END, so the executor
+ * can keep the native left button down for the whole gesture.
  */
 int wc3_direct_touch_tick(Wc3DirectTouch *dt, uint64_t now_ms);
 

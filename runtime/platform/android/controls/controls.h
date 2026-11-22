@@ -114,6 +114,17 @@ typedef Wc3DirectTouchRectGate Wc3DirectTouchBeaconRectGate;
 void controls_set_direct_touch_beacon_gate(
     Wc3DirectTouchBeaconRectGate gate, void *user);
 
+/*
+ * Lock-free command-card rectangle supplied by the host, same contract as
+ * the beacon gate.  The card's top row overlaps the battlefield rectangle
+ * (the card starts above the field bottom), so a touch that starts inside
+ * the card is forced to the raw NATIVE route; otherwise the field
+ * recognizer would turn a command-card press into a world tap.
+ */
+typedef Wc3DirectTouchRectGate Wc3DirectTouchCommandRectGate;
+void controls_set_direct_touch_command_gate(
+    Wc3DirectTouchCommandRectGate gate, void *user);
+
 /* Profile JSON must stay valid only for the duration of this call. */
 int controls_init(const char *profile_json, int width, int height);
 

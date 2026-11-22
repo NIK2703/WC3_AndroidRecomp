@@ -3,7 +3,8 @@
  *
  * The queue is the host/HLE boundary: it must preserve order, drop cleanly
  * when full, and never expose a partial event.  The recognizer is the other
- * half: a tap is one event on release, a long press fires exactly once, a
+ * half: a tap is one event on release, a long press presses the native
+ * selection button exactly once at the deadline and releases it on UP, a
  * second pointer cancels the tap, and all emitted coordinates are normalised
  * surface fractions.
  */
@@ -166,19 +167,21 @@ static void test_up_without_move_uses_slop(void)
     expect_near("no-move tap x", g_events[0].x, 0.21f);
 
     /* A release after the long-press deadline but before any tick must not
-     * degrade into a tap; it arms the hold, plays the legacy haptic and
-     * emits the semantic long press. */
+     * degrade into a tap.  The press and release are emitted in one step so
+     * the native left button is not left latched. */
     events_clear();
     wc3_direct_touch_down(&dt, 6, 300.0f, 300.0f, 300);
     wc3_direct_touch_up(&dt, 6, 300.0f, 300.0f, 800);
-    assert(g_event_count == 1);
-    assert(g_events[0].kind == WC3_DIRECT_TOUCH_LONG_PRESS);
-    expect_near("late tick long x", g_events[0].x, 0.3f);
+    assert(g_event_count == 2);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+    expect_near("late tick press x", g_events[0].x, 0.3f);
+    expect_near("late tick release x", g_events[1].x, 0.3f);
     assert(g_haptic_count == 1);
     assert(g_haptic_effect == 3);
 }
 
-static void test_long_press_fires_once(void)
+static void test_long_press_presses_once(void)
 {
     Wc3DirectTouch dt = make_recognizer();
     events_clear();
@@ -187,42 +190,47 @@ static void test_long_press_fires_once(void)
     assert(wc3_direct_touch_tick(&dt, 2449) == 0);
     assert(g_event_count == 0);
     assert(g_haptic_count == 0);
-    /* The deadline arms the hold and plays the legacy long-press haptic; the
-     * semantic action waits for the release so a drag can still become a
-     * selection instead. */
+    /* The deadline arms the hold, plays the legacy long-press haptic and
+     * presses the native left button at the hold point.  The press stays
+     * down until the finger is released. */
     assert(wc3_direct_touch_tick(&dt, 2450) == 1);
-    assert(g_event_count == 0);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
+    assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
+    assert(g_events[0].pointer_id == 3);
+    expect_near("long press x", g_events[0].x, 0.5f);
+    expect_near("long press y", g_events[0].y, 0.6f);
+    assert(g_events[0].time_ms == 2450);
     assert(g_haptic_count == 1);
     assert(g_haptic_effect == 3);
     assert(wc3_direct_touch_tick(&dt, 3000) == 0);
     wc3_direct_touch_up(&dt, 3, 500.0f, 600.0f, 3100);
-    assert(g_event_count == 1);
-    assert(g_events[0].kind == WC3_DIRECT_TOUCH_LONG_PRESS);
-    assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
-    assert(g_events[0].pointer_id == 3);
-    expect_near("long x", g_events[0].x, 0.5f);
-    expect_near("long y", g_events[0].y, 0.6f);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+    assert(g_events[1].time_ms == 3100);
     assert(g_haptic_count == 1);
     assert(wc3_direct_touch_next_deadline_ms(&dt) == 0);
 }
 
-static void test_hold_drift_stays_long_press(void)
+static void test_hold_drift_presses_at_last_point(void)
 {
     Wc3DirectTouch dt = make_recognizer();
     events_clear();
 
     /* 10 px is inside the 20 px legacy drag threshold: the hold survives and
-     * the release emits the semantic long press. */
+     * presses at the deadline with the last known point. */
     wc3_direct_touch_down(&dt, 8, 100.0f, 100.0f, 0);
     wc3_direct_touch_move(&dt, 8, 110.0f, 100.0f, 100);
     assert(wc3_direct_touch_tick(&dt, 449) == 0);
-    assert(wc3_direct_touch_tick(&dt, 450) == 1);
     assert(g_event_count == 0);
+    assert(wc3_direct_touch_tick(&dt, 450) == 1);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
+    expect_near("drift press x", g_events[0].x, 0.11f);
     assert(g_haptic_count == 1);
     wc3_direct_touch_up(&dt, 8, 110.0f, 100.0f, 500);
-    assert(g_event_count == 1);
-    assert(g_events[0].kind == WC3_DIRECT_TOUCH_LONG_PRESS);
-    expect_near("drift long x", g_events[0].x, 0.11f);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
 }
 
 static void test_hold_then_drag_selects(void)
@@ -233,29 +241,28 @@ static void test_hold_then_drag_selects(void)
     wc3_direct_touch_down(&dt, 9, 100.0f, 100.0f, 0);
     assert(wc3_direct_touch_tick(&dt, 450) == 1);
     assert(g_haptic_count == 1);
-    assert(g_event_count == 0);
-
-    /* Small drift while the hold is armed does not start the selection. */
-    wc3_direct_touch_move(&dt, 9, 115.0f, 100.0f, 500);
-    assert(g_event_count == 0);
-    assert(wc3_direct_touch_field_drag_active(&dt) == 0);
-
-    /* Crossing the threshold after the hold starts the native left-button
-     * selection drag; the deferred long-press action is cancelled. */
-    wc3_direct_touch_move(&dt, 9, 140.0f, 100.0f, 510);
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
-    assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
+    expect_near("select begin x", g_events[0].x, 0.10f);
+    expect_near("select begin y", g_events[0].y, 0.10f);
     assert(wc3_direct_touch_field_drag_active(&dt) == 1);
 
-    wc3_direct_touch_move(&dt, 9, 160.0f, 120.0f, 520);
+    /* The native left button is already down.  Every move after the
+     * deadline is a native selection move, even inside the old drift slop. */
+    wc3_direct_touch_move(&dt, 9, 115.0f, 100.0f, 500);
     assert(g_event_count == 2);
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
+    expect_near("select move1 x", g_events[1].x, 0.115f);
+
+    wc3_direct_touch_move(&dt, 9, 160.0f, 120.0f, 520);
+    assert(g_event_count == 3);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
+    expect_near("select move2 x", g_events[2].x, 0.16f);
 
     wc3_direct_touch_up(&dt, 9, 180.0f, 140.0f, 600);
-    assert(g_event_count == 3);
-    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
-    expect_near("select end x", g_events[2].x, 0.18f);
+    assert(g_event_count == 4);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+    expect_near("select end x", g_events[3].x, 0.18f);
     assert(wc3_direct_touch_field_drag_active(&dt) == 0);
     assert(g_haptic_count == 1);
     assert(wc3_direct_touch_next_deadline_ms(&dt) == 0);
@@ -300,17 +307,20 @@ static void test_late_move_arms_hold(void)
     wc3_direct_touch_move(&dt, 12, 125.0f, 100.0f, 460);
     assert(g_haptic_count == 1);
     assert(g_haptic_effect == 3);
-    assert(g_event_count == 1);
+    assert(g_event_count == 2);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
     assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
+    expect_near("late press x", g_events[0].x, 0.125f);
+    expect_near("late move x", g_events[1].x, 0.125f);
 
     wc3_direct_touch_move(&dt, 12, 140.0f, 110.0f, 470);
-    assert(g_event_count == 2);
-    assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
+    assert(g_event_count == 3);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
 
     wc3_direct_touch_up(&dt, 12, 150.0f, 120.0f, 500);
-    assert(g_event_count == 3);
-    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+    assert(g_event_count == 4);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
     assert(wc3_direct_touch_tick(&dt, 600) == 0);
     assert(g_haptic_count == 1);
 }
@@ -427,17 +437,6 @@ static void test_coordinate_mapping(void)
     expect_near("pick y bottom",
                 wc3_dt_pick_axis(wc3_dt_client_pixel(1.0f, 600), 0.6f),
                 359.4f);
-}
-
-static void test_owner_rule(void)
-{
-    assert(wc3_dt_owner_is_friendly(3, 3) == 1);
-    assert(wc3_dt_owner_is_friendly(12, 3) == 1);
-    assert(wc3_dt_owner_is_friendly(14, 3) == 1);
-    assert(wc3_dt_owner_is_friendly(15, 3) == 1);
-    assert(wc3_dt_owner_is_friendly(13, 3) == 0);
-    assert(wc3_dt_owner_is_friendly(4, 3) == 0);
-    assert(wc3_dt_owner_is_friendly(0, 3) == 0);
 }
 
 static void test_tap_intent_resolution(void)
@@ -593,22 +592,6 @@ static void test_portrait_gesture(void)
     assert(g_event_count == 2);
 }
 
-static void test_long_press_intent_resolution(void)
-{
-    assert(wc3_dt_long_press_intent(WC3_DT_PICK_NONE, 0, 0, 0) ==
-           WC3_DT_LONG_INTENT_NONE);
-    assert(wc3_dt_long_press_intent(WC3_DT_PICK_OBJECT, 1, 1, 1) ==
-           WC3_DT_LONG_INTENT_SELECT_UNIT);
-    assert(wc3_dt_long_press_intent(WC3_DT_PICK_OBJECT, 1, 0, 0) ==
-           WC3_DT_LONG_INTENT_NONE);
-    assert(wc3_dt_long_press_intent(WC3_DT_PICK_OBJECT, 1, 1, 0) ==
-           WC3_DT_LONG_INTENT_ORDER_UNIT);
-    assert(wc3_dt_long_press_intent(WC3_DT_PICK_OBJECT, 0, 0, 0) ==
-           WC3_DT_LONG_INTENT_NONE);
-    assert(wc3_dt_long_press_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0) ==
-           WC3_DT_LONG_INTENT_CLEAR_SELECTION);
-}
-
 static void test_beacon_release_resolution(void)
 {
     /* Release on the button arms the next minimap tap, even after jitter.
@@ -634,6 +617,35 @@ static void test_command_release_resolution(void)
     assert(wc3_dt_command_release(1, 0, 1) == WC3_DT_COMMAND_NONE);
     assert(wc3_dt_command_release(1, 1, 0) == WC3_DT_COMMAND_NONE);
     assert(wc3_dt_command_release(1, 1, 1) == WC3_DT_COMMAND_TARGET);
+}
+
+static void test_command_movement_slop(void)
+{
+    /* The command handler can miss a MOVE that the recognizer routes over
+     * the field path, so the release recomputes movement from DOWN to UP. */
+    assert(wc3_dt_command_moved(0.5f, 0.5f, 0.5f, 0.5f, 0.02f) == 0);
+    assert(wc3_dt_command_moved(0.5f, 0.5f, 0.51f, 0.5f, 0.02f) == 0);
+    assert(wc3_dt_command_moved(0.5f, 0.5f, 0.51f, 0.51f, 0.02f) == 0);
+    assert(wc3_dt_command_moved(0.5f, 0.5f, 0.53f, 0.5f, 0.02f) == 1);
+    assert(wc3_dt_command_moved(0.5f, 0.5f, 0.5f, 0.53f, 0.02f) == 1);
+    assert(wc3_dt_command_moved(0.5f, 0.5f, 0.52f, 0.52f, 0.02f) == 1);
+}
+
+static void test_console_rect_scale(void)
+{
+    /* The 00:58 trace's command bar: the HLE-local rect
+     * 0.6181,0.8690..0.7926,0.9980 is the visible card at
+     * 0.7726,0.7817..0.9908,0.9967 on the surface.  The transform must
+     * undo the 0.8x0.6 console scale, not just flip y. */
+    float l = 0.6181f;
+    float t = 0.8690f;
+    float r = 0.7926f;
+    float b = 0.9980f;
+    wc3_dt_console_rect_scale(&l, &t, &r, &b);
+    expect_near("console rect left", l, 0.7726f);
+    expect_near("console rect top", t, 0.7817f);
+    expect_near("console rect right", r, 0.9908f);
+    expect_near("console rect bottom", b, 0.9967f);
 }
 
 static void test_minimap_inverse(void)
@@ -721,8 +733,8 @@ int main(void)
     test_tap();
     test_tap_cancelled_by_motion();
     test_up_without_move_uses_slop();
-    test_long_press_fires_once();
-    test_hold_drift_stays_long_press();
+    test_long_press_presses_once();
+    test_hold_drift_presses_at_last_point();
     test_hold_then_drag_selects();
     test_quick_swipe_camera();
     test_late_move_arms_hold();
@@ -732,15 +744,15 @@ int main(void)
     test_reset_discards_pending();
     test_pointer_snapshot();
     test_coordinate_mapping();
-    test_owner_rule();
     test_tap_intent_resolution();
     test_route();
     test_field_drag_keep();
     test_pointer_phases();
     test_portrait_gesture();
-    test_long_press_intent_resolution();
     test_beacon_release_resolution();
     test_command_release_resolution();
+    test_command_movement_slop();
+    test_console_rect_scale();
     test_minimap_local_point();
     test_minimap_inverse();
     puts("direct_touch: ok");

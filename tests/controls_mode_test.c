@@ -122,6 +122,19 @@ static int beacon_rect(float *left, float *top, float *right,
     return 1;
 }
 
+/* The command card's top row overlaps the field rectangle; the command gate
+ * must claim it for NATIVE so the guest command handler sees raw phases. */
+static int command_rect(float *left, float *top, float *right,
+                        float *bottom, void *user)
+{
+    (void)user;
+    *left = 0.60f;
+    *top = 0.78f;
+    *right = 0.70f;
+    *bottom = 0.84f;
+    return 1;
+}
+
 static int has_pointer_move(int x, int y)
 {
     for (int i = 0; i < g_action_count; i++) {
@@ -435,6 +448,7 @@ int main(int argc, char **argv)
     controls_set_direct_touch_portrait_gate(portrait_rect, NULL);
     controls_set_direct_touch_minimap_gate(minimap_rect, NULL);
     controls_set_direct_touch_beacon_gate(beacon_rect, NULL);
+    controls_set_direct_touch_command_gate(command_rect, NULL);
     controls_set_direct_touch_enabled(true);
 
     const TouchElement *shift_element = find_key(50);
@@ -469,9 +483,10 @@ int main(int argc, char **argv)
     assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
 
     /* Portrait: follow starts immediately on DOWN and stops on UP.  No
-     * long-press deadline and no separate tap action.  The portrait frame is
-     * outside the field rectangle, so without its own route this touch would
-     * be a dead native mouse click. */
+     * long-press deadline and no separate tap action.  The portrait frame
+     * overlaps the field's lower edge, so its own route must run before the
+     * field/native split; without it this touch would be a dead native
+     * mouse click. */
     actions_clear();
     direct_clear();
     assert(controls_touch(WC3_TOUCH_DOWN, 0, 70.0f, 850.0f, 5600) == 0);
@@ -608,12 +623,26 @@ int main(int argc, char **argv)
     assert(direct_has(WC3_DIRECT_TOUCH_TAP));
     assert(!direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
 
+    /* Command card: the top row starts above the field bottom, so the
+     * field test would claim it.  The command gate must force the press to
+     * NATIVE; the guest command handler then hit-tests the real buttons. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 650.0f, 800.0f, 7400) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 650.0f, 800.0f, 7450) == 0);
+    controls_tick(7500);
+    assert(g_action_count == 0);
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
+
     controls_set_direct_touch_enabled(false);
     controls_set_direct_touch_sink(NULL, NULL);
     controls_set_direct_touch_route_gate(NULL, NULL);
     controls_set_direct_touch_portrait_gate(NULL, NULL);
     controls_set_direct_touch_minimap_gate(NULL, NULL);
     controls_set_direct_touch_beacon_gate(NULL, NULL);
+    controls_set_direct_touch_command_gate(NULL, NULL);
     controls_set_action_sink(NULL, NULL);
     controls_cancel_all();
     free(json);

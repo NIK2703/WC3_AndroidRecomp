@@ -9,8 +9,10 @@
  * for a real mouse message.
  *
  * The semantic surface is deliberately small:
- *   - tap: select a friendly unit, or smart-order an enemy/ground target;
- *   - long press: force a smart order to a unit or ground point;
+ *   - tap: select a unit, or smart-order when the selection is controlled;
+ *   - long press: native left-button press-and-hold from the deadline to the
+ *     finger release; a stationary release clicks one unit, a drag selects a
+ *     box;
  *   - portrait: sticky-finger camera follow;
  *   - minimap: native pointer phases clamped to its frame;
  *   - selected-unit grid: activate the subgroup under the finger;
@@ -102,11 +104,15 @@
 #define DT_INV_MAX_SLOTS     6u
 /* Mirror of controls.c direct_touch_field_contains().  A release inside this
  * rectangle is a battlefield point; everything outside it is native HUD and
- * must not turn an inventory drag into a drop.  Keep the two in sync. */
+ * must not turn an inventory drag into a drop.  Keep the two in sync.
+ * The bottom is the console's top edge: the live minimap frame starts at
+ * 0.8550 and the command card at 0.8690, so the world extends well below
+ * 0.72.  The minimap, portrait and beacon have their own rect gates that run
+ * before this rectangle, so the overlap is safe. */
 #define DT_INV_FIELD_LEFT    0.03f
 #define DT_INV_FIELD_RIGHT   0.97f
 #define DT_INV_FIELD_TOP     0.10f
-#define DT_INV_FIELD_BOTTOM  0.72f
+#define DT_INV_FIELD_BOTTOM  0.85f
 
 /* Command card: CGameUI+0x3C8 -> CCommandBar.  The bar is a CGridPanel with
  * 3 rows x 4 columns at +0x124/+0x128; +0x154 is the row array, each row is
@@ -128,13 +134,23 @@
 #define DT_CMD_ENTRY_LEFT    1u
 #define DT_CMD_ENTRY_RIGHT   4u
 /* Target/area command flags.  A left entry with any of these bits needs a
- * world target; a drag into the field replays the command and confirms it at
- * the release point. */
+ * world target.  Diagnostic only: the live target mode decides a release. */
 #define DT_CMD_TARGET_FLAGS  0x00000281u
 #define DT_CMD_MAX_ROWS      4u
 #define DT_CMD_MAX_COLS      4u
 #define DT_CMD_LONG_PRESS_MS 450u
 #define DT_CMD_TAP_SLOP      0.02f
+/* A drag release queues the confirming field click.  The game switches modes
+ * on its own update, so the click is posted from a later pump tick.  Drop it
+ * if the mode never becomes live. */
+#define DT_CMD_TARGET_TIMEOUT_MS 400u
+/* A finger aiming at the rightmost icon often lands on the card's right
+ * border.  The margin is in surface units and covers the gap between the
+ * last button and the card edge (0.9838..0.9908 on a 2400x1080 surface);
+ * the click still targets the centre of the button, so the command
+ * semantics do not change.  Do not add a top margin: the old 0.08 local
+ * margin extended the top row above the card and captured world points. */
+#define DT_CMD_HIT_MARGIN_RIGHT 0.017f
 
 #define DT_SELECTION_PRIMARY 0x000001E4u
 
@@ -149,6 +165,20 @@
 #define DT_FN_PICK             0x6F3840E0u
 #define DT_FN_PLAYER           0x6F1E0EA0u
 #define DT_FN_VALIDATE_OBJECT  0x6F21B730u
+/* 0x6F1D73B0 is the CUnit counterpart of 0x6F21B730.  It validates a CUnit
+ * (class 0x2B773375), takes its own reference and writes it to the guest
+ * dword at ecx.  The native unit-at-point helper uses it on pick+0x0C. */
+#define DT_FN_VALIDATE_UNIT    0x6F1D73B0u
+/* Debug-only counterparts of the validation chain inside 0x6F21B730:
+ * 0x6F6DA7D0 returns the expected CGhostImage class id, the vtable slot at
+ * +0x1C returns the object's class id, and 0x6F04CDD0 compares the two
+ * (walking the class registry for subclasses).  0x6F054530 resolves a
+ * handle/type pair. */
+#define DT_FN_CLASS_GHOST_ID   0x6F6DA7D0u
+#define DT_FN_CLASS_IS         0x6F04CDD0u
+#define DT_FN_HANDLE_LOOKUP    0x6F054530u
+#define DT_FN_VALIDATE_WORLD_OBJECT 0x6F1F2A60u
+#define DT_CLASS_GHOST_ID      0x2B776768u
 #define DT_FN_SELECT_EVENT     0x6F395410u
 #define DT_FN_SELECTION_COUNT  0x6F290270u
 #define DT_FN_SELECTION_PRIMARY_UNIT 0x6F290240u
@@ -210,6 +240,9 @@
 #define DT_PICK_OFFSET  0x00u
 #define DT_POINT_OFFSET 0x30u
 #define DT_UNIT_OFFSET  0x40u
+/* Second 4-byte validator slot for debug probes; 0x44..0x4F is otherwise
+ * unused before the selection event at 0x50. */
+#define DT_PROBE_OFFSET 0x44u
 #define DT_EVENT_OFFSET 0x50u
 #define DT_EVENT_SIZE   0x40u
 
@@ -301,6 +334,11 @@ static DtRectSnapshot g_minimap_snapshot;
  * NATIVE route even if the button overlaps the field rectangle; the guest
  * service then claims the gesture before posting any native mouse button. */
 static DtRectSnapshot g_beacon_snapshot;
+/* The command card's top row overlaps the field rectangle (the card starts
+ * at 0.7817 and the field ends at 0.85), so the controls layer needs the
+ * card rect to claim the press for NATIVE before the field recognizer sees
+ * it.  Published in surface coordinates, like the beacon snapshot. */
+static DtRectSnapshot g_command_snapshot;
 /* Set by wc3_hle_direct_touch_reset() (any thread) when the game leaves the
  * in-game UI.  The service, on the main guest thread, clears the camera
  * follow before it drops the queue. */
@@ -345,12 +383,21 @@ static int g_cmd_active;
 static uint32_t g_cmd_pointer;
 static uint32_t g_cmd_bar;
 static uint32_t g_cmd_button;
+static uint32_t g_cmd_data;
 static float g_cmd_down_x;
 static float g_cmd_down_y;
 static uint64_t g_cmd_down_ms;
 static int g_cmd_moved;
 static int g_cmd_long_pending;
 static int g_cmd_long_fired;
+/* Confirming field click queued by a drag release.  It is posted by the pump
+ * tick, after the game has switched to target mode. */
+static int g_cmd_target_pending;
+static float g_cmd_target_x;
+static float g_cmd_target_y;
+static uint32_t g_cmd_target_button;
+static uint32_t g_cmd_target_data;
+static uint64_t g_cmd_target_ms;
 
 #if WC3_DEBUG && WC3_DEBUG_INPUT
 #include <stdarg.h>
@@ -595,6 +642,12 @@ static void dt_beacon_publish(float left, float top, float right,
     dt_rect_publish(&g_beacon_snapshot, left, top, right, bottom);
 }
 
+static void dt_command_publish(float left, float top, float right,
+                               float bottom)
+{
+    dt_rect_publish(&g_command_snapshot, left, top, right, bottom);
+}
+
 int wc3_hle_direct_touch_portrait_rect(float *left, float *top,
                                        float *right, float *bottom)
 {
@@ -611,6 +664,12 @@ int wc3_hle_direct_touch_beacon_rect(float *left, float *top,
                                      float *right, float *bottom)
 {
     return dt_rect_read(&g_beacon_snapshot, left, top, right, bottom);
+}
+
+int wc3_hle_direct_touch_command_rect(float *left, float *top,
+                                      float *right, float *bottom)
+{
+    return dt_rect_read(&g_command_snapshot, left, top, right, bottom);
 }
 
 /*
@@ -655,10 +714,15 @@ static int dt_frame_rect_read(uint32_t frame, uint32_t width,
     r = dt_clamp01(r);
     b = dt_clamp01(b);
     if (!(r > l) || !(b > t)) return 0;
+    /* The guest frame rect is stored in the native bottom-left space (the
+     * native event producer's y origin is bottom-left), while the overlay
+     * touch coordinates are top-left.  Report the rect in the overlay space
+     * so every HUD hit-test and the published controls gates compare the
+     * same y axis. */
     *out_left = l;
-    *out_top = t;
+    *out_top = 1.0f - b;
     *out_right = r;
-    *out_bottom = b;
+    *out_bottom = 1.0f - t;
     return 1;
 }
 
@@ -677,6 +741,36 @@ static int dt_frame_rect_snapshot(uint32_t frame, uint32_t width,
     }
     return dt_frame_rect_read(frame, width, height, out_left, out_top,
                               out_right, out_bottom);
+}
+
+/* The command card, inventory and selected-unit grid are console-space
+ * frames; the minimap, portrait and beacon are full-surface frames.  These
+ * wrappers apply the console scale to the former so hit-tests and synthetic
+ * clicks use surface fractions, the same axis as the touch events. */
+static int dt_console_rect_read(uint32_t frame, uint32_t width,
+                                uint32_t height, float *out_left,
+                                float *out_top, float *out_right,
+                                float *out_bottom)
+{
+    if (!dt_frame_rect_read(frame, width, height, out_left, out_top,
+                            out_right, out_bottom)) {
+        return 0;
+    }
+    wc3_dt_console_rect_scale(out_left, out_top, out_right, out_bottom);
+    return 1;
+}
+
+static int dt_console_rect_snapshot(uint32_t frame, uint32_t width,
+                                    uint32_t height, float *out_left,
+                                    float *out_top, float *out_right,
+                                    float *out_bottom)
+{
+    if (!dt_frame_rect_snapshot(frame, width, height, out_left, out_top,
+                                out_right, out_bottom)) {
+        return 0;
+    }
+    wc3_dt_console_rect_scale(out_left, out_top, out_right, out_bottom);
+    return 1;
 }
 
 /*
@@ -843,6 +937,32 @@ static void dt_beacon_snapshot(uint32_t width, uint32_t height)
     dt_beacon_publish(l, t, r, b);
 }
 
+/*
+ * Publish the visible command bar in surface coordinates.  The card's top
+ * row overlaps the field rectangle (the card starts at 0.7817 and the field
+ * ends at 0.85), so the controls layer must claim a press inside the card
+ * for the raw NATIVE route before the field recognizer can turn it into a
+ * world tap.  CFrame+0x44 is console-local; dt_console_rect_read() applies
+ * the 0.8x0.6 transform and returns surface fractions.
+ */
+static void dt_command_snapshot(uint32_t ui, uint32_t width, uint32_t height)
+{
+    if (!ui || !dt_guest_readable(ui + DT_UI_COMMAND_BAR, 4u)) {
+        dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    const uint32_t bar = wc3_rd32g(ui + DT_UI_COMMAND_BAR);
+    float l = 0.0f;
+    float t = 0.0f;
+    float r = 0.0f;
+    float b = 0.0f;
+    if (!bar || !dt_console_rect_read(bar, width, height, &l, &t, &r, &b)) {
+        dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    dt_command_publish(l, t, r, b);
+}
+
 #if WC3_DEBUG && WC3_DEBUG_INPUT
 static void dt_trace_one_rect(const char *where, const char *name,
                               const DtRectSnapshot *snap,
@@ -870,17 +990,19 @@ static void dt_trace_one_rect(const char *where, const char *name,
            where, name, present, l, t, r, b);
 }
 
-/* The beacon rectangle is the prime suspect for a field touch being forced
- * to NATIVE.  Log every change of the three input-thread snapshots so the
- * log shows whether the beacon grew over the battlefield. */
+/* The beacon and command rectangles are the prime suspects for a field
+ * touch being forced to NATIVE.  Log every change of the four input-thread
+ * snapshots so the log shows whether either grew over the battlefield. */
 static void dt_trace_snapshots(const char *where)
 {
     static float portrait[4];
     static float minimap[4];
     static float beacon[4];
+    static float command[4];
     static int portrait_present = -1;
     static int minimap_present = -1;
     static int beacon_present = -1;
+    static int command_present = -1;
 
     dt_trace_one_rect(where, "portrait", &g_portrait_snapshot,
                       portrait, &portrait_present);
@@ -888,6 +1010,8 @@ static void dt_trace_snapshots(const char *where)
                       minimap, &minimap_present);
     dt_trace_one_rect(where, "beacon", &g_beacon_snapshot,
                       beacon, &beacon_present);
+    dt_trace_one_rect(where, "command", &g_command_snapshot,
+                      command, &command_present);
 }
 #endif
 
@@ -1208,12 +1332,13 @@ static void dt_sync_idle_context(uint32_t width, uint32_t height)
         ui = wc3_rd32g(DT_UI_GLOBAL);
         world = dt_world_from_ui(ui);
     }
-    /* Keep the input thread's portrait, minimap and beacon rectangles fresh
-     * even while no direct event is queued: the next touch must not hit a
-     * stale frame. */
+    /* Keep the input thread's portrait, minimap, beacon and command-card
+     * rectangles fresh even while no direct event is queued: the next touch
+     * must not hit a stale frame. */
     dt_portrait_snapshot(ui, width, height);
     dt_minimap_snapshot(ui, width, height);
     dt_beacon_snapshot(width, height);
+    dt_command_snapshot(ui, width, height);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     dt_trace_snapshots("idle");
 #endif
@@ -1330,39 +1455,64 @@ static void dt_publish_service_route(Wc3DirectTouchRoute route)
 }
 
 /*
- * Mirror CWorldFrameWar3::OnSelect's pick-context initialisation.  A direct
- * tap is a left click; a long press is modelled as a right click so the same
- * native smart-order path is used.
+ * Mirror CWorldFrameWar3::OnSelect's pick-context initialisation.  A tap
+ * selects with a left click when the live selection cannot receive an order,
+ * and uses the right-click context when it can.  A long press is the
+ * left-click analogue and always uses the left-button context.  The button
+ * changes the pick filters and the 0x20/0x04 flags, and therefore the object
+ * class returned at pick+0x0C.
  */
 static int dt_init_pick(CPU *c, const DtContext *ctx, uint32_t pick,
                         uint32_t button)
 {
     const uint32_t ui = ctx->ui;
     const uint32_t world = ctx->world;
+    const uint32_t select_gate = wc3_rd32g(world + DT_WORLD_SELECT_GATE);
+    const uint32_t alt_gate = wc3_rd32g(world + DT_WORLD_ALT_GATE);
 
     wc3_wr32g(pick + 0x00u, 0);
     wc3_wr32g(pick + 0x04u, 2);
 
-    if (wc3_rd32g(world + DT_WORLD_SELECT_GATE) & button) {
+    if (select_gate & button) {
         uint32_t flags = 2u | 0x210u;
         const uint32_t select_mode = ctx->mode;
         const uint32_t drag_mode = wc3_rd32g(ui + DT_UI_DRAG_MODE);
         const uint32_t alt_mode = wc3_rd32g(ui + DT_UI_ALT_MODE);
+        const int drag_active = dt_mode_active(c, ui, drag_mode);
+        const int alt_active = dt_mode_active(c, ui, alt_mode);
+        const int select_active = dt_mode_active(c, ui, select_mode);
 
         wc3_wr32g(pick + 0x00u, 1);
-        if (button != 4u && !dt_mode_active(c, ui, drag_mode))
+        if (button != 4u && !drag_active)
             flags |= 0x20u;
-        if (dt_mode_active(c, ui, alt_mode))
+        if (alt_active)
             flags |= 0x84u;
-        if (button != 4u && dt_mode_active(c, ui, select_mode))
+        if (button != 4u && select_active)
             flags |= 0x04u;
         wc3_wr32g(pick + 0x04u, flags);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        dt_log("pick-init select button=%u gate=%08X drag=%08X/%d "
+               "alt=%08X/%d select=%08X/%d flags=%08X",
+               button, select_gate, drag_mode, drag_active, alt_mode,
+               alt_active, select_mode, select_active, flags);
+#endif
+    } else {
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        dt_log("pick-init select-skip button=%u gate=%08X", button,
+               select_gate);
+#endif
     }
 
-    if (dt_event_gate(c, world, DT_EVENT_ID_TERRAIN_GATE) &&
-        (wc3_rd32g(world + DT_WORLD_ALT_GATE) & button)) {
+    const int terrain_gate =
+        dt_event_gate(c, world, DT_EVENT_ID_TERRAIN_GATE);
+    if (terrain_gate && (alt_gate & button)) {
         wc3_wr32g(pick + 0x00u, wc3_rd32g(pick + 0x00u) | 2u);
     }
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    dt_log("pick-init terrain button=%u gate=%d alt=%08X pick=%08X "
+           "flags=%08X", button, terrain_gate, alt_gate,
+           wc3_rd32g(pick + 0x00u), wc3_rd32g(pick + 0x04u));
+#endif
 
     return wc3_rd32g(pick + 0x00u) != 0;
 }
@@ -1375,8 +1525,8 @@ static int dt_init_pick(CPU *c, const DtContext *ctx, uint32_t pick,
  * unit/sprite and 2 for terrain.  On success the world point is read from the
  * pick context, and object is the raw pick object.  It is borrowed from the
  * pick context: 0x6F395410 reads event+0xC without releasing it, so the
- * executor must not release it either.  0x6F21B730 creates the reference that
- * the executor does release after the action.
+ * executor must not release it either.  0x6F21B730 (ghost) and 0x6F1D73B0
+ * (CUnit) create the reference that the executor releases after the action.
  */
 static int dt_pick(CPU *c, const DtContext *ctx, uint32_t x_bits,
                    uint32_t y_bits, uint32_t pick, uint32_t button,
@@ -1514,6 +1664,28 @@ static uint32_t dt_validate_object(CPU *c, uint32_t object, uint32_t out)
     if (!object) return 0;
     wc3_wr32g(out, 0);
     (void)dt_call_thiscall(c, out, DT_FN_VALIDATE_OBJECT, 1, &object);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    dt_log("validate ghost object=%08X valid=%08X out=%08X", object,
+           wc3_rd32g(out), out);
+#endif
+    return wc3_rd32g(out);
+}
+
+/*
+ * 0x6F1D73B0 is the CUnit validator.  It writes a reference-counted CUnit to
+ * the guest dword at ecx; the caller releases it after the action.  A pick
+ * made with the left-button context returns a CUnit at pick+0x0C, so the
+ * selection path must use this validator instead of the CGhostImage one.
+ */
+static uint32_t dt_validate_unit(CPU *c, uint32_t object, uint32_t out)
+{
+    if (!object) return 0;
+    wc3_wr32g(out, 0);
+    (void)dt_call_thiscall(c, out, DT_FN_VALIDATE_UNIT, 1, &object);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    dt_log("validate unit object=%08X valid=%08X out=%08X", object,
+           wc3_rd32g(out), out);
+#endif
     return wc3_rd32g(out);
 }
 
@@ -1533,6 +1705,117 @@ static void dt_release_object(CPU *c, uint32_t object)
     if (!destroy) return;
     (void)dt_call_thiscall(c, object, destroy, 0, NULL);
 }
+
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+/*
+ * Debug-only object probe for the direct-touch pick path.  0x6F21B730
+ * rejects an object when its vtable class id is not a CGhostImage
+ * (0x2B776768); a CUnit uses 0x2B773375 and is rejected by design.  The
+ * trace already prints the raw pointer; this dump adds the class-id call,
+ * the class comparison, the handle lookup and the world-object validator so
+ * a rejection can be attributed without another build.  out is a
+ * caller-owned 4-byte guest slot for 0x6F1F2A60; pass 0 to skip it.
+ */
+static void dt_probe_object(CPU *c, const char *label, uint32_t object,
+                            uint32_t out)
+{
+    if (!object) {
+        dt_log("probe %s object=00000000", label);
+        return;
+    }
+    if (!dt_guest_readable(object, 0x30u)) {
+        dt_log("probe %s object=%08X unreadable", label, object);
+        return;
+    }
+
+    const uint32_t vtable = wc3_rd32g(object);
+    const uint32_t refs = wc3_rd32g(object + 4u);
+    const uint32_t f08 = wc3_rd32g(object + 8u);
+    const uint32_t f0c = wc3_rd32g(object + 0x0Cu);
+    const uint32_t f10 = wc3_rd32g(object + 0x10u);
+    const uint32_t f20 = wc3_rd32g(object + 0x20u);
+    const uint32_t f28 = wc3_rd32g(object + 0x28u);
+    const uint32_t f2c = wc3_rd32g(object + 0x2Cu);
+    uint32_t class_fn = 0;
+    uint32_t expected_class = DT_CLASS_GHOST_ID;
+    uint32_t class_id = 0;
+    uint32_t class_ok = 0;
+    int class_call = 0;
+    uint32_t holder_a = 0;
+    uint32_t holder_a_class = 0;
+    uint32_t holder_a_flags = 0;
+    uint32_t holder_b = 0;
+    uint32_t holder_b_class = 0;
+    uint32_t holder_b_flags = 0;
+    uint32_t world_object = 0;
+    int vtable_ok = 0;
+
+    if (vtable >= 0x6F000000u && vtable < 0x70000000u &&
+        dt_guest_readable(vtable, 0x20u)) {
+        vtable_ok = 1;
+        class_fn = wc3_rd32g(vtable + 0x1Cu);
+    }
+
+    /* Write the raw fields before any virtual call: if a corrupt candidate
+     * faults inside the class probe, the line still identifies it. */
+    dt_log("probe %s raw object=%08X vt=%08X refs=%u f08=%08X f0C=%08X "
+           "f10=%08X f20=%08X f28=%08X f2C=%08X class_fn=%08X vtable_ok=%d",
+           label, object, vtable, refs, f08, f0c, f10, f20, f28, f2c,
+           class_fn, vtable_ok);
+
+    if (vtable_ok &&
+        class_fn >= 0x6F000000u && class_fn < 0x70000000u &&
+        dt_guest_readable(class_fn, 1u)) {
+        class_call = 1;
+        expected_class = wc3_hle_call_guest(c, DT_FN_CLASS_GHOST_ID, 0, NULL);
+        class_id = dt_call_thiscall(c, object, class_fn, 0, NULL);
+        c->ecx = class_id;
+        c->edx = expected_class;
+        class_ok = wc3_hle_call_guest(c, DT_FN_CLASS_IS, 0, NULL) != 0;
+    }
+
+    /* 0x6F054530(handle, type) is the fastcall resolver used by the native
+     * unit paths.  Try the two plausible pairs; a CUnit does not carry a
+     * handle at +0xC, so this also shows whether the pick object is a
+     * handle-holder instead. */
+    if (f0c || f10) {
+        c->ecx = f0c;
+        c->edx = f10;
+        holder_a = wc3_hle_call_guest(c, DT_FN_HANDLE_LOOKUP, 0, NULL);
+        if (holder_a && dt_guest_readable(holder_a, 0x24u)) {
+            holder_a_class = wc3_rd32g(holder_a + 0x0Cu);
+            holder_a_flags = wc3_rd32g(holder_a + 0x20u);
+        }
+    }
+    if (f28 || f2c) {
+        c->ecx = f28;
+        c->edx = f2c;
+        holder_b = wc3_hle_call_guest(c, DT_FN_HANDLE_LOOKUP, 0, NULL);
+        if (holder_b && dt_guest_readable(holder_b, 0x24u)) {
+            holder_b_class = wc3_rd32g(holder_b + 0x0Cu);
+            holder_b_flags = wc3_rd32g(holder_b + 0x20u);
+        }
+    }
+
+    if (out && class_call) {
+        wc3_wr32g(out, 0);
+        const uint32_t world_arg = object;
+        (void)dt_call_thiscall(c, out, DT_FN_VALIDATE_WORLD_OBJECT, 1,
+                               &world_arg);
+        world_object = wc3_rd32g(out);
+        /* The validator took its own reference; the probe is not an action,
+         * so balance it instead of leaking the object. */
+        if (world_object) dt_release_object(c, world_object);
+    }
+
+    dt_log("probe %s object=%08X class_call=%d expect=%08X class=%08X "
+           "class_ok=%d holderA=%08X hAclass=%08X hAflags=%08X "
+           "holderB=%08X hBclass=%08X hBflags=%08X world=%08X",
+           label, object, class_call, expected_class, class_id, class_ok,
+           holder_a, holder_a_class, holder_a_flags, holder_b,
+           holder_b_class, holder_b_flags, world_object);
+}
+#endif
 
 static uint32_t dt_selection(CPU *c, const DtContext *ctx)
 {
@@ -1911,25 +2194,6 @@ static void dt_clear_selection(CPU *c, const DtContext *ctx)
 }
 
 /*
- * Long-press owner rule: the local player and the three neutral non-hostile
- * owners select; every other owner is an attack-order target.  This is
- * deliberately not an alliance query.  Tap does not use this filter: without
- * a controlled selection every unit tap selects, including hostile units and
- * allied units whose owner has not shared control.
- */
-static int dt_unit_selectable(uint32_t unit)
-{
-    if (!dt_guest_readable(unit, 0x5Cu)) return 0;
-    if (wc3_rd32g(unit + 0x0Cu) != DT_CLASS_UNIT) return 0;
-
-    const uint16_t owner = wc3_rd16g(unit + 0x58u);
-    const uint32_t manager = wc3_rd32g(DT_PLAYER_MANAGER);
-    if (!manager || !dt_guest_readable(manager + 0x2Au, 2)) return 0;
-    const uint16_t local = wc3_rd16g(manager + 0x28u);
-    return wc3_dt_owner_is_friendly(owner, local);
-}
-
-/*
  * Canonical unit-select path.  0x6F395410 checks the pause gate, rejects a
  * right-button event, calls the native 0x6F358B40 thunk and then selects
  * through 0x6F6BCE50([unit+0x6A0]) or the 0x6F6BD380 fallback.  Reusing it
@@ -2054,8 +2318,8 @@ static uint32_t dt_grid_button_at(CPU *c, uint32_t ui, float nx, float ny,
             float top = 0.0f;
             float right = 0.0f;
             float bottom = 0.0f;
-            if (!dt_frame_rect_snapshot(button, width, height, &left, &top,
-                                        &right, &bottom)) {
+            if (!dt_console_rect_snapshot(button, width, height, &left, &top,
+                                          &right, &bottom)) {
                 continue;
             }
             if (!(nx >= left && nx < right && ny >= top && ny < bottom)) {
@@ -2271,7 +2535,7 @@ static uint32_t dt_order_ground(CPU *c, const DtContext *ctx,
  * the native dispatcher validate the target and issue the smart order.  The
  * event lives only on our guest scratch and is never posted to a queue.
  *
- * event+0x38 must be the raw pick object, not our validated CUnit: the
+ * event+0x38 must be the raw pick object, not our validated reference: the
  * handler validates it again with 0x6F21B730 and takes its own reference,
  * exactly as the native OnSelect path does.  Our reference, when the caller
  * holds one for target inspection, only keeps the raw object alive.
@@ -2329,78 +2593,94 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
     dt_log("tap point=%08X,%08X", wc3_rd32g(point),
            wc3_rd32g(point + 4u));
 
-    uint32_t object = 0, wx = 0, wy = 0, wz = 0;
-    const int r = dt_pick(c, ctx, wc3_rd32g(point), wc3_rd32g(point + 4u),
-                          pick, 1u, &object, &wx, &wy, &wz);
-    dt_log("tap pickctx +00=%08X +04=%08X +08=%08X +0C=%08X +10=%08X "
-           "+14=%08X +18=%08X",
-           wc3_rd32g(pick), wc3_rd32g(pick + 4u),
-           wc3_rd32g(pick + 8u), wc3_rd32g(pick + 0x0Cu),
-           wc3_rd32g(pick + 0x10u), wc3_rd32g(pick + 0x14u),
-           wc3_rd32g(pick + 0x18u));
-
-    /* The live selection decides select vs. order.  Compute it once for any
-     * hit: the unit branch and the terrain fallback must agree, otherwise a
-     * selection made only of uncontrollable units would still issue a ground
-     * order.  The pre/post dumps show whether the active-subgroup repair
-     * changed +0x20C and which unit the gate evaluated. */
+    /* The live selection decides select vs. order.  Compute it before the
+     * pick because the two actions need different native pick contexts: a
+     * smart order is a right-button pick and yields a CGhostImage at
+     * pick+0x0C, while a selection is a left-button pick and yields a
+     * CUnit.  0x6F21B730 only accepts the former; 0x6F1D73B0 validates the
+     * latter. */
     dt_trace_selection(c, ctx, "tap-pre");
     const int controlled = dt_selection_controlled(c, ctx);
     dt_trace_selection(c, ctx, "tap-post");
-    dt_log("tap pick r=%d object=%08X world=%08X,%08X,%08X controlled=%d",
-           r, object, wx, wy, wz, controlled);
 
-    if (r == 1) {
-        const uint32_t unit = dt_validate_object(c, object, unit_out);
-        if (unit) {
-            /* Validation guarantees a live object, but keep the class read
-             * inside a readable window: a corrupted object must not fault in
-             * the executor before the native release path sees it. */
-            const int readable = dt_guest_readable(unit, 0x10u);
-            const int is_unit = readable &&
-                wc3_rd32g(unit + 0x0Cu) == DT_CLASS_UNIT;
-            const int intent = wc3_dt_tap_intent(r, 1, is_unit, controlled);
-            dt_log("tap unit object=%08X unit=%08X readable=%d is_unit=%d "
-                   "intent=%d",
-                   object, unit, readable, is_unit, intent);
-            switch (intent) {
-            case WC3_DT_INTENT_ORDER_UNIT: {
-                /* The semantic ghost handler is the native right-click-on-
-                 * unit path and uses the whole selection; it is not limited
-                 * to a single unit.  It also avoids re-picking at the touch
-                 * point, so a group keeps the object validated above.  Only
-                 * a rejected selection falls back to the native replay. */
-                const uint32_t order = dt_order_unit(c, ctx, scratch, object,
-                                                     wc3_rd32g(pick + 0x08u),
-                                                     wx, wy, wz);
-                dt_log("tap order-unit ret=%u", order);
-                dt_trace("tap-order-unit", unit, object);
-                if (!order) {
-                    dt_log("tap order-unit fallback native pending=%d down=%d",
-                           g_native_right_pending,
-                           hle_android_mouse_is_down(2));
-                    dt_native_right_click(ev->x, ev->y);
-                    dt_trace("tap-order-unit-native", unit, object);
-                }
-                break;
+    const uint32_t pick_button = controlled ? 4u : 1u;
+    uint32_t object = 0, wx = 0, wy = 0, wz = 0;
+    const int r = dt_pick(c, ctx, wc3_rd32g(point), wc3_rd32g(point + 4u),
+                          pick, pick_button, &object, &wx, &wy, &wz);
+    const uint32_t candidate = wc3_rd32g(pick + 8u);
+    dt_log("tap pickctx +00=%08X +04=%08X +08=%08X +0C=%08X +10=%08X "
+           "+14=%08X +18=%08X +1C=%08X +20=%08X +24=%08X +28=%08X "
+           "+2C=%08X",
+           wc3_rd32g(pick), wc3_rd32g(pick + 4u),
+           wc3_rd32g(pick + 8u), wc3_rd32g(pick + 0x0Cu),
+           wc3_rd32g(pick + 0x10u), wc3_rd32g(pick + 0x14u),
+           wc3_rd32g(pick + 0x18u), wc3_rd32g(pick + 0x1Cu),
+           wc3_rd32g(pick + 0x20u), wc3_rd32g(pick + 0x24u),
+           wc3_rd32g(pick + 0x28u), wc3_rd32g(pick + 0x2Cu));
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    /* Do not probe pick+0x08: it is opaque to the handler and must never be
+     * dereferenced through its vtable.  The 20:31 crash was a candidate
+     * probe calling 0x6F1A2640 on an arbitrary pointer. */
+    dt_probe_object(c, "tap-picked", object, scratch + DT_PROBE_OFFSET);
+#endif
+    dt_log("tap pick r=%d object=%08X world=%08X,%08X,%08X controlled=%d "
+           "button=%u", r, object, wx, wy, wz, controlled, pick_button);
+
+    if (r == 1 && controlled) {
+        /* Native right-button OnSelect path: validate the raw CGhostImage,
+         * then let 0x6F392FA0 issue the smart order over the whole
+         * selection.  A rejected unit hit must not become a ground order;
+         * replay the native right click, which resolves the same point
+         * through the window procedure. */
+        const uint32_t ghost = dt_validate_object(c, object, unit_out);
+        dt_log("tap ghost object=%08X validated=%08X", object, ghost);
+        if (ghost) {
+            const uint32_t order = dt_order_unit(c, ctx, scratch, object,
+                                                 candidate, wx, wy, wz);
+            dt_log("tap order-unit ret=%u", order);
+            dt_trace("tap-order-unit", ghost, object);
+            if (!order) {
+                dt_log("tap order-unit fallback native pending=%d down=%d",
+                       g_native_right_pending, hle_android_mouse_is_down(2));
+                dt_native_right_click(ev->x, ev->y);
+                dt_trace("tap-order-unit-native", ghost, object);
             }
+            dt_release_object(c, ghost);
+            dt_scratch_free(scratch);
+            return;
+        }
+        dt_log("tap invalid-ghost object=%08X", object);
+        dt_native_right_click(ev->x, ev->y);
+        dt_trace("tap-order-native", object, 0);
+        dt_scratch_free(scratch);
+        return;
+    }
+
+    if (r == 1 && !controlled) {
+        /* Left-button pick: the object is a CUnit, not a CGhostImage. */
+        const uint32_t unit = dt_validate_unit(c, object, unit_out);
+        const int readable = unit && dt_guest_readable(unit, 0x10u);
+        const uint32_t unit_class =
+            readable ? wc3_rd32g(unit + 0x0Cu) : 0;
+        /* 0x6F1D73B0 already checked the CUnit class; do not repeat the
+         * check through the CGhostImage-only class tag. */
+        const int is_unit = unit != 0;
+        const int intent = wc3_dt_tap_intent(r, 1, is_unit, controlled);
+        dt_log("tap unit object=%08X unit=%08X readable=%d class=%08X "
+               "is_unit=%d intent=%d",
+               object, unit, readable, unit_class, is_unit, intent);
+        if (unit) {
+            switch (intent) {
             case WC3_DT_INTENT_SELECT_UNIT:
                 dt_select_unit(c, unit, scratch + DT_EVENT_OFFSET);
                 dt_trace("tap-select-unit", unit, 0);
                 break;
             case WC3_DT_INTENT_CLEAR_SELECTION:
-                /* Defensive: a validated unit is always selected when the
-                 * live selection cannot receive an order, so this branch is
-                 * not reached for a unit.  Keep the native clear path in
-                 * case a future intent rule adds a unit clear case. */
                 dt_clear_selection(c, ctx);
                 dt_trace("tap-clear-unit", unit, 0);
                 break;
             case WC3_DT_INTENT_NONE:
-                /* A non-unit sprite has no phase-1 selection/order action;
-                 * do not turn it into a ground order. */
-                dt_trace("tap-non-unit", object,
-                         readable ? wc3_rd32g(unit + 0x0Cu) : 0);
+                dt_trace("tap-non-unit", object, unit_class);
                 break;
             default:
                 break;
@@ -2412,7 +2692,7 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
         /* An object that no longer validates is the native "invalid sprite"
          * case: with select mode active and a left button, OnSelect
          * substitutes a terrain click.  Fall through to the world point. */
-        dt_log("tap invalid-object object=%08X", object);
+        dt_log("tap invalid-unit object=%08X", object);
     }
 
     if (r == 1 || r == 2) {
@@ -2459,80 +2739,6 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
     }
 
     dt_log("tap done");
-    dt_scratch_free(scratch);
-}
-
-static void dt_long_press(CPU *c, const DtContext *ctx,
-                          const Wc3DirectTouchEvent *ev,
-                          uint32_t width, uint32_t height)
-{
-    dt_log("long enter ptr=%u n=%.4f,%.4f", ev->pointer_id, ev->x, ev->y);
-    if (dt_paused(c)) {
-        dt_trace("long-paused", 0, 0);
-        return;
-    }
-
-    const uint32_t scratch = dt_scratch_alloc();
-    if (!scratch) return;
-
-    const uint32_t pick = scratch + DT_PICK_OFFSET;
-    const uint32_t unit_out = scratch + DT_UNIT_OFFSET;
-    const uint32_t point = scratch + DT_POINT_OFFSET;
-    if (!dt_event_point(c, ev->x, ev->y, width, height, point)) {
-        dt_scratch_free(scratch);
-        return;
-    }
-
-    uint32_t object = 0, wx = 0, wy = 0, wz = 0;
-    const int r = dt_pick(c, ctx, wc3_rd32g(point), wc3_rd32g(point + 4u),
-                          pick, 1u, &object, &wx, &wy, &wz);
-
-    uint32_t unit = 0;
-    if (r == 1) unit = dt_validate_object(c, object, unit_out);
-    const int readable = unit && dt_guest_readable(unit, 0x10u);
-    const int is_unit = readable &&
-        wc3_rd32g(unit + 0x0Cu) == DT_CLASS_UNIT;
-    const int selectable = is_unit && dt_unit_selectable(unit);
-    const int intent =
-        wc3_dt_long_press_intent(r, unit != 0, is_unit, selectable);
-    dt_log("long pick r=%d object=%08X unit=%08X is_unit=%d selectable=%d "
-           "intent=%d",
-           r, object, unit, is_unit, selectable, intent);
-
-    if (r != 1 && r != 2) {
-        const int controlled = dt_selection_controlled(c, ctx);
-        dt_log("long no-hit r=%d controlled=%d", r, controlled);
-        if (controlled) {
-            /* Same wrapper-gate fallback as tap: the native right click
-             * resolves the order through the window procedure. */
-            dt_log("long order-native fallback pending=%d down=%d",
-                   g_native_right_pending, hle_android_mouse_is_down(2));
-            dt_native_right_click(ev->x, ev->y);
-            dt_trace("long-order-native", 0, 0);
-        }
-    }
-
-    switch (intent) {
-    case WC3_DT_LONG_INTENT_SELECT_UNIT:
-        dt_select_unit(c, unit, scratch + DT_EVENT_OFFSET);
-        dt_trace("long-select-unit", unit, 0);
-        break;
-    case WC3_DT_LONG_INTENT_ORDER_UNIT:
-        /* Hostile target: keep the force-attack order.  The ghost handler
-         * validates the raw object and falls back to the world point. */
-        (void)dt_order_unit(c, ctx, scratch, object,
-                            wc3_rd32g(pick + 0x08u), wx, wy, wz);
-        dt_trace("long-order-unit", object, 0);
-        break;
-    case WC3_DT_LONG_INTENT_CLEAR_SELECTION:
-        dt_clear_selection(c, ctx);
-        dt_trace("long-clear", 0, 0);
-        break;
-    default:
-        break;
-    }
-
-    if (unit) dt_release_object(c, unit);
     dt_scratch_free(scratch);
 }
 
@@ -3025,11 +3231,14 @@ static void dt_field_camera_end(const Wc3DirectTouchEvent *ev)
 }
 
 /*
- * Field selection drag.  Legacy longPressDragAction is MOUSE_LEFT_BUTTON, so
- * the native game draws and commits its own selection rectangle.  The press
- * is posted only when the finger moves after the long-press timer, never for
- * a plain long press.  MOVE/END reuse the native pointer state machine so a
- * rapid gesture gets the same queued-release handling as a HUD click.
+ * Field selection.  Legacy longPressDragAction is MOUSE_LEFT_BUTTON, so the
+ * native game draws and commits its own selection rectangle.  The recognizer
+ * emits BEGIN at the long-press deadline, every move in between emits MOVE,
+ * and the finger release emits END.  The executor posts WM_LBUTTONDOWN at
+ * BEGIN and keeps it down, so a stationary release is a native click that
+ * selects one unit and a drag is the native box selection.  MOVE/END reuse
+ * the native pointer state machine so a rapid gesture gets the same
+ * queued-release handling as a HUD click.
  */
 static void dt_field_select_begin(const Wc3DirectTouchEvent *ev)
 {
@@ -3257,8 +3466,8 @@ static int dt_inventory_slot_at(uint32_t bar, float nx, float ny,
         float top = 0.0f;
         float right = 0.0f;
         float bottom = 0.0f;
-        if (!dt_frame_rect_read(button, width, height, &left, &top,
-                                &right, &bottom)) {
+        if (!dt_console_rect_read(button, width, height, &left, &top,
+                                  &right, &bottom)) {
             continue;
         }
         if (!(nx >= left && nx < right && ny >= top && ny < bottom)) {
@@ -3357,8 +3566,8 @@ static void dt_inventory_finish(const Wc3DirectTouchEvent *ev,
         float top = 0.0f;
         float right = 0.0f;
         float bottom = 0.0f;
-        if (dt_frame_rect_read(dest_button, width, height, &left, &top,
-                               &right, &bottom)) {
+        if (dt_console_rect_read(dest_button, width, height, &left, &top,
+                                 &right, &bottom)) {
             dt_native_right_click(down_x, down_y);
             dt_native_left_click((left + right) * 0.5f,
                                     (top + bottom) * 0.5f);
@@ -3434,6 +3643,7 @@ static void dt_command_reset(void)
     g_cmd_pointer = 0;
     g_cmd_bar = 0;
     g_cmd_button = 0;
+    g_cmd_data = 0;
     g_cmd_down_x = 0.0f;
     g_cmd_down_y = 0.0f;
     g_cmd_down_ms = 0;
@@ -3488,6 +3698,15 @@ static int dt_command_context(uint32_t *bar_out, int allow_targeting)
     return 1;
 }
 
+/* The game's own target-mode state.  The command card selects on the first
+ * click and enters target mode on the next card click, so the HLE command
+ * flag is only diagnostic; this is the state that decides a release. */
+static int dt_command_targeting(void)
+{
+    if (!dt_guest_readable(DT_UI_GLOBAL, 4u)) return 0;
+    return dt_grid_targeting(wc3_rd32g(DT_UI_GLOBAL));
+}
+
 /*
  * Exact 0x6F3B69C0: return the entry index (0 or 1) for the mouse mask, or -1
  * when the command data has no usable entry for that button.  A left entry
@@ -3513,7 +3732,9 @@ static int dt_command_entry(uint32_t data, uint32_t mask)
 }
 
 /* A targeted/area command needs a world point or object after the button
- * click.  The flag word comes from the left entry selected above. */
+ * click.  The flag word comes from the left entry selected above.  This is a
+ * diagnostic only: the live target mode, not this flag, decides a release. */
+#if WC3_DEBUG && WC3_DEBUG_INPUT
 static int dt_command_targeted(uint32_t data)
 {
     const int index = dt_command_entry(data, DT_CMD_ENTRY_LEFT);
@@ -3522,6 +3743,7 @@ static int dt_command_targeted(uint32_t data)
         wc3_rd32g(data + DT_CMD_DATA_FLAGS + (uint32_t)index * 4u);
     return (flags & DT_CMD_TARGET_FLAGS) != 0;
 }
+#endif
 
 /* Return the command data under the point and store the button, or 0. */
 static uint32_t dt_command_button_at(uint32_t bar, float nx, float ny,
@@ -3568,11 +3790,14 @@ static uint32_t dt_command_button_at(uint32_t bar, float nx, float ny,
             float top = 0.0f;
             float right = 0.0f;
             float bottom = 0.0f;
-            if (!dt_frame_rect_read(button, width, height, &left, &top,
-                                    &right, &bottom)) {
+            if (!dt_console_rect_read(button, width, height, &left, &top,
+                                      &right, &bottom)) {
                 continue;
             }
-            if (!(nx >= left && nx < right && ny >= top && ny < bottom)) {
+            float hit_right = right;
+            if (col + 1u == cols) hit_right += DT_CMD_HIT_MARGIN_RIGHT;
+            if (!(nx >= left && nx < hit_right &&
+                  ny >= top && ny < bottom)) {
                 continue;
             }
             if (button_out) *button_out = button;
@@ -3594,8 +3819,33 @@ static void dt_command_dump_bar(uint32_t bar, uint32_t width, uint32_t height)
     const uint32_t rows = wc3_rd32g(bar + DT_CMD_ROWS);
     const uint32_t cols = wc3_rd32g(bar + DT_CMD_COLS);
     const uint32_t row_array = wc3_rd32g(bar + DT_CMD_ROW_ARRAY);
-    dt_log("cmd-bar bar=%08X rows=%u cols=%u row_array=%08X", bar, rows, cols,
-           row_array);
+    dt_log("cmd-bar bar=%08X rows=%u cols=%u row_array=%08X size=%ux%u", bar,
+           rows, cols, row_array, width, height);
+    float bar_l = 0.0f;
+    float bar_t = 0.0f;
+    float bar_r = 0.0f;
+    float bar_b = 0.0f;
+    if (dt_console_rect_read(bar, width, height, &bar_l, &bar_t, &bar_r,
+                             &bar_b)) {
+        dt_log("cmd-bar-rect %.4f,%.4f..%.4f,%.4f", bar_l, bar_t, bar_r,
+               bar_b);
+    }
+    float local_l = 0.0f;
+    float local_t = 0.0f;
+    float local_r = 0.0f;
+    float local_b = 0.0f;
+    if (dt_frame_rect_read(bar, width, height, &local_l, &local_t, &local_r,
+                           &local_b)) {
+        dt_log("cmd-bar-local %.4f,%.4f..%.4f,%.4f", local_l, local_t,
+               local_r, local_b);
+    }
+    if (dt_guest_readable(bar + DT_FRAME_RECT, 16u)) {
+        dt_log("cmd-bar-raw t=%08X l=%08X b=%08X r=%08X",
+               wc3_rd32g(bar + DT_FRAME_RECT + 0u),
+               wc3_rd32g(bar + DT_FRAME_RECT + 4u),
+               wc3_rd32g(bar + DT_FRAME_RECT + 8u),
+               wc3_rd32g(bar + DT_FRAME_RECT + 12u));
+    }
     if (!rows || !cols || rows > DT_CMD_MAX_ROWS || cols > DT_CMD_MAX_COLS) {
         return;
     }
@@ -3614,12 +3864,26 @@ static void dt_command_dump_bar(uint32_t bar, uint32_t width, uint32_t height)
             float rr = 0.0f;
             float b = 0.0f;
             if (!button ||
-                !dt_frame_rect_read(button, width, height, &l, &t, &rr, &b)) {
+                !dt_console_rect_read(button, width, height, &l, &t, &rr,
+                                      &b)) {
                 dt_log("cmd-btn[%u,%u] btn=%08X rect=none", r, c, button);
                 continue;
             }
+            float local_l = 0.0f;
+            float local_t = 0.0f;
+            float local_r = 0.0f;
+            float local_b = 0.0f;
+            (void)dt_frame_rect_read(button, width, height, &local_l,
+                                     &local_t, &local_r, &local_b);
             dt_log("cmd-btn[%u,%u] btn=%08X rect=%.4f,%.4f..%.4f,%.4f "
-                   "vis=%u shown=%u data=%08X", r, c, button, l, t, rr, b,
+                   "local=%.4f,%.4f..%.4f,%.4f "
+                   "raw=%08X,%08X,%08X,%08X vis=%u shown=%u data=%08X",
+                   r, c, button, l, t, rr, b, local_l, local_t, local_r,
+                   local_b,
+                   wc3_rd32g(button + DT_FRAME_RECT + 0u),
+                   wc3_rd32g(button + DT_FRAME_RECT + 4u),
+                   wc3_rd32g(button + DT_FRAME_RECT + 8u),
+                   wc3_rd32g(button + DT_FRAME_RECT + 12u),
                    wc3_rd32g(button + DT_CMD_BUTTON_VISIBLE),
                    wc3_rd32g(button + DT_CMD_BUTTON_SHOWN),
                    wc3_rd32g(button + DT_CMD_BUTTON_DATA));
@@ -3656,8 +3920,8 @@ static void dt_command_long_press(uint32_t width, uint32_t height)
     float top = 0.0f;
     float right = 0.0f;
     float bottom = 0.0f;
-    if (!dt_frame_rect_read(button, width, height, &left, &top,
-                            &right, &bottom)) {
+    if (!dt_console_rect_read(button, width, height, &left, &top,
+                              &right, &bottom)) {
         g_cmd_long_pending = 0;
         g_cmd_long_fired = 1;
         return;
@@ -3674,6 +3938,28 @@ static void dt_command_long_press(uint32_t width, uint32_t height)
  * and only posts native input, never guest code. */
 static void dt_command_tick(uint32_t width, uint32_t height)
 {
+    /* A drag release queued a confirming field click.  Wait until the game's
+     * own update has made target mode live, then post it; a non-targeted
+     * command never arms and the queued click is dropped by the timeout. */
+    if (g_cmd_target_pending) {
+        const int targeted = dt_command_targeting();
+        const uint64_t now = dt_now_ms();
+        if (wc3_dt_command_release(1, targeted, 1) ==
+            WC3_DT_COMMAND_TARGET) {
+            dt_native_left_click(g_cmd_target_x, g_cmd_target_y);
+            dt_log("cmd target button=%08X data=%08X x=%.4f y=%.4f",
+                   g_cmd_target_button, g_cmd_target_data,
+                   g_cmd_target_x, g_cmd_target_y);
+            dt_trace("cmd-drag", g_cmd_target_button, g_cmd_target_data);
+            g_cmd_target_pending = 0;
+        } else if (g_cmd_target_ms && now && now >= g_cmd_target_ms &&
+                   now - g_cmd_target_ms >= DT_CMD_TARGET_TIMEOUT_MS) {
+            dt_trace("cmd-target-timeout", g_cmd_target_button,
+                     g_cmd_target_data);
+            g_cmd_target_pending = 0;
+        }
+    }
+
     if (!g_cmd_active || !g_cmd_long_pending || g_cmd_long_fired) return;
     if (g_cmd_moved) {
         g_cmd_long_pending = 0;
@@ -3688,17 +3974,19 @@ static void dt_command_tick(uint32_t width, uint32_t height)
 }
 
 /* Resolve the release.  The DOWN already posted the native left click that
- * selects the command, so a tap release is a no-op.  A drag from a
- * targeted/area command into the field posts one more native left click at
- * the release point to confirm the target.  Any other drag cancels. */
+ * selects the command and, for a targeted/area command, enters target mode,
+ * so a tap release is a no-op.  A drag into the field posts one native left
+ * click at the release point to confirm the target.  Any other drag
+ * cancels. */
 static void dt_command_finish(const Wc3DirectTouchEvent *ev,
                               uint32_t width, uint32_t height)
 {
     const uint32_t bar = g_cmd_bar;
     const uint32_t button = g_cmd_button;
+    const uint32_t data = g_cmd_data;
     const float down_x = g_cmd_down_x;
     const float down_y = g_cmd_down_y;
-    const int moved = g_cmd_moved;
+    int moved = g_cmd_moved;
     const int long_fired = g_cmd_long_fired;
 
     if (long_fired) {
@@ -3708,43 +3996,79 @@ static void dt_command_finish(const Wc3DirectTouchEvent *ev,
     }
 
     /* The UI may have been replaced between DOWN and UP.  Never post a click
-     * into a new command page or a menu. */
+     * into a new command page or a menu.  The pressed button itself may be
+     * rebuilt by the command the DOWN click ran, so it is not used as a
+     * second hit-test gate; only the bar identity decides the context. */
     uint32_t live_bar = 0;
     if (!dt_command_context(&live_bar, 1) || live_bar != bar) {
         dt_trace("cmd-context", button, live_bar);
         dt_command_reset();
         return;
     }
-    uint32_t live_button = 0;
-    const uint32_t data = dt_command_button_at(live_bar, down_x, down_y,
-                                               width, height, &live_button);
-    if (!data || live_button != button) {
-        dt_trace("cmd-source", button, live_button);
-        dt_command_reset();
-        return;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    {
+        uint32_t live_button = 0;
+        const uint32_t live_data =
+            dt_command_button_at(live_bar, down_x, down_y, width, height,
+                                 &live_button);
+        if (!live_data || live_button != button) {
+            dt_log("cmd-source-moved button=%08X live=%08X data=%08X "
+                   "down=%.4f,%.4f", button, live_button, live_data,
+                   down_x, down_y);
+        }
+    }
+#endif
+
+    /* The recognizer routes a MOVE that leaves the HUD over the field path,
+     * so the command handler may never see it.  Recompute the movement from
+     * the DOWN and UP points; otherwise a drag into the field is mistaken
+     * for a tap and the target click is never posted. */
+    if (!moved &&
+        wc3_dt_command_moved(down_x, down_y, ev->x, ev->y,
+                             DT_CMD_TAP_SLOP)) {
+        moved = 1;
+        g_cmd_moved = 1;
+        g_cmd_long_pending = 0;
     }
 
+    /* The DOWN click selected the command and, for a targeted/area command,
+     * entered target mode.  A tap is complete: a targeted command stays in
+     * target mode for the next field tap, and a non-targeted one already
+     * ran.  Do not post a second card click; it would cancel target mode or
+     * run the command twice. */
     if (!moved) {
-        /* The DOWN already posted the left click, so the command is selected.
-         * A tap release must not post a second click. */
         dt_trace("cmd-tap", button, data);
         dt_command_reset();
         return;
     }
 
-    if (wc3_dt_command_release(moved, dt_command_targeted(data),
-                               dt_field_contains(ev->x, ev->y)) ==
-        WC3_DT_COMMAND_TARGET) {
-        /* The DOWN click selected the command and entered target mode; the
-         * release click confirms the target at the finger point. */
-        dt_native_left_click(ev->x, ev->y);
-        dt_log("cmd target button=%08X data=%08X x=%.4f y=%.4f",
-               button, data, ev->x, ev->y);
-        dt_trace("cmd-drag", button, data);
+    if (dt_field_contains(ev->x, ev->y)) {
+        const int targeted = dt_command_targeting();
+        if (wc3_dt_command_release(moved, targeted, 1) ==
+            WC3_DT_COMMAND_TARGET) {
+            /* Target mode is already live; confirm now. */
+            dt_native_left_click(ev->x, ev->y);
+            dt_log("cmd target button=%08X data=%08X x=%.4f y=%.4f",
+                   button, data, ev->x, ev->y);
+            dt_trace("cmd-drag", button, data);
+        } else {
+            /* The game updates the mode on its own tick; queue the click so
+             * the pump posts it once target mode is live. */
+            g_cmd_target_pending = 1;
+            g_cmd_target_x = ev->x;
+            g_cmd_target_y = ev->y;
+            g_cmd_target_button = button;
+            g_cmd_target_data = data;
+            g_cmd_target_ms = dt_now_ms();
+            dt_trace("cmd-target-queued", button, data);
+        }
         dt_command_reset();
         return;
     }
 
+    /* Outside the field: keep the command selected and post no world
+     * click.  A targeted command stays in target mode for the next field
+     * tap. */
     dt_trace("cmd-cancel", button, (uint32_t)moved);
     dt_command_reset();
 }
@@ -3774,6 +4098,7 @@ static int dt_command_pointer(const Wc3DirectTouchEvent *ev,
         g_cmd_pointer = ev->pointer_id;
         g_cmd_bar = bar;
         g_cmd_button = button;
+        g_cmd_data = data;
         g_cmd_down_x = ev->x;
         g_cmd_down_y = ev->y;
         g_cmd_down_ms = dt_now_ms();
@@ -3782,20 +4107,24 @@ static int dt_command_pointer(const Wc3DirectTouchEvent *ev,
         g_cmd_long_fired = 0;
 
         /* Select the command as soon as the finger lands: the left-click
-         * equivalent is posted here, not on release.  A targeted command
-         * enters target mode immediately, so the drag that follows selects
-         * the target. */
+         * equivalent is posted here, not on release.  A successful click on
+         * the button is what enters the game's target mode for a targeted
+         * command, so the drag only moves the cursor and the field release
+         * confirms the target.  The old second "arm" click is not posted:
+         * it would either cancel target mode or run the command twice. */
         float left = 0.0f;
         float top = 0.0f;
         float right = 0.0f;
         float bottom = 0.0f;
-        if (dt_frame_rect_read(button, width, height, &left, &top,
-                               &right, &bottom)) {
+        if (dt_console_rect_read(button, width, height, &left, &top,
+                                 &right, &bottom)) {
             const float center_x = (left + right) * 0.5f;
             const float center_y = (top + bottom) * 0.5f;
             dt_native_left_click(center_x, center_y);
-            dt_log("cmd select button=%08X data=%08X center=%.4f,%.4f",
-                   button, data, center_x, center_y);
+            dt_log("cmd select button=%08X data=%08X center=%.4f,%.4f "
+                   "hle_tgt=%d",
+                   button, data, center_x, center_y,
+                   dt_command_targeted(data));
         }
         dt_trace("cmd-down", button, data);
         return 1;
@@ -3803,7 +4132,9 @@ static int dt_command_pointer(const Wc3DirectTouchEvent *ev,
     case WC3_DIRECT_TOUCH_POINTER_MOVE:
         if (!g_cmd_active || ev->pointer_id != g_cmd_pointer) return 0;
         /* Follow the finger with the native cursor.  In target mode this is
-         * the targeting cursor; outside it is a plain hover move. */
+         * the targeting cursor; outside it is a plain hover move.  The DOWN
+         * click already selected/armed the command, so no extra click is
+         * posted here. */
         hle_android_mouse_move(ev->x, ev->y);
         if (!g_cmd_moved) {
             const float dx = ev->x - g_cmd_down_x;
@@ -3902,7 +4233,10 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
              * current recognizer starts the portrait follow on DOWN. */
             dt_portrait_follow_start(c, ctx);
         } else {
-            dt_long_press(c, ctx, ev, width, height);
+            /* Reserved.  The current field long press is a native
+             * left-button press expressed as FIELD_SELECT_BEGIN; do not run
+             * the old semantic pick/select action. */
+            dt_trace("long-press-ignored", dt_bits(ev->x), dt_bits(ev->y));
         }
         break;
     case WC3_DIRECT_TOUCH_FOLLOW_START:
@@ -3986,6 +4320,7 @@ void wc3_hle_direct_touch_start(void)
     dt_portrait_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_minimap_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_beacon_publish(0.0f, 0.0f, 0.0f, 0.0f);
+    dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_publish_route(WC3_DIRECT_TOUCH_ROUTE_LEGACY);
     g_last_ui = 0;
     g_last_world = 0;
@@ -4020,6 +4355,7 @@ void wc3_hle_direct_touch_reset(void)
     dt_portrait_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_minimap_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_beacon_publish(0.0f, 0.0f, 0.0f, 0.0f);
+    dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_publish_route(WC3_DIRECT_TOUCH_ROUTE_LEGACY);
     wc3_direct_touch_clear();
 }
@@ -4069,12 +4405,13 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
     if (cur_ui) g_last_ui = cur_ui;
     if (cur_world) g_last_world = cur_world;
 
-    /* The portrait, minimap and beacon frames can change with a selection or
-     * a UI transition; publish them before resolving the batch so the next
-     * touch sees the new UI. */
+    /* The portrait, minimap, beacon and command-card frames can change with
+     * a selection or a UI transition; publish them before resolving the
+     * batch so the next touch sees the new UI. */
     dt_portrait_snapshot(cur_ui, width, height);
     dt_minimap_snapshot(cur_ui, width, height);
     dt_beacon_snapshot(width, height);
+    dt_command_snapshot(cur_ui, width, height);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     dt_trace_snapshots("service");
 #endif
@@ -4228,6 +4565,7 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
     dt_portrait_snapshot(final_ui, width, height);
     dt_minimap_snapshot(final_ui, width, height);
     dt_beacon_snapshot(width, height);
+    dt_command_snapshot(final_ui, width, height);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     dt_trace_snapshots("final");
 #endif

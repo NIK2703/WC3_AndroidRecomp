@@ -6,14 +6,15 @@
  * queue: it runs only on the main guest thread, at the message-pump boundary.
  *
  * The queue carries:
- *   - semantic TAP/LONG_PRESS: resolved against the live
- *     CGameUI/CWorldFrameWar3; orders go through the native world
- *     click/order handlers and selection through the native selection
- *     builder.  A semantic event tagged PORTRAIT instead resolves against the
- *     portrait's displayed unit: FOLLOW_START makes the native camera follow
- *     it immediately, and HOLD_RELEASE clears that follow.  The current
- *     recognizer does not emit a portrait tap; a stale queued TAP is still
- *     resolved for compatibility.
+ *   - semantic TAP: resolved against the live CGameUI/CWorldFrameWar3;
+ *     orders go through the native world click/order handlers and selection
+ *     through the native selection builder.  A semantic event tagged
+ *     PORTRAIT instead resolves against the portrait's displayed unit:
+ *     FOLLOW_START makes the native camera follow it immediately, and
+ *     HOLD_RELEASE clears that follow.  The current recognizer does not emit
+ *     a portrait tap; a stale queued TAP is still resolved for compatibility.
+ *     LONG_PRESS remains reserved for a queued event from an older build and
+ *     no longer runs a semantic selection.
  *   - raw POINTER_DOWN/MOVE/UP/CANCEL: forwarded to the native Win32 mouse
  *     message path.  This is what makes minimap taps and drags, command-card
  *     buttons, menus and targeting/placement work without the overlay touch
@@ -27,11 +28,12 @@
  *   - FIELD_CAMERA_BEGIN/MOVE/END: the quick battlefield swipe.  The executor
  *     presses the native middle button at the start point and releases it at
  *     the end, so the game performs its own camera drag.
- *   - FIELD_SELECT_BEGIN/MOVE/END: the held battlefield drag.  After the
- *     long-press deadline the executor presses the native left button and
- *     lets the game draw and commit its own selection rectangle.  A held
- *     finger that never crosses the drag threshold keeps the semantic
- *     LONG_PRESS instead.
+ *   - FIELD_SELECT_BEGIN/MOVE/END: the battlefield selection press.  At the
+ *     long-press deadline the executor posts the native left button DOWN and
+ *     keeps it down for the whole gesture; moves are the native selection
+ *     rectangle and the finger release posts the matching UP.  A stationary
+ *     release is therefore a native click that selects one unit, and a drag
+ *     commits the native box selection.
  *   - the selected-unit panel grid and the inventory bar are the native-route
  *     gestures the executor claims itself.  Touching or dragging onto a grid
  *     button activates that subgroup or selects the individual unit
@@ -114,6 +116,14 @@ int wc3_hle_direct_touch_minimap_rect(float *left, float *top,
  * claims the press before any native mouse button is posted. */
 int wc3_hle_direct_touch_beacon_rect(float *left, float *top,
                                      float *right, float *bottom);
+
+/* Lock-free snapshot of the visible command card in surface-normalised
+ * coordinates.  The card's top row overlaps the field rectangle (the card
+ * starts at 0.7817 and the field ends at 0.85), so the controls layer forces
+ * a press that starts inside the card to the raw NATIVE route before the
+ * field recognizer can turn it into a world tap. */
+int wc3_hle_direct_touch_command_rect(float *left, float *top,
+                                      float *right, float *bottom);
 
 #ifdef __cplusplus
 }
