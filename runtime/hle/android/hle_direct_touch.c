@@ -3459,18 +3459,30 @@ static int dt_command_context(uint32_t *bar_out, int allow_targeting)
     if (!bar_out) return 0;
     *bar_out = 0;
 
-    if (!dt_guest_readable(DT_UI_GLOBAL, 4u)) return 0;
+    if (!dt_guest_readable(DT_UI_GLOBAL, 4u)) {
+        dt_log("cmd-ctx no-ui-global");
+        return 0;
+    }
     const uint32_t ui = wc3_rd32g(DT_UI_GLOBAL);
-    if (!ui || !dt_guest_readable(ui, DT_UI_COMMAND_BAR + 4u)) return 0;
-    if (!wc3_rd32g(ui + DT_UI_WORLD_FRAME)) return 0;
-    if (!wc3_rd32g(ui + DT_UI_CLICK_GATE)) return 0;
-    if (!wc3_rd32g(ui + DT_UI_SELECT_MODE)) return 0;
-    /* A release after the DOWN click is expected to run with target mode
-     * active; only the DOWN and the long press reject it. */
-    if (!allow_targeting && dt_grid_targeting(ui)) return 0;
+    if (!ui || !dt_guest_readable(ui, DT_UI_COMMAND_BAR + 4u)) {
+        dt_log("cmd-ctx no-ui ui=%08X", ui);
+        return 0;
+    }
+    const uint32_t world = wc3_rd32g(ui + DT_UI_WORLD_FRAME);
+    const uint32_t gate = wc3_rd32g(ui + DT_UI_CLICK_GATE);
+    const uint32_t select_mode = wc3_rd32g(ui + DT_UI_SELECT_MODE);
+    const int targeting = dt_grid_targeting(ui);
+    if (!world || !gate || !select_mode || (!allow_targeting && targeting)) {
+        dt_log("cmd-ctx-fail world=%08X gate=%08X sel=%08X tgt=%d allow=%d",
+               world, gate, select_mode, targeting, allow_targeting);
+        return 0;
+    }
 
     const uint32_t bar = dt_command_live_bar();
-    if (!bar || !dt_guest_readable(bar, DT_CMD_ROW_ARRAY + 4u)) return 0;
+    if (!bar || !dt_guest_readable(bar, DT_CMD_ROW_ARRAY + 4u)) {
+        dt_log("cmd-ctx-no-bar bar=%08X", bar);
+        return 0;
+    }
 
     *bar_out = bar;
     return 1;
@@ -3566,6 +3578,52 @@ static uint32_t dt_command_button_at(uint32_t bar, float nx, float ny,
     }
     return 0;
 }
+
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+/* Dump the live command-bar layout when a press misses every button.  The
+ * dump is debug-only: it reads guest memory and writes the dt_trace file. */
+static void dt_command_dump_bar(uint32_t bar, uint32_t width, uint32_t height)
+{
+    if (!bar || !dt_guest_readable(bar, DT_CMD_ROW_ARRAY + 4u)) {
+        dt_log("cmd-bar bar=%08X unreadable", bar);
+        return;
+    }
+    const uint32_t rows = wc3_rd32g(bar + DT_CMD_ROWS);
+    const uint32_t cols = wc3_rd32g(bar + DT_CMD_COLS);
+    const uint32_t row_array = wc3_rd32g(bar + DT_CMD_ROW_ARRAY);
+    dt_log("cmd-bar bar=%08X rows=%u cols=%u row_array=%08X", bar, rows, cols,
+           row_array);
+    if (!rows || !cols || rows > DT_CMD_MAX_ROWS || cols > DT_CMD_MAX_COLS) {
+        return;
+    }
+    if (!row_array ||
+        !dt_guest_readable(row_array, rows * DT_CMD_ROW_STRIDE)) {
+        return;
+    }
+    for (uint32_t r = 0; r < rows; r++) {
+        const uint32_t row = row_array + r * DT_CMD_ROW_STRIDE;
+        const uint32_t buttons = wc3_rd32g(row + DT_CMD_ROW_BUTTONS);
+        if (!buttons || !dt_guest_readable(buttons, cols * 4u)) continue;
+        for (uint32_t c = 0; c < cols; c++) {
+            const uint32_t button = wc3_rd32g(buttons + c * 4u);
+            float l = 0.0f;
+            float t = 0.0f;
+            float rr = 0.0f;
+            float b = 0.0f;
+            if (!button ||
+                !dt_frame_rect_read(button, width, height, &l, &t, &rr, &b)) {
+                dt_log("cmd-btn[%u,%u] btn=%08X rect=none", r, c, button);
+                continue;
+            }
+            dt_log("cmd-btn[%u,%u] btn=%08X rect=%.4f,%.4f..%.4f,%.4f "
+                   "vis=%u shown=%u data=%08X", r, c, button, l, t, rr, b,
+                   wc3_rd32g(button + DT_CMD_BUTTON_VISIBLE),
+                   wc3_rd32g(button + DT_CMD_BUTTON_SHOWN),
+                   wc3_rd32g(button + DT_CMD_BUTTON_DATA));
+        }
+    }
+}
+#endif
 
 /* Long press on a command button.  The right-click entry is the autocast
  * toggle; when the data has none the gesture is swallowed so the release
@@ -3701,7 +3759,13 @@ static int dt_command_pointer(const Wc3DirectTouchEvent *ev,
         uint32_t button = 0;
         const uint32_t data = dt_command_button_at(bar, ev->x, ev->y,
                                                    width, height, &button);
-        if (!data) return 0;
+        if (!data) {
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+            dt_log("cmd-hit-none bar=%08X n=%.4f,%.4f", bar, ev->x, ev->y);
+            dt_command_dump_bar(bar, width, height);
+#endif
+            return 0;
+        }
 
         g_cmd_active = 1;
         g_cmd_pointer = ev->pointer_id;
