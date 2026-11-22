@@ -1119,22 +1119,19 @@ static int dt_paused(CPU *c)
 
 /*
  * Reproduce the native input-event conversion.  The overlay reports
- * surface-normalised coordinates; the window procedure receives client
- * pixels, and 0x6F074010 turns those into pick-event coordinates through
- * 0x6F8B38A0 (x*0.8, y*0.6).  0x6F3840E0 consumes that event space, not
- * [0,1], so using ev->x/ev->y directly would pick near the top-left corner.
+ * surface-normalised coordinates; 0x6F074010 copies them into the event and
+ * 0x6F8B38A0 scales them by 0.8/0.6 into the pick-event space that
+ * 0x6F3840E0 and its viewport gates consume.  The wrapper's bound at
+ * 0x6FABB988 is in that scaled normalised space (0.577), so converting to
+ * client pixels first makes every pick fail the bound.
  */
 static int dt_event_point(CPU *c, float nx, float ny, uint32_t width,
                           uint32_t height, uint32_t out)
 {
-    const uint32_t w = width > 1u ? width : 800u;
-    const uint32_t h = height > 1u ? height : 600u;
-    /* The native producer truncates the client pixel float before
-     * 0x6F074010 hands it to 0x6F8B38A0. */
-    const float x = wc3_dt_client_pixel(nx, w);
-    const float y = wc3_dt_client_pixel(ny, h);
+    (void)width;
+    (void)height;
 
-    const uint32_t args[2] = { dt_bits(x), dt_bits(y) };
+    const uint32_t args[2] = { dt_bits(nx), dt_bits(ny) };
     c->ecx = out;
     c->edx = out + 4u;
     (void)wc3_hle_call_guest(c, DT_FN_INPUT_COORDS, 2, args);
@@ -1861,11 +1858,8 @@ static void dt_trace_selection_impl(CPU *c, const DtContext *ctx,
             const uint32_t cls = wc3_rd32g(unit + 0x0Cu);
             const uint32_t owner = wc3_rd16g(unit + 0x58u);
             const uint32_t flags = wc3_rd32g(unit + 0x5Cu);
-            int can = -1;
-            if (cls == DT_CLASS_UNIT) {
-                can = dt_call_thiscall(c, unit, DT_FN_UNIT_CONTROLLABLE, 0,
-                                       NULL) != 0;
-            }
+            const int can = dt_call_thiscall(c, unit, DT_FN_UNIT_CONTROLLABLE,
+                                             0, NULL) != 0;
             dt_log("sel[%s] unit[%u]=%08X node=%08X cls=%08X owner=%u "
                    "flags=%08X can=%d", where, i, unit, node, cls, owner,
                    flags, can);
@@ -1901,9 +1895,12 @@ static int dt_selection_controlled(CPU *c, const DtContext *ctx)
     const uint32_t primary = dt_call_thiscall(c, selection,
                                               DT_FN_SELECTION_PRIMARY_UNIT, 0,
                                               NULL);
-    if (!primary || !dt_guest_readable(primary, 0x60u) ||
-        wc3_rd32g(primary + 0x0Cu) != DT_CLASS_UNIT) {
-        dt_log("controlled selection=%08X primary=%08X readable/class=0",
+    /* The selection list stores CUnit objects; 0x2B61676C is the class id
+     * of the handle-holder resolved by 0x6F054530, not of the CUnit at
+     * +0xC (that field is the unit type).  The native controllable
+     * predicate is the authority. */
+    if (!primary || !dt_guest_readable(primary, 0x60u)) {
+        dt_log("controlled selection=%08X primary=%08X readable=0",
                selection, primary);
         return 0;
     }
