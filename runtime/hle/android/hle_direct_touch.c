@@ -1684,9 +1684,11 @@ static void dt_clear_selection(CPU *c, const DtContext *ctx)
 }
 
 /*
- * The tap/long-press owner rule from the analysis document: the local player
- * and the three neutral non-hostile owners select; every other owner is an
- * order target.  This is deliberately not an alliance query.
+ * Long-press owner rule: the local player and the three neutral non-hostile
+ * owners select; every other owner is an attack-order target.  This is
+ * deliberately not an alliance query.  Tap does not use this filter: without
+ * a controlled selection every unit tap selects, including hostile units and
+ * allied units whose owner has not shared control.
  */
 static int dt_unit_selectable(uint32_t unit)
 {
@@ -2115,12 +2117,10 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
             const int readable = dt_guest_readable(unit, 0x10u);
             const int is_unit = readable &&
                 wc3_rd32g(unit + 0x0Cu) == DT_CLASS_UNIT;
-            const int selectable = is_unit && dt_unit_selectable(unit);
-            const int intent = wc3_dt_tap_intent(r, 1, is_unit, selectable,
-                                                 controlled);
+            const int intent = wc3_dt_tap_intent(r, 1, is_unit, controlled);
             dt_log("tap unit object=%08X unit=%08X readable=%d is_unit=%d "
-                   "selectable=%d intent=%d",
-                   object, unit, readable, is_unit, selectable, intent);
+                   "intent=%d",
+                   object, unit, readable, is_unit, intent);
             switch (intent) {
             case WC3_DT_INTENT_ORDER_UNIT:
                 /* Keep the raw pick pointer in the event; the ghost
@@ -2134,9 +2134,10 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
                 dt_trace("tap-select-unit", unit, 0);
                 break;
             case WC3_DT_INTENT_CLEAR_SELECTION:
-                /* A non-selectable (hostile) target with no controlled
-                 * selection is the native terrain substitution: a left
-                 * click clears the current, uncontrollable selection. */
+                /* Defensive: a validated unit is always selected when the
+                 * live selection cannot receive an order, so this branch is
+                 * not reached for a unit.  Keep the native clear path in
+                 * case a future intent rule adds a unit clear case. */
                 dt_clear_selection(c, ctx);
                 dt_trace("tap-clear-unit", unit, 0);
                 break;
@@ -2160,7 +2161,7 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
     }
 
     if (r == 1 || r == 2) {
-        const int intent = wc3_dt_tap_intent(r, 0, 0, 0, controlled);
+        const int intent = wc3_dt_tap_intent(r, 0, 0, controlled);
         dt_log("tap terrain r=%d controlled=%d intent=%d world=%08X,%08X",
                r, controlled, intent, wx, wy);
         switch (intent) {

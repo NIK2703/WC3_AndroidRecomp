@@ -119,25 +119,24 @@ typedef enum {
  * terrain click.  A validated non-unit sprite is a no-op in phase 1.
  *
  * The discriminator is whether the current selection can receive an order
- * from the local player, not merely whether it is non-empty.  A selection
- * made only of units this player cannot control must not turn a tap into an
- * order: tapping a selectable unit replaces the selection (left-click
- * analogue), and tapping terrain clears it (left-click analogue).  When a
- * controlled unit is selected, a unit tap is the right-click analogue
- * (smart order, including a friendly unit) and a terrain tap is a smart
- * point order.  A hostile target with no controlled selection keeps the
- * native terrain substitution below.
+ * from the local player, not merely whether it is non-empty.  Without a
+ * controlled selection (empty, hostile/neutral units, decorations, or an
+ * ally who has not shared control) a unit tap is the left-click analogue:
+ * it selects that unit, whatever its owner.  With a controlled selection
+ * (own units or an ally who shared control) a unit tap is the right-click
+ * analogue (smart order, including a friendly unit) and a terrain tap is a
+ * smart point order.  A non-empty but uncontrollable selection never turns
+ * a terrain tap into a ground order; terrain clears it instead.
  */
 static inline Wc3DtTapIntent wc3_dt_tap_intent(int pick_result,
                                                int validated_object,
                                                int is_unit,
-                                               int target_selectable,
                                                int selection_controlled)
 {
     if (pick_result == WC3_DT_PICK_OBJECT && validated_object) {
         if (!is_unit) return WC3_DT_INTENT_NONE;
-        if (selection_controlled) return WC3_DT_INTENT_ORDER_UNIT;
-        if (target_selectable) return WC3_DT_INTENT_SELECT_UNIT;
+        return selection_controlled ? WC3_DT_INTENT_ORDER_UNIT
+                                    : WC3_DT_INTENT_SELECT_UNIT;
     }
     if (pick_result == WC3_DT_PICK_OBJECT || pick_result == WC3_DT_PICK_TERRAIN)
         return selection_controlled ? WC3_DT_INTENT_ORDER_GROUND

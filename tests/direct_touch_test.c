@@ -442,38 +442,36 @@ static void test_owner_rule(void)
 
 static void test_tap_intent_resolution(void)
 {
-    /* Without a controlled selection a selectable unit selects, even when
-     * the previous selection was non-empty but uncontrollable. */
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_NONE, 0, 0, 0, 0) ==
+    /* A miss has no action. */
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_NONE, 0, 0, 0) ==
            WC3_DT_INTENT_NONE);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 0) ==
+
+    /* Without a controlled selection every unit tap is the left-click
+     * analogue and selects that unit, including a hostile or neutral unit
+     * and an ally whose owner has not shared control.  The resolver does not
+     * take an owner/friendliness argument any more. */
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0) ==
            WC3_DT_INTENT_SELECT_UNIT);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 0, 0) ==
+
+    /* A validated non-unit sprite remains a no-op in phase 1. */
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 0) ==
            WC3_DT_INTENT_NONE);
 
     /* A controlled selection makes every unit tap the right-click
      * analogue, friendly or hostile. */
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 1) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1) ==
            WC3_DT_INTENT_ORDER_UNIT);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 1) ==
-           WC3_DT_INTENT_ORDER_UNIT);
-
-    /* A hostile target with no controlled selection keeps the native
-     * terrain substitution.  A non-empty but uncontrollable selection must
-     * not turn the tap into a ground order: it is still a left-click
-     * analogue, which clears the selection. */
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 0) ==
-           WC3_DT_INTENT_CLEAR_SELECTION);
 
     /* An object that failed 0x6F21B730 is a terrain click.  Terrain orders
-     * only when the selection can receive an order; otherwise it clears. */
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 0, 0) ==
+     * only when the selection can receive an order; otherwise it clears.
+     * A non-empty but uncontrollable selection is not an order source. */
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 0) ==
            WC3_DT_INTENT_CLEAR_SELECTION);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 0, 1) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 1) ==
            WC3_DT_INTENT_ORDER_GROUND);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0, 0) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0) ==
            WC3_DT_INTENT_CLEAR_SELECTION);
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0, 1) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 1) ==
            WC3_DT_INTENT_ORDER_GROUND);
 }
 
