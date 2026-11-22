@@ -117,6 +117,17 @@ def _compile_and_link(cmd: list[str], cwd: Path) -> int | None:
             continue
         base.append(arg)
 
+    # Linker-only inputs must not reach the per-source -c invocations: clang
+    # rejects them under -Werror ("linker input unused").  Keep them for the
+    # final link instead.
+    def is_link_flag(arg: str) -> bool:
+        return (arg.startswith("-l") or arg.startswith("-L") or
+                arg.startswith("-Wl,"))
+
+    link_flags = [arg for arg in base[1:] if is_link_flag(arg)]
+    if link_flags:
+        base = [base[0], *[arg for arg in base[1:] if not is_link_flag(arg)]]
+
     digest = hashlib.sha256(
         ("\0".join(base) + "\0" + "\0".join(sources)).encode()).hexdigest()[:16]
     objdir = BUILD / "ccache-objects" / digest
@@ -129,7 +140,7 @@ def _compile_and_link(cmd: list[str], cwd: Path) -> int | None:
         rc = _execute([*base, "-c", source, "-o", str(obj)], cwd)
         if rc != 0:
             return rc
-    return _execute([*base, *objects, "-o", output], cwd)
+    return _execute([*base, *objects, *link_flags, "-o", output], cwd)
 
 
 def run(cmd: list[str], cwd: Path = ROOT) -> int:
@@ -3517,6 +3528,8 @@ def test_controls_mode() -> int:
         str(controls / "controls.c"),
         str(controls / "profile_mode.c"),
         str(controls / "overlay.c"),
+        str(controls / "direct_touch.c"),
+        str(ROOT / "runtime" / "ipc" / "direct_touch_event.c"),
         str(ROOT / "tests" / "host_shims" / "gesture_host.c"),
         str(ROOT / "tests" / "controls_mode_test.c"),
     ]
@@ -3572,6 +3585,7 @@ def test_direct_touch() -> int:
         "-I" + str(controls),
         "-I" + str(ROOT / "runtime" / "ipc"),
         "-I" + str(ROOT / "runtime" / "hle" / "android"),
+        "-I" + str(ROOT / "runtime" / "diag"),
         *sources,
         "-lm",
         "-o",

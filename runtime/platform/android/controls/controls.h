@@ -43,9 +43,23 @@ void controls_set_direct_touch_enabled(bool enabled);
 void controls_set_direct_touch_sink(Wc3DirectTouchSink sink, void *user);
 
 /*
+ * Legacy long-press haptic for the battlefield.  The direct recognizer runs
+ * on the input thread and cannot call the guest, so it delivers the haptic
+ * directly through this sink when the profile's gesture long-press timer
+ * expires.  The effect comes from the authored profile
+ * (gestureLongPressHaptic, 3 in the Warcraft 3 profile).  A NULL sink
+ * disables the vibration without changing the gesture.
+ */
+typedef void (*Wc3DirectTouchHapticSink)(int effect, void *user);
+void controls_set_direct_touch_haptic_sink(Wc3DirectTouchHapticSink sink,
+                                           void *user);
+
+/*
  * Lock-free routing predicate supplied by the host.  The input thread cannot
  * call guest code, so the guest side publishes where a non-overlay touch
- * belongs.  FIELD means the semantic battlefield recognizer; NATIVE means
+ * belongs.  FIELD means the semantic battlefield recognizer (with a quick
+ * swipe driving the native camera drag and a held drag drawing the native
+ * selection rectangle); NATIVE means
  * raw pointer phases for the native UI (HUD, menus, targeting/placement);
  * PORTRAIT and MINIMAP are claimed by their separate rectangle gates;
  * LEGACY means the touch stays on the legacy overlay path, either because it
@@ -87,6 +101,18 @@ void controls_set_direct_touch_portrait_gate(
 typedef Wc3DirectTouchRectGate Wc3DirectTouchMinimapRectGate;
 void controls_set_direct_touch_minimap_gate(
     Wc3DirectTouchMinimapRectGate gate, void *user);
+
+/*
+ * Lock-free beacon button (MinimapSignal) rectangle supplied by the host,
+ * same contract as the minimap gate.  A touch that starts inside this
+ * rectangle is forced to the raw NATIVE route even if the button overlaps the
+ * battlefield rectangle, so the guest beacon gesture can claim the press
+ * before any native mouse button is posted.  A NULL gate keeps the normal
+ * route.
+ */
+typedef Wc3DirectTouchRectGate Wc3DirectTouchBeaconRectGate;
+void controls_set_direct_touch_beacon_gate(
+    Wc3DirectTouchBeaconRectGate gate, void *user);
 
 /* Profile JSON must stay valid only for the duration of this call. */
 int controls_init(const char *profile_json, int width, int height);

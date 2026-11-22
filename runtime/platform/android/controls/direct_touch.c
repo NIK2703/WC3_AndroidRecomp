@@ -3,6 +3,61 @@
 #include <math.h>
 #include <string.h>
 
+#include "wc3_debug.h"
+
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+#include <android/log.h>
+#define DT_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "Wc3DirectTouch", __VA_ARGS__)
+
+static const char *dt_route_name(uint32_t route)
+{
+    switch (route) {
+    case WC3_DIRECT_TOUCH_ROUTE_LEGACY: return "LEGACY";
+    case WC3_DIRECT_TOUCH_ROUTE_FIELD: return "FIELD";
+    case WC3_DIRECT_TOUCH_ROUTE_NATIVE: return "NATIVE";
+    case WC3_DIRECT_TOUCH_ROUTE_PORTRAIT: return "PORTRAIT";
+    case WC3_DIRECT_TOUCH_ROUTE_MINIMAP: return "MINIMAP";
+    default: return "?";
+    }
+}
+
+static const char *dt_kind_name(uint32_t kind)
+{
+    switch (kind) {
+    case WC3_DIRECT_TOUCH_NONE: return "NONE";
+    case WC3_DIRECT_TOUCH_TAP: return "TAP";
+    case WC3_DIRECT_TOUCH_LONG_PRESS: return "LONG_PRESS";
+    case WC3_DIRECT_TOUCH_POINTER_DOWN: return "POINTER_DOWN";
+    case WC3_DIRECT_TOUCH_POINTER_MOVE: return "POINTER_MOVE";
+    case WC3_DIRECT_TOUCH_POINTER_UP: return "POINTER_UP";
+    case WC3_DIRECT_TOUCH_POINTER_CANCEL: return "POINTER_CANCEL";
+    case WC3_DIRECT_TOUCH_HOLD_RELEASE: return "HOLD_RELEASE";
+    case WC3_DIRECT_TOUCH_FOLLOW_START: return "FOLLOW_START";
+    case WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN: return "FIELD_CAMERA_BEGIN";
+    case WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE: return "FIELD_CAMERA_MOVE";
+    case WC3_DIRECT_TOUCH_FIELD_CAMERA_END: return "FIELD_CAMERA_END";
+    case WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN: return "FIELD_SELECT_BEGIN";
+    case WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE: return "FIELD_SELECT_MOVE";
+    case WC3_DIRECT_TOUCH_FIELD_SELECT_END: return "FIELD_SELECT_END";
+    default: return "?";
+    }
+}
+
+static const char *dt_mode_name(uint8_t mode)
+{
+    switch (mode) {
+    case WC3_DIRECT_TOUCH_FIELD_PENDING: return "PENDING";
+    case WC3_DIRECT_TOUCH_FIELD_HOLD: return "HOLD";
+    case WC3_DIRECT_TOUCH_FIELD_CAMERA: return "CAMERA";
+    case WC3_DIRECT_TOUCH_FIELD_SELECT: return "SELECT";
+    default: return "?";
+    }
+}
+#else
+#define DT_LOG(...) ((void)0)
+#endif
+
 static float clamp01(float value)
 {
     if (!(value > 0.0f)) return 0.0f;
@@ -23,6 +78,11 @@ static void emit_event(Wc3DirectTouch *dt, Wc3DirectTouchKind kind,
     event.y = clamp01(dt->height > 0.0f ? y / dt->height : 0.0f);
     event.time_ms = now_ms;
     event.route = route;
+    DT_LOG("emit kind=%s(%u) ptr=%d px=%.1f,%.1f n=%.4f,%.4f "
+           "route=%s t=%llu",
+           dt_kind_name((uint32_t)kind), (unsigned)kind, pointer_id, x, y,
+           event.x, event.y, dt_route_name(route),
+           (unsigned long long)now_ms);
     dt->sink(&event, dt->user);
 }
 
@@ -31,6 +91,46 @@ static float distance_sq(float ax, float ay, float bx, float by)
     const float dx = ax - bx;
     const float dy = ay - by;
     return dx * dx + dy * dy;
+}
+
+static float drag_threshold_sq(const Wc3DirectTouch *dt)
+{
+    const float threshold = dt->drag_threshold_px > 0.0f
+        ? dt->drag_threshold_px : 1.0f;
+    return threshold * threshold;
+}
+
+static void fire_haptic(Wc3DirectTouch *dt)
+{
+    if (dt->haptic && dt->haptic_effect > 0)
+        dt->haptic(dt->haptic_effect, dt->haptic_user);
+}
+
+/* Only a field pointer can become a semantic hold.  The deadline is checked
+ * in both tick() and move(): a batch can deliver a MOVE after the deadline
+ * but before the next tick, and that move must become a selection drag, not
+ * a camera swipe. */
+static int hold_due(const Wc3DirectTouch *dt,
+                    const Wc3DirectTouchPointer *pointer, uint64_t now_ms)
+{
+    if (pointer->route != WC3_DIRECT_TOUCH_ROUTE_FIELD ||
+        pointer->multi || pointer->long_fired ||
+        pointer->mode != WC3_DIRECT_TOUCH_FIELD_PENDING) {
+        return 0;
+    }
+    const uint64_t timeout = dt->long_press_ms > 0
+        ? (uint64_t)dt->long_press_ms : 0u;
+    return now_ms >= pointer->down_ms &&
+           now_ms - pointer->down_ms >= timeout;
+}
+
+static void arm_hold(Wc3DirectTouch *dt, Wc3DirectTouchPointer *pointer)
+{
+    pointer->long_fired = 1;
+    pointer->mode = WC3_DIRECT_TOUCH_FIELD_HOLD;
+    /* The legacy engine plays gestureLongPressHaptic exactly when the
+     * long-press timer expires, before any drag. */
+    fire_haptic(dt);
 }
 
 static int active_count(const Wc3DirectTouch *dt)
@@ -62,20 +162,28 @@ static Wc3DirectTouchPointer *alloc_pointer(Wc3DirectTouch *dt)
 }
 
 void wc3_direct_touch_init(Wc3DirectTouch *dt, float width, float height,
-                           float tap_slop_px, float long_press_slop_px,
-                           int long_press_ms,
+                           float drag_threshold_px, int long_press_ms,
                            Wc3DirectTouchSink sink, void *user)
 {
     if (!dt) return;
     memset(dt, 0, sizeof(*dt));
     dt->width = width;
     dt->height = height;
-    dt->tap_slop_px = tap_slop_px > 0.0f ? tap_slop_px : 1.0f;
-    dt->long_press_slop_px = long_press_slop_px > 0.0f
-        ? long_press_slop_px : dt->tap_slop_px;
+    dt->drag_threshold_px = drag_threshold_px > 0.0f
+        ? drag_threshold_px : 1.0f;
     dt->long_press_ms = long_press_ms;
     dt->sink = sink;
     dt->user = user;
+}
+
+void wc3_direct_touch_set_haptic(Wc3DirectTouch *dt,
+                                 Wc3DirectTouchHaptic haptic, void *user,
+                                 int effect)
+{
+    if (!dt) return;
+    dt->haptic = haptic;
+    dt->haptic_user = user;
+    dt->haptic_effect = effect;
 }
 
 void wc3_direct_touch_set_sink(Wc3DirectTouch *dt, Wc3DirectTouchSink sink,
@@ -99,6 +207,9 @@ void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
 {
     if (!dt) return;
 
+    DT_LOG("down ptr=%d px=%.1f,%.1f route=%s active_before=%d",
+           pointer_id, x, y, dt_route_name(route), active_count(dt));
+
     Wc3DirectTouchPointer *pointer = find_pointer(dt, pointer_id);
     if (pointer) {
         /* A duplicate DOWN for the same id starts a new contact. */
@@ -106,7 +217,10 @@ void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
     } else {
         pointer = alloc_pointer(dt);
     }
-    if (!pointer) return;
+    if (!pointer) {
+        DT_LOG("down ptr=%d no-free-slot", pointer_id);
+        return;
+    }
 
     const int others = active_count(dt);
     if (others > 0) {
@@ -124,6 +238,10 @@ void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
     pointer->route = route;
     pointer->active = 1;
     pointer->multi = others > 0 ? 1 : 0;
+    pointer->mode = WC3_DIRECT_TOUCH_FIELD_PENDING;
+    DT_LOG("down-state ptr=%d mode=%s multi=%d others=%d down_ms=%llu",
+           pointer_id, dt_mode_name(pointer->mode), pointer->multi, others,
+           (unsigned long long)now_ms);
     if (route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
         /* The portrait is a tracking control, not a long-press gesture.
          * Start the native camera follow as soon as the finger lands on it;
@@ -145,29 +263,82 @@ void wc3_direct_touch_down(Wc3DirectTouch *dt, int pointer_id,
 void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
                            float x, float y, uint64_t now_ms)
 {
-    (void)now_ms;
     if (!dt) return;
     Wc3DirectTouchPointer *pointer = find_pointer(dt, pointer_id);
-    if (!pointer) return;
+    if (!pointer) {
+        DT_LOG("move ptr=%d no-pointer", pointer_id);
+        return;
+    }
 
     pointer->last_x = x;
     pointer->last_y = y;
     if (pointer->route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
         /* The portrait follow is owned by the pointer, not by the rectangle.
          * Moving anywhere on the screen must not cancel it. */
+        DT_LOG("move ptr=%d px=%.1f,%.1f route=PORTRAIT ignored",
+               pointer_id, x, y);
         return;
     }
+    /* NATIVE and MINIMAP pointers are forwarded as raw phases by controls.c;
+     * they must never enter the field state machine or emit semantic events.
+     * Keep last_x/last_y updated above for a reset/handoff. */
+    if (pointer->route != WC3_DIRECT_TOUCH_ROUTE_FIELD) {
+        DT_LOG("move ptr=%d px=%.1f,%.1f route=%s ignored",
+               pointer_id, x, y, dt_route_name(pointer->route));
+        return;
+    }
+    if (pointer->multi) {
+        DT_LOG("move ptr=%d px=%.1f,%.1f multi ignored", pointer_id, x, y);
+        return;
+    }
+
+    /* A MOVE can arrive in the same batch as the deadline but before
+     * controls_tick().  Arm the hold here so the gesture below is classified
+     * as a selection drag, not as a camera swipe. */
+    if (hold_due(dt, pointer, now_ms)) {
+        DT_LOG("move ptr=%d hold-due -> arm", pointer_id);
+        arm_hold(dt, pointer);
+    }
+
     const float moved_sq =
         distance_sq(x, y, pointer->down_x, pointer->down_y);
-    if (moved_sq > dt->tap_slop_px * dt->tap_slop_px) {
-        /* Too much drift for a tap.  A long press has its own, larger
-         * tolerance below. */
-        pointer->moved = 1;
-    }
-    if (moved_sq > dt->long_press_slop_px * dt->long_press_slop_px) {
-        /* Too much drift for a long press either: suppress both. */
-        pointer->moved = 1;
-        pointer->long_fired = 1;
+    DT_LOG("move ptr=%d px=%.1f,%.1f mode=%s moved_sq=%.1f "
+           "threshold_sq=%.1f route=%s",
+           pointer_id, x, y, dt_mode_name(pointer->mode), moved_sq,
+           drag_threshold_sq(dt), dt_route_name(pointer->route));
+    switch (pointer->mode) {
+    case WC3_DIRECT_TOUCH_FIELD_CAMERA:
+        emit_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE, pointer_id,
+                   x, y, now_ms, pointer->route);
+        break;
+    case WC3_DIRECT_TOUCH_FIELD_SELECT:
+        emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE, pointer_id,
+                   x, y, now_ms, pointer->route);
+        break;
+    case WC3_DIRECT_TOUCH_FIELD_HOLD:
+        if (moved_sq > drag_threshold_sq(dt)) {
+            /* The legacy long-press drag binding is the left button: start
+             * the native selection rectangle at the point where the finger
+             * crossed the threshold.  The deferred long-press action is
+             * cancelled. */
+            pointer->mode = WC3_DIRECT_TOUCH_FIELD_SELECT;
+            DT_LOG("move ptr=%d HOLD -> SELECT", pointer_id);
+            emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN, pointer_id,
+                       x, y, now_ms, pointer->route);
+        }
+        break;
+    case WC3_DIRECT_TOUCH_FIELD_PENDING:
+    default:
+        if (moved_sq > drag_threshold_sq(dt)) {
+            /* Legacy singleTapDragAction is the middle button: rotate the
+             * camera with the native drag instead of emitting a tap. */
+            pointer->mode = WC3_DIRECT_TOUCH_FIELD_CAMERA;
+            pointer->moved = 1;
+            DT_LOG("move ptr=%d PENDING -> CAMERA", pointer_id);
+            emit_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN, pointer_id,
+                       x, y, now_ms, pointer->route);
+        }
+        break;
     }
 }
 
@@ -176,10 +347,18 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
 {
     if (!dt) return;
     Wc3DirectTouchPointer *pointer = find_pointer(dt, pointer_id);
-    if (!pointer) return;
+    if (!pointer) {
+        DT_LOG("up ptr=%d no-pointer", pointer_id);
+        return;
+    }
 
     pointer->last_x = x;
     pointer->last_y = y;
+    DT_LOG("up ptr=%d px=%.1f,%.1f route=%s mode=%s multi=%d "
+           "long_fired=%d",
+           pointer_id, x, y, dt_route_name(pointer->route),
+           dt_mode_name(pointer->mode), pointer->multi,
+           pointer->long_fired);
 
     if (pointer->route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
         /* The follow started on DOWN and is owned by this finger.  Lifting
@@ -190,33 +369,73 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
         memset(pointer, 0, sizeof(*pointer));
         return;
     }
+    if (pointer->route != WC3_DIRECT_TOUCH_ROUTE_FIELD) {
+        /* Raw NATIVE/MINIMAP ownership ends here; controls.c already sent
+         * the matching raw UP.  Never turn it into TAP or LONG_PRESS. */
+        DT_LOG("up ptr=%d route=%s raw -> no semantic", pointer_id,
+               dt_route_name(pointer->route));
+        memset(pointer, 0, sizeof(*pointer));
+        return;
+    }
 
     const float moved_sq = distance_sq(x, y, pointer->down_x, pointer->down_y);
     const uint64_t timeout = dt->long_press_ms > 0
         ? (uint64_t)dt->long_press_ms : 0u;
     const int held_long = now_ms >= pointer->down_ms &&
                           now_ms - pointer->down_ms >= timeout;
-    const int beyond_long = moved_sq >
-        dt->long_press_slop_px * dt->long_press_slop_px;
+    DT_LOG("up-state ptr=%d moved_sq=%.1f threshold_sq=%.1f held_long=%d",
+           pointer_id, moved_sq, drag_threshold_sq(dt), held_long);
 
-    if (!pointer->multi && !pointer->long_fired && !beyond_long) {
-        if (held_long) {
-            /* The input thread normally emits this from the deadline tick.
-             * If the tick was late, the release still produces the long
-             * press instead of degrading into a tap at the release point. */
-            pointer->long_fired = 1;
+    switch (pointer->mode) {
+    case WC3_DIRECT_TOUCH_FIELD_CAMERA:
+        DT_LOG("up ptr=%d camera end", pointer_id);
+        emit_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_END, pointer_id,
+                   x, y, now_ms, pointer->route);
+        memset(pointer, 0, sizeof(*pointer));
+        return;
+    case WC3_DIRECT_TOUCH_FIELD_SELECT:
+        DT_LOG("up ptr=%d select end", pointer_id);
+        emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END, pointer_id,
+                   x, y, now_ms, pointer->route);
+        memset(pointer, 0, sizeof(*pointer));
+        return;
+    case WC3_DIRECT_TOUCH_FIELD_HOLD:
+        if (!pointer->multi) {
+            DT_LOG("up ptr=%d HOLD -> LONG_PRESS", pointer_id);
+            /* The hold was armed by the deadline tick (or by a late UP).
+             * Without a drag it keeps the previous semantic long-press
+             * action; a drag would have emitted SELECT_BEGIN instead. */
             emit_event(dt, WC3_DIRECT_TOUCH_LONG_PRESS, pointer_id,
-                       pointer->last_x, pointer->last_y, now_ms,
-                       pointer->route);
-        } else if (!pointer->moved &&
-                   moved_sq <= dt->tap_slop_px * dt->tap_slop_px) {
-            /* A fast flick can arrive as DOWN+UP with no MOVE at all; the
-             * release point must still be inside the tap slop. */
-            emit_event(dt, WC3_DIRECT_TOUCH_TAP, pointer_id, x, y, now_ms,
-                       pointer->route);
+                       x, y, now_ms, pointer->route);
         }
+        memset(pointer, 0, sizeof(*pointer));
+        return;
+    case WC3_DIRECT_TOUCH_FIELD_PENDING:
+    default:
+        if (!pointer->multi) {
+            if (held_long) {
+                /* The tick was late.  Arm the hold, fire its haptic and
+                 * emit the semantic action instead of degrading into a tap
+                 * at the release point. */
+                DT_LOG("up ptr=%d late-hold -> LONG_PRESS", pointer_id);
+                fire_haptic(dt);
+                emit_event(dt, WC3_DIRECT_TOUCH_LONG_PRESS, pointer_id,
+                           x, y, now_ms, pointer->route);
+            } else if (moved_sq <= drag_threshold_sq(dt)) {
+                /* A fast flick can arrive as DOWN+UP with no MOVE at all;
+                 * the release point must still be inside the legacy drag
+                 * threshold. */
+                DT_LOG("up ptr=%d PENDING -> TAP", pointer_id);
+                emit_event(dt, WC3_DIRECT_TOUCH_TAP, pointer_id, x, y,
+                           now_ms, pointer->route);
+            } else {
+                DT_LOG("up ptr=%d PENDING -> no event moved_sq=%.1f", pointer_id,
+                       moved_sq);
+            }
+        }
+        memset(pointer, 0, sizeof(*pointer));
+        return;
     }
-    memset(pointer, 0, sizeof(*pointer));
 }
 
 void wc3_direct_touch_reset(Wc3DirectTouch *dt)
@@ -224,12 +443,21 @@ void wc3_direct_touch_reset(Wc3DirectTouch *dt)
     if (!dt) return;
     for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
         Wc3DirectTouchPointer *pointer = &dt->pointers[i];
-        if (!pointer->active ||
-            pointer->route != WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
-            continue;
+        if (!pointer->active) continue;
+        DT_LOG("reset ptr=%d route=%s mode=%s", pointer->pointer_id,
+               dt_route_name(pointer->route), dt_mode_name(pointer->mode));
+        if (pointer->route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
+            emit_event(dt, WC3_DIRECT_TOUCH_HOLD_RELEASE, pointer->pointer_id,
+                       pointer->last_x, pointer->last_y, 0, pointer->route);
+        } else if (pointer->mode == WC3_DIRECT_TOUCH_FIELD_CAMERA) {
+            emit_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_END,
+                       pointer->pointer_id, pointer->last_x,
+                       pointer->last_y, 0, pointer->route);
+        } else if (pointer->mode == WC3_DIRECT_TOUCH_FIELD_SELECT) {
+            emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END,
+                       pointer->pointer_id, pointer->last_x,
+                       pointer->last_y, 0, pointer->route);
         }
-        emit_event(dt, WC3_DIRECT_TOUCH_HOLD_RELEASE, pointer->pointer_id,
-                   pointer->last_x, pointer->last_y, 0, pointer->route);
     }
     memset(dt->pointers, 0, sizeof(dt->pointers));
 }
@@ -237,26 +465,15 @@ void wc3_direct_touch_reset(Wc3DirectTouch *dt)
 int wc3_direct_touch_tick(Wc3DirectTouch *dt, uint64_t now_ms)
 {
     if (!dt) return 0;
-    int emitted = 0;
+    int armed = 0;
     for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
         Wc3DirectTouchPointer *pointer = &dt->pointers[i];
-        if (!pointer->active || pointer->multi || pointer->long_fired ||
-            pointer->route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
-            continue;
-        }
-        const uint64_t timeout = dt->long_press_ms > 0
-            ? (uint64_t)dt->long_press_ms : 0u;
-        if (now_ms < pointer->down_ms ||
-            now_ms - pointer->down_ms < timeout) {
-            continue;
-        }
-        pointer->long_fired = 1;
-        emit_event(dt, WC3_DIRECT_TOUCH_LONG_PRESS, pointer->pointer_id,
-                   pointer->last_x, pointer->last_y, now_ms,
-                   pointer->route);
-        emitted++;
+        if (!pointer->active || !hold_due(dt, pointer, now_ms)) continue;
+        DT_LOG("tick ptr=%d hold-due -> arm", pointer->pointer_id);
+        arm_hold(dt, pointer);
+        armed++;
     }
-    return emitted;
+    return armed;
 }
 
 uint64_t wc3_direct_touch_next_deadline_ms(const Wc3DirectTouch *dt)
@@ -266,7 +483,8 @@ uint64_t wc3_direct_touch_next_deadline_ms(const Wc3DirectTouch *dt)
     for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
         const Wc3DirectTouchPointer *pointer = &dt->pointers[i];
         if (!pointer->active || pointer->multi || pointer->long_fired ||
-            pointer->route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
+            pointer->route != WC3_DIRECT_TOUCH_ROUTE_FIELD ||
+            pointer->mode != WC3_DIRECT_TOUCH_FIELD_PENDING) {
             continue;
         }
         const uint64_t timeout = dt->long_press_ms > 0
@@ -276,6 +494,20 @@ uint64_t wc3_direct_touch_next_deadline_ms(const Wc3DirectTouch *dt)
         if (next == 0 || deadline < next) next = deadline;
     }
     return next;
+}
+
+int wc3_direct_touch_field_drag_active(const Wc3DirectTouch *dt)
+{
+    if (!dt) return 0;
+    for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
+        const Wc3DirectTouchPointer *pointer = &dt->pointers[i];
+        if (!pointer->active) continue;
+        if (pointer->mode == WC3_DIRECT_TOUCH_FIELD_CAMERA ||
+            pointer->mode == WC3_DIRECT_TOUCH_FIELD_SELECT) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 int wc3_direct_touch_active_count(const Wc3DirectTouch *dt)

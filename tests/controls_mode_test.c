@@ -109,6 +109,19 @@ static int minimap_rect(float *left, float *top, float *right,
     return 1;
 }
 
+/* Deliberately inside the FIELD rectangle: the beacon gate must win over
+ * the published route, otherwise the press would become a semantic tap. */
+static int beacon_rect(float *left, float *top, float *right,
+                       float *bottom, void *user)
+{
+    (void)user;
+    *left = 0.40f;
+    *top = 0.40f;
+    *right = 0.45f;
+    *bottom = 0.45f;
+    return 1;
+}
+
 static int has_pointer_move(int x, int y)
 {
     for (int i = 0; i < g_action_count; i++) {
@@ -421,6 +434,7 @@ int main(int argc, char **argv)
     controls_set_direct_touch_route_gate(route_field, NULL);
     controls_set_direct_touch_portrait_gate(portrait_rect, NULL);
     controls_set_direct_touch_minimap_gate(minimap_rect, NULL);
+    controls_set_direct_touch_beacon_gate(beacon_rect, NULL);
     controls_set_direct_touch_enabled(true);
 
     const TouchElement *shift_element = find_key(50);
@@ -562,11 +576,44 @@ int main(int argc, char **argv)
     assert(direct_has(WC3_DIRECT_TOUCH_TAP));
     assert(!direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
 
+    /* Beacon button: its rectangle is inside the FIELD route on purpose.
+     * The beacon gate must force the press to NATIVE, so it is not a
+     * semantic tap and its drag is not clamped to the minimap.  The HLE
+     * claims these raw phases and turns the release into a beacon. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 420.0f, 420.0f, 7000) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, 850.0f, 800.0f, 7010) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 850.0f, 800.0f, 7020) == 0);
+    controls_tick(7100);
+    assert(g_action_count == 0);
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+    const int bc_down = direct_index(WC3_DIRECT_TOUCH_POINTER_DOWN);
+    const int bc_move = direct_index(WC3_DIRECT_TOUCH_POINTER_MOVE);
+    const int bc_up = direct_index(WC3_DIRECT_TOUCH_POINTER_UP);
+    assert(bc_down >= 0 && bc_move >= 0 && bc_up >= 0);
+    assert(fabsf(g_direct_x[bc_down] - 0.42f) < 0.0001f);
+    assert(fabsf(g_direct_y[bc_down] - 0.42f) < 0.0001f);
+    assert(fabsf(g_direct_x[bc_move] - 0.85f) < 0.0001f);
+    assert(fabsf(g_direct_y[bc_move] - 0.80f) < 0.0001f);
+    assert(fabsf(g_direct_x[bc_up] - 0.85f) < 0.0001f);
+    assert(fabsf(g_direct_y[bc_up] - 0.80f) < 0.0001f);
+
+    /* Outside the beacon rectangle the field route is unchanged. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 550.0f, 550.0f, 7200) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 550.0f, 550.0f, 7250) == 0);
+    controls_tick(7300);
+    assert(direct_has(WC3_DIRECT_TOUCH_TAP));
+    assert(!direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
+
     controls_set_direct_touch_enabled(false);
     controls_set_direct_touch_sink(NULL, NULL);
     controls_set_direct_touch_route_gate(NULL, NULL);
     controls_set_direct_touch_portrait_gate(NULL, NULL);
     controls_set_direct_touch_minimap_gate(NULL, NULL);
+    controls_set_direct_touch_beacon_gate(NULL, NULL);
     controls_set_action_sink(NULL, NULL);
     controls_cancel_all();
     free(json);

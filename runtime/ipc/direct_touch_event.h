@@ -48,7 +48,26 @@ typedef enum {
      * visible portrait; the guest-side executor starts the native camera
      * follow for the displayed unit.  The follow stays active while that
      * finger is on the screen, even if it moves outside the portrait. */
-    WC3_DIRECT_TOUCH_FOLLOW_START = 8
+    WC3_DIRECT_TOUCH_FOLLOW_START = 8,
+    /* Field camera drag.  A quick swipe on the battlefield starts the same
+     * native middle-button drag the legacy profile binds to
+     * singleTapDragAction; the guest-side executor posts WM_MBUTTONDOWN/
+     * WM_MOUSEMOVE/WM_MBUTTONUP.  BEGIN carries the point where the drag
+     * crossed the legacy drag threshold, MOVE the later positions, and END
+     * the release.  These events are only valid on the FIELD route. */
+    WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN = 9,
+    WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE = 10,
+    WC3_DIRECT_TOUCH_FIELD_CAMERA_END = 11,
+    /* Field selection drag.  A long press that is still held when the finger
+     * moves starts the native left-button drag (legacy longPressDragAction),
+     * so the game draws and commits its own selection rectangle.  BEGIN is
+     * emitted at the point where the drag crossed the threshold, MOVE for
+     * later positions, and END on release.  The long-press haptic already
+     * fired on the deadline; the semantic LONG_PRESS event is not emitted
+     * for this gesture.  These events are only valid on the FIELD route. */
+    WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN = 12,
+    WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE = 13,
+    WC3_DIRECT_TOUCH_FIELD_SELECT_END = 14
 } Wc3DirectTouchKind;
 
 /*
@@ -60,7 +79,9 @@ typedef enum {
  *         the host has no sink), or the touch hits an overlay control
  *         element.  This is not a per-feature fallback.
  * FIELD:  the touch is in the battlefield and CSelectMode owns input.  Use
- *         the semantic tap/long-press recognizer.
+ *         the semantic tap/long-press recognizer, plus the native middle-
+ *         button camera drag for a quick swipe and the native left-button
+ *         selection drag for a long press that keeps moving.
  * NATIVE: the touch belongs to the native UI (HUD, menu, targeting or
  *         placement).  Forward raw pointer phases so the guest-side service
  *         can post native mouse messages.  The service claims a gesture that

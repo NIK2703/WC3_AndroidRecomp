@@ -207,6 +207,13 @@ int hle_android_mouse_is_down(int button);
  * for a second tap that follows its own pending release; the message order
  * still pairs DOWN with UP.  Do not use it for the overlay engine. */
 void hle_android_mouse_button_down_force(int button);
+/* Post a button release even when the logical state is already up.  Another
+ * release path (overlay release_all, a surface stop, a duplicate cancel) may
+ * have cleared the bit while the guest window procedure still owns a native
+ * drag.  The direct path uses this so a minimap/camera drag always sees its
+ * matching UP; the message is harmless when the guest already saw a release.
+ * Do not use it for the overlay engine. */
+void hle_android_mouse_button_up_force(int button);
 /* delta is in Windows wheel units: +/-120 per notch. */
 void hle_android_mouse_wheel(int delta);
 /* vk may be a specific left/right modifier VK; the HLE maps it to the generic

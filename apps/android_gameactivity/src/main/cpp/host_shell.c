@@ -61,6 +61,8 @@ int wc3_hle_direct_touch_portrait_rect(float *left, float *top,
                                        float *right, float *bottom);
 int wc3_hle_direct_touch_minimap_rect(float *left, float *top,
                                       float *right, float *bottom);
+int wc3_hle_direct_touch_beacon_rect(float *left, float *top,
+                                     float *right, float *bottom);
 
 static Wc3DirectTouchRoute host_direct_touch_route_gate(void *user)
 {
@@ -82,6 +84,14 @@ static int host_direct_touch_minimap_gate(float *left, float *top,
 {
     (void)user;
     return wc3_hle_direct_touch_minimap_rect(left, top, right, bottom);
+}
+
+static int host_direct_touch_beacon_gate(float *left, float *top,
+                                         float *right, float *bottom,
+                                         void *user)
+{
+    (void)user;
+    return wc3_hle_direct_touch_beacon_rect(left, top, right, bottom);
 }
 #endif
 #include "window_settle.h"
@@ -2407,12 +2417,17 @@ static int overlay_input_start(int width, int height)
                                             NULL);
     controls_set_direct_touch_minimap_gate(host_direct_touch_minimap_gate,
                                            NULL);
+    controls_set_direct_touch_beacon_gate(host_direct_touch_beacon_gate,
+                                          NULL);
+    controls_set_direct_touch_haptic_sink(host_haptic_sink, NULL);
 #else
     controls_set_action_sink(NULL, NULL);
     controls_set_direct_touch_sink(NULL, NULL);
+    controls_set_direct_touch_haptic_sink(NULL, NULL);
     controls_set_direct_touch_route_gate(NULL, NULL);
     controls_set_direct_touch_portrait_gate(NULL, NULL);
     controls_set_direct_touch_minimap_gate(NULL, NULL);
+    controls_set_direct_touch_beacon_gate(NULL, NULL);
 #endif
 
     /* A surface resize must not throw away the current FULL/SIMPLE/SIMPLE_ESC
@@ -2433,6 +2448,7 @@ static int overlay_input_start(int width, int height)
             OVERLAY_LOGE("controls profile missing; using the one-finger fallback");
             controls_set_action_sink(NULL, NULL);
             controls_set_direct_touch_sink(NULL, NULL);
+            controls_set_direct_touch_haptic_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
             overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
@@ -2447,6 +2463,7 @@ static int overlay_input_start(int width, int height)
             free(profile);
             controls_set_action_sink(NULL, NULL);
             controls_set_direct_touch_sink(NULL, NULL);
+            controls_set_direct_touch_haptic_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
             overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
@@ -2478,6 +2495,7 @@ static int overlay_input_start(int width, int height)
 #endif
         controls_set_action_sink(NULL, NULL);
         controls_set_direct_touch_sink(NULL, NULL);
+        controls_set_direct_touch_haptic_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
         overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
@@ -2501,6 +2519,7 @@ static int overlay_input_start(int width, int height)
 #endif
         controls_set_action_sink(NULL, NULL);
         controls_set_direct_touch_sink(NULL, NULL);
+        controls_set_direct_touch_haptic_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
         overlay_actions_set_haptic_sink(NULL, NULL);
 #endif
@@ -2536,6 +2555,7 @@ static void overlay_input_stop(void)
 #endif
     controls_set_action_sink(NULL, NULL);
     controls_set_direct_touch_sink(NULL, NULL);
+    controls_set_direct_touch_haptic_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
     overlay_actions_set_haptic_sink(NULL, NULL);
 #endif

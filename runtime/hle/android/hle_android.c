@@ -7440,6 +7440,17 @@ void hle_android_set_message_wait_tick(void (*fn)(CPU *c))
     g_msg_wait_tick = fn;
 }
 
+/* Remove one queued message by ring index.  The caller holds g_uq_lock. */
+static void u_msg_remove_locked(int index)
+{
+    if (index < 0 || index >= g_uq_count) return;
+    for (int i = index; i < g_uq_count - 1; i++) {
+        g_uq[(g_uq_head + i) % UMSG_MAX] =
+            g_uq[(g_uq_head + i + 1) % UMSG_MAX];
+    }
+    g_uq_count--;
+}
+
 static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
 {
     int32_t x = (int16_t)(lp & 0xFFFF);
@@ -7461,8 +7472,19 @@ static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
         }
     }
     if (g_uq_count == UMSG_MAX) {
-        g_uq_head = (g_uq_head + 1) % UMSG_MAX;
-        g_uq_count--;
+        /* A move burst must not evict a button transition.  Losing a move is
+         * harmless because the next move or the button message carries the
+         * position; losing WM_LBUTTONUP leaves the native minimap/camera drag
+         * latched.  Drop the oldest move, and only fall back to the oldest
+         * message when the queue holds no move at all. */
+        int victim = -1;
+        for (int i = 0; i < g_uq_count; i++) {
+            if (g_uq[(g_uq_head + i) % UMSG_MAX].msg == WM_MOUSEMOVE) {
+                victim = i;
+                break;
+            }
+        }
+        u_msg_remove_locked(victim >= 0 ? victim : 0);
     }
     UMsg *m = &g_uq[(g_uq_head + g_uq_count) % UMSG_MAX];
     m->hwnd = hwnd;
@@ -7503,12 +7525,7 @@ static int u_msg_take_locked(uint32_t out, uint32_t hwnd_filter, uint32_t lo,
     if (found < 0) return 0;
 
     UMsg m = g_uq[(g_uq_head + found) % UMSG_MAX];
-    if (remove) {
-        for (int i = found; i < g_uq_count - 1; i++)
-            g_uq[(g_uq_head + i) % UMSG_MAX] =
-                g_uq[(g_uq_head + i + 1) % UMSG_MAX];
-        g_uq_count--;
-    }
+    if (remove) u_msg_remove_locked(found);
 
     wr32g(out + 0, m.hwnd);
     wr32g(out + 4, m.msg);
@@ -8195,7 +8212,7 @@ static void mouse_button_ex(int button, int down, int force)
         if (button == 0) g_mouse_down = 1;
         u_msg_post(input_target(), mouse_button_down_msg(button), mouse_mk(), lp);
     } else {
-        if (!(g_mouse_buttons & bit)) return;
+        if (!(g_mouse_buttons & bit) && !force) return;
         uint32_t wp = mouse_mk() & ~mouse_button_mk(button);
         u_msg_post(input_target(), mouse_button_up_msg(button), wp, lp);
     }
@@ -8220,6 +8237,11 @@ void hle_android_mouse_button_ex(int button, int down)
 void hle_android_mouse_button_down_force(int button)
 {
     mouse_button_ex(button, 1, 1);
+}
+
+void hle_android_mouse_button_up_force(int button)
+{
+    mouse_button_ex(button, 0, 1);
 }
 
 void hle_android_mouse_button(int down)

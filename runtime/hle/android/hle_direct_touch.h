@@ -18,8 +18,20 @@
  *     message path.  This is what makes minimap taps and drags, command-card
  *     buttons, menus and targeting/placement work without the overlay touch
  *     engine.  A minimap-owned drag is clamped to the published minimap
- *     rectangle by the controls layer, so leaving the minimap does not stop
- *     the camera drag before the finger is released.
+ *     rectangle by the controls layer, and the executor keeps its own
+ *     backstop: a DOWN inside the published rectangle stays minimap-owned
+ *     until that pointer's UP/CANCEL, every phase is inset into the frame,
+ *     and the release is forced even if another path already cleared the
+ *     logical button bit.  Leaving the minimap therefore cannot latch the
+ *     native camera drag.
+ *   - FIELD_CAMERA_BEGIN/MOVE/END: the quick battlefield swipe.  The executor
+ *     presses the native middle button at the start point and releases it at
+ *     the end, so the game performs its own camera drag.
+ *   - FIELD_SELECT_BEGIN/MOVE/END: the held battlefield drag.  After the
+ *     long-press deadline the executor presses the native left button and
+ *     lets the game draw and commit its own selection rectangle.  A held
+ *     finger that never crosses the drag threshold keeps the semantic
+ *     LONG_PRESS instead.
  *   - the selected-unit panel grid and the inventory bar are the native-route
  *     gestures the executor claims itself.  Touching or dragging onto a grid
  *     button activates that subgroup or selects the individual unit
@@ -70,9 +82,9 @@ int wc3_hle_direct_touch_can_service(void);
 void wc3_hle_direct_touch_reset(void);
 
 /* Lock-free routing snapshot for the Android input thread, one of
- * Wc3DirectTouchRoute.  FIELD means the semantic battlefield recognizer;
- * NATIVE means raw pointer phases for the native UI (HUD, menus,
- * targeting/placement); PORTRAIT means the touch is inside the published
+ * Wc3DirectTouchRoute.  FIELD means the semantic battlefield recognizer,
+ * including its native camera and selection drags; NATIVE means raw pointer
+ * phases for the native UI (HUD, menus, targeting/placement); PORTRAIT means the touch is inside the published
  * portrait frame; LEGACY means the UI singleton is not up yet and the
  * controls layer must keep the pointer on the overlay path.  The controls
  * layer derives its MINIMAP owner from the separate minimap rectangle, not
@@ -90,9 +102,18 @@ int wc3_hle_direct_touch_portrait_rect(float *left, float *top,
 
 /* Lock-free snapshot of the visible minimap frame, same contract as the
  * portrait rectangle.  The controls layer claims a touch that starts inside
- * this rectangle and clamps its native pointer phases to it until release. */
+ * this rectangle and clamps its native pointer phases to it until release;
+ * the guest-thread executor uses the same snapshot as a backstop so the
+ * release stays inside the frame even when the controls route was NATIVE. */
 int wc3_hle_direct_touch_minimap_rect(float *left, float *top,
                                       float *right, float *bottom);
+
+/* Lock-free snapshot of the visible beacon button (MinimapSignal) frame,
+ * same contract as the portrait rectangle.  The controls layer forces a touch
+ * that starts inside it to the raw NATIVE route so the guest beacon gesture
+ * claims the press before any native mouse button is posted. */
+int wc3_hle_direct_touch_beacon_rect(float *left, float *top,
+                                     float *right, float *bottom);
 
 #ifdef __cplusplus
 }
