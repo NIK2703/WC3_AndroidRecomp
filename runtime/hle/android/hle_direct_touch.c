@@ -155,11 +155,23 @@
 #define DT_FN_VALIDATE_OBJECT  0x6F21B730u
 #define DT_FN_SELECT_EVENT     0x6F395410u
 #define DT_FN_SELECTION_COUNT  0x6F290270u
+#define DT_FN_SELECTION_PRIMARY_UNIT 0x6F290240u
+/* 0x6F28FFE0 returns CSelectionWar3+0x1E0, the refcounted primary selected
+ * CUnit.  Neither native order path reads it; it is only a diagnostic
+ * counterpart to the active-subgroup primary below. */
+#define DT_FN_SELECTION_PRIMARY_SELECTED 0x6F28FFE0u
+/* 0x6F290570 is the active subgroup's vector accessor:
+ * (group, index) -> CUnit* or 0.  Used by the debug selection dump. */
+#define DT_FN_GROUP_AT         0x6F290570u
 /* 0x6F291240 is CSelectionWar3::Realize (mirror update), not a clear.
  * dt_clear_selection() predates this analysis; do not copy the name into new
  * paths.  The grid path uses the explicit DT_FN_SELECTION_REALIZE alias. */
 #define DT_FN_CLEAR_SELECTION  0x6F291240u
-#define DT_FN_CAN_ORDER        0x6F66EC60u
+/* 0x6F66EC60 -> 0x6F66EC70(CUnit*, local_player_id).  It reads CUnit+0x58,
+ * CUnit+0x5C and the CUnit vtable, not a CSelectionWar3*.  The native ground
+ * order path calls it with the primary selected CUnit, never with the
+ * selection object. */
+#define DT_FN_UNIT_CONTROLLABLE 0x6F66EC60u
 #define DT_FN_GHOST_INIT       0x6F37C550u
 #define DT_FN_CLICK_DISPATCH   0x6F392FA0u
 #define DT_FN_GROUND_ORDER     0x6F394680u
@@ -429,6 +441,7 @@ static void dt_beacon_cancel(void)
 static int dt_minimap_native_rect(float *left, float *top,
                                   float *right, float *bottom);
 static int dt_field_contains(float nx, float ny);
+static void dt_native_right_click(float x, float y);
 
 static float dt_clamp01(float value)
 {
@@ -1646,32 +1659,190 @@ static void dt_portrait_release(CPU *c)
     dt_trace("portrait-release", 0, 0);
 }
 
-static int dt_selection_nonempty(CPU *c, const DtContext *ctx)
+static int dt_selection_nonempty(CPU *c, uint32_t selection)
 {
-    const uint32_t selection = dt_selection(c, ctx);
     if (!selection) return 0;
     const int count = (int)dt_call_thiscall(c, selection,
                                              DT_FN_SELECTION_COUNT, 0, NULL);
     return count > 0 && count <= 40;
 }
 
+/* True when unit is in the selected-unit list (node+8, next at node+4). */
+static int dt_selection_contains_unit(uint32_t selection, uint32_t unit)
+{
+    if (!selection || !unit) return 0;
+    uint32_t node = wc3_rd32g(selection + 0x1F4u);
+    for (uint32_t i = 0; i < 40u && node; i++) {
+        if (!dt_guest_readable(node, 0x0Cu)) return 0;
+        if (wc3_rd32g(node + 0x08u) == unit) return 1;
+        node = wc3_rd32g(node + 0x04u);
+    }
+    return 0;
+}
+
+/* 0x6F293550 sets CSelectionWar3+0x20C from the last subgroup-list node
+ * ([+0x204]+8).  A group selection can leave +0x20C zero, empty, or pointing
+ * at a subgroup that is no longer part of the selection; the native order
+ * paths (0x6F290240) then resolve a wrong or missing primary and silently
+ * issue nothing.  Replicate the native write in those cases.  A populated
+ * active subgroup whose first unit is still selected is kept: +0x20C is also
+ * the user's active grid subgroup, not just the last one. */
+static void dt_selection_ensure_active_group(CPU *c, uint32_t selection)
+{
+    if (!selection || !dt_guest_readable(selection + 0x20Cu, 4u)) return;
+    const uint32_t active = wc3_rd32g(selection + 0x20Cu);
+    if (active && dt_guest_readable(active, 0x14u)) {
+        const uint32_t count = wc3_rd32g(active + 0x10u);
+        if (count > 0) {
+            const uint32_t index = 0;
+            const uint32_t first = dt_call_thiscall(c, active, DT_FN_GROUP_AT,
+                                                    1, &index);
+            if (first && dt_selection_contains_unit(selection, first)) return;
+            dt_log("selection active-group stale selection=%08X active=%08X "
+                   "first=%08X", selection, active, first);
+        } else {
+            dt_log("selection active-group empty selection=%08X active=%08X",
+                   selection, active);
+        }
+    }
+    if (!dt_guest_readable(selection + 0x204u, 4u)) {
+        dt_log("selection active-group no-list selection=%08X active=%08X",
+               selection, active);
+        return;
+    }
+    const uint32_t last = wc3_rd32g(selection + 0x204u);
+    if ((int32_t)last <= 0 || !dt_guest_readable(last, 0x14u)) {
+        dt_log("selection active-group bad-tail selection=%08X active=%08X "
+               "last=%08X", selection, active, last);
+        return;
+    }
+    const uint32_t group = last + 8u;
+    if (!dt_guest_readable(group, 0x14u)) {
+        dt_log("selection active-group bad-group selection=%08X active=%08X "
+               "last=%08X group=%08X", selection, active, last, group);
+        return;
+    }
+    wc3_wr32g(selection + 0x20Cu, group);
+    dt_log("selection active-group repaired selection=%08X old=%08X "
+           "group=%08X count=%u", selection, active, group,
+           wc3_rd32g(group + 0x10u));
+}
+
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+static uint32_t dt_trace_word(uint32_t va, uint32_t off)
+{
+    if (!dt_guest_readable(va + off, 4u)) return 0xFFFFFFFFu;
+    return wc3_rd32g(va + off);
+}
+
+/* Dump the live selection before and after the gate.  The fields are the
+ * ones the native order paths use: +0x1F8 is the selected-unit count,
+ * +0x1F4 is the selected-unit list head, +0x204 is the last subgroup-list
+ * node, and +0x20C is the active subgroup.  The walk uses the same list
+ * shape as 0x6F293FB0/0x6F293D30: node+8 is the CUnit, node+4 is next. */
+static void dt_trace_selection_impl(CPU *c, const DtContext *ctx,
+                                    const char *where)
+{
+    const uint32_t selection = dt_selection(c, ctx);
+    if (!selection) {
+        dt_log("sel[%s] none", where);
+        return;
+    }
+    dt_log("sel[%s] obj=%08X +1E0=%08X +1E4=%08X +1F0=%08X +1F4=%08X "
+           "+1F8=%08X +200=%08X +204=%08X +208=%08X +20C=%08X",
+           where, selection,
+           dt_trace_word(selection, 0x1E0u),
+           dt_trace_word(selection, 0x1E4u),
+           dt_trace_word(selection, 0x1F0u),
+           dt_trace_word(selection, 0x1F4u),
+           dt_trace_word(selection, 0x1F8u),
+           dt_trace_word(selection, 0x200u),
+           dt_trace_word(selection, 0x204u),
+           dt_trace_word(selection, 0x208u),
+           dt_trace_word(selection, 0x20Cu));
+
+    const uint32_t active = dt_trace_word(selection, 0x20Cu);
+    const uint32_t primary = dt_call_thiscall(c, selection,
+                                              DT_FN_SELECTION_PRIMARY_UNIT, 0,
+                                              NULL);
+    const uint32_t selected = dt_call_thiscall(c, selection,
+                                               DT_FN_SELECTION_PRIMARY_SELECTED,
+                                               0, NULL);
+    dt_log("sel[%s] primary_unit=%08X primary_selected=%08X active=%08X",
+           where, primary, selected, active);
+
+    if (active && dt_guest_readable(active, 0x14u)) {
+        const uint32_t index = 0;
+        const uint32_t first = dt_call_thiscall(c, active, DT_FN_GROUP_AT, 1,
+                                                &index);
+        dt_log("sel[%s] active=%08X count=%u first=%08X", where, active,
+               wc3_rd32g(active + 0x10u), first);
+    }
+
+    uint32_t node = dt_trace_word(selection, 0x1F4u);
+    for (uint32_t i = 0; i < 40u && node && node != 0xFFFFFFFFu; i++) {
+        if (!dt_guest_readable(node, 0x0Cu)) {
+            dt_log("sel[%s] node[%u]=%08X unreadable", where, i, node);
+            break;
+        }
+        const uint32_t unit = wc3_rd32g(node + 0x08u);
+        if (!unit || !dt_guest_readable(unit, 0x60u)) {
+            dt_log("sel[%s] node[%u]=%08X unit=%08X unreadable", where, i,
+                   node, unit);
+        } else {
+            const uint32_t cls = wc3_rd32g(unit + 0x0Cu);
+            const uint32_t owner = wc3_rd16g(unit + 0x58u);
+            const uint32_t flags = wc3_rd32g(unit + 0x5Cu);
+            int can = -1;
+            if (cls == DT_CLASS_UNIT) {
+                can = dt_call_thiscall(c, unit, DT_FN_UNIT_CONTROLLABLE, 0,
+                                       NULL) != 0;
+            }
+            dt_log("sel[%s] unit[%u]=%08X node=%08X cls=%08X owner=%u "
+                   "flags=%08X can=%d", where, i, unit, node, cls, owner,
+                   flags, can);
+        }
+        node = wc3_rd32g(node + 0x04u);
+    }
+}
+#define dt_trace_selection(c, ctx, where) \
+    dt_trace_selection_impl((c), (ctx), (where))
+#else
+#define dt_trace_selection(c, ctx, where) ((void)0)
+#endif
+
 /*
  * True when the live selection can receive an order from the local player.
- * 0x6F66EC60 is the same predicate the native ground/unit order paths use
- * before issuing an order, so it stays correct for team/shared-control edge
- * cases that a raw owner compare would miss.
+ * Both native order paths resolve the primary through 0x6F290240
+ * (CSelectionWar3+0x20C, the active subgroup's first unit), so the gate
+ * evaluates that same unit.  +0x1E0 (0x6F28FFE0) is the refcounted primary
+ * selected CUnit, but neither 0x6F394680 nor 0x6F393018 reads it; accepting a
+ * selection on +0x1E0 would let the tap issue an order that the native path
+ * then rejects.  0x6F66EC60 is a CUnit predicate (owner at +0x58, flags at
+ * +0x5C, CUnit vtable +0xEC), not a CSelectionWar3 predicate.
  */
 static int dt_selection_controlled(CPU *c, const DtContext *ctx)
 {
     const uint32_t selection = dt_selection(c, ctx);
-    if (!selection || !dt_selection_nonempty(c, ctx)) {
+    if (!selection || !dt_selection_nonempty(c, selection)) {
         dt_log("controlled selection=%08X nonempty=0", selection);
         return 0;
     }
+    dt_selection_ensure_active_group(c, selection);
+
+    const uint32_t primary = dt_call_thiscall(c, selection,
+                                              DT_FN_SELECTION_PRIMARY_UNIT, 0,
+                                              NULL);
+    if (!primary || !dt_guest_readable(primary, 0x60u) ||
+        wc3_rd32g(primary + 0x0Cu) != DT_CLASS_UNIT) {
+        dt_log("controlled selection=%08X primary=%08X readable/class=0",
+               selection, primary);
+        return 0;
+    }
     const int can_order =
-        dt_call_thiscall(c, selection, DT_FN_CAN_ORDER, 0, NULL) != 0;
-    dt_log("controlled selection=%08X nonempty=1 can_order=%d",
-           selection, can_order);
+        dt_call_thiscall(c, primary, DT_FN_UNIT_CONTROLLABLE, 0, NULL) != 0;
+    dt_log("controlled selection=%08X primary=%08X can_order=%d",
+           selection, primary, can_order);
     return can_order;
 }
 
@@ -2030,11 +2201,13 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
     }
 }
 
-static void dt_order_ground(CPU *c, const DtContext *ctx, uint32_t wx_bits,
-                            uint32_t wy_bits)
+/* Returns the native 0x6F394680 result: 1 when an order was issued, 0 when
+ * the native path rejected the selection or the point. */
+static uint32_t dt_order_ground(CPU *c, const DtContext *ctx,
+                                uint32_t wx_bits, uint32_t wy_bits)
 {
     const uint32_t args[2] = { wx_bits, wy_bits };
-    (void)dt_call_thiscall(c, ctx->mode, DT_FN_GROUND_ORDER, 2, args);
+    return dt_call_thiscall(c, ctx->mode, DT_FN_GROUND_ORDER, 2, args);
 }
 
 /*
@@ -2046,11 +2219,16 @@ static void dt_order_ground(CPU *c, const DtContext *ctx, uint32_t wx_bits,
  * handler validates it again with 0x6F21B730 and takes its own reference,
  * exactly as the native OnSelect path does.  Our reference, when the caller
  * holds one for target inspection, only keeps the raw object alive.
+ *
+ * Returns the 0x6F392FA0 result: non-zero when the handler accepted the
+ * selection and issued the order, 0 when it rejected the selection (paused,
+ * no active-subgroup primary, or the primary is not controllable).  The tap
+ * uses 0 only to decide whether a native right-click replay is worth trying.
  */
-static void dt_order_unit(CPU *c, const DtContext *ctx, uint32_t scratch,
-                          uint32_t object, uint32_t candidate,
-                          uint32_t wx_bits, uint32_t wy_bits,
-                          uint32_t wz_bits)
+static uint32_t dt_order_unit(CPU *c, const DtContext *ctx, uint32_t scratch,
+                              uint32_t object, uint32_t candidate,
+                              uint32_t wx_bits, uint32_t wy_bits,
+                              uint32_t wz_bits)
 {
     const uint32_t event = scratch + DT_EVENT_OFFSET;
     memset(guest_host_ptr(event), 0, DT_EVENT_SIZE);
@@ -2065,7 +2243,7 @@ static void dt_order_unit(CPU *c, const DtContext *ctx, uint32_t scratch,
     wc3_wr32g(event + 0x34u, candidate);
     wc3_wr32g(event + 0x38u, object);
 
-    (void)dt_call_thiscall(c, ctx->mode, DT_FN_CLICK_DISPATCH, 1, &event);
+    return dt_call_thiscall(c, ctx->mode, DT_FN_CLICK_DISPATCH, 1, &event);
 }
 
 static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
@@ -2098,13 +2276,22 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
     uint32_t object = 0, wx = 0, wy = 0, wz = 0;
     const int r = dt_pick(c, ctx, wc3_rd32g(point), wc3_rd32g(point + 4u),
                           pick, 1u, &object, &wx, &wy, &wz);
+    dt_log("tap pickctx +00=%08X +04=%08X +08=%08X +0C=%08X +10=%08X "
+           "+14=%08X +18=%08X",
+           wc3_rd32g(pick), wc3_rd32g(pick + 4u),
+           wc3_rd32g(pick + 8u), wc3_rd32g(pick + 0x0Cu),
+           wc3_rd32g(pick + 0x10u), wc3_rd32g(pick + 0x14u),
+           wc3_rd32g(pick + 0x18u));
 
     /* The live selection decides select vs. order.  Compute it once for any
      * hit: the unit branch and the terrain fallback must agree, otherwise a
      * selection made only of uncontrollable units would still issue a ground
-     * order. */
+     * order.  The pre/post dumps show whether the active-subgroup repair
+     * changed +0x20C and which unit the gate evaluated. */
+    dt_trace_selection(c, ctx, "tap-pre");
     const int controlled = (r == 1 || r == 2)
         ? dt_selection_controlled(c, ctx) : 0;
+    dt_trace_selection(c, ctx, "tap-post");
     dt_log("tap pick r=%d object=%08X world=%08X,%08X,%08X controlled=%d",
            r, object, wx, wy, wz, controlled);
 
@@ -2122,13 +2309,26 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
                    "intent=%d",
                    object, unit, readable, is_unit, intent);
             switch (intent) {
-            case WC3_DT_INTENT_ORDER_UNIT:
-                /* Keep the raw pick pointer in the event; the ghost
-                 * handler validates it again and takes its own ref. */
-                dt_order_unit(c, ctx, scratch, object,
-                              wc3_rd32g(pick + 0x08u), wx, wy, wz);
+            case WC3_DT_INTENT_ORDER_UNIT: {
+                /* The semantic ghost handler is the native right-click-on-
+                 * unit path and uses the whole selection; it is not limited
+                 * to a single unit.  It also avoids re-picking at the touch
+                 * point, so a group keeps the object validated above.  Only
+                 * a rejected selection falls back to the native replay. */
+                const uint32_t order = dt_order_unit(c, ctx, scratch, object,
+                                                     wc3_rd32g(pick + 0x08u),
+                                                     wx, wy, wz);
+                dt_log("tap order-unit ret=%u", order);
                 dt_trace("tap-order-unit", unit, object);
+                if (!order) {
+                    dt_log("tap order-unit fallback native pending=%d down=%d",
+                           g_native_right_pending,
+                           hle_android_mouse_is_down(2));
+                    dt_native_right_click(ev->x, ev->y);
+                    dt_trace("tap-order-unit-native", unit, object);
+                }
                 break;
+            }
             case WC3_DT_INTENT_SELECT_UNIT:
                 dt_select_unit(c, unit, scratch + DT_EVENT_OFFSET);
                 dt_trace("tap-select-unit", unit, 0);
@@ -2165,10 +2365,22 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
         dt_log("tap terrain r=%d controlled=%d intent=%d world=%08X,%08X",
                r, controlled, intent, wx, wy);
         switch (intent) {
-        case WC3_DT_INTENT_ORDER_GROUND:
-            dt_order_ground(c, ctx, wx, wy);
+        case WC3_DT_INTENT_ORDER_GROUND: {
+            /* 0x6F394680 already walks the whole selection; the group case
+             * does not need a native replay.  Keep the replay only when the
+             * native path returned 0 (paused, no primary, uncontrollable). */
+            const uint32_t order = dt_order_ground(c, ctx, wx, wy);
+            dt_log("tap order-ground ret=%u", order);
             dt_trace("tap-order-ground", wx, wy);
+            if (!order) {
+                dt_log("tap order-ground fallback native pending=%d down=%d",
+                       g_native_right_pending,
+                       hle_android_mouse_is_down(2));
+                dt_native_right_click(ev->x, ev->y);
+                dt_trace("tap-order-ground-native", wx, wy);
+            }
             break;
+        }
         case WC3_DT_INTENT_CLEAR_SELECTION:
             dt_clear_selection(c, ctx);
             dt_trace("tap-clear", 0, 0);
@@ -2229,8 +2441,8 @@ static void dt_long_press(CPU *c, const DtContext *ctx,
     case WC3_DT_LONG_INTENT_ORDER_UNIT:
         /* Hostile target: keep the force-attack order.  The ghost handler
          * validates the raw object and falls back to the world point. */
-        dt_order_unit(c, ctx, scratch, object,
-                      wc3_rd32g(pick + 0x08u), wx, wy, wz);
+        (void)dt_order_unit(c, ctx, scratch, object,
+                            wc3_rd32g(pick + 0x08u), wx, wy, wz);
         dt_trace("long-order-unit", object, 0);
         break;
     case WC3_DT_LONG_INTENT_CLEAR_SELECTION:
@@ -3005,6 +3217,8 @@ static void dt_native_left_click(float x, float y)
  * both paths drive the same physical button. */
 static void dt_native_right_click(float x, float y)
 {
+    dt_log("native right click x=%.4f y=%.4f pending=%d down=%d",
+           x, y, g_native_right_pending, hle_android_mouse_is_down(2));
     if (g_native_right_pending && !hle_android_mouse_is_down(2)) {
         g_native_right_pending = 0;
     }
