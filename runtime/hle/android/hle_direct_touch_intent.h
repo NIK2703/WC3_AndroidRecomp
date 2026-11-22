@@ -202,6 +202,24 @@ static inline Wc3DtBeaconRelease wc3_dt_beacon_release(int inside_button,
 }
 
 /*
+ * Command-card release.  The DOWN already selected the command, so a release
+ * only confirms a targeted/area command when the drag ended over the field.
+ * A tap, a non-targeted command, or a release outside the field is a no-op.
+ */
+typedef enum {
+    WC3_DT_COMMAND_NONE = 0,
+    WC3_DT_COMMAND_TARGET
+} Wc3DtCommandRelease;
+
+static inline Wc3DtCommandRelease wc3_dt_command_release(int moved,
+                                                         int targeted,
+                                                         int inside_field)
+{
+    if (moved && targeted && inside_field) return WC3_DT_COMMAND_TARGET;
+    return WC3_DT_COMMAND_NONE;
+}
+
+/*
  * Map a surface-normalised point inside the published minimap frame to the
  * frame-local coordinate space AddSignal uses.  The published rectangle and
  * the local clamp rectangle are both derived from CFrame+0x44, so only their

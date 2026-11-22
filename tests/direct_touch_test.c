@@ -625,6 +625,17 @@ static void test_beacon_release_resolution(void)
     assert(wc3_dt_beacon_release(1, 1, 1, 1) == WC3_DT_BEACON_ARM);
 }
 
+static void test_command_release_resolution(void)
+{
+    /* The DOWN already selected the command.  Only a drag from a targeted
+     * command that ends over the field confirms the target; a tap, a
+     * non-targeted command, or a release outside the field is a no-op. */
+    assert(wc3_dt_command_release(0, 1, 1) == WC3_DT_COMMAND_NONE);
+    assert(wc3_dt_command_release(1, 0, 1) == WC3_DT_COMMAND_NONE);
+    assert(wc3_dt_command_release(1, 1, 0) == WC3_DT_COMMAND_NONE);
+    assert(wc3_dt_command_release(1, 1, 1) == WC3_DT_COMMAND_TARGET);
+}
+
 static void test_minimap_inverse(void)
 {
     /* Scale 2, translate (400,300): AddSignal maps world (0,0) to the
@@ -729,6 +740,7 @@ int main(void)
     test_portrait_gesture();
     test_long_press_intent_resolution();
     test_beacon_release_resolution();
+    test_command_release_resolution();
     test_minimap_local_point();
     test_minimap_inverse();
     puts("direct_touch: ok");

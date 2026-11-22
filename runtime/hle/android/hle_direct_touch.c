@@ -15,7 +15,7 @@
  *   - minimap: native pointer phases clamped to its frame;
  *   - selected-unit grid: activate the subgroup under the finger;
  *   - inventory: native click pairs for use/swap/move/drop;
- *   - command card: native click pairs, targeted drag and autocast.
+ *   - command card: select on finger-down, targeted drag and autocast.
  * Native UI paths post the same Win32 mouse messages a real mouse
  * produces; the overlay touch engine is not involved.
  *
@@ -31,10 +31,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-#include <android/log.h>
-#endif
 
 #include "guest_host.h"
 #include "guest_memory.h"
@@ -340,10 +336,11 @@ static float g_inv_down_y;
 static int g_native_right_pending;
 
 /* Command-card gesture.  A touch that starts on a command button is consumed
- * so the release can be replayed as a native click pair.  A tap executes the
- * command; a drag from a targeted/area command into the field executes it and
- * confirms the target at the release point.  A long press posts the native
- * right click, which is the autocast toggle.  Main guest thread only. */
+ * and immediately replayed as a native left click, so the command is selected
+ * on finger-down.  A drag follows the finger with the native cursor; a release
+ * over the field from a targeted/area command confirms the target there.  A
+ * long press posts the native right click, which is the autocast toggle.  Main
+ * guest thread only. */
 static int g_cmd_active;
 static uint32_t g_cmd_pointer;
 static uint32_t g_cmd_bar;
@@ -359,14 +356,12 @@ static int g_cmd_long_fired;
 #include <stdarg.h>
 #include <stdlib.h>
 
-#define DT_LOG_TAG "Wc3DirectTouch"
-
 /*
  * Debug-only direct-touch log.  logcat is a ring buffer: a long guest run
  * overwrites the trace before it can be pulled, and the game log is a
- * different stream.  Mirror every line to dt_trace.txt in WC3_DATA_DIR, the
- * same way selection.c writes sel_trace.txt.  The file is truncated per
- * process, line buffered and opened once.
+ * different stream.  Write every line only to dt_trace.txt in WC3_DATA_DIR,
+ * the same way selection.c writes sel_trace.txt.  The file is truncated per
+ * process, line buffered and opened once; there is no logcat sink.
  */
 static FILE *g_dt_log;
 static pthread_once_t g_dt_log_once = PTHREAD_ONCE_INIT;
@@ -390,10 +385,6 @@ static void dt_open_log(void)
 static void dt_log_write(const char *fmt, ...)
 {
     va_list ap;
-
-    va_start(ap, fmt);
-    __android_log_vprint(ANDROID_LOG_INFO, DT_LOG_TAG, fmt, ap);
-    va_end(ap);
 
     pthread_once(&g_dt_log_once, dt_open_log);
     if (!g_dt_log)
@@ -3463,7 +3454,7 @@ static uint32_t dt_command_live_bar(void)
 /* Resolve the live command bar only in the normal in-game UI.  Target mode
  * owns the click while it is active, so a gesture there is forwarded to the
  * native handler unchanged. */
-static int dt_command_context(uint32_t *bar_out)
+static int dt_command_context(uint32_t *bar_out, int allow_targeting)
 {
     if (!bar_out) return 0;
     *bar_out = 0;
@@ -3474,7 +3465,9 @@ static int dt_command_context(uint32_t *bar_out)
     if (!wc3_rd32g(ui + DT_UI_WORLD_FRAME)) return 0;
     if (!wc3_rd32g(ui + DT_UI_CLICK_GATE)) return 0;
     if (!wc3_rd32g(ui + DT_UI_SELECT_MODE)) return 0;
-    if (dt_grid_targeting(ui)) return 0;
+    /* A release after the DOWN click is expected to run with target mode
+     * active; only the DOWN and the long press reject it. */
+    if (!allow_targeting && dt_grid_targeting(ui)) return 0;
 
     const uint32_t bar = dt_command_live_bar();
     if (!bar || !dt_guest_readable(bar, DT_CMD_ROW_ARRAY + 4u)) return 0;
@@ -3576,11 +3569,11 @@ static uint32_t dt_command_button_at(uint32_t bar, float nx, float ny,
 
 /* Long press on a command button.  The right-click entry is the autocast
  * toggle; when the data has none the gesture is swallowed so the release
- * cannot turn into a delayed left click. */
+ * cannot turn into a second click. */
 static void dt_command_long_press(uint32_t width, uint32_t height)
 {
     uint32_t bar = 0;
-    if (!dt_command_context(&bar) || bar != g_cmd_bar) {
+    if (!dt_command_context(&bar, 0) || bar != g_cmd_bar) {
         dt_trace("cmd-long-context", g_cmd_button, bar);
         g_cmd_long_pending = 0;
         g_cmd_long_fired = 1;
@@ -3633,10 +3626,10 @@ static void dt_command_tick(uint32_t width, uint32_t height)
     dt_command_long_press(width, height);
 }
 
-/* Resolve the release.  A tap is a native left click on the button.  A drag
- * from a targeted/area command into the field is two native click pairs: the
- * first executes the command and enters target mode, the second confirms the
- * target at the release point.  Any other drag cancels. */
+/* Resolve the release.  The DOWN already posted the native left click that
+ * selects the command, so a tap release is a no-op.  A drag from a
+ * targeted/area command into the field posts one more native left click at
+ * the release point to confirm the target.  Any other drag cancels. */
 static void dt_command_finish(const Wc3DirectTouchEvent *ev,
                               uint32_t width, uint32_t height)
 {
@@ -3656,7 +3649,7 @@ static void dt_command_finish(const Wc3DirectTouchEvent *ev,
     /* The UI may have been replaced between DOWN and UP.  Never post a click
      * into a new command page or a menu. */
     uint32_t live_bar = 0;
-    if (!dt_command_context(&live_bar) || live_bar != bar) {
+    if (!dt_command_context(&live_bar, 1) || live_bar != bar) {
         dt_trace("cmd-context", button, live_bar);
         dt_command_reset();
         return;
@@ -3670,31 +3663,22 @@ static void dt_command_finish(const Wc3DirectTouchEvent *ev,
         return;
     }
 
-    float left = 0.0f;
-    float top = 0.0f;
-    float right = 0.0f;
-    float bottom = 0.0f;
-    if (!dt_frame_rect_read(button, width, height, &left, &top,
-                            &right, &bottom)) {
-        dt_command_reset();
-        return;
-    }
-    const float center_x = (left + right) * 0.5f;
-    const float center_y = (top + bottom) * 0.5f;
-
     if (!moved) {
-        dt_native_left_click(center_x, center_y);
+        /* The DOWN already posted the left click, so the command is selected.
+         * A tap release must not post a second click. */
         dt_trace("cmd-tap", button, data);
         dt_command_reset();
         return;
     }
 
-    if (dt_command_targeted(data) && dt_field_contains(ev->x, ev->y)) {
-        /* The native queue preserves order, so target mode is already active
-         * when the second pair is dispatched even though both are posted
-         * here. */
-        dt_native_left_click(center_x, center_y);
+    if (wc3_dt_command_release(moved, dt_command_targeted(data),
+                               dt_field_contains(ev->x, ev->y)) ==
+        WC3_DT_COMMAND_TARGET) {
+        /* The DOWN click selected the command and entered target mode; the
+         * release click confirms the target at the finger point. */
         dt_native_left_click(ev->x, ev->y);
+        dt_log("cmd target button=%08X data=%08X x=%.4f y=%.4f",
+               button, data, ev->x, ev->y);
         dt_trace("cmd-drag", button, data);
         dt_command_reset();
         return;
@@ -3713,7 +3697,7 @@ static int dt_command_pointer(const Wc3DirectTouchEvent *ev,
     case WC3_DIRECT_TOUCH_POINTER_DOWN: {
         if (g_cmd_active) return 1;
         uint32_t bar = 0;
-        if (!dt_command_context(&bar)) return 0;
+        if (!dt_command_context(&bar, 0)) return 0;
         uint32_t button = 0;
         const uint32_t data = dt_command_button_at(bar, ev->x, ev->y,
                                                    width, height, &button);
@@ -3729,11 +3713,31 @@ static int dt_command_pointer(const Wc3DirectTouchEvent *ev,
         g_cmd_moved = 0;
         g_cmd_long_pending = 1;
         g_cmd_long_fired = 0;
+
+        /* Select the command as soon as the finger lands: the left-click
+         * equivalent is posted here, not on release.  A targeted command
+         * enters target mode immediately, so the drag that follows selects
+         * the target. */
+        float left = 0.0f;
+        float top = 0.0f;
+        float right = 0.0f;
+        float bottom = 0.0f;
+        if (dt_frame_rect_read(button, width, height, &left, &top,
+                               &right, &bottom)) {
+            const float center_x = (left + right) * 0.5f;
+            const float center_y = (top + bottom) * 0.5f;
+            dt_native_left_click(center_x, center_y);
+            dt_log("cmd select button=%08X data=%08X center=%.4f,%.4f",
+                   button, data, center_x, center_y);
+        }
         dt_trace("cmd-down", button, data);
         return 1;
     }
     case WC3_DIRECT_TOUCH_POINTER_MOVE:
         if (!g_cmd_active || ev->pointer_id != g_cmd_pointer) return 0;
+        /* Follow the finger with the native cursor.  In target mode this is
+         * the targeting cursor; outside it is a plain hover move. */
+        hle_android_mouse_move(ev->x, ev->y);
         if (!g_cmd_moved) {
             const float dx = ev->x - g_cmd_down_x;
             const float dy = ev->y - g_cmd_down_y;
