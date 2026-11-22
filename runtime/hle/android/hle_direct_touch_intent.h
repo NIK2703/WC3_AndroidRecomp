@@ -218,6 +218,30 @@ static inline Wc3DtCommandRelease wc3_dt_command_release(int moved,
 }
 
 /*
+ * Command-card target mode.  The command button's click handler (0x6F3BE1E0)
+ * selects an input mode from the command data type: unit, point, area and the
+ * remaining target case use CGameUI+0x228, +0x238, +0x23C and +0x240.  The
+ * +0x210 mode belongs to the selected-unit grid, not the command card.  A
+ * release confirms only when one of these modes is the active input mode
+ * (CGameUI+0x1B4); an instant command leaves the select mode active and a
+ * submenu leaves a different mode active.
+ */
+static inline int wc3_dt_command_target_mode(uint32_t active,
+                                             uint32_t mode_210,
+                                             uint32_t mode_228,
+                                             uint32_t mode_238,
+                                             uint32_t mode_23c,
+                                             uint32_t mode_240)
+{
+    if (!active) return 0;
+    return (mode_210 && active == mode_210) ||
+           (mode_228 && active == mode_228) ||
+           (mode_238 && active == mode_238) ||
+           (mode_23c && active == mode_23c) ||
+           (mode_240 && active == mode_240);
+}
+
+/*
  * Map a surface-normalised point inside the published minimap frame to the
  * frame-local coordinate space AddSignal uses.  The published rectangle and
  * the local clamp rectangle are both derived from CFrame+0x44, so only their

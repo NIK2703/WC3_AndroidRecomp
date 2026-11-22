@@ -52,6 +52,10 @@
 #define DT_UI_SELECT_MODE  0x00000214u
 #define DT_UI_DRAG_MODE    0x00000218u
 #define DT_UI_ALT_MODE     0x00000220u
+#define DT_UI_CMD_MODE_228 0x00000228u
+#define DT_UI_CMD_MODE_238 0x00000238u
+#define DT_UI_CMD_MODE_23C 0x0000023Cu
+#define DT_UI_CMD_MODE_240 0x00000240u
 #define DT_UI_CAMERA       0x00000254u
 #define DT_UI_MANAGER      0x0000024Cu
 #define DT_UI_INFO_BAR     0x000003C4u
@@ -1022,6 +1026,12 @@ static void dt_trace_snapshots(const char *where)
  * legacy overlay path; that is a startup boundary, not a per-feature
  * fallback.  No guest calls.
  */
+static uint32_t dt_ui_mode_read(uint32_t ui, uint32_t offset)
+{
+    if (!ui || !dt_guest_readable(ui + offset, 4u)) return 0;
+    return wc3_rd32g(ui + offset);
+}
+
 static Wc3DirectTouchRoute dt_route_snapshot(void)
 {
     Wc3DirectTouchRoute route = WC3_DIRECT_TOUCH_ROUTE_LEGACY;
@@ -1369,6 +1379,11 @@ static Wc3DirectTouchRoute dt_ready_route(CPU *c, DtContext *ctx)
     int active_eq = 0;
     uint32_t target_mode = 0;
     uint32_t active_mode = 0;
+    uint32_t cmd_228 = 0;
+    uint32_t cmd_238 = 0;
+    uint32_t cmd_23c = 0;
+    uint32_t cmd_240 = 0;
+    int cmd_target = 0;
 
     if (!dt_context(ctx)) {
         route = WC3_DIRECT_TOUCH_ROUTE_LEGACY;
@@ -1397,6 +1412,13 @@ static Wc3DirectTouchRoute dt_ready_route(CPU *c, DtContext *ctx)
     select_active = dt_mode_active(c, ctx->ui, ctx->mode);
     active_mode = wc3_rd32g(ctx->ui + DT_UI_ACTIVE_MODE);
     active_eq = active_mode == ctx->mode;
+    cmd_228 = dt_ui_mode_read(ctx->ui, DT_UI_CMD_MODE_228);
+    cmd_238 = dt_ui_mode_read(ctx->ui, DT_UI_CMD_MODE_238);
+    cmd_23c = dt_ui_mode_read(ctx->ui, DT_UI_CMD_MODE_23C);
+    cmd_240 = dt_ui_mode_read(ctx->ui, DT_UI_CMD_MODE_240);
+    cmd_target = wc3_dt_command_target_mode(active_mode, target_mode,
+                                            cmd_228, cmd_238, cmd_23c,
+                                            cmd_240);
     if (select_active && active_eq) {
         route = WC3_DIRECT_TOUCH_ROUTE_FIELD;
         reason = "select-mode";
@@ -1416,11 +1438,13 @@ done:
         const uint32_t ui = ctx ? ctx->ui : 0;
         dt_log("ready route=%s reason=%s ui=%08X world=%08X manager=%08X "
                "mode=%08X target=%08X active=%08X context=%d in_game=%d "
-               "target_active=%d select_active=%d active_eq=%d",
+               "target_active=%d select_active=%d active_eq=%d "
+               "cmd=%08X/%08X/%08X/%08X cmd_target=%d",
                dt_route_name(route), reason, ui,
                ctx ? ctx->world : 0, ctx ? ctx->manager : 0,
                ctx ? ctx->mode : 0, target_mode, active_mode, context_ok,
-               in_game, target_active, select_active, active_eq);
+               in_game, target_active, select_active, active_eq,
+               cmd_228, cmd_238, cmd_23c, cmd_240, cmd_target);
     }
 #endif
     return route;
@@ -3698,13 +3722,23 @@ static int dt_command_context(uint32_t *bar_out, int allow_targeting)
     return 1;
 }
 
-/* The game's own target-mode state.  The command card selects on the first
- * click and enters target mode on the next card click, so the HLE command
- * flag is only diagnostic; this is the state that decides a release. */
+/* The game's own command target-mode state.  The command card click handler
+ * (0x6F3BE1E0) selects an input mode by the command data type; those modes
+ * live at CGameUI+0x228/+0x238/+0x23C/+0x240, not at the selected-unit grid
+ * target mode +0x210.  A live mode decides the release; the command data
+ * flags are only diagnostic. */
 static int dt_command_targeting(void)
 {
     if (!dt_guest_readable(DT_UI_GLOBAL, 4u)) return 0;
-    return dt_grid_targeting(wc3_rd32g(DT_UI_GLOBAL));
+    const uint32_t ui = wc3_rd32g(DT_UI_GLOBAL);
+    if (!ui) return 0;
+    return wc3_dt_command_target_mode(
+        dt_ui_mode_read(ui, DT_UI_ACTIVE_MODE),
+        dt_ui_mode_read(ui, DT_UI_TARGET_MODE),
+        dt_ui_mode_read(ui, DT_UI_CMD_MODE_228),
+        dt_ui_mode_read(ui, DT_UI_CMD_MODE_238),
+        dt_ui_mode_read(ui, DT_UI_CMD_MODE_23C),
+        dt_ui_mode_read(ui, DT_UI_CMD_MODE_240));
 }
 
 /*

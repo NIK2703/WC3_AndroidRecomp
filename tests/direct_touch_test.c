@@ -619,6 +619,28 @@ static void test_command_release_resolution(void)
     assert(wc3_dt_command_release(1, 1, 1) == WC3_DT_COMMAND_TARGET);
 }
 
+static void test_command_target_mode(void)
+{
+    /* The command card's click handler selects a mode by the command data
+     * type.  The selected-unit grid target (+0x210) and the four command
+     * target modes all count; the select mode and a null mode do not. */
+    assert(!wc3_dt_command_target_mode(0, 0x210, 0x228, 0x238, 0x23c,
+                                       0x240));
+    assert(!wc3_dt_command_target_mode(0x214, 0x210, 0x228, 0x238, 0x23c,
+                                       0x240));
+    assert(!wc3_dt_command_target_mode(0x300, 0, 0, 0, 0, 0));
+    assert(wc3_dt_command_target_mode(0x210, 0x210, 0x228, 0x238, 0x23c,
+                                      0x240));
+    assert(wc3_dt_command_target_mode(0x228, 0x210, 0x228, 0x238, 0x23c,
+                                      0x240));
+    assert(wc3_dt_command_target_mode(0x238, 0x210, 0x228, 0x238, 0x23c,
+                                      0x240));
+    assert(wc3_dt_command_target_mode(0x23c, 0x210, 0x228, 0x238, 0x23c,
+                                      0x240));
+    assert(wc3_dt_command_target_mode(0x240, 0x210, 0x228, 0x238, 0x23c,
+                                      0x240));
+}
+
 static void test_command_movement_slop(void)
 {
     /* The command handler can miss a MOVE that the recognizer routes over
@@ -751,6 +773,7 @@ int main(void)
     test_portrait_gesture();
     test_beacon_release_resolution();
     test_command_release_resolution();
+    test_command_target_mode();
     test_command_movement_slop();
     test_console_rect_scale();
     test_minimap_local_point();
