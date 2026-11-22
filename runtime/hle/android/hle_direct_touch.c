@@ -1411,6 +1411,26 @@ static int dt_pick(CPU *c, const DtContext *ctx, uint32_t x_bits,
     dt_log("pick init=%d button=%u", init, button);
     if (!init) return 0;
 
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    /* The wrapper rejects before the raycast on its own gates: world+0x108,
+     * the viewport rectangle and the pick upper bound at 0x6FABB988.  Dump
+     * them so a zero result can be attributed without a second build. */
+    if (dt_guest_readable(ctx->world, 0x13Cu) &&
+        dt_guest_readable(0x6FABB988u, 4u)) {
+        dt_log("pick gates world=%08X +108=%08X +12C=%08X +130=%08X "
+               "+134=%08X +138=%08X ny=%.3f max=%.3f",
+               ctx->world,
+               wc3_rd32g(ctx->world + 0x108u),
+               wc3_rd32g(ctx->world + 0x12Cu),
+               wc3_rd32g(ctx->world + 0x130u),
+               wc3_rd32g(ctx->world + 0x134u),
+               wc3_rd32g(ctx->world + 0x138u),
+               dt_float(y_bits), dt_float(wc3_rd32g(0x6FABB988u)));
+    } else {
+        dt_log("pick gates unreadable world=%08X", ctx->world);
+    }
+#endif
+
     const uint32_t args[5] = { x_bits, y_bits, pick, 1u, 1u };
     const int r = (int)dt_call_thiscall(c, ctx->world, DT_FN_PICK, 5, args);
     if (r != 1 && r != 2) {
@@ -2337,8 +2357,7 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
      * order.  The pre/post dumps show whether the active-subgroup repair
      * changed +0x20C and which unit the gate evaluated. */
     dt_trace_selection(c, ctx, "tap-pre");
-    const int controlled = (r == 1 || r == 2)
-        ? dt_selection_controlled(c, ctx) : 0;
+    const int controlled = dt_selection_controlled(c, ctx);
     dt_trace_selection(c, ctx, "tap-post");
     dt_log("tap pick r=%d object=%08X world=%08X,%08X,%08X controlled=%d",
            r, object, wx, wy, wz, controlled);
@@ -2437,7 +2456,18 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
             break;
         }
     } else {
-        dt_log("tap no-hit r=%d", r);
+        dt_log("tap no-hit r=%d controlled=%d", r, controlled);
+        if (controlled) {
+            /* 0x6F3840E0 can reject before its raycast (world/viewport/pick
+             * bound gates), leaving no semantic target.  Replay the same
+             * gesture as a native right click: the window procedure owns
+             * those gates and still resolves the smart order for the live
+             * selection. */
+            dt_log("tap order-native fallback pending=%d down=%d",
+                   g_native_right_pending, hle_android_mouse_is_down(2));
+            dt_native_right_click(ev->x, ev->y);
+            dt_trace("tap-order-native", 0, 0);
+        }
     }
 
     dt_log("tap done");
@@ -2480,6 +2510,19 @@ static void dt_long_press(CPU *c, const DtContext *ctx,
     dt_log("long pick r=%d object=%08X unit=%08X is_unit=%d selectable=%d "
            "intent=%d",
            r, object, unit, is_unit, selectable, intent);
+
+    if (r != 1 && r != 2) {
+        const int controlled = dt_selection_controlled(c, ctx);
+        dt_log("long no-hit r=%d controlled=%d", r, controlled);
+        if (controlled) {
+            /* Same wrapper-gate fallback as tap: the native right click
+             * resolves the order through the window procedure. */
+            dt_log("long order-native fallback pending=%d down=%d",
+                   g_native_right_pending, hle_android_mouse_is_down(2));
+            dt_native_right_click(ev->x, ev->y);
+            dt_trace("long-order-native", 0, 0);
+        }
+    }
 
     switch (intent) {
     case WC3_DT_LONG_INTENT_SELECT_UNIT:
