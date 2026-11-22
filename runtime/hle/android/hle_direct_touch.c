@@ -1119,11 +1119,11 @@ static int dt_paused(CPU *c)
 
 /*
  * Reproduce the native input-event conversion.  The overlay reports
- * surface-normalised coordinates; 0x6F074010 copies them into the event and
- * 0x6F8B38A0 scales them by 0.8/0.6 into the pick-event space that
- * 0x6F3840E0 and its viewport gates consume.  The wrapper's bound at
- * 0x6FABB988 is in that scaled normalised space (0.577), so converting to
- * client pixels first makes every pick fail the bound.
+ * surface-normalised coordinates with origin top-left; 0x6F074010 copies
+ * them into the event and 0x6F8B38A0 scales them by 0.8/0.6 into the
+ * pick-event space that 0x6F3840E0 and its viewport gates consume.  The
+ * native producer's y origin is bottom-left, so y is inverted here;
+ * without the inversion the upper half picks the wrong side of the map.
  */
 static int dt_event_point(CPU *c, float nx, float ny, uint32_t width,
                           uint32_t height, uint32_t out)
@@ -1131,7 +1131,7 @@ static int dt_event_point(CPU *c, float nx, float ny, uint32_t width,
     (void)width;
     (void)height;
 
-    const uint32_t args[2] = { dt_bits(nx), dt_bits(ny) };
+    const uint32_t args[2] = { dt_bits(nx), dt_bits(1.0f - ny) };
     c->ecx = out;
     c->edx = out + 4u;
     (void)wc3_hle_call_guest(c, DT_FN_INPUT_COORDS, 2, args);
