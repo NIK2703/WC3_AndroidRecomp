@@ -3553,8 +3553,11 @@ static uint32_t dt_command_button_at(uint32_t bar, float nx, float ny,
                 !dt_guest_readable(button, DT_CMD_BUTTON_DATA + 4u)) {
                 continue;
             }
+            /* The frame visible bit is the real gate.  The +0x94 control
+             * shown bit is not set on a visible command button in 1.27b
+             * (T2 item 18), so requiring it made every hit-test miss and
+             * the gesture fell through to the native path. */
             if (!wc3_rd32g(button + DT_CMD_BUTTON_VISIBLE)) continue;
-            if (!wc3_rd32g(button + DT_CMD_BUTTON_SHOWN)) continue;
 
             const uint32_t data = wc3_rd32g(button + DT_CMD_BUTTON_DATA);
             if (!data || !dt_guest_readable(data, DT_CMD_DATA_FLAGS + 8u)) {
