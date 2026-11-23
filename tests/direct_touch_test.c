@@ -641,6 +641,50 @@ static void test_command_target_mode(void)
                                       0x240));
 }
 
+static void test_command_target_live(void)
+{
+    /* The command data word at +0x8 is not a reliable type (T2 saw pairs and
+     * ASCII-like values on commands that did enter target mode), so the
+     * release uses the live input mode.  A targeted command is live only after
+     * the game leaves CSelectMode; the target object need not match any of the
+     * four fixed CGameUI fields.  The 02:05 trace saw active=42B10088 while
+     * select=42AD0088. */
+    assert(!wc3_dt_command_target_live(0x214, 0x214));
+    assert(!wc3_dt_command_target_live(0, 0x214));
+    assert(!wc3_dt_command_target_live(0x300, 0));
+    assert(wc3_dt_command_target_live(0x300, 0x214));
+    assert(wc3_dt_command_target_live(0x42B10088, 0x42AD0088));
+    assert(wc3_dt_command_target_live(0x43420088, 0x42AD0088));
+    /* The helper only knows the live mode; the caller uses it only while a
+     * command gesture or its queued confirmation owns the pointer. */
+    assert(wc3_dt_command_target_live(0x43400088, 0x42AD0088));
+}
+
+static void test_field_click_defer(void)
+{
+    /* inside, ui, world, select present, select active, gate, ready field */
+    /* A field press is held only while the game has a world and the select
+     * mode is active, but the exact service route is not FIELD yet (map
+     * load/fade-in) or the click gate is still closed.  A menu, a field drag
+     * and a command target mode are all select-inactive and stay native. */
+    assert(!wc3_dt_field_click_defer(0, 1, 1, 1, 1, 1, 1));
+    assert(!wc3_dt_field_click_defer(1, 0, 1, 1, 1, 1, 1));
+    assert(!wc3_dt_field_click_defer(1, 1, 0, 1, 1, 1, 1));
+    assert(!wc3_dt_field_click_defer(1, 1, 1, 0, 0, 1, 1));
+    assert(!wc3_dt_field_click_defer(1, 1, 1, 1, 0, 1, 1));
+    /* Target mode: select is not active, so the target confirmation must not
+     * be deferred even though the exact route is NATIVE. */
+    assert(!wc3_dt_field_click_defer(1, 1, 1, 1, 0, 1, 0));
+    /* Ready select mode: the native field path runs normally. */
+    assert(!wc3_dt_field_click_defer(1, 1, 1, 1, 1, 1, 1));
+    /* First tap after a map load: the snapshot sees select, the exact guest
+     * route is still not FIELD.  Hold and replay it. */
+    assert(wc3_dt_field_click_defer(1, 1, 1, 1, 1, 1, 0));
+    /* The gate is still closed during the load. */
+    assert(wc3_dt_field_click_defer(1, 1, 1, 1, 1, 0, 0));
+    assert(wc3_dt_field_click_defer(1, 1, 1, 1, 1, 0, 1));
+}
+
 static void test_command_movement_slop(void)
 {
     /* The command handler can miss a MOVE that the recognizer routes over
@@ -774,6 +818,8 @@ int main(void)
     test_beacon_release_resolution();
     test_command_release_resolution();
     test_command_target_mode();
+    test_command_target_live();
+    test_field_click_defer();
     test_command_movement_slop();
     test_console_rect_scale();
     test_minimap_local_point();

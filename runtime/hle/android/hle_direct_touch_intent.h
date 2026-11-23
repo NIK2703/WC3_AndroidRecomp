@@ -218,13 +218,18 @@ static inline Wc3DtCommandRelease wc3_dt_command_release(int moved,
 }
 
 /*
- * Command-card target mode.  The command button's click handler (0x6F3BE1E0)
- * selects an input mode from the command data type: unit, point, area and the
- * remaining target case use CGameUI+0x228, +0x238, +0x23C and +0x240.  The
- * +0x210 mode belongs to the selected-unit grid, not the command card.  A
- * release confirms only when one of these modes is the active input mode
- * (CGameUI+0x1B4); an instant command leaves the select mode active and a
- * submenu leaves a different mode active.
+ * Command-card target mode.  The native click handler selects one of the
+ * target input modes, but the command data word at +0x8 cannot identify that
+ * choice: observed values are small pairs and ASCII-like words even on
+ * commands that entered target mode.  The release therefore uses the live
+ * input mode (CGameUI+0x1B4) versus CSelectMode (CGameUI+0x214), not this
+ * pointer list.
+ *
+ * The list below is a diagnostic fallback only.  The live game can select a
+ * target mode object that is not one of these fields (a T2 trace saw
+ * active=42B10088 while all four fields held different pointers; the card
+ * target used 43420088).  The +0x210 mode belongs to the selected-unit grid,
+ * not the command card.  An instant command leaves the select mode active.
  */
 static inline int wc3_dt_command_target_mode(uint32_t active,
                                              uint32_t mode_210,
@@ -239,6 +244,47 @@ static inline int wc3_dt_command_target_mode(uint32_t active,
            (mode_238 && active == mode_238) ||
            (mode_23c && active == mode_23c) ||
            (mode_240 && active == mode_240);
+}
+
+/*
+ * The command data word at +0x8 is not a reliable command type across the
+ * observed buttons: T2 saw small pairs (0x000D0016, 0x000D001D) and
+ * ASCII-like values from adjacent data on commands that clearly entered
+ * target mode.  The live input mode is authoritative: selecting a targeted
+ * command leaves the select mode, and confirming the target returns to it.
+ * The target object is not necessarily one of the fixed CGameUI fields, so
+ * compare against the live select mode rather than a hard-coded pointer.
+ * A queued release for an instant command sees the select mode still active
+ * and is dropped by the timeout.
+ */
+static inline int wc3_dt_command_target_live(uint32_t active,
+                                             uint32_t select_mode)
+{
+    return select_mode && active && active != select_mode;
+}
+
+/*
+ * A field press can arrive while the game is not ready for semantic input:
+ * the map is loading/fading in, the player manager is not live yet, or the
+ * input gate is still closed.  The native click would be dropped, so the HLE
+ * holds the press and replays a tap once the exact service route becomes
+ * FIELD.  The select mode must already be the active mode: a menu, a field
+ * drag or a command target mode owns the pointer and must stay native.
+ *
+ * `ready_field` is the exact service route for this pump, not the
+ * input-thread snapshot.  The snapshot can see a live select mode while the
+ * game is still not in game; that mismatch is the idle first tap after a map
+ * load.
+ */
+static inline int wc3_dt_field_click_defer(int inside_field, int ui_present,
+                                           int world_present,
+                                           int select_present,
+                                           int select_active,
+                                           int click_gate,
+                                           int ready_field)
+{
+    return inside_field && ui_present && world_present && select_present &&
+           select_active && (!click_gate || !ready_field);
 }
 
 /*
