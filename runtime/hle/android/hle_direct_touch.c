@@ -318,6 +318,12 @@ static int g_field_camera_active;
 static int g_field_camera_pointer;
 static int g_field_select_active;
 static int g_field_select_pointer;
+/* A battlefield drag that starts while target/placement/transient owns the
+ * world.  The recognizer still sees the physical FIELD gesture, but the
+ * gesture must confirm/settle the target instead of rotating the camera or
+ * starting a selection box.  No native button is pressed until release. */
+static int g_field_target_gesture_active;
+static uint32_t g_field_target_gesture_pointer;
 /* The middle button has the same queued-release hazard as the right button:
  * the next camera drag can begin before the guest has dispatched the
  * previous WM_MBUTTONUP.  Main guest thread only. */
@@ -382,16 +388,35 @@ static float g_inv_down_y;
  * DOWN/UP pair, the same way g_native_up_pending handles the left button.
  * Shared by the inventory move and the command-card autocast toggle. */
 static int g_native_right_pending;
-/* A field press that arrived while the game was not ready for semantic input.
- * The native DOWN is held; a tap is replayed once dt_context() and IsInGame()
- * succeed.  A drag falls back to the normal native path.  Main guest thread
- * only. */
+/* A raw field press that is a tap candidate.  The native DOWN is held only
+ * until the release so the gesture can be classified as a tap; the tap is
+ * then dispatched immediately with the live route.  A drag falls back to the
+ * normal native path.  Main guest thread only. */
 static int g_field_defer_active;
 static uint32_t g_field_defer_pointer;
 static float g_field_defer_x;
 static float g_field_defer_y;
 static int g_field_defer_moved;
 static int g_field_defer_down_posted;
+/* The raw field press is a tap candidate on the live FIELD route.  It is
+ * recognized on release and dispatched immediately with that route; no queue
+ * and no replay tick are involved. */
+static int g_field_defer_live;
+/* The same release classification for an in-game target mode.  The native
+ * press is not posted on DOWN; the target cursor follows with moves and the
+ * click pair is posted on release.  This keeps the click out of the command
+ * card's pending button batch and gives the target mode its cursor move
+ * before the click. */
+static int g_field_defer_target;
+/* The contact is in the battlefield and the native UI is live, but the
+ * semantic route is not FIELD at DOWN (target/transient/menu/transition).
+ * It is still a tap candidate: release decides between a native click and an
+ * explicit drop.  This is what makes a raw DOWN that the input thread routed
+ * NATIVE stop losing the following world tap. */
+static int g_field_defer_late;
+/* Map-load/fade-in deferral.  This is a separate case: the field press is
+ * held until the game's input gate opens.  A live-route field tap never uses
+ * this path. */
 static int g_field_click_pending;
 static Wc3DirectTouchEvent g_field_click_event;
 static uint64_t g_field_click_ms;
@@ -515,6 +540,7 @@ static const char *dt_kind_name(uint32_t kind)
     case WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN: return "FIELD_SELECT_BEGIN";
     case WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE: return "FIELD_SELECT_MOVE";
     case WC3_DIRECT_TOUCH_FIELD_SELECT_END: return "FIELD_SELECT_END";
+    case WC3_DIRECT_TOUCH_FIELD_HOVER: return "FIELD_HOVER";
     default: return "?";
     }
 }
@@ -561,12 +587,20 @@ static void dt_beacon_cancel(void)
     dt_beacon_reset();
 }
 
-static void dt_field_click_reset(void)
+static void dt_field_defer_reset(void)
 {
     g_field_defer_active = 0;
     g_field_defer_pointer = 0;
     g_field_defer_moved = 0;
     g_field_defer_down_posted = 0;
+    g_field_defer_live = 0;
+    g_field_defer_target = 0;
+    g_field_defer_late = 0;
+}
+
+static void dt_field_click_reset(void)
+{
+    dt_field_defer_reset();
     g_field_click_pending = 0;
     memset(&g_field_click_event, 0, sizeof g_field_click_event);
     g_field_click_ms = 0;
@@ -579,6 +613,7 @@ static int dt_minimap_native_rect(float *left, float *top,
 static int dt_field_contains(float nx, float ny);
 static void dt_native_left_click(float x, float y);
 static void dt_native_right_click(float x, float y);
+static void dt_native_click(const Wc3DirectTouchEvent *ev);
 
 static float dt_clamp01(float value)
 {
@@ -596,10 +631,235 @@ static uint64_t dt_now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
+/* Hold a semantic tap for the map-load/fade-in deferral.  This is not used
+ * for panel taps: those are dispatched immediately on the same gesture. */
+static void dt_field_click_queue(const Wc3DirectTouchEvent *ev)
+{
+    g_field_click_event = *ev;
+    g_field_click_event.kind = WC3_DIRECT_TOUCH_TAP;
+    g_field_click_event.route = WC3_DIRECT_TOUCH_ROUTE_FIELD;
+    g_field_click_pending = 1;
+    g_field_click_ms = dt_now_ms();
+}
+
 static int dt_guest_readable(uint32_t va, uint32_t size)
 {
     return va && hle_android_guest_ok(va, size);
 }
+
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+/*
+ * Bounded first-contact probe.
+ *
+ * The guest keeps its own input ring in CGame.dll's data: sixteen entries of
+ * five dwords at 0x6FD3D410, with the next-write index at 0x6FD3D550 and the
+ * next-read index at 0x6FD3D554.  The window procedure fills it from the
+ * Win32 mouse messages before the per-frame pump converts the entries into
+ * CGameUI events.  Code 9 is a button down, 10 an absolute move, 11 a wheel,
+ * 12 a relative move and 13 a button up; a full ring drops its oldest entry
+ * (0x6F091327/0x6F091344), so the probe also has to show whether the hover was
+ * evicted before the click.
+ *
+ * The probe starts at the panel gesture and ends after the first field
+ * release, on timeout, or when a later panel gesture supersedes it.  It reads
+ * only guest memory already owned by the pump and never calls guest code, so
+ * it can run inside the native message wrappers.
+ */
+#define DT_PROBE_LIFETIME_MS  60000u
+#define DT_GAME_QUEUE_BASE    0x6FD3D410u
+#define DT_GAME_QUEUE_HEAD    0x6FD3D550u
+#define DT_GAME_QUEUE_TAIL    0x6FD3D554u
+#define DT_GAME_QUEUE_SLOTS   16u
+#define DT_GAME_QUEUE_STRIDE  20u
+#define DT_GAME_CAPTURE       0x6FD3D3E8u
+#define DT_GAME_PRESSED       0x6FD3D408u
+#define DT_GAME_REL_GUARD     0x6FD3D40Cu
+#define DT_GAME_UI_BUTTONS    0x6FD3CE54u
+#define DT_GAME_UI_PRESSED    0x6FD3CE58u
+#define DT_GAME_UI_CONTEXT    0x6FD3CE60u
+#define DT_GAME_LAST_X        0x6FD3D558u
+#define DT_GAME_LAST_Y        0x6FD3D55Cu
+#define DT_UI_MODE_STACK      0x000001B8u
+
+/* Written by the guest thread, read by the input thread when it posts a
+ * message.  A diagnostic race is harmless, but volatile keeps the state from
+ * being cached across the two threads at -O3. */
+static volatile int g_dt_probe_active;
+static volatile uint64_t g_dt_probe_until;
+static uint32_t g_dt_probe_seq;
+static int g_dt_probe_field_seen;
+
+static uint32_t dt_probe_read32(uint32_t va, int *ok)
+{
+    if (!dt_guest_readable(va, 4u)) {
+        if (ok) *ok = 0;
+        return 0;
+    }
+    if (ok) *ok = 1;
+    return wc3_rd32g(va);
+}
+
+static void dt_probe_dump_queue(const char *why)
+{
+    if (!dt_guest_readable(DT_GAME_QUEUE_BASE, 0x148u)) {
+        dt_log("probe q %s unavailable", why);
+        return;
+    }
+
+    const uint32_t head = wc3_rd32g(DT_GAME_QUEUE_HEAD);
+    const uint32_t tail = wc3_rd32g(DT_GAME_QUEUE_TAIL);
+    if (head >= DT_GAME_QUEUE_SLOTS || tail >= DT_GAME_QUEUE_SLOTS) {
+        dt_log("probe q %s bad head=%u tail=%u", why, head, tail);
+        return;
+    }
+
+    const uint32_t count =
+        (head - tail) & (DT_GAME_QUEUE_SLOTS - 1u);
+    dt_log("probe q %s head=%u tail=%u n=%u", why, head, tail, count);
+
+    /* A full ring drops its oldest entry.  The indices alone cannot show
+     * which entry was overwritten; log every live entry in read order. */
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t index = (tail + i) & (DT_GAME_QUEUE_SLOTS - 1u);
+        const uint32_t entry =
+            DT_GAME_QUEUE_BASE + index * DT_GAME_QUEUE_STRIDE;
+        dt_log("probe q[%u] code=%u d1=%08X d2=%08X d3=%08X d4=%08X",
+               index, wc3_rd32g(entry), wc3_rd32g(entry + 4u),
+               wc3_rd32g(entry + 8u), wc3_rd32g(entry + 0x0Cu),
+               wc3_rd32g(entry + 0x10u));
+    }
+}
+
+static void dt_probe_dump(const char *what, uint32_t a, uint32_t b)
+{
+    int ok = 0;
+    const uint32_t ui = dt_probe_read32(DT_UI_GLOBAL, &ok);
+    uint32_t world = 0;
+    uint32_t gate = 0;
+    uint32_t active = 0;
+    uint32_t select = 0;
+    uint32_t target = 0;
+    uint32_t stack_count = 0;
+    uint32_t stack_ptr = 0;
+    if (ok && ui && dt_guest_readable(ui, DT_UI_SELECT_MODE + 4u)) {
+        world = wc3_rd32g(ui + DT_UI_WORLD_FRAME);
+        gate = wc3_rd32g(ui + DT_UI_CLICK_GATE);
+        active = wc3_rd32g(ui + DT_UI_ACTIVE_MODE);
+        select = wc3_rd32g(ui + DT_UI_SELECT_MODE);
+        target = wc3_rd32g(ui + DT_UI_TARGET_MODE);
+        stack_ptr = wc3_rd32g(ui + DT_UI_MODE_STACK);
+        stack_count = wc3_rd32g(ui + DT_UI_MODE_COUNT);
+    }
+
+    dt_log("probe %s a=%08X b=%08X ui=%08X world=%08X gate=%08X "
+           "active=%08X select=%08X target=%08X stack=%08X/%u",
+           what ? what : "?", a, b, ui, world, gate, active, select,
+           target, stack_ptr, stack_count);
+    dt_log("probe %s cap=%08X pressed=%08X guard=%08X ui_btns=%08X "
+           "ui_press=%08X ctx=%08X last=%08X,%08X",
+           what ? what : "?",
+           dt_probe_read32(DT_GAME_CAPTURE, NULL),
+           dt_probe_read32(DT_GAME_PRESSED, NULL),
+           dt_probe_read32(DT_GAME_REL_GUARD, NULL),
+           dt_probe_read32(DT_GAME_UI_BUTTONS, NULL),
+           dt_probe_read32(DT_GAME_UI_PRESSED, NULL),
+           dt_probe_read32(DT_GAME_UI_CONTEXT, NULL),
+           dt_probe_read32(DT_GAME_LAST_X, NULL),
+           dt_probe_read32(DT_GAME_LAST_Y, NULL));
+
+    if (stack_ptr && stack_count && stack_count <= 16u &&
+        dt_guest_readable(stack_ptr, stack_count * 4u)) {
+        char line[160];
+        int used = snprintf(line, sizeof line, "probe %s stack",
+                            what ? what : "?");
+        for (uint32_t i = 0; i < stack_count && used > 0 &&
+                            (size_t)used + 10u < sizeof line; i++) {
+            const int n = snprintf(line + used,
+                                   sizeof line - (size_t)used,
+                                   " %08X", wc3_rd32g(stack_ptr + i * 4u));
+            if (n <= 0) break;
+            used += n;
+        }
+        if (used > 0) dt_log("%s", line);
+    }
+
+    dt_probe_dump_queue(what ? what : "?");
+}
+
+void wc3_hle_direct_touch_tracef(const char *fmt, ...)
+{
+    va_list ap;
+    pthread_once(&g_dt_log_once, dt_open_log);
+    if (!g_dt_log) return;
+
+    va_start(ap, fmt);
+    fputs("[dt] ", g_dt_log);
+    vfprintf(g_dt_log, fmt, ap);
+    fputc('\n', g_dt_log);
+    va_end(ap);
+}
+
+void wc3_hle_direct_touch_probe_begin(const char *reason,
+                                      uint32_t a, uint32_t b)
+{
+    const uint64_t now = dt_now_ms();
+    const int was_active =
+        g_dt_probe_active &&
+        !(now && g_dt_probe_until && now >= g_dt_probe_until);
+
+    /* A field release closes the sequence.  Keep the probe running so the
+     * native posts and the guest dispatch after it are still captured, but a
+     * later panel click starts a new sequence instead of extending the old. */
+    const int new_sequence = !was_active || g_dt_probe_field_seen;
+    if (new_sequence) {
+        g_dt_probe_seq++;
+        g_dt_probe_field_seen = 0;
+    }
+    g_dt_probe_active = 1;
+    g_dt_probe_until = now ? now + DT_PROBE_LIFETIME_MS : 0;
+    dt_log("probe begin#%u %s reason=%s a=%08X b=%08X",
+           g_dt_probe_seq, new_sequence ? "start" : "extend",
+           reason ? reason : "?", a, b);
+    dt_probe_dump(new_sequence ? "begin" : "extend", a, b);
+}
+
+int wc3_hle_direct_touch_probe_active(void)
+{
+    if (!g_dt_probe_active) return 0;
+    const uint64_t now = dt_now_ms();
+    if (now && g_dt_probe_until && now >= g_dt_probe_until) {
+        dt_log("probe end#%u reason=timeout", g_dt_probe_seq);
+        g_dt_probe_active = 0;
+        return 0;
+    }
+    return 1;
+}
+
+void wc3_hle_direct_touch_probe_mark(const char *what, uint32_t a,
+                                     uint32_t b)
+{
+    if (!wc3_hle_direct_touch_probe_active()) return;
+    if (what && !g_dt_probe_field_seen &&
+        strncmp(what, "field-release", 13u) == 0) {
+        g_dt_probe_field_seen = 1;
+        /* The release marks below and the native posts they trigger are the
+         * evidence.  Keep a short grace period for the next guest pump, then
+         * stop instead of logging the rest of the match. */
+        const uint64_t now = dt_now_ms();
+        if (now) g_dt_probe_until = now + 2000u;
+    }
+    dt_probe_dump(what ? what : "?", a, b);
+}
+
+void wc3_hle_direct_touch_probe_end(const char *reason)
+{
+    if (!g_dt_probe_active) return;
+    dt_log("probe end#%u reason=%s", g_dt_probe_seq,
+           reason ? reason : "?");
+    dt_probe_dump("end", 0, 0);
+    g_dt_probe_active = 0;
+}
+#endif
 
 /*
  * CGameUI+0x3BC is the live CWorldFrameWar3* for the current map.  The
@@ -620,6 +880,17 @@ static uint32_t dt_world_from_ui(uint32_t ui)
         if (world) return world;
     }
     return 0;
+}
+
+/* The UI singleton is the live native recipient even when no semantic field
+ * context exists (menu, loading, target/transient mode). */
+static int dt_ui_present(uint32_t *ui_out)
+{
+    uint32_t ui = 0;
+    if (dt_guest_readable(DT_UI_GLOBAL, 4u)) ui = wc3_rd32g(DT_UI_GLOBAL);
+    if (!ui) return 0;
+    if (ui_out) *ui_out = ui;
+    return 1;
 }
 
 static void dt_publish_route(Wc3DirectTouchRoute route)
@@ -1089,10 +1360,8 @@ static Wc3DirectTouchRoute dt_route_snapshot(void)
     uint32_t target_mode = 0;
     uint32_t world = 0;
     uint32_t manager = 0;
-    int world_present = 0;
+    int world_ready = 0;
     int click_gate = 0;
-    int select_active = 0;
-    int target_active = 0;
 
     if (!dt_guest_readable(DT_UI_GLOBAL, 4)) {
         goto done;
@@ -1107,15 +1376,15 @@ static Wc3DirectTouchRoute dt_route_snapshot(void)
     active_mode = wc3_rd32g(ui + DT_UI_ACTIVE_MODE);
     target_mode = wc3_rd32g(ui + DT_UI_TARGET_MODE);
     world = dt_world_from_ui(ui);
-    world_present = world != 0;
     click_gate = wc3_rd32g(ui + DT_UI_CLICK_GATE) != 0;
 
-    /* No battlefield yet (menu/loading) or a modal UI blocked clicks: the
-     * native window is still the right recipient. */
-    if (!select_mode || !world_present || !click_gate) {
+    /* The physical owner needs a battlefield, not a particular input mode.
+     * Target/placement is handled on release.  Without a world or with the
+     * click gate closed, native pointer phases are the safe recipient. */
+    if (!select_mode || !world || !click_gate) {
         route = WC3_DIRECT_TOUCH_ROUTE_NATIVE;
         reason = !select_mode ? "no-select-mode"
-               : !world_present ? "no-world-frame"
+               : !world ? "no-world-frame"
                : "click-gate-closed";
         goto done;
     }
@@ -1130,16 +1399,11 @@ static Wc3DirectTouchRoute dt_route_snapshot(void)
         reason = "no-world-or-manager";
         goto done;
     }
+    world_ready = 1;
 
-    /* CGameUI+0x1B4 is the active mode; 0x6F36E330 is exactly an equality
-     * check against it.  The +0x1B8 stack holds the previous modes, so
-     * membership in that stack says nothing about what is active now. */
-    select_active = select_mode && active_mode == select_mode;
-    target_active = target_mode && active_mode == target_mode;
-    route = wc3_dt_route(1, select_active, target_active,
-                         active_mode == select_mode);
+    route = wc3_dt_physical_route(1, world_ready, click_gate);
     reason = route == WC3_DIRECT_TOUCH_ROUTE_FIELD ? "field-ready"
-                                                   : "mode-gate";
+                                                   : "native-recipient";
 
 done:
 #if !(WC3_DEBUG && WC3_DEBUG_INPUT)
@@ -1155,8 +1419,10 @@ done:
                    "world=%08X manager=%08X select_active=%d target_active=%d "
                    "active_eq=%d target_eq=%d",
                    dt_route_name(route), reason, ui, select_mode, active_mode,
-                   target_mode, world_present, click_gate, world, manager,
-                   select_active, target_active, active_mode == select_mode,
+                   target_mode, world != 0, click_gate, world, manager,
+                   select_mode && active_mode == select_mode,
+                   target_mode && active_mode == target_mode,
+                   active_mode == select_mode,
                    target_mode && active_mode == target_mode);
         }
     }
@@ -1499,26 +1765,20 @@ done:
 
 static void dt_publish_service_route(Wc3DirectTouchRoute route)
 {
-    Wc3DirectTouchRoute published = route;
-    if (route != WC3_DIRECT_TOUCH_ROUTE_FIELD) {
-        /* Menus/loading/modal UI are native recipients even though the
-         * semantic executor has no context. */
-        published = dt_route_snapshot();
-        if (published == WC3_DIRECT_TOUCH_ROUTE_FIELD) {
-            /* The exact check rejected FIELD.  The pointer snapshot can still
-             * see an active select mode while the map is not in game
-             * (loading screen), so never publish FIELD for a route the
-             * executor rejects. */
-            published = WC3_DIRECT_TOUCH_ROUTE_NATIVE;
-        }
-    }
+    /* `route` is the semantic readiness for this pump.  The input thread
+     * needs the physical owner instead: target/placement and transient panel
+     * modes still live over the battlefield and must be recognized as a field
+     * gesture, then resolved on release.  Publishing `route` here recreated
+     * the split-route defect whenever a command changed the mode between
+     * DOWN and UP. */
+    const Wc3DirectTouchRoute published = dt_route_snapshot();
     dt_publish_route(published);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     {
         static int last_published = -1;
         if ((int)published != last_published) {
             last_published = (int)published;
-            dt_log("publish-service ready=%s published=%s",
+            dt_log("publish-service ready=%s physical=%s",
                    dt_route_name(route), dt_route_name(published));
         }
     }
@@ -2541,6 +2801,9 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
         g_grid_selection = selection;
         g_grid_unit = unit;
         g_grid_target = 0;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        wc3_hle_direct_touch_probe_begin("grid-select", unit, selection);
+#endif
 
         if (dt_grid_targeting(ui)) {
             const uint32_t target = wc3_rd32g(ui + DT_UI_TARGET_MODE);
@@ -2921,6 +3184,26 @@ static int dt_field_click_should_defer(float x, float y)
                                     (int)click_gate, g_service_field_ready);
 }
 
+/* Any live non-select input mode over the battlefield owns the click as a
+ * target/transient resolution.  `CGameUI+0x220` is one observed example; it
+ * is not CGameUI+0x210, so the old grid-only predicate missed it.  The caller
+ * suppresses the native DOWN, follows the cursor with moves, and posts the
+ * native click pair on release.  No guest calls here: the raw active/select
+ * words are enough to choose the release owner, and the semantic service
+ * performs the exact check when it dispatches. */
+static int dt_field_target_tap_ready(float x, float y)
+{
+    DtContext ctx;
+    memset(&ctx, 0, sizeof ctx);
+    if (!dt_context(&ctx)) return 0;
+    if (!dt_field_contains(x, y)) return 0;
+    const uint32_t select = wc3_rd32g(ctx.ui + DT_UI_SELECT_MODE);
+    const uint32_t target = wc3_rd32g(ctx.ui + DT_UI_TARGET_MODE);
+    const uint32_t active = wc3_rd32g(ctx.ui + DT_UI_ACTIVE_MODE);
+    if (target && active == target) return 1;
+    return select && active && active != select;
+}
+
 /* Returns 1 when the event belongs to the deferred field tap. */
 static int dt_native_defer_pointer(const Wc3DirectTouchEvent *ev)
 {
@@ -2937,76 +3220,130 @@ static int dt_native_defer_pointer(const Wc3DirectTouchEvent *ev)
             g_native_up_pending = 0;
         }
         if (g_field_defer_active) {
-            /* A second press while the first is held: drop the held tap and
-             * release any native press it started. */
+            /* A second press while the first is held: drop the held gesture
+             * and release any native press it started. */
             if (g_field_defer_down_posted) {
                 hle_android_mouse_button_up_force(0);
                 g_native_down = 0;
                 g_native_up_pending = 1;
             }
-            dt_field_click_reset();
+            dt_field_defer_reset();
         }
         if (g_field_click_pending) {
-            /* A new gesture supersedes the queued replay. */
+            /* A new gesture supersedes the load-time replay. */
             dt_trace("field-click-cancel", dt_bits(ev->x), dt_bits(ev->y));
             g_field_click_pending = 0;
         }
-        if (!g_native_down && !g_native_up_pending &&
+        /* A raw field press on the live FIELD route is a tap candidate.  It
+         * is recognized on release, so the native DOWN is not posted until a
+         * drag proves it is not a tap.  This is the same immediate tap path
+         * used for a semantic FIELD event; it does not depend on a preceding
+         * panel gesture. */
+        float ml = 0.0f;
+        float mt = 0.0f;
+        float mr = 0.0f;
+        float mb = 0.0f;
+        const int on_minimap =
+            dt_minimap_native_rect(&ml, &mt, &mr, &mb) &&
+            ev->x >= ml && ev->x <= mr && ev->y >= mt && ev->y <= mb;
+        const int inside_field = !on_minimap &&
+                                 dt_field_contains(ev->x, ev->y);
+        const int load_defer =
+            inside_field && !g_native_up_pending &&
             !hle_android_mouse_is_down(0) &&
-            dt_field_click_should_defer(ev->x, ev->y)) {
+            dt_field_click_should_defer(ev->x, ev->y);
+        const int live_defer =
+            !load_defer && g_service_field_ready && inside_field;
+        const int target_defer =
+            !load_defer && !live_defer && inside_field &&
+            dt_field_target_tap_ready(ev->x, ev->y);
+        const int late_defer =
+            !load_defer && !live_defer && !target_defer && inside_field &&
+            dt_ui_present(NULL);
+        if (!g_native_down &&
+            (live_defer || target_defer || late_defer || load_defer)) {
             g_field_defer_active = 1;
             g_field_defer_pointer = ev->pointer_id;
             g_field_defer_x = ev->x;
             g_field_defer_y = ev->y;
             g_field_defer_moved = 0;
             g_field_defer_down_posted = 0;
-            dt_trace("field-click-defer", dt_bits(ev->x), dt_bits(ev->y));
+            g_field_defer_live = live_defer;
+            g_field_defer_target = target_defer;
+            g_field_defer_late = late_defer;
+            if (target_defer) {
+                /* Move the target cursor without pressing the button. */
+                hle_android_mouse_move(ev->x, ev->y);
+            }
+            dt_trace(target_defer ? "field-target-defer"
+                                  : (live_defer ? "field-tap-defer"
+                                     : (late_defer ? "field-late-defer"
+                                                   : "field-click-defer")),
+                     dt_bits(ev->x), dt_bits(ev->y));
             return 1;
         }
         return 0;
     case WC3_DIRECT_TOUCH_POINTER_MOVE:
         if (!g_field_defer_active || ev->pointer_id != g_field_defer_pointer)
             return 0;
+        if (g_field_defer_target) {
+            /* Follow the target cursor without pressing the button. */
+            hle_android_mouse_move(ev->x, ev->y);
+        }
         if (!g_field_defer_moved) {
             const float dx = ev->x - g_field_defer_x;
             const float dy = ev->y - g_field_defer_y;
             if (dx * dx + dy * dy >
                 DT_FIELD_TAP_SLOP * DT_FIELD_TAP_SLOP) {
                 g_field_defer_moved = 1;
-                /* The press is a drag, not a tap: start the native press at
-                 * the original point and follow the finger. */
-                hle_android_mouse_move(g_field_defer_x, g_field_defer_y);
-                hle_android_mouse_button_ex(0, 1);
-                g_native_down = 1;
-                g_native_up_pending = 0;
-                g_field_defer_down_posted = 1;
-                dt_trace("field-click-drag", dt_bits(ev->x),
-                         dt_bits(ev->y));
+                if (g_field_defer_target) {
+                    /* Target/placement owns the release, not the press.
+                     * Follow the cursor and confirm once on UP; a native
+                     * DOWN here would turn the gesture into a drag that the
+                     * target mode may cancel instead of confirm. */
+                    dt_trace("field-target-drag", dt_bits(ev->x),
+                             dt_bits(ev->y));
+                } else {
+                    /* The press is a drag, not a tap: start the native press
+                     * at the original point and follow the finger. */
+                    hle_android_mouse_move(g_field_defer_x, g_field_defer_y);
+                    hle_android_mouse_button_ex(0, 1);
+                    g_native_down = 1;
+                    g_native_up_pending = 0;
+                    g_field_defer_down_posted = 1;
+                    dt_trace(g_field_defer_live ? "field-tap-drag"
+                             : (g_field_defer_late ? "field-late-drag"
+                                                   : "field-click-drag"),
+                             dt_bits(ev->x), dt_bits(ev->y));
+                }
             }
         }
-        if (g_field_defer_moved) hle_android_mouse_move(ev->x, ev->y);
+        if (g_field_defer_moved && !g_field_defer_target) {
+            hle_android_mouse_move(ev->x, ev->y);
+        }
         return 1;
     case WC3_DIRECT_TOUCH_POINTER_UP:
         if (!g_field_defer_active || ev->pointer_id != g_field_defer_pointer)
             return 0;
         if (!g_field_defer_moved) {
-            g_field_click_event = *ev;
-            g_field_click_event.kind = WC3_DIRECT_TOUCH_TAP;
-            g_field_click_event.route = WC3_DIRECT_TOUCH_ROUTE_FIELD;
-            g_field_click_pending = 1;
-            g_field_click_ms = dt_now_ms();
-            dt_trace("field-click-queued", dt_bits(ev->x), dt_bits(ev->y));
+            /* The matching UP is resolved by dt_dispatch() before this
+             * native path, so a no-move candidate reaching here belongs to
+             * another pointer or a superseded gesture.  Drop it; there is no
+             * native press to release and it must not be queued for a later
+             * world tap. */
+            dt_trace(g_field_defer_target ? "field-target-up-miss"
+                     : (g_field_defer_live ? "field-tap-up-miss"
+                        : (g_field_defer_late ? "field-late-up-miss"
+                                              : "field-load-up-miss")),
+                     ev->pointer_id, 0);
         } else if (g_field_defer_down_posted) {
             hle_android_mouse_move(ev->x, ev->y);
             hle_android_mouse_button_up_force(0);
             g_native_down = 0;
             g_native_up_pending = 1;
-            dt_trace("field-click-drag-up", dt_bits(ev->x),
-                     dt_bits(ev->y));
+            dt_trace("field-click-drag-up", dt_bits(ev->x), dt_bits(ev->y));
         }
-        g_field_defer_active = 0;
-        g_field_defer_pointer = 0;
-        g_field_defer_down_posted = 0;
+        dt_field_defer_reset();
         return 1;
     case WC3_DIRECT_TOUCH_POINTER_CANCEL:
         if (!g_field_defer_active || ev->pointer_id != g_field_defer_pointer)
@@ -3017,9 +3354,7 @@ static int dt_native_defer_pointer(const Wc3DirectTouchEvent *ev)
             g_native_up_pending = 1;
         }
         dt_trace("field-click-cancel", ev->pointer_id, 0);
-        g_field_defer_active = 0;
-        g_field_defer_pointer = 0;
-        g_field_defer_down_posted = 0;
+        dt_field_defer_reset();
         return 1;
     default:
         return 0;
@@ -3259,6 +3594,10 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
         return 1;
     case WC3_DT_BEACON_ARM:
         g_beacon_armed = 1;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        wc3_hle_direct_touch_probe_begin("beacon-arm", dt_bits(ev->x),
+                                         dt_bits(ev->y));
+#endif
         dt_trace("beacon-arm", dt_bits(ev->x), dt_bits(ev->y));
         return 1;
     default:
@@ -3355,6 +3694,61 @@ static void dt_native_minimap_pointer(const Wc3DirectTouchEvent *ev,
     dt_trace(ev->kind == WC3_DIRECT_TOUCH_POINTER_CANCEL
                  ? "minimap-native-cancel" : "minimap-native-up",
              dt_bits(clamped.x), dt_bits(clamped.y));
+}
+
+/*
+ * True while the live world is not in CSelectMode and a battlefield gesture
+ * therefore belongs to target/placement or another transient input mode.
+ * Active != select is the authoritative release signal; it includes the
+ * observed CGameUI+0x220 object that the +0x210-only grid check missed.
+ */
+static int dt_field_target_active(CPU *c, const DtContext *ctx)
+{
+    if (!c || !ctx || !ctx->ui || !ctx->world) return 0;
+    if (!dt_call_ui_bool(c, ctx->ui, DT_FN_IN_GAME)) return 0;
+    const uint32_t select = wc3_rd32g(ctx->ui + DT_UI_SELECT_MODE);
+    const uint32_t target = wc3_rd32g(ctx->ui + DT_UI_TARGET_MODE);
+    const uint32_t active = wc3_rd32g(ctx->ui + DT_UI_ACTIVE_MODE);
+    if (target && dt_mode_active(c, ctx->ui, target)) return 1;
+    return select && active && active != select;
+}
+
+static void dt_field_target_gesture_begin(const Wc3DirectTouchEvent *ev)
+{
+    if (g_field_target_gesture_active) {
+        dt_trace("field-target-gesture-restart",
+                 g_field_target_gesture_pointer, ev->pointer_id);
+    }
+    g_field_target_gesture_active = 1;
+    g_field_target_gesture_pointer = ev->pointer_id;
+    hle_android_mouse_move(ev->x, ev->y);
+    dt_trace("field-target-gesture-begin", dt_bits(ev->x),
+             dt_bits(ev->y));
+}
+
+static void dt_field_target_gesture_move(const Wc3DirectTouchEvent *ev)
+{
+    if (!g_field_target_gesture_active ||
+        ev->pointer_id != g_field_target_gesture_pointer) {
+        dt_log("field-target-move ignored ptr=%u active=%d owner=%u",
+               ev->pointer_id, g_field_target_gesture_active,
+               g_field_target_gesture_pointer);
+        return;
+    }
+    hle_android_mouse_move(ev->x, ev->y);
+}
+
+static void dt_field_target_gesture_end(const Wc3DirectTouchEvent *ev)
+{
+    if (!g_field_target_gesture_active ||
+        ev->pointer_id != g_field_target_gesture_pointer) {
+        return;
+    }
+    hle_android_mouse_move(ev->x, ev->y);
+    dt_native_click(ev);
+    g_field_target_gesture_active = 0;
+    g_field_target_gesture_pointer = 0;
+    dt_trace("field-target-gesture-end", dt_bits(ev->x), dt_bits(ev->y));
 }
 
 /*
@@ -3511,6 +3905,8 @@ static void dt_field_select_end(const Wc3DirectTouchEvent *ev)
  * that keeps a native button from staying latched. */
 static void dt_field_reset(void)
 {
+    g_field_target_gesture_active = 0;
+    g_field_target_gesture_pointer = 0;
     if (g_field_camera_active) {
         dt_log("field-reset camera ptr=%d", g_field_camera_pointer);
         hle_android_mouse_button_up_force(1);
@@ -3533,7 +3929,8 @@ static void dt_field_reset(void)
 
 static int dt_field_drag_active(void)
 {
-    return g_field_camera_active || g_field_select_active;
+    return g_field_camera_active || g_field_select_active ||
+           g_field_target_gesture_active;
 }
 
 static int dt_is_field_drag_kind(uint32_t kind)
@@ -3561,10 +3958,111 @@ static int dt_is_field_drag_end(uint32_t kind)
 static void dt_native_click(const Wc3DirectTouchEvent *ev)
 {
     Wc3DirectTouchEvent pointer = *ev;
+    /* The caller already resolved the route and decided that the game owns
+     * this click.  Do not let the raw field deferral re-queue it as a tap:
+     * that would replay a target confirmation through the select path. */
+    if (g_native_down) {
+        /* Another owner still holds the left button.  Posting only this
+         * click's UP would release that owner's press; dropping the click is
+         * the safe outcome because the target mode is already changing. */
+        dt_trace("native-click-busy", dt_bits(ev->x), dt_bits(ev->y));
+        return;
+    }
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_probe_mark("native-click-down", dt_bits(ev->x),
+                                    dt_bits(ev->y));
+#endif
+    g_native_synthetic = 1;
     pointer.kind = WC3_DIRECT_TOUCH_POINTER_DOWN;
     dt_native_pointer(&pointer);
-    pointer.kind = WC3_DIRECT_TOUCH_POINTER_UP;
-    dt_native_pointer(&pointer);
+    if (g_native_down) {
+        pointer.kind = WC3_DIRECT_TOUCH_POINTER_UP;
+        dt_native_pointer(&pointer);
+    }
+    g_native_synthetic = 0;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_probe_mark("native-click-up", g_native_down, 0);
+#endif
+}
+
+/* A field contact was held only until this release so it could be classified
+ * as a tap.  Resolve it now with the exact route and the live world:
+ *
+ *   FIELD      semantic select/order (the reason direct touch exists)
+ *   target/etc native click pair (confirms the target or settles the mode)
+ *   loading    the separate map-load replay, not a panel tap
+ *   no UI      explicit drop
+ *
+ * There is no "keep waiting for the next tap" outcome: the user's contact is
+ * always consumed exactly once on its own release. */
+static void dt_field_release_tap(CPU *c, const Wc3DirectTouchEvent *ev,
+                                 uint32_t width, uint32_t height)
+{
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_probe_mark("field-release-enter", dt_bits(ev->x),
+                                    dt_bits(ev->y));
+#endif
+    DtContext ctx;
+    memset(&ctx, 0, sizeof ctx);
+    const Wc3DirectTouchRoute route = dt_ready_route(c, &ctx);
+    const int ui_present = dt_ui_present(NULL);
+    /* A closed click gate during a target/transient mode is not a map-load
+     * deferral.  The game is in control (route NATIVE); the release must be a
+     * native click, not a replay queued until select mode returns. */
+    const int should_defer =
+        route != WC3_DIRECT_TOUCH_ROUTE_NATIVE &&
+        dt_field_click_should_defer(ev->x, ev->y);
+    const uint32_t outcome =
+        (uint32_t)wc3_dt_field_release(route == WC3_DIRECT_TOUCH_ROUTE_FIELD,
+                                       should_defer, ui_present);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_probe_mark("field-release-route", (uint32_t)route,
+                                    (outcome << 8) |
+                                    ((uint32_t)ui_present << 16) |
+                                    (uint32_t)should_defer << 24);
+#endif
+    switch (outcome) {
+    case WC3_DT_FIELD_RELEASE_SEMANTIC: {
+        Wc3DirectTouchEvent tap = *ev;
+        tap.kind = WC3_DIRECT_TOUCH_TAP;
+        tap.route = WC3_DIRECT_TOUCH_ROUTE_FIELD;
+        dt_tap(c, &ctx, &tap, width, height);
+        dt_trace("field-tap-release", dt_bits(ev->x), dt_bits(ev->y));
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        wc3_hle_direct_touch_probe_mark("field-release-semantic",
+                                        dt_bits(ev->x), dt_bits(ev->y));
+#endif
+        break;
+    }
+    case WC3_DT_FIELD_RELEASE_DEFER:
+        dt_field_click_queue(ev);
+        dt_trace("field-tap-load-queue", dt_bits(ev->x), dt_bits(ev->y));
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        wc3_hle_direct_touch_probe_mark("field-release-defer",
+                                        dt_bits(ev->x), dt_bits(ev->y));
+#endif
+        break;
+    case WC3_DT_FIELD_RELEASE_NATIVE:
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        wc3_hle_direct_touch_probe_mark("field-release-native-pre",
+                                        dt_bits(ev->x), dt_bits(ev->y));
+#endif
+        dt_native_click(ev);
+        dt_trace("field-tap-release-native", dt_bits(ev->x), dt_bits(ev->y));
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        wc3_hle_direct_touch_probe_mark("field-release-native-post",
+                                        dt_bits(ev->x), dt_bits(ev->y));
+#endif
+        break;
+    case WC3_DT_FIELD_RELEASE_DROP:
+    default:
+        dt_trace("field-tap-release-drop", dt_bits(ev->x), dt_bits(ev->y));
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        wc3_hle_direct_touch_probe_mark("field-release-drop",
+                                        dt_bits(ev->x), dt_bits(ev->y));
+#endif
+        break;
+    }
 }
 
 /*
@@ -3704,15 +4202,18 @@ static void dt_native_left_click(float x, float y)
     g_native_synthetic = 0;
 }
 
-/* Replay a held field tap once the game's exact service route is FIELD.  This
- * uses the same semantic tap path as a normal field tap, so a selected unit
- * gets a smart order rather than the left-click selection a native replay
- * would do.  The route check requires the click gate, in-game state and select
- * mode to be live, and the active mode to still be select: a target mode or a
- * menu means the tap is stale. */
+/* Replay a field tap held during a map load/fade-in.  A live-route tap is
+ * immediate: dt_field_release_tap() dispatches on the gesture's release and
+ * never enters this function.  A load tap replays only when the exact service
+ * route is FIELD; the semantic path gives a selected unit a smart order
+ * rather than the left-click selection a native replay would do. */
 static void dt_field_click_tick(CPU *c, uint32_t width, uint32_t height)
 {
     if (!g_field_click_pending) return;
+    /* The replay decides select vs. target from the live mode.  Do not read
+     * that mode while an earlier native click is still waiting in the Win32
+     * queue; the mode belongs to the previous state until it is applied. */
+    if (hle_android_native_button_pending()) return;
 
     const uint64_t now = dt_now_ms();
     if (g_field_click_ms && now && now >= g_field_click_ms &&
@@ -3730,9 +4231,19 @@ static void dt_field_click_tick(CPU *c, uint32_t width, uint32_t height)
     memset(&ctx, 0, sizeof ctx);
     if (dt_ready_route(c, &ctx) != WC3_DIRECT_TOUCH_ROUTE_FIELD) return;
 
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_probe_mark("field-replay-pre",
+                                    dt_bits(g_field_click_event.x),
+                                    dt_bits(g_field_click_event.y));
+#endif
     dt_tap(c, &ctx, &g_field_click_event, width, height);
     dt_trace("field-tap-replay", dt_bits(g_field_click_event.x),
              dt_bits(g_field_click_event.y));
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_probe_mark("field-replay-post",
+                                    dt_bits(g_field_click_event.x),
+                                    dt_bits(g_field_click_event.y));
+#endif
     g_field_click_pending = 0;
 }
 
@@ -3845,6 +4356,9 @@ static int dt_inventory_pointer(const Wc3DirectTouchEvent *ev,
         g_inv_slot = (uint32_t)slot;
         g_inv_down_x = ev->x;
         g_inv_down_y = ev->y;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        wc3_hle_direct_touch_probe_begin("inv-select", (uint32_t)slot, bar);
+#endif
         dt_trace("inv-down", (uint32_t)slot, bar);
         return 1;
     }
@@ -4396,6 +4910,11 @@ static int dt_command_pointer(const Wc3DirectTouchEvent *ev,
 #if WC3_DEBUG && WC3_DEBUG_INPUT
             dt_log("cmd-hit-none bar=%08X n=%.4f,%.4f", bar, ev->x, ev->y);
             dt_command_dump_bar(bar, width, height);
+            /* A background press on the command bar is still a panel
+             * interaction.  Start the sequence here so the next world tap is
+             * traced; the previous probe used to wait for a command button
+             * and missed this repro. */
+            wc3_hle_direct_touch_probe_begin("cmd-contact", bar, 0);
 #endif
             return 0;
         }
@@ -4430,11 +4949,20 @@ static int dt_command_pointer(const Wc3DirectTouchEvent *ev,
                                  &right, &bottom)) {
             const float center_x = (left + right) * 0.5f;
             const float center_y = (top + bottom) * 0.5f;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+            wc3_hle_direct_touch_probe_begin("cmd-select", button, data);
+            wc3_hle_direct_touch_probe_mark("cmd-click-pre",
+                                            dt_bits(center_x),
+                                            dt_bits(center_y));
+#endif
             dt_native_left_click(center_x, center_y);
             dt_log("cmd select button=%08X data=%08X type=%u "
                    "center=%.4f,%.4f hle_tgt=%d",
                    button, data, g_cmd_type, center_x, center_y,
                    dt_command_targeted(data));
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+            wc3_hle_direct_touch_probe_mark("cmd-click-post", button, data);
+#endif
         }
         dt_trace("cmd-down", button, data);
         return 1;
@@ -4477,6 +5005,22 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
     dt_log("dispatch kind=%s(%u) ptr=%u n=%.4f,%.4f route=%s",
            dt_kind_name(ev->kind), ev->kind, ev->pointer_id,
            ev->x, ev->y, dt_route_name(ev->route));
+    /* The probe dumps the guest's own ring for every discrete event.  Moves
+     * only get a light line: a drag can produce dozens, and none of them
+     * posts a native message by itself. */
+    if (wc3_hle_direct_touch_probe_active()) {
+        if (ev->kind == WC3_DIRECT_TOUCH_POINTER_MOVE ||
+            ev->kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE ||
+            ev->kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE) {
+            wc3_hle_direct_touch_tracef(
+                "probe dispatch-move kind=%u ptr=%u n=%08X,%08X route=%u",
+                ev->kind, ev->pointer_id, dt_bits(ev->x), dt_bits(ev->y),
+                (uint32_t)ev->route);
+        } else {
+            wc3_hle_direct_touch_probe_mark("dispatch", ev->kind,
+                                            ev->pointer_id);
+        }
+    }
 #endif
     switch (ev->kind) {
     case WC3_DIRECT_TOUCH_TAP: {
@@ -4494,6 +5038,10 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
             ev->y >= bt && ev->y <= bb;
         if (on_button) {
             g_beacon_armed = 1;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+            wc3_hle_direct_touch_probe_begin("beacon-tap-arm", dt_bits(ev->x),
+                                             dt_bits(ev->y));
+#endif
             dt_trace("beacon-tap-arm", dt_bits(ev->x), dt_bits(ev->y));
             break;
         }
@@ -4560,30 +5108,75 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
         break;
     case WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN:
         g_beacon_armed = 0;
-        dt_field_camera_begin(ev);
+        if (dt_field_target_active(c, ctx)) {
+            dt_field_target_gesture_begin(ev);
+        } else {
+            dt_field_camera_begin(ev);
+        }
         break;
     case WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE:
-        dt_field_camera_move(ev);
+        if (g_field_target_gesture_active) {
+            dt_field_target_gesture_move(ev);
+        } else {
+            dt_field_camera_move(ev);
+        }
         break;
     case WC3_DIRECT_TOUCH_FIELD_CAMERA_END:
-        dt_field_camera_end(ev);
+        if (g_field_target_gesture_active) {
+            dt_field_target_gesture_end(ev);
+        } else {
+            dt_field_camera_end(ev);
+        }
         break;
     case WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN:
         g_beacon_armed = 0;
-        dt_field_select_begin(ev);
+        if (dt_field_target_active(c, ctx)) {
+            dt_field_target_gesture_begin(ev);
+        } else {
+            dt_field_select_begin(ev);
+        }
         break;
     case WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE:
-        dt_field_select_move(ev);
+        if (g_field_target_gesture_active) {
+            dt_field_target_gesture_move(ev);
+        } else {
+            dt_field_select_move(ev);
+        }
         break;
     case WC3_DIRECT_TOUCH_FIELD_SELECT_END:
-        dt_field_select_end(ev);
+        if (g_field_target_gesture_active) {
+            dt_field_target_gesture_end(ev);
+        } else {
+            dt_field_select_end(ev);
+        }
         break;
     case WC3_DIRECT_TOUCH_POINTER_DOWN:
     case WC3_DIRECT_TOUCH_POINTER_MOVE:
     case WC3_DIRECT_TOUCH_POINTER_UP:
     case WC3_DIRECT_TOUCH_POINTER_CANCEL:
         if (dt_beacon_pointer(c, ctx, ev, width, height)) {
+            /* A beacon gesture owns this world touch. */
             dt_log("consumed=beacon ptr=%u", ev->pointer_id);
+            break;
+        }
+        if (ev->kind == WC3_DIRECT_TOUCH_POINTER_UP &&
+            g_field_defer_active &&
+            ev->pointer_id == g_field_defer_pointer &&
+            (!g_field_defer_moved || g_field_defer_target)) {
+            /* Every raw field press is held only until this release so it
+             * can be classified once, by the live route.  A target gesture
+             * follows the cursor and is resolved on release even when the
+             * finger moved.  The total resolver decides between semantic
+             * tap, map-load replay, native click and explicit drop; this
+             * path never queues a live select-mode tap. */
+            dt_trace(g_field_defer_target ? "field-target-release"
+                     : (g_field_defer_live ? "field-tap-release-up"
+                        : (g_field_defer_late ? "field-late-release"
+                                              : "field-load-release")),
+                     dt_bits(ev->x), dt_bits(ev->y));
+            dt_field_release_tap(c, ev, width, height);
+            dt_log("consumed=field-tap ptr=%u", ev->pointer_id);
+            dt_field_defer_reset();
             break;
         }
         if (ev->route == WC3_DIRECT_TOUCH_ROUTE_NATIVE &&
@@ -4601,6 +5194,9 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
             dt_log("consumed=grid ptr=%u", ev->pointer_id);
             break;
         }
+        /* A native press outside the battlefield is HUD/menu input; the
+         * minimap backstop handles its own rectangle and everything else is
+         * posted as a normal native click. */
         dt_native_minimap_pointer(ev, width, height);
         dt_log("consumed=native ptr=%u", ev->pointer_id);
         break;
@@ -4700,6 +5296,7 @@ static int dt_event_starts_new_gesture(uint32_t kind)
     case WC3_DIRECT_TOUCH_FOLLOW_START:
     case WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN:
     case WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN:
+    case WC3_DIRECT_TOUCH_FIELD_HOVER:
         return 1;
     default:
         return 0;
@@ -4716,6 +5313,18 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
     if (__atomic_exchange_n(&g_portrait_release_pending, 0,
                             __ATOMIC_ACQ_REL)) {
         dt_portrait_release(c);
+    }
+    /* Applied-input barrier.  A command-card click selects the command and
+     * may change CGameUI's input mode.  The change exists only after the
+     * guest wndproc has dispatched that click, so classifying a world release
+     * before then reads the previous mode.  Leave the direct events in the
+     * SPSC queue and let the Win32 pump apply the queued button messages
+     * first; the next service call sees the new mode and the same contact is
+     * resolved once, on its own release. */
+    if (wc3_direct_touch_pending() != 0 &&
+        hle_android_native_button_pending()) {
+        dt_trace("input-barrier", wc3_direct_touch_pending(), 0);
+        return;
     }
     if (wc3_direct_touch_pending() == 0) {
         dt_sync_idle_context(width, height);
@@ -4782,6 +5391,15 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
     }
 
     for (uint32_t i = 0; i < DT_MAX_EVENTS_PER_PUMP; i++) {
+        /* An event handled earlier in this batch may have posted a native
+         * button (command select, target confirmation, field drag).  Stop
+         * before the next direct contact so the mode read for that contact
+         * includes the click.  Remaining events stay queued for the next
+         * pump. */
+        if (hle_android_native_button_pending()) {
+            dt_trace("input-barrier-mid", wc3_direct_touch_pending(), 0);
+            break;
+        }
         Wc3DirectTouchEvent event;
         if (!wc3_direct_touch_pop(&event)) break;
 
@@ -4812,7 +5430,8 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
          * the stale tap instead of letting it run after the new gesture. */
         if (g_field_click_pending &&
             (event.kind == WC3_DIRECT_TOUCH_POINTER_DOWN ||
-             event.kind == WC3_DIRECT_TOUCH_TAP)) {
+             event.kind == WC3_DIRECT_TOUCH_TAP ||
+             event.kind == WC3_DIRECT_TOUCH_FIELD_HOVER)) {
             dt_trace("field-click-cancel", dt_bits(event.x),
                      dt_bits(event.y));
             g_field_click_pending = 0;
@@ -4840,6 +5459,35 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
              * release only needs the current camera, not the semantic
              * context. */
             dt_dispatch(c, &ctx, &event, width, height);
+        } else if (event.kind == WC3_DIRECT_TOUCH_FIELD_HOVER) {
+            /* Give the game's targeting cursor the tap point while the
+             * finger is still down.  Earlier traces show the first release
+             * after a command card resolving against the card's cursor and
+             * only the next contact confirming, so the mode has to see this
+             * contact as a hover before its click.  Select mode ignores the
+             * event; its semantic path has no native cursor.  When the tap
+             * already left the queue, stop here: the click must be a later
+             * message than the hover. */
+            if (ctx.ui && ctx.world && dt_field_target_active(c, &ctx)) {
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+                wc3_hle_direct_touch_probe_mark("field-hover-pre",
+                                                dt_bits(event.x),
+                                                dt_bits(event.y));
+#endif
+                hle_android_mouse_move(event.x, event.y);
+                dt_trace("field-target-hover", dt_bits(event.x),
+                         dt_bits(event.y));
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+                wc3_hle_direct_touch_probe_mark("field-hover-post",
+                                                dt_bits(event.x),
+                                                dt_bits(event.y));
+#endif
+                if (wc3_direct_touch_pending() != 0) {
+                    dt_trace("field-target-hover-barrier",
+                             wc3_direct_touch_pending(), 0);
+                    break;
+                }
+            }
         } else if (dt_is_field_drag_end(event.kind)) {
             /* The END only releases a native mouse button.  It must run even
              * if the game changed context between BEGIN and END; otherwise
@@ -4848,9 +5496,17 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
         } else if (dt_is_field_drag_kind(event.kind)) {
             /* Once BEGIN has pressed the native button, keep feeding MOVE to
              * that drag even if the button changed the active mode and the
-             * route now reads NATIVE.  A BEGIN with no active drag still
-             * requires FIELD: it is the gesture's first native press. */
-            if (wc3_dt_field_drag_keep(route, dt_field_drag_active())) {
+             * route now reads NATIVE.  A new field gesture during target or
+             * a transient mode is a target gesture, not a camera/selection
+             * drag; its END posts the native click pair. */
+            const int target_begin =
+                !dt_field_drag_active() &&
+                event.route == WC3_DIRECT_TOUCH_ROUTE_FIELD &&
+                (event.kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN ||
+                 event.kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN) &&
+                dt_field_target_active(c, &ctx);
+            if (target_begin ||
+                wc3_dt_field_drag_keep(route, dt_field_drag_active())) {
                 dt_dispatch(c, &ctx, &event, width, height);
             } else {
                 dt_trace("field-drag-drop", event.kind, event.pointer_id);
@@ -4873,24 +5529,16 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
         } else if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD) {
             dt_dispatch(c, &ctx, &event, width, height);
         } else if (event.kind == WC3_DIRECT_TOUCH_TAP &&
-                   event.route == WC3_DIRECT_TOUCH_ROUTE_FIELD &&
-                   dt_field_click_should_defer(event.x, event.y)) {
-            /* The input snapshot saw a live select mode, but the exact
-             * service route is not FIELD yet: in_game is still false during
-             * the map fade-in, or the game is between modes.  Replaying now
-             * as a native click would be dropped, so hold the tap and replay
-             * it when the route becomes exactly FIELD. */
-            g_field_click_event = event;
-            g_field_click_event.kind = WC3_DIRECT_TOUCH_TAP;
-            g_field_click_event.route = WC3_DIRECT_TOUCH_ROUTE_FIELD;
-            g_field_click_pending = 1;
-            g_field_click_ms = dt_now_ms();
-            dt_trace("field-tap-queued", dt_bits(event.x),
-                     dt_bits(event.y));
+                   event.route == WC3_DIRECT_TOUCH_ROUTE_FIELD) {
+            /* The recognizer classified the contact on the physical FIELD
+             * route, but the live semantic route is not select.  Resolve it
+             * once, on this release: map-load -> separate replay;
+             * target/transient/menu -> native click; no UI -> drop. */
+            dt_field_release_tap(c, &event, width, height);
         } else if (route == WC3_DIRECT_TOUCH_ROUTE_NATIVE) {
-            /* The gesture was classified as a field tap before the game
-             * entered targeting/placement.  Let the native click handler
-             * consume it instead of losing the target. */
+            /* A semantic event that was not a field TAP still has a native
+             * recipient (menu/HUD/targeting).  Let the native click handler
+             * consume it instead of losing the contact. */
             dt_trace("semantic-native", event.kind, event.pointer_id);
             dt_native_click(&event);
         } else {
@@ -4923,6 +5571,7 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
             dt_command_reset();
             dt_command_target_reset();
             dt_field_reset();
+            dt_field_click_reset();
             dt_native_release();
             /* The pending HOLD_RELEASE belongs to the old context; release
              * the follow now instead of leaving it latched on the camera. */

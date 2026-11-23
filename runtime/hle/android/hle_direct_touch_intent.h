@@ -102,6 +102,51 @@ static inline Wc3DirectTouchRoute wc3_dt_route(int ui_ready,
 }
 
 /*
+ * Physical owner of a contact.  This is the input-thread route and it must not
+ * depend on the active input mode: a live battlefield is FIELD whether
+ * CSelectMode, a command target, or a transient panel mode is on top.  The
+ * release resolver in the guest thread decides whether that field contact is
+ * a semantic select/order, a target confirmation, or a native UI click.
+ *
+ * target/placement is deliberately absent from the arguments.  Reintroducing
+ * it here recreates the split-route defect: DOWN is classified NATIVE, the
+ * mode returns to select before UP, and the release never becomes a TAP.
+ */
+static inline Wc3DirectTouchRoute wc3_dt_physical_route(int ui_ready,
+                                                        int world_ready,
+                                                        int click_gate)
+{
+    if (!ui_ready) return WC3_DIRECT_TOUCH_ROUTE_LEGACY;
+    if (world_ready && click_gate) return WC3_DIRECT_TOUCH_ROUTE_FIELD;
+    return WC3_DIRECT_TOUCH_ROUTE_NATIVE;
+}
+
+/* Total release outcome for a field contact that reached the guest. */
+typedef enum {
+    WC3_DT_FIELD_RELEASE_SEMANTIC = 0,
+    WC3_DT_FIELD_RELEASE_DEFER,
+    WC3_DT_FIELD_RELEASE_NATIVE,
+    WC3_DT_FIELD_RELEASE_DROP
+} Wc3DtFieldRelease;
+
+/*
+ * Resolve a field release without a fifth "NONE" outcome.  `ready_field` is
+ * the exact semantic route for this pump, `should_defer` is the map-load gate,
+ * and `ui_present` says whether there is still a live UI to receive the
+ * click.  Target/transient/menu releases are native clicks, not semantic
+ * orders; an absent UI is an explicit drop.
+ */
+static inline Wc3DtFieldRelease wc3_dt_field_release(int ready_field,
+                                                     int should_defer,
+                                                     int ui_present)
+{
+    if (ready_field) return WC3_DT_FIELD_RELEASE_SEMANTIC;
+    if (should_defer) return WC3_DT_FIELD_RELEASE_DEFER;
+    if (ui_present) return WC3_DT_FIELD_RELEASE_NATIVE;
+    return WC3_DT_FIELD_RELEASE_DROP;
+}
+
+/*
  * A field drag owns its native mouse button from BEGIN to END.  Pressing that
  * button can change the game's active input mode, so the route snapshot can
  * briefly become NATIVE after BEGIN.  That is the drag itself, not a reason to

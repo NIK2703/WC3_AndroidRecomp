@@ -20,6 +20,7 @@
 
 static Wc3DirectTouchEvent g_events[128];
 static int g_event_count;
+static int g_hover_count;
 static int g_wake_count;
 static int g_haptic_count;
 static int g_haptic_effect;
@@ -27,6 +28,13 @@ static int g_haptic_effect;
 static void sink(const Wc3DirectTouchEvent *event, void *user)
 {
     (void)user;
+    /* Field hover is a native-cursor phase consumed by the service before
+     * semantic dispatch.  Count it separately so the gesture tests below
+     * keep asserting the semantic stream (tap/selection/camera) only. */
+    if (event->kind == WC3_DIRECT_TOUCH_FIELD_HOVER) {
+        g_hover_count++;
+        return;
+    }
     assert(g_event_count < (int)(sizeof(g_events) / sizeof(g_events[0])));
     g_events[g_event_count++] = *event;
 }
@@ -47,6 +55,7 @@ static void wake(void *user)
 static void events_clear(void)
 {
     g_event_count = 0;
+    g_hover_count = 0;
     g_haptic_count = 0;
     g_haptic_effect = 0;
 }
@@ -105,7 +114,7 @@ static void test_queue(void)
 static Wc3DirectTouch make_recognizer(void)
 {
     Wc3DirectTouch dt;
-    wc3_direct_touch_init(&dt, 1000.0f, 1000.0f, 20.0f, 450,
+    wc3_direct_touch_init(&dt, 1000.0f, 1000.0f, 20.0f, 120,
                           sink, NULL);
     wc3_direct_touch_set_haptic(&dt, haptic, NULL, 3);
     return dt;
@@ -127,6 +136,39 @@ static void test_tap(void)
     expect_near("tap x", g_events[0].x, 0.105f);
     expect_near("tap y", g_events[0].y, 0.205f);
     assert(g_events[0].time_ms == 1050);
+}
+
+static void test_field_hover(void)
+{
+    Wc3DirectTouch dt = make_recognizer();
+    events_clear();
+
+    /* The first pointer of a field contact announces its press point before
+     * the semantic tap exists.  The executor uses this to move the game's
+     * targeting cursor while the finger is down; without it the release
+     * click is resolved against the previous contact's cursor. */
+    wc3_direct_touch_down(&dt, 40, 300.0f, 400.0f, 0);
+    assert(g_hover_count == 1);
+    assert(g_event_count == 0);
+
+    /* Moves do not repeat the hover; the target gesture owns the move
+     * stream after the press. */
+    wc3_direct_touch_move(&dt, 40, 310.0f, 410.0f, 10);
+    assert(g_hover_count == 1);
+
+    wc3_direct_touch_up(&dt, 40, 310.0f, 410.0f, 50);
+    assert(g_hover_count == 1);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_TAP);
+
+    /* A second finger is a multi-touch camera gesture, not a targeting
+     * hover. */
+    events_clear();
+    wc3_direct_touch_down(&dt, 41, 500.0f, 500.0f, 1000);
+    wc3_direct_touch_down(&dt, 42, 600.0f, 600.0f, 1001);
+    assert(g_hover_count == 1);
+
+    wc3_direct_touch_reset(&dt);
 }
 
 static void test_tap_cancelled_by_motion(void)
@@ -187,20 +229,20 @@ static void test_long_press_presses_once(void)
     events_clear();
 
     wc3_direct_touch_down(&dt, 3, 500.0f, 600.0f, 2000);
-    assert(wc3_direct_touch_tick(&dt, 2449) == 0);
+    assert(wc3_direct_touch_tick(&dt, 2119) == 0);
     assert(g_event_count == 0);
     assert(g_haptic_count == 0);
     /* The deadline arms the hold, plays the legacy long-press haptic and
      * presses the native left button at the hold point.  The press stays
      * down until the finger is released. */
-    assert(wc3_direct_touch_tick(&dt, 2450) == 1);
+    assert(wc3_direct_touch_tick(&dt, 2120) == 1);
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
     assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
     assert(g_events[0].pointer_id == 3);
     expect_near("long press x", g_events[0].x, 0.5f);
     expect_near("long press y", g_events[0].y, 0.6f);
-    assert(g_events[0].time_ms == 2450);
+    assert(g_events[0].time_ms == 2120);
     assert(g_haptic_count == 1);
     assert(g_haptic_effect == 3);
     assert(wc3_direct_touch_tick(&dt, 3000) == 0);
@@ -218,12 +260,12 @@ static void test_hold_drift_presses_at_last_point(void)
     events_clear();
 
     /* 10 px is inside the 20 px legacy drag threshold: the hold survives and
-     * presses at the deadline with the last known point. */
+     * presses at the long-press deadline with the last known point. */
     wc3_direct_touch_down(&dt, 8, 100.0f, 100.0f, 0);
     wc3_direct_touch_move(&dt, 8, 110.0f, 100.0f, 100);
-    assert(wc3_direct_touch_tick(&dt, 449) == 0);
+    assert(wc3_direct_touch_tick(&dt, 119) == 0);
     assert(g_event_count == 0);
-    assert(wc3_direct_touch_tick(&dt, 450) == 1);
+    assert(wc3_direct_touch_tick(&dt, 120) == 1);
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
     expect_near("drift press x", g_events[0].x, 0.11f);
@@ -231,6 +273,7 @@ static void test_hold_drift_presses_at_last_point(void)
     wc3_direct_touch_up(&dt, 8, 110.0f, 100.0f, 500);
     assert(g_event_count == 2);
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+    assert(g_haptic_count == 1);
 }
 
 static void test_hold_then_drag_selects(void)
@@ -239,7 +282,7 @@ static void test_hold_then_drag_selects(void)
     events_clear();
 
     wc3_direct_touch_down(&dt, 9, 100.0f, 100.0f, 0);
-    assert(wc3_direct_touch_tick(&dt, 450) == 1);
+    assert(wc3_direct_touch_tick(&dt, 120) == 1);
     assert(g_haptic_count == 1);
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
@@ -248,7 +291,8 @@ static void test_hold_then_drag_selects(void)
     assert(wc3_direct_touch_field_drag_active(&dt) == 1);
 
     /* The native left button is already down.  Every move after the
-     * deadline is a native selection move, even inside the old drift slop. */
+     * long-press deadline is a native selection move, even inside the old
+     * drift slop. */
     wc3_direct_touch_move(&dt, 9, 115.0f, 100.0f, 500);
     assert(g_event_count == 2);
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
@@ -295,7 +339,7 @@ static void test_quick_swipe_camera(void)
     assert(g_haptic_count == 0);
 }
 
-static void test_late_move_arms_hold(void)
+static void test_late_move_starts_select(void)
 {
     Wc3DirectTouch dt = make_recognizer();
     events_clear();
@@ -304,24 +348,24 @@ static void test_late_move_arms_hold(void)
      * controls_tick().  The move must arm the hold and start a selection
      * drag, not classify the gesture as a quick camera swipe. */
     wc3_direct_touch_down(&dt, 12, 100.0f, 100.0f, 0);
-    wc3_direct_touch_move(&dt, 12, 125.0f, 100.0f, 460);
+    wc3_direct_touch_move(&dt, 12, 125.0f, 100.0f, 130);
     assert(g_haptic_count == 1);
     assert(g_haptic_effect == 3);
     assert(g_event_count == 2);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
     assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
-    expect_near("late press x", g_events[0].x, 0.125f);
-    expect_near("late move x", g_events[1].x, 0.125f);
+    expect_near("late select begin x", g_events[0].x, 0.125f);
+    expect_near("late select move x", g_events[1].x, 0.125f);
 
-    wc3_direct_touch_move(&dt, 12, 140.0f, 110.0f, 470);
+    wc3_direct_touch_move(&dt, 12, 140.0f, 110.0f, 140);
     assert(g_event_count == 3);
     assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
 
-    wc3_direct_touch_up(&dt, 12, 150.0f, 120.0f, 500);
+    wc3_direct_touch_up(&dt, 12, 150.0f, 120.0f, 200);
     assert(g_event_count == 4);
     assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
-    assert(wc3_direct_touch_tick(&dt, 600) == 0);
+    assert(wc3_direct_touch_tick(&dt, 300) == 0);
     assert(g_haptic_count == 1);
 }
 
@@ -344,6 +388,7 @@ static void test_raw_routes_never_emit_semantics(void)
     wc3_direct_touch_up(&dt, 31, 200.0f, 100.0f, 1600);
 
     assert(g_event_count == 0);
+    assert(g_hover_count == 0);
     assert(g_haptic_count == 0);
     assert(wc3_direct_touch_active_count(&dt) == 0);
 }
@@ -490,6 +535,33 @@ static void test_route(void)
     assert(wc3_dt_route(0, 0, 0, 0) == WC3_DIRECT_TOUCH_ROUTE_LEGACY);
 }
 
+static void test_physical_route(void)
+{
+    /* A live battlefield is FIELD regardless of the active input mode.
+     * Target/placement and transient panel modes are resolved on release,
+     * not by handing the DOWN to raw native phases. */
+    assert(wc3_dt_physical_route(1, 1, 1) == WC3_DIRECT_TOUCH_ROUTE_FIELD);
+    assert(wc3_dt_physical_route(1, 1, 0) == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+    assert(wc3_dt_physical_route(1, 0, 1) == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+    assert(wc3_dt_physical_route(1, 0, 0) == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+    assert(wc3_dt_physical_route(0, 1, 1) == WC3_DIRECT_TOUCH_ROUTE_LEGACY);
+}
+
+static void test_field_release_resolution(void)
+{
+    /* FIELD is the only semantic outcome. */
+    assert(wc3_dt_field_release(1, 0, 1) == WC3_DT_FIELD_RELEASE_SEMANTIC);
+    assert(wc3_dt_field_release(1, 1, 1) == WC3_DT_FIELD_RELEASE_SEMANTIC);
+    assert(wc3_dt_field_release(1, 0, 0) == WC3_DT_FIELD_RELEASE_SEMANTIC);
+    /* Map-load opens the separate replay path. */
+    assert(wc3_dt_field_release(0, 1, 1) == WC3_DT_FIELD_RELEASE_DEFER);
+    /* Target/transient/menu has a native recipient; never a silent NONE. */
+    assert(wc3_dt_field_release(0, 0, 1) == WC3_DT_FIELD_RELEASE_NATIVE);
+    /* No UI is an explicit drop. */
+    assert(wc3_dt_field_release(0, 0, 0) == WC3_DT_FIELD_RELEASE_DROP);
+    assert(wc3_dt_field_release(0, 1, 0) == WC3_DT_FIELD_RELEASE_DEFER);
+}
+
 static void test_field_drag_keep(void)
 {
     /* An idle field can start a drag only while the route is FIELD. */
@@ -506,7 +578,7 @@ static void test_field_drag_keep(void)
 static void test_pointer_phases(void)
 {
     Wc3DirectTouch dt;
-    wc3_direct_touch_init(&dt, 100.0f, 200.0f, 8.0f, 450,
+    wc3_direct_touch_init(&dt, 100.0f, 200.0f, 8.0f, 120,
                           sink, NULL);
     events_clear();
     wc3_direct_touch_emit_pointer(&dt, WC3_DIRECT_TOUCH_POINTER_DOWN,
@@ -797,13 +869,14 @@ int main(void)
 {
     test_queue();
     test_tap();
+    test_field_hover();
     test_tap_cancelled_by_motion();
     test_up_without_move_uses_slop();
     test_long_press_presses_once();
     test_hold_drift_presses_at_last_point();
     test_hold_then_drag_selects();
     test_quick_swipe_camera();
-    test_late_move_arms_hold();
+    test_late_move_starts_select();
     test_raw_routes_never_emit_semantics();
     test_reset_releases_field_drag();
     test_second_pointer_cancels();
@@ -812,6 +885,8 @@ int main(void)
     test_coordinate_mapping();
     test_tap_intent_resolution();
     test_route();
+    test_physical_route();
+    test_field_release_resolution();
     test_field_drag_keep();
     test_pointer_phases();
     test_portrait_gesture();

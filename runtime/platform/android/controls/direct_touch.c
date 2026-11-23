@@ -40,6 +40,7 @@ static const char *dt_kind_name(uint32_t kind)
     case WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN: return "FIELD_SELECT_BEGIN";
     case WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE: return "FIELD_SELECT_MOVE";
     case WC3_DIRECT_TOUCH_FIELD_SELECT_END: return "FIELD_SELECT_END";
+    case WC3_DIRECT_TOUCH_FIELD_HOVER: return "FIELD_HOVER";
     default: return "?";
     }
 }
@@ -250,6 +251,17 @@ void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
     DT_LOG("down-state ptr=%d mode=%s multi=%d others=%d down_ms=%llu",
            pointer_id, dt_mode_name(pointer->mode), pointer->multi, others,
            (unsigned long long)now_ms);
+    if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD && others == 0) {
+        /* One hover for the contact, not one per MOVE.  A target-mode field
+         * tap otherwise posts its first WM_MOUSEMOVE only on release, in the
+         * same pump as its click; the game then resolves the click against
+         * the command-card cursor and ignores it.  Emitting at DOWN gives the
+         * targeting cursor the whole press duration to reach the tap point.
+         * Select-mode service ignores this event, so selection rings and the
+         * native camera drag keep their old move stream. */
+        emit_event(dt, WC3_DIRECT_TOUCH_FIELD_HOVER, pointer_id, x, y,
+                   now_ms, route);
+    }
     if (route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
         /* The portrait is a tracking control, not a long-press gesture.
          * Start the native camera follow as soon as the finger lands on it;

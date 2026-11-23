@@ -71,7 +71,16 @@ typedef enum {
      * on the FIELD route. */
     WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN = 12,
     WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE = 13,
-    WC3_DIRECT_TOUCH_FIELD_SELECT_END = 14
+    WC3_DIRECT_TOUCH_FIELD_SELECT_END = 14,
+    /* Field press hover.  Emitted once on DOWN for the first pointer of a
+     * battlefield contact, before any semantic classification.  The service
+     * posts it as a native WM_MOUSEMOVE when the live mode is target/transient,
+     * so the game's targeting cursor sees the tap point before the release
+     * click.  Without it the target mode keeps the previous contact's cursor
+     * and the first click after a command card is resolved against the old
+     * position.  In select mode this event is ignored: native cursor movement
+     * there would move the selection/camera cursor. */
+    WC3_DIRECT_TOUCH_FIELD_HOVER = 15
 } Wc3DirectTouchKind;
 
 /*

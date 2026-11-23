@@ -202,6 +202,11 @@ void hle_android_mouse_button_ex(int button, int down);
  * this to avoid posting a second DOWN while the overlay engine owns the
  * button, and to release only the press it actually posted. */
 int hle_android_mouse_is_down(int button);
+/* 1 when a native button transition is queued but not yet dispatched.  The
+ * direct-touch service uses this as an applied-input barrier: it must not
+ * read the game's input mode to classify a world release while a command-card
+ * or target click is still waiting in the Win32 queue. */
+int hle_android_native_button_pending(void);
 /* Post a button press even when the logical state is still down because an
  * earlier release is queued but not dispatched.  The direct path uses this
  * for a second tap that follows its own pending release; the message order

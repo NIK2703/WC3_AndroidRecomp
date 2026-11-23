@@ -7451,10 +7451,45 @@ static void u_msg_remove_locked(int index)
     g_uq_count--;
 }
 
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+/* Debug probe: publish the HLE's own message ring next to the guest ring.
+ * Never called with g_uq_lock held. */
+static void u_probe_queue(const char *why)
+{
+    if (!wc3_hle_direct_touch_probe_active())
+        return;
+
+    UMsg copy[8];
+    int head;
+    int count;
+    int n;
+
+    pthread_mutex_lock(&g_uq_lock);
+    head = g_uq_head;
+    count = g_uq_count;
+    n = count > (int)(sizeof copy / sizeof copy[0])
+            ? (int)(sizeof copy / sizeof copy[0]) : count;
+    for (int i = 0; i < n; i++)
+        copy[i] = g_uq[(head + i) % UMSG_MAX];
+    pthread_mutex_unlock(&g_uq_lock);
+
+    wc3_hle_direct_touch_tracef("probe native-q %s head=%d count=%d",
+                                why, head, count);
+    for (int i = 0; i < n; i++)
+        wc3_hle_direct_touch_tracef(
+            "probe native-q[%d] msg=%04X hwnd=%08X wp=%08X lp=%08X",
+            i, copy[i].msg, copy[i].hwnd, copy[i].wp, copy[i].lp);
+}
+#define U_PROBE_QUEUE(why) u_probe_queue(why)
+#endif
+
 static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
 {
     int32_t x = (int16_t)(lp & 0xFFFF);
     int32_t y = (int16_t)((lp >> 16) & 0xFFFF);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    int probe_dropped = 0;
+#endif
     pthread_mutex_lock(&g_uq_lock);
     /* Coalesce only a move that is still at the tail.  Replacing an earlier
      * move could jump it over a click and make the wndproc see the button
@@ -7468,6 +7503,10 @@ static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
             tail->y = y;
             tail->time = hle_now_ms();
             pthread_mutex_unlock(&g_uq_lock);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+            U_PROBE_QUEUE("post-move-coalesced");
+            wc3_hle_direct_touch_probe_mark("uq-post-move-coalesced", msg, lp);
+#endif
             return;
         }
     }
@@ -7484,6 +7523,9 @@ static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
                 break;
             }
         }
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        probe_dropped = 1;
+#endif
         u_msg_remove_locked(victim >= 0 ? victim : 0);
     }
     UMsg *m = &g_uq[(g_uq_head + g_uq_count) % UMSG_MAX];
@@ -7497,6 +7539,11 @@ static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
     g_uq_count++;
     pthread_cond_broadcast(&g_uq_cond);
     pthread_mutex_unlock(&g_uq_lock);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    U_PROBE_QUEUE(probe_dropped ? "post-dropped" : "post");
+    wc3_hle_direct_touch_probe_mark(
+        probe_dropped ? "uq-post-dropped" : "uq-post", msg, lp);
+#endif
 }
 
 /* PUBLIC: post a Win32 message into the guest queue.  The DirectShow movie
@@ -7806,6 +7853,12 @@ static void u_get_message(CPU *c)
 
         if (got) {
             c->eax = rd32g(out + 4) == 0x0012u ? 0 : 1;   /* WM_QUIT */
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+            U_PROBE_QUEUE("take");
+            if (out && guest_ok(out, 28))
+                wc3_hle_direct_touch_probe_mark("uq-take", rd32g(out + 4),
+                                                rd32g(out + 12));
+#endif
 #if WC3_DEBUG
             {
                 static unsigned n;
@@ -7832,6 +7885,13 @@ static void u_peek_message(CPU *c)
     wc3_hle_direct_touch_service(c, g_win_w, g_win_h);
     keyboard_service();
     c->eax = (uint32_t)u_msg_take(out, hwnd, lo, hi, remove);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (c->eax && remove && out && guest_ok(out, 28)) {
+        U_PROBE_QUEUE("take");
+        wc3_hle_direct_touch_probe_mark("uq-take", rd32g(out + 4),
+                                        rd32g(out + 12));
+    }
+#endif
 #if WC3_DEBUG
     {
         static unsigned n;
@@ -7990,7 +8050,13 @@ static void u_dispatch_message(CPU *c)
 #endif
 
     uint32_t args[4] = { hwnd, msg, wp, lp };
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_probe_mark("uq-dispatch-pre", msg, lp);
+#endif
     c->eax = u_call_guest(c, wndproc, 4, args);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_probe_mark("uq-dispatch-post", msg, c->eax);
+#endif
 #if WC3_DEBUG
     fprintf(stderr, "[input] wndproc %08X hwnd=%08X msg=%04X returned\n",
             wndproc, hwnd, msg);
@@ -8114,6 +8180,23 @@ int hle_android_mouse_is_down(int button)
     return bit && (g_mouse_buttons & bit) != 0;
 }
 
+int hle_android_native_button_pending(void)
+{
+    int pending = 0;
+    pthread_mutex_lock(&g_uq_lock);
+    for (int i = 0; i < g_uq_count; i++) {
+        const uint32_t msg = g_uq[(g_uq_head + i) % UMSG_MAX].msg;
+        if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
+            msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
+            msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP) {
+            pending = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_uq_lock);
+    return pending;
+}
+
 static uint32_t mouse_button_mk(int button)
 {
     return button == 0 ? 0x0001u : button == 1 ? 0x0010u : button == 2 ? 0x0002u : 0u;
@@ -8169,6 +8252,12 @@ void hle_android_mouse_move(float nx, float ny)
     g_mouse_x = (int32_t)(nx * (float)(w - 1) + 0.5f);
     g_mouse_y = (int32_t)(ny * (float)(h - 1) + 0.5f);
     uint32_t lp = ((uint32_t)g_mouse_y << 16) | (uint16_t)g_mouse_x;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (wc3_hle_direct_touch_probe_active())
+        wc3_hle_direct_touch_tracef(
+            "probe mouse-move %d,%d win=%ux%u mk=%08X buttons=%08X",
+            g_mouse_x, g_mouse_y, w, h, mouse_mk(), g_mouse_buttons);
+#endif
     u_msg_post(input_target(), WM_MOUSEMOVE, mouse_mk(), lp);
 #if WC3_DEBUG
     {
@@ -8201,6 +8290,14 @@ static void mouse_button_ex(int button, int down, int force)
     if (!bit) return;
 
     uint32_t lp = ((uint32_t)g_mouse_y << 16) | (uint16_t)g_mouse_x;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (wc3_hle_direct_touch_probe_active())
+        wc3_hle_direct_touch_tracef(
+            "probe button pre button=%d down=%d force=%d at=%d,%d "
+            "logical=%08X down=%d",
+            button, down, force, g_mouse_x, g_mouse_y, g_mouse_buttons,
+            g_mouse_down);
+#endif
     if (down) {
         if ((g_mouse_buttons & bit) && !force) return;
         /* Logical state is raised at press time so a poll between the press
@@ -8872,6 +8969,12 @@ static void u_get_key_state(CPU *c)
         break;
     }
     c->eax = state;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (vk == VK_LBUTTON && wc3_hle_direct_touch_probe_active())
+        wc3_hle_direct_touch_tracef(
+            "probe GetKeyState(VK_LBUTTON) -> %04X logical=%08X down=%d",
+            state, g_mouse_buttons, g_mouse_down);
+#endif
 #if WC3_DEBUG
     if (vk == VK_LBUTTON) {
         static unsigned n;
@@ -8889,6 +8992,12 @@ static void u_get_cursor_pos(CPU *c)
         wr32g(p + 4, (uint32_t)g_mouse_y);
     }
     c->eax = 1;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (wc3_hle_direct_touch_probe_active())
+        wc3_hle_direct_touch_tracef(
+            "probe GetCursorPos -> %d,%d logical=%08X down=%d",
+            g_mouse_x, g_mouse_y, g_mouse_buttons, g_mouse_down);
+#endif
 #if WC3_DEBUG
     {
         static unsigned n;
@@ -8914,6 +9023,12 @@ static void u_set_cursor_pos(CPU *c)
     /* Apply the guest's own warps, but never while a finger is down: the
      * engine must not pull the cursor back from under a touch drag. */
     if (!g_mouse_buttons) { g_mouse_x = x; g_mouse_y = y; }
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (wc3_hle_direct_touch_probe_active())
+        wc3_hle_direct_touch_tracef(
+            "probe SetCursorPos %d,%d -> %d,%d logical=%08X down=%d",
+            x, y, g_mouse_x, g_mouse_y, g_mouse_buttons, g_mouse_down);
+#endif
     c->eax = 1;
 }
 /* GetCursorPos already answers in client coordinates and Win32
@@ -9476,8 +9591,26 @@ static void u_close_clipboard(CPU *c) { (void)c; c->eax = 1; }
 static void u_empty_clipboard(CPU *c) { (void)c; c->eax = 1; }
 static void u_get_clipboard_data(CPU *c) { (void)c; c->eax = 0; }
 static void u_set_clipboard_data(CPU *c) { (void)c; c->eax = 1; }
-static void u_set_capture(CPU *c) { (void)c; c->eax = 0; }
-static void u_release_capture(CPU *c) { (void)c; c->eax = 1; }
+static void u_set_capture(CPU *c)
+{
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (wc3_hle_direct_touch_probe_active())
+        wc3_hle_direct_touch_tracef("probe SetCapture logical=%08X down=%d",
+                                    g_mouse_buttons, g_mouse_down);
+#endif
+    (void)c;
+    c->eax = 0;
+}
+static void u_release_capture(CPU *c)
+{
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (wc3_hle_direct_touch_probe_active())
+        wc3_hle_direct_touch_tracef("probe ReleaseCapture logical=%08X down=%d",
+                                    g_mouse_buttons, g_mouse_down);
+#endif
+    (void)c;
+    c->eax = 1;
+}
 static void u_window_from_point(CPU *c) { (void)c; c->eax = 0; }
 
 static void g_create_solid_brush(CPU *c) { c->eax = 0x00070000u + (g_fake_next += 4); }

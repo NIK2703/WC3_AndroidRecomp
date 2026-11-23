@@ -927,7 +927,7 @@ static void direct_touch_configure(int width, int height,
      * threshold (11 px) decides tap vs. camera drag and hold vs. selection
      * drag, the long-press timer is the profile's 120 ms, and the hold plays
      * gestureLongPressHaptic.  A missing profile (host-only tests) keeps the
-     * same defaults instead of the old 450 ms/2.2% values. */
+     * same defaults. */
     float drag_threshold = 11.0f;
     int long_press_ms = 120;
     int haptic_effect = 3;

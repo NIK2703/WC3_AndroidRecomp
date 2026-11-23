@@ -52,6 +52,7 @@
 
 #include "cpu.h"
 #include "direct_touch_event.h"
+#include "wc3_debug.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,6 +72,31 @@ void wc3_hle_direct_touch_enqueue(const Wc3DirectTouchEvent *event,
  * surface-normalised coordinates to client pixels and then through the same
  * 0x6F8B38A0 conversion the native mouse path uses before picking. */
 void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height);
+
+/* ---- debug-only bounded input probe -------------------------------------
+ *
+ * The probe answers the "first battlefield tap after a panel click is idle"
+ * question without guessing.  probe_begin() is called by the panel gesture
+ * (command card, inventory, grid, beacon); while the probe is active every
+ * native post/take/dispatch, every mouse injection and every field release
+ * appends a line with the guest's own input ring at 0x6FD3D410 and the raw
+ * CGameUI mode fields.  probe_mark() adds a step; probe_end() stops early.
+ * The probe expires on its own.  There is no release form: the declarations,
+ * definitions and every call site exist only under the debug tag, so release
+ * contains no probe code or logging at all.
+ */
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+void wc3_hle_direct_touch_tracef(const char *fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+void wc3_hle_direct_touch_probe_begin(const char *reason,
+                                      uint32_t a, uint32_t b);
+void wc3_hle_direct_touch_probe_mark(const char *what, uint32_t a, uint32_t b);
+int wc3_hle_direct_touch_probe_active(void);
+void wc3_hle_direct_touch_probe_end(const char *reason);
+#endif
 
 /* True when a queued event can be consumed by the calling thread right now:
  * it is the main guest thread and no direct dispatch is already in progress.
