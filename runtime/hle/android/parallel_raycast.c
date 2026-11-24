@@ -358,6 +358,9 @@ static _Thread_local int t_phase_armed;
  * loop.  The nested boundary becomes a no-op and the new requests are drained
  * by the outer apply_all after the postfix returns. */
 static _Thread_local int t_phase_apply_active;
+/* 1-based index of the request being applied by wc3_phase_apply_all() on this
+ * thread, 0 outside an apply.  Debug HP-bar trace only. */
+static _Thread_local unsigned t_phase_apply_index;
 #endif
 
 typedef enum RayJobKind {
@@ -2857,6 +2860,20 @@ static void *par_tuner_main(void *arg)
     return NULL;
 }
 
+static void par_tuner_load_initial(void)
+{
+    char buf[4096];
+    if (!g_par_paths_ready) par_tuner_init_paths();
+    if (!par_read_file(g_par_cfg_path, buf, sizeof buf, &g_par_cfg_hash))
+        return;
+    par_parse_text(buf);
+    fprintf(stderr, "[parallel-tune] initial %s\n", g_par_cfg_path);
+    /* Apply the phase gates before the guest can enter a collect half.
+     * Without this the debug defaults are live until the first 200 ms poll,
+     * so a phase=0 file could still let the first raycast window through. */
+    phase_sync_config();
+}
+
 static void par_tuner_start(void)
 {
     if (g_par_tuner_started) return;
@@ -3790,17 +3807,16 @@ static void init_once(void)
         atomic_store_explicit(&g_init_ok, 1, memory_order_release);
         return;
     }
-#if WC3_DEBUG && WC3_DEBUG_PARALLEL
-    /* Debug phase run: the old chunked paths are opt-in.  The worker pool
-     * below is still created for the SPMD phase. */
-    g_raycast_enabled = env_on("WC3_PARALLEL_RAYCAST");
-    g_vertex_enabled = env_on("WC3_VERTEX");
-    g_triangle_enabled = env_on("WC3_TRIANGLE");
-#else
+    /* The master switch above gates the subsystem as a whole.  The three
+     * per-path variables are kill switches, not opt-ins: an unset variable
+     * keeps the path active, matching the launch contract (two or more
+     * selected cores enable the parallel paths) and the documented
+     * WC3_PARALLEL_RAYCAST=0 / WC3_VERTEX=0 / WC3_TRIANGLE=0 diagnostics.
+     * This applies to the debug phase build too; otherwise the default
+     * launch silently ran every path sequentially. */
     g_raycast_enabled = !env_off("WC3_PARALLEL_RAYCAST");
     g_vertex_enabled = !env_off("WC3_VERTEX");
     g_triangle_enabled = !env_off("WC3_TRIANGLE");
-#endif
     if (!g_raycast_enabled && !g_vertex_enabled && !g_triangle_enabled) {
 #if WC3_PAR_LAYOUT_DEBUG
         fprintf(stderr, "[parallel] all guest paths disabled\n");
@@ -4065,6 +4081,10 @@ static void init_once(void)
                               memory_order_relaxed);
         atomic_store_explicit(&g_phase_cfg.dirty, 0, memory_order_release);
     }
+    /* Apply parallel.cfg before the phase pool becomes visible.  This is
+     * the first point where the sequential oracle and container snapshot
+     * are ready; doing it here closes the window before the first collect. */
+    par_tuner_load_initial();
 #endif
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     if (g_triangle_ab_enabled && g_triangle_enabled) {
@@ -4161,10 +4181,12 @@ static void init_once(void)
 #endif
 
     g_parallel_ok = 1;
-    atomic_store_explicit(&g_init_ok, 1, memory_order_release);
 #if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    /* Start the live tuner before publishing init_ok.  The initial config
+     * was already applied before the phase pool became visible. */
     par_tuner_start();
 #endif
+    atomic_store_explicit(&g_init_ok, 1, memory_order_release);
 #if WC3_DEBUG && WC3_DEBUG_PERF && WC3_PARALLEL_TRIANGLE_VALIDATE
     fprintf(stderr, "[triangle] sequential oracle %s\n",
             g_triangle_verify ? "on" : "off (set WC3_TRIANGLE_VERIFY=1)");
@@ -5144,16 +5166,26 @@ unsigned wc3_phase_count(void)
     return g_phase.enabled ? g_phase.count : 0u;
 }
 
+unsigned wc3_phase_apply_index(void)
+{
+    return t_phase_apply_index;
+}
+
 int wc3_phase_window_full(void)
 {
     if (!g_phase.enabled) return 0;
     return g_phase.count + g_phase.reserved >= WC3_PHASE_MAX_REQUESTS;
 }
 
+int wc3_phase_enabled(void)
+{
+    return g_phase.enabled ? 1 : 0;
+}
+
 int wc3_phase_arm(int on)
 {
     int prev = t_phase_armed;
-    t_phase_armed = on ? 1 : 0;
+    t_phase_armed = (on && g_phase.enabled) ? 1 : 0;
     return prev;
 }
 
@@ -5211,6 +5243,7 @@ int wc3_phase_apply_all(CPU *c, Wc3PhaseApplyFn apply)
             phase_commit_fail("phase run failed");
         for (i = applied; i < n; i++) {
             uint32_t before = g_phase.count;
+            t_phase_apply_index = i + 1u;
             apply(c, i);
             c->disp_depth = loop.disp_depth;
             c->disp_draining = loop.disp_draining;
@@ -5251,6 +5284,7 @@ int wc3_phase_apply_all(CPU *c, Wc3PhaseApplyFn apply)
 #endif
     *c = loop;
     wc3_phase_reset();
+    t_phase_apply_index = 0;
     t_phase_apply_active = 0;
     return 1;
 }
@@ -5439,6 +5473,10 @@ static int run_vertex_batch(CPU *c, wc3_lifted_fn fn, unsigned kind,
     if (chunks < 2u || chunks > g_workers) return 0;
 #if WC3_DEBUG && WC3_DEBUG_PARALLEL
     if (atomic_load_explicit(&g_phase_busy, memory_order_acquire)) return 0;
+    /* A phase apply runs the deferred L_6F376730 postfix on the guest
+     * thread.  That postfix can call a sequential raycast; it must not
+     * publish a per-call job while the window is still being applied. */
+    if (t_phase_apply_active) return 0;
 #endif
     if (pthread_mutex_trylock(&g_submit_lock) != 0) return 0;
     if (t_ray_active || c->parallel_vertex_bypass) {
@@ -6170,6 +6208,7 @@ static int run_triangle_batch(CPU *c, wc3_lifted_fn fn, uint32_t total,
     if (chunks < 2u || chunks > g_workers) return 0;
 #if WC3_DEBUG && WC3_DEBUG_PARALLEL
     if (atomic_load_explicit(&g_phase_busy, memory_order_acquire)) return 0;
+    if (t_phase_apply_active) return 0;
 #endif
     if (pthread_mutex_trylock(&g_submit_lock) != 0) return 0;
     if (t_ray_active || c->parallel_vertex_bypass) {
@@ -6783,6 +6822,7 @@ static int run_batch(CPU *c, wc3_lifted_fn fn, uint32_t container,
     if (limit < 2u || limit > g_workers) return 0;
 #if WC3_DEBUG && WC3_DEBUG_PARALLEL
     if (atomic_load_explicit(&g_phase_busy, memory_order_acquire)) return 0;
+    if (t_phase_apply_active) return 0;
 #endif
     if (pthread_mutex_trylock(&g_submit_lock) != 0) return 0;
     if (t_ray_active) {

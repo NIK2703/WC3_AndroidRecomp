@@ -1389,6 +1389,19 @@ Java_wc3_recomp_Wc3GameActivity_nativeSetGridActive(
     grid_android_set_active(active ? 1 : 0);
 }
 
+/*
+ * Activity teardown bridge.  GameActivity does not join android_main before
+ * the process can be killed after a recents swipe, so the activity asks for a
+ * synchronous export while the log file and its path are still valid.
+ */
+JNIEXPORT void JNICALL
+Java_wc3_recomp_Wc3GameActivity_nativeExportLog(JNIEnv *env, jclass clazz)
+{
+    (void)env;
+    (void)clazz;
+    wc3_crash_export_log();
+}
+
 JNIEXPORT jfloat JNICALL
 Java_wc3_recomp_Wc3GameActivity_nativeImePan(JNIEnv *env, jobject thiz)
 {

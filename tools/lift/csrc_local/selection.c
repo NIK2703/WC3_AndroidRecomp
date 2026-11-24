@@ -27,7 +27,7 @@
 #include "sha256.h"
 
 #define PASS "selection"
-#define PASS_REV 57
+#define PASS_REV 58
 
 /* The pass always emits the product 40-entry layout.  The site table is
  * authored against the 24-reference displacements and mapped once below. */
@@ -157,7 +157,7 @@ static const unsigned expected_total[K_COUNT] = {
     2, /* order_frame */
     4, /* order_sort */
     4, /* order_loop */
-    8, /* order_callback */
+    9, /* order_callback: +1 type 0x11 cap guard (PASS_REV 58) */
     4, /* order_callback_b */
     1, /* trace_evt2 */
     2, /* trace_lookup */
@@ -175,7 +175,7 @@ static const unsigned expected_total[K_COUNT] = {
     1, /* trace_tasknull */
     1, /* trace_evinit */
     1, /* trace_orderdrop */
-    44, /* order_obj_container: +9 third-writer fragments (PASS_REV 54) */
+    56, /* order_obj_container: +9 third-writer fragments (PASS_REV 54), +12 type 0x11 (PASS_REV 58) */
     5, /* order_msg10 */
     3, /* trace_order_slots */
     2, /* order_group_full */
@@ -208,7 +208,7 @@ static const unsigned expected_seed[K_COUNT] = {
     2, /* order_frame */
     0, /* order_sort */
     0, /* order_loop */
-    0, /* order_callback */
+    1, /* order_callback: type 0x11 cap guard (PASS_REV 58) */
     0, /* order_callback_b */
     0, /* trace_evt2 */
     2, /* trace_lookup */
@@ -226,7 +226,7 @@ static const unsigned expected_seed[K_COUNT] = {
     0, /* trace_tasknull */
     0, /* trace_evinit */
     0, /* trace_orderdrop */
-    4, /* order_obj_container */
+    6, /* order_obj_container: entry + frame (PASS_REV 58) */
     1, /* order_msg10 */
     3, /* trace_order_slots */
     0, /* order_group_full */
@@ -279,7 +279,7 @@ static const unsigned expected_closed[K_COUNT] = {
     1, /* trace_tasknull */
     1, /* trace_evinit */
     1, /* trace_orderdrop */
-    40, /* order_obj_container: +9 third-writer fragments (PASS_REV 54) */
+    50, /* order_obj_container: +9 third-writer fragments (PASS_REV 54), +10 type 0x11 (PASS_REV 58) */
     4, /* order_msg10 */
     0, /* trace_order_slots */
     2, /* order_group_full */
@@ -758,9 +758,53 @@ static int order_b_cont(uint32_t va)
             return 1;
     return 0;
 }
+
+/* Type 0x11 handler entry and its early no-prologue continuations.
+ *
+ * 0x6F6BB980 owns a second point-order container at ebp-0x1E0 and calls
+ * 0x6F6B8960 with this = container+0x24.  The continuations below run on
+ * the same ebp: they have no frame prologue and their ebp references in
+ * [-0x1E0, -0x14] are container fields.  PASS_REV 54 shifted only the
+ * third writer, so the entry and these fragments kept the twelve-slot
+ * offsets while the writer used the forty-slot ones.  Shift them with the
+ * same two spans.  The standalone appenders 0x6F6BB5F0/0x6F6BB7A0 are
+ * below 0x6F6BB980 and stay out; 0x6F6BBEB0 is a callback with its own
+ * frame and receives the already-shifted context pointer. */
+static const uint32_t ORDER_H11_CONT_VAS[] = {
+    0x6F6BB980u, /* handler entry */
+    0x6F6BBA2Du, /* early continuation */
+    0x6F6BBA3Bu, /* early continuation */
+    0x6F6BBB51u, /* early continuation */
+    0x6F6BBB59u, /* early continuation */
+    0x6F6BBBD7u, /* early continuation */
+    0x6F6BBBDFu, /* early continuation */
+    0x6F6BBC19u, /* early continuation */
+    0x6F6BBC5Cu, /* early continuation */
+    0x6F6BBC64u, /* early continuation */
+};
+
+static int order_h11_cont(uint32_t va)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(ORDER_H11_CONT_VAS) /
+                    sizeof(ORDER_H11_CONT_VAS[0]); ++i)
+        if (ORDER_H11_CONT_VAS[i] == va)
+            return 1;
+    return 0;
+}
 #define VA_ORDER_A_FRAME      0x6F6BAAB1u
 #define VA_ORDER_B_FRAME      0x6F6BB061u
 #define VA_ORDER_CTOR_CAP     0x6F6B879Au
+/* Type 0x11 handler frame.  Its container moves from -0x1E0 to -0x7A4
+ * (0x3C4 for 24 slots, another 0x200 for 40), so the frame grows by the
+ * same 0x5C4: 0x200 -> 0x7C4. */
+#define VA_ORDER_H11_FRAME    0x6F6BB991u
+/* Type 0x11 constructor 0x6F6B8960 writes the memset count 12 at
+ * [this+0x28]; its trace anchor VA_TRACE_H11_CTOR is the same line and
+ * patches the count before appending the trace. */
+/* Type 0x11 callback append: count at [ebx+0x28], record base [ebx+0x2C]. */
+#define VA_ORDER_H11_CB_CAP   0x6F6BBFB6u
 #define ORDER_B_OLD_FRAME   0x250u
 #define ORDER_B_NEW_FRAME   0x9A0u
 #define ORDER_C_OLD_FRAME   0x248u
@@ -942,6 +986,26 @@ static const char *const INSERT_TRACE_H11_WALK[] = {
     "#endif"
 };
 
+/* Safety net for the type 0x11 order container.  The callback appends at
+ * [ctx+0x28] without a bound.  The forty-slot container ends at
+ * container+0x550; the next append would overwrite the handler locals
+ * between the container and the security cookie.  The selection cap is
+ * also forty, so this guard should never fire in normal play.  If it
+ * does, restore the callback frame and return zero so ForEachSelected
+ * stops instead of writing past the container. */
+static const char *const INSERT_ORDER_H11_CB_CAP[] = {
+    "    /* selection order callback capacity guard */",
+    "    if (c->edi >= 0x28u) {",
+    "        c->edi = (uint32_t)(pop32(c));",
+    "        c->esi = (uint32_t)(pop32(c));",
+    "        c->ebx = (uint32_t)(pop32(c));",
+    "        c->eax = 0u;",
+    "        c->esp = c->ebp;",
+    "        c->ebp = (uint32_t)(pop32(c));",
+    "        c->esp += 4; return;",
+    "    }"
+};
+
 /*
  * 0x6F28EEF0 removes one unit from the selection group: it walks the group's
  * unit list and, when the entry is found, decrements the counter at +0x1F8
@@ -1111,9 +1175,9 @@ static const char *const INSERT_TRACE_ORDER_EXEC_2[] = {
 /*
  * A territory order splits the selected group into batches.  The lifted
  * single-unit shortcut at 0x6F16CF60 is selected from the *batch* size, so a
- * trailing remainder of one unit (40 units with the 3-wide compact formation:
- * 13*3 + 1) sends that unit straight to the order point instead of placing it
- * in the formation.  With 24 units both column rules divide the
+ * trailing remainder of one unit (for example 13 units in the 4-wide compact
+ * grid: 3*4 + 1) sends that unit straight to the order point instead of
+ * placing it in the formation.  With 24 units both column rules divide the
  * group exactly, which is why 24 never showed the defect.  Compare the total
  * group count instead: the shortcut stays exact for a real one-unit
  * selection, while a one-unit remainder of a larger group goes through the
@@ -1740,17 +1804,20 @@ static int handle_subst(Buf *out, const char *p, const char *e,
     return 0;
 }
 
-static int handle_insert(Buf *out, const char **pp, const char *end,
-                         const char *anchor, const char *anchor_alt,
+/* Append the lines after an anchor that has already been written to out.
+ * `pp` points at the start of the next input line, `anchor_start` and
+ * `anchor_end` describe the emitted anchor line.  The marker lives on the
+ * first inserted line so a second pass copies that line and leaves the
+ * remaining inserted lines to the normal input loop. */
+static int insert_follow(Buf *out, const char **pp, const char *end,
+                         const char *anchor_start, const char *anchor_end,
                          const char *marker,
                          const char *const *ins, int ins_count,
                          Kind k, uint32_t va, int line, Counts *counts,
-                         Sites *sites, int *handled, char *err, size_t errsz)
+                         Sites *sites, char *err, size_t errsz)
 {
-    const char *p = *pp;
-    const char *le = line_end(p, end);
-    const char *ns;
-    const char *ne;
+    const char *ns = *pp;
+    const char *ne = line_end(ns, end);
     size_t tlen;
     char before[65];
     char after[65];
@@ -1760,23 +1827,10 @@ static int handle_insert(Buf *out, const char **pp, const char *end,
     int already;
     const char *term;
 
-    if (!code_equals(p, le, anchor) &&
-        (!anchor_alt || !code_equals(p, le, anchor_alt))) {
-        snprintf(err, errsz,
-                 "site 0x%08X line %d does not match anchor '%s'",
-                 va, line, anchor);
-        return -1;
-    }
-    hash_hex(p, (size_t)(le - p), before);
-
-    ns = le;
-    ne = line_end(ns, end);
+    hash_hex(anchor_start, (size_t)(anchor_end - anchor_start), before);
     already = contains_sub(ns, (size_t)(ne - ns), marker);
 
-    if (buf_append(out, p, (size_t)(le - p)) != 0)
-        return -1;
-
-    tlen = term_len(p, le);
+    tlen = term_len(anchor_start, anchor_end);
     term = (tlen == 2) ? "\r\n" : "\n";
     if (tlen == 0)
         term = "\n";
@@ -1803,11 +1857,39 @@ static int handle_insert(Buf *out, const char **pp, const char *end,
         hash_hex(insbuf, inslen, after);
         if (buf_append(out, insbuf, inslen) != 0)
             return -1;
-        *pp = le;
+        *pp = ns;
         sites_add(sites, k, va, "insert", line, before, after);
     }
 
     counts->n[k]++;
+    return 0;
+}
+
+static int handle_insert(Buf *out, const char **pp, const char *end,
+                         const char *anchor, const char *anchor_alt,
+                         const char *marker,
+                         const char *const *ins, int ins_count,
+                         Kind k, uint32_t va, int line, Counts *counts,
+                         Sites *sites, int *handled, char *err, size_t errsz)
+{
+    const char *p = *pp;
+    const char *le = line_end(p, end);
+
+    if (!code_equals(p, le, anchor) &&
+        (!anchor_alt || !code_equals(p, le, anchor_alt))) {
+        snprintf(err, errsz,
+                 "site 0x%08X line %d does not match anchor '%s'",
+                 va, line, anchor);
+        return -1;
+    }
+
+    if (buf_append(out, p, (size_t)(le - p)) != 0)
+        return -1;
+    *pp = le;
+    if (insert_follow(out, pp, end, p, le, marker, ins, ins_count,
+                      k, va, line, counts, sites, err, errsz) != 0)
+        return -1;
+
     *handled = 1;
     return 0;
 }
@@ -2108,8 +2190,8 @@ static int shift_container_line(const char *p, const char *e,
 /* 0x6FA91D20/0x6FA91D88 is followed by a vtable, so count 13 read      */
 /* B[0]/C[0] = 0 and the order loop never advanced its step.  The       */
 /* helper returns the original word for count <= 12 and a defined       */
-/* 13..40 row length otherwise (compact 3, grid ceil(count/3) up to      */
-/* 24 then ceil(count/4)).                                               */
+/* 13..40 row length otherwise (compact 4 for 13..24 and 5 for 25..40,  */
+/* grid ceil(count/3) up to 24 then ceil(count/4)).                     */
 /*                                                                     */
 /* Every row is one anchor VA from                                    */
 /* docs/research/SELECTION_24_SITES.tsv plus the exact operand text    */
@@ -2576,7 +2658,8 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                 span40.hi = ORDER_CONTAINER_A24_HI;
             } else if ((block_va >= ORDER_HANDLER_B_LO &&
                         block_va < ORDER_HANDLER_B_HI) ||
-                       order_b_cont(block_va)) {
+                       order_b_cont(block_va) ||
+                       order_h11_cont(block_va)) {
                 span.active = 1;
                 span.lo = ORDER_CONTAINER_B_LO;
                 span.hi = ORDER_CONTAINER_B_HI;
@@ -2869,6 +2952,14 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                  "0xCu", "0x18u",
                                  "mov dword ptr [esi + 0x4c], 0xc */",
                                  "mov dword ptr [esi + 0x4c], 0x18 */",
+                                 K_ORDER_OBJ_CONTAINER, va, line, counts,
+                                 sites, &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_H11_FRAME:
+                if (handle_subst(out, p, le,
+                                 "0x200u", "0x7C4u",
+                                 "sub esp, 0x200 */", "sub esp, 0x7c4 */",
                                  K_ORDER_OBJ_CONTAINER, va, line, counts,
                                  sites, &handled, err, errsz) != 0)
                     return -1;
@@ -3384,17 +3475,37 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
-            case VA_TRACE_H11_CTOR:
-                next = p;
-                if (handle_insert(out, &next, end,
-                                  "wr32((c->esi + 0x00000028u), 0xCu);",
-                                  NULL,
+            case VA_TRACE_H11_CTOR: {
+                /* This line carries both the constructor memset count and
+                 * the trace anchor.  Patch the count first, then append the
+                 * trace after the rewritten line. */
+                Buf linebuf = {0};
+                const char *le = line_end(p, end);
+
+                if (handle_subst(&linebuf, p, le,
+                                 "0xCu", "0x18u",
+                                 "[esi + 0x28], 0xc */",
+                                 "[esi + 0x28], 0x28 */",
+                                 K_ORDER_OBJ_CONTAINER, va, line, counts,
+                                 sites, &handled, err, errsz) != 0) {
+                    buf_free(&linebuf);
+                    return -1;
+                }
+                if (buf_append(out, linebuf.p, linebuf.n) != 0) {
+                    buf_free(&linebuf);
+                    return -1;
+                }
+                buf_free(&linebuf);
+                next = le;
+                if (insert_follow(out, &next, end, p, le,
                                   "selection type 0x11 constructor trace",
                                   INSERT_TRACE_H11_CTOR, 4,
                                   K_TRACE_FORMATION, va, line, counts, sites,
-                                  &handled, err, errsz) != 0)
+                                  err, errsz) != 0)
                     return -1;
+                handled = 1;
                 break;
+            }
             case VA_TRACE_H11_CTOR_B:
                 next = p;
                 if (handle_insert(out, &next, end,
@@ -3414,6 +3525,17 @@ static int process_buffer(const char *data, size_t n, const char *profile,
                                   "selection type 0x11 array walk trace",
                                   INSERT_TRACE_H11_WALK, 4,
                                   K_TRACE_FORMATION, va, line, counts, sites,
+                                  &handled, err, errsz) != 0)
+                    return -1;
+                break;
+            case VA_ORDER_H11_CB_CAP:
+                next = p;
+                if (handle_insert(out, &next, end,
+                                  "c->edi = rd32((c->ebx + 0x00000028u));",
+                                  NULL,
+                                  "selection order callback capacity guard",
+                                  INSERT_ORDER_H11_CB_CAP, 10,
+                                  K_ORDER_CALLBACK, va, line, counts, sites,
                                   &handled, err, errsz) != 0)
                     return -1;
                 break;
@@ -4235,6 +4357,7 @@ static int self_test(char *err, size_t errsz)
     /* The fixture deliberately does not carry the new point-order anchors:
      * they are covered by the whole-corpus totals and by the real lift. */
     exp_fix[K_TRACE_FORMATION] = 0;
+    exp_fix[K_ORDER_CALLBACK] = 8;
     exp_fix[K_ORDER_CURSOR] = 0;
     exp_fix[K_FORMATION_SINGLE] = 0;
 
@@ -4426,25 +4549,25 @@ fail40:
     }
 
     {
-        /* Mirrors a current report: PASS_REV 57 (369 sites). */
+        /* Mirrors a current report: PASS_REV 58 (382 sites). */
         const char json[] =
             "{\"pass\":\"" PASS "\","
-            "\"pass_rev\":57,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
+            "\"pass_rev\":58,\"counts\":{\"group_alloc\":1,\"init_group\":2,\"select\":2,"
             "\"cap_outer\":2,\"cap_inner\":2,\"fill_block\":2,\"fill_grid\":1,"
             "\"note_selection\":1,\"hide_all\":1,\"addunit_cap\":1,\"cap_local_list\":5,"
             "\"cap_copy_list\":3,\"cap_sync_add\":1,\"cap_net_recv\":1,\"cap_net_apply\":5,"
             "\"cap_net_send\":2,\"cap_select_all\":1,\"order_frame\":2,\"order_sort\":4,"
-            "\"order_loop\":4,\"order_callback\":8,\"order_callback_b\":4,\"trace_evt2\":1,"
+            "\"order_loop\":4,\"order_callback\":9,\"order_callback_b\":4,\"trace_evt2\":1,"
             "\"trace_lookup\":2,\"cap_group_store\":3,\"cap_add_merge\":3,"
             "\"trace_order_unit_b\":1,\"trace_order_unit_c\":1,\"trace_order_loop_b\":2,"
             "\"trace_order_loop_c\":2,\"trace_order_apply\":2,\"trace_order_exec\":2,"
             "\"trace_remove\":4,\"trace_evbirth\":1,\"trace_apply\":2,"
             "\"trace_tasknull\":1,\"trace_evinit\":1,\"trace_orderdrop\":1,"
-            "\"order_obj_container\":44,\"order_msg10\":5,\"trace_order_slots\":3,"
+            "\"order_obj_container\":56,\"order_msg10\":5,\"trace_order_slots\":3,"
             "\"order_group_full\":2,\"trace_evrelease\":1,\"slot_unlink\":1,"
             "\"layout\":211,\"trace_formation\":17,\"order_cursor\":0,"
             "\"formation_single\":1},"
-            "\"total\":369};";
+            "\"total\":382};";
         Counts c3;
 
         if (json_counts_parse(json, &c3, err2, sizeof(err2)) != 0 ||
@@ -4520,13 +4643,16 @@ fail40:
     }
 
     /* Regression: the type 0x11 handler has its own container and its own
-     * constructor 0x6F6B8960.  The traces must land on the entry, both
-     * constructors, the array walk and the third writer without moving any
-     * offset; the pass must still leave the standalone appender alone. */
+     * constructor 0x6F6B8960.  The entry frame and container, its early
+     * continuation and the constructor must move with the forty-slot
+     * container; the callback append gets the cap guard; the standalone
+     * appender 0x6F6B8720 stays put. */
     {
         static const char h11[] =
             "void L_6F6BB980(CPU *restrict c)\n"
             "{\n"
+            "    c->esp = flags_sub_mask(c, c->esp, 0x200u, 4, 0x10u); /* 6F6BB991: sub esp, 0x200 */\n"
+            "    wr32((c->ebp + 0xFFFFFE3Cu), c->ebx); /* 6F6BB9B0: mov dword ptr [ebp - 0x1c4], ebx */\n"
             "    c->ebx = c->ecx; /* 6F6BB9AE: mov ebx, ecx */\n"
             "}\n"
             "void L_6F6B8960(CPU *restrict c)\n"
@@ -4543,6 +4669,7 @@ fail40:
             "}\n"
             "void L_6F6BBEB0(CPU *restrict c)\n"
             "{\n"
+            "    c->edi = rd32((c->ebx + 0x00000028u)); /* 6F6BBFB6: mov edi, dword ptr [ebx + 0x28] */\n"
             "    wr32((c->esi + 0x0000002Cu), c->eax); /* 6F6BBFCC: mov dword ptr [esi + 0x2c], eax */\n"
             "}\n";
         Buf out = {0};
@@ -4555,6 +4682,21 @@ fail40:
             ok = 0;
         } else if (counts.n[K_TRACE_FORMATION] != 4 ||
                    counts.n[K_TRACE_ORDER_SLOTS] != 1 ||
+                   counts.n[K_ORDER_OBJ_CONTAINER] != 3 ||
+                   counts.n[K_ORDER_CALLBACK] != 1 ||
+                   count_occurrences(out.p, out.n, "0x7C4u") != 1 ||
+                   count_occurrences(out.p, out.n, "sub esp, 0x7c4") != 1 ||
+                   count_occurrences(out.p, out.n, "0xFFFFF878u") != 1 ||
+                   count_occurrences(out.p, out.n, "[ebp - 0x788]") != 1 ||
+                   count_occurrences(out.p, out.n, "0xFFFFFE3Cu") != 0 ||
+                   count_occurrences(out.p, out.n, "[ebp - 0x1c4]") != 0 ||
+                   count_occurrences(out.p, out.n,
+                       "wr32((c->esi + 0x00000028u), 0x28u);") != 1 ||
+                   count_occurrences(out.p, out.n, "0xCu") != 0 ||
+                   count_occurrences(out.p, out.n,
+                       "if (c->edi >= 0x28u) {") != 1 ||
+                   count_occurrences(out.p, out.n,
+                       "c->esp += 4; return;") != 1 ||
                    count_occurrences(out.p, out.n,
                        "wc3_sel_trace_h11(c, 0u, c->ecx, 0u, 0u);") != 1 ||
                    count_occurrences(out.p, out.n,
@@ -4569,6 +4711,26 @@ fail40:
                        "wc3_sel_trace_order_slots(c, 3u, c->ebx, c->esi);") != 1) {
             snprintf(err, errsz, "self-test type 0x11 trace mismatch");
             ok = 0;
+        } else {
+            Buf out2 = {0};
+            Counts counts2;
+            Sites sites2 = {0};
+
+            if (process_buffer(out.p, out.n, NULL, &out2, &counts2, &sites2,
+                               err2, sizeof(err2)) != 0) {
+                snprintf(err, errsz,
+                         "self-test type 0x11 second pass failed: %s", err2);
+                ok = 0;
+            } else if (out2.n != out.n ||
+                       memcmp(out2.p, out.p, out.n) != 0 ||
+                       memcmp(counts2.n, counts.n,
+                              sizeof(counts.n)) != 0) {
+                snprintf(err, errsz,
+                         "self-test type 0x11 was not idempotent");
+                ok = 0;
+            }
+            buf_free(&out2);
+            free(sites2.v);
         }
         buf_free(&out);
         free(sites.v);

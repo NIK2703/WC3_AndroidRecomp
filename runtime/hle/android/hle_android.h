@@ -186,41 +186,10 @@ uint32_t hle_mss_hook_ail_startup(uint32_t real);
  * logs the stdcall arguments and the real export's return value. */
 uint32_t hle_mss_hook_trace(const char *name, uint32_t real);
 
-/* Touch input from the activity's AInputQueue.  Coordinates are normalised
- * to the client area: (0,0) is the top-left corner and (1,1) the bottom-right.
- * The HLE keeps a virtual Win32 cursor and left-button state, which is what
- * the guest polls through GetCursorPos/GetKeyState.  A button release is held
- * for a few frames so a tap shorter than one game tick is not lost. */
-void hle_android_mouse_move(float nx, float ny);
-/* Relative motion in client pixels, used by the touch engine's trackpad and
- * on-screen movement bindings. */
-void hle_android_mouse_move_delta(int dx, int dy);
-void hle_android_mouse_button(int down);
-/* button: 0=left, 1=middle, 2=right (Winlator order). */
-void hle_android_mouse_button_ex(int button, int down);
-/* 1 when the HLE's logical mouse button state is down.  The direct path uses
- * this to avoid posting a second DOWN while the overlay engine owns the
- * button, and to release only the press it actually posted. */
-int hle_android_mouse_is_down(int button);
-/* 1 when a native button transition is queued but not yet dispatched.  The
- * direct-touch service uses this as an applied-input barrier: it must not
- * read the game's input mode to classify a world release while a command-card
- * or target click is still waiting in the Win32 queue. */
-int hle_android_native_button_pending(void);
-/* Post a button press even when the logical state is still down because an
- * earlier release is queued but not dispatched.  The direct path uses this
- * for a second tap that follows its own pending release; the message order
- * still pairs DOWN with UP.  Do not use it for the overlay engine. */
-void hle_android_mouse_button_down_force(int button);
-/* Post a button release even when the logical state is already up.  Another
- * release path (overlay release_all, a surface stop, a duplicate cancel) may
- * have cleared the bit while the guest window procedure still owns a native
- * drag.  The direct path uses this so a minimap/camera drag always sees its
- * matching UP; the message is harmless when the guest already saw a release.
- * Do not use it for the overlay engine. */
-void hle_android_mouse_button_up_force(int button);
-/* delta is in Windows wheel units: +/-120 per notch. */
-void hle_android_mouse_wheel(int delta);
+/* Native Input Gateway: the only mouse surface direct touch may use.
+ * Raw/legacy button posting is deliberately not declared here. */
+#include "native_input_gateway.h"
+
 /* vk may be a specific left/right modifier VK; the HLE maps it to the generic
  * WM_KEYDOWN/WM_SYSKEYDOWN wParam and keeps GetKeyState coherent. */
 void hle_android_key_event(int vk, int down);

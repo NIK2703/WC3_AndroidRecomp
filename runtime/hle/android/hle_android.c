@@ -43,6 +43,7 @@
 
 #include "host.h"
 #include "hle_android.h"
+#include "hle_android_mouse_private.h"
 #include "hle_direct_touch.h"
 #include "hle_input_state.h"
 #include "hle_registry.h"
@@ -6865,6 +6866,12 @@ static uint32_t g_main_userdata;
  * focuses so GetActiveWindow/GetFocus can answer with the same value instead
  * of a hard-coded handle that never matches g_main_hwnd. */
 static volatile uint32_t g_active_hwnd, g_focus_hwnd;
+/* Main-window handle that already received the activation/focus a real first
+ * click implies.  Tracked per handle because a campaign mission creates a
+ * replacement top-level window; the first native input posted to that window
+ * must carry WM_ACTIVATEAPP/WM_ACTIVATE/WM_SETFOCUS ahead of the mouse
+ * messages. */
+static volatile uint32_t g_input_activated_hwnd;
 
 /* Win32 dispatches a message to the procedure registered by the window's
  * class, not to one global procedure.  The engine registers "Warcraft III"
@@ -7342,6 +7349,9 @@ static void u_register_class(CPU *c)
  * WM_LBUTTONDOWN/WM_LBUTTONUP messages.  The queue is small and shared with
  * the input thread, so every operation takes g_uq_lock. */
 #define UMSG_MAX 64
+#define WM_ACTIVATE    0x0006u
+#define WM_SETFOCUS    0x0007u
+#define WM_ACTIVATEAPP 0x001Cu
 #define WM_KEYDOWN     0x0100u
 #define WM_KEYUP       0x0101u
 #define WM_CHAR        0x0102u
@@ -7376,7 +7386,11 @@ static int32_t  g_win_x, g_win_y;
 static uint32_t g_win_w = 800, g_win_h = 600;
 
 /* Defined next to the virtual mouse below; the dispatcher needs them earlier. */
-static volatile int32_t g_mouse_x, g_mouse_y;
+static volatile int32_t g_mouse_x = 400, g_mouse_y = 300;
+/* g_mouse_down is the logical left-button alias of g_mouse_buttons bit 0;
+ * g_mouse_dispatched_down is set only while the guest handles a real
+ * WM_LBUTTONDOWN.  Single definitions: the dispatcher below needs them
+ * declared here, the virtual-mouse helpers are further down. */
 static volatile int g_mouse_down, g_mouse_dispatched_down;
 /* bit 0=left, bit 1=middle, bit 2=right.  g_mouse_down stays the left-button
  * alias used by the one-finger path and the wait hook. */
@@ -7553,6 +7567,218 @@ void hle_android_post_message(uint32_t hwnd, uint32_t msg, uint32_t wp,
                               uint32_t lp)
 {
     u_msg_post(hwnd, msg, wp, lp);
+}
+
+/* Native Input Gateway state.  The guest refreshes its hot control only in
+ * the idle GetCursorPos pass, so every native press is armed here and
+ * published from that pass after its move was dispatched.  One action shape
+ * serves the camera triplet and the universal press; mutual exclusion is
+ * enforced when arming, so a single slot is enough. */
+typedef enum {
+    WC3_PENDING_NONE = 0,
+    WC3_PENDING_CAMERA,
+    WC3_PENDING_PRESS
+} Wc3PendingKind;
+
+/* Maximum sequence: DOWN + UP, or the camera triplet with its LEFT UP cleanup. */
+#define WC3_PENDING_MSG_MAX 4
+
+typedef struct {
+    Wc3PendingKind kind;
+    int button;             /* -1 for the camera triplet */
+    uint32_t hwnd;
+    uint32_t lp;
+    uint32_t msg[WC3_PENDING_MSG_MAX];
+    uint32_t wp[WC3_PENDING_MSG_MAX];
+    uint32_t raise_mask;    /* logical button bits raised at flush time */
+    int count;
+    int raise_index;        /* raise_mask is set before posting msg[raise_index] */
+    int move_dispatched;    /* WM_MOUSEMOVE ran through the guest wndproc */
+    int move_ready;         /* guest had an idle GetCursorPos pass after it */
+    pthread_t thread;
+    int thread_valid;
+} Wc3PendingAction;
+
+static pthread_mutex_t g_pending_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Native Input Gateway.  There is no synchronous press path: every press is
+ * published from the guest's idle GetCursorPos pass, after the move has been
+ * dispatched.  This is the architectural reason a stale hot control or a
+ * live CDragScrollManager+0xA0 can never swallow the first press of a gesture.
+ * No flag, no caller decision, no exceptional path. */
+static Wc3PendingAction g_pending_action;
+
+static void pending_clear_locked(Wc3PendingAction *a)
+{
+    memset(a, 0, sizeof *a);
+    a->kind = WC3_PENDING_NONE;
+    a->button = -1;
+}
+
+static int pending_cancel_locked(Wc3PendingAction *a)
+{
+    const int was = a->kind != WC3_PENDING_NONE;
+    if (was) pending_clear_locked(a);
+    return was;
+}
+
+/* The gateway owns exactly one pending sequence.  Arming a new one replaces
+ * the old (a new gesture supersedes the previous), and cancelling is atomic. */
+static int pending_cancel_active(void)
+{
+    int was;
+    pthread_mutex_lock(&g_pending_lock);
+    was = pending_cancel_locked(&g_pending_action);
+    pthread_mutex_unlock(&g_pending_lock);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (was)
+        wc3_hle_direct_touch_tracef("probe native-down-cancel");
+#endif
+    return was;
+}
+
+static int pending_active(void)
+{
+    int active;
+    pthread_mutex_lock(&g_pending_lock);
+    active = g_pending_action.kind != WC3_PENDING_NONE;
+    pthread_mutex_unlock(&g_pending_lock);
+    return active;
+}
+
+/* An armed press that is still waiting for its hover pass is not in the
+ * queue yet.  It must not close the applied-input barrier, or a modal loop
+ * without GetCursorPos would never read the matching pointer release and
+ * could never publish the press. */
+static int pending_ready(void)
+{
+    int ready;
+    pthread_mutex_lock(&g_pending_lock);
+    ready = g_pending_action.kind != WC3_PENDING_NONE &&
+            g_pending_action.move_ready;
+    pthread_mutex_unlock(&g_pending_lock);
+    return ready;
+}
+
+/* A move posted by this thread replaces the pending sequence position.  A move
+ * from another input path (the legacy overlay) must not drag it away from the
+ * direct-touch point. */
+static void pending_note_move_post(uint32_t lp)
+{
+    pthread_mutex_lock(&g_pending_lock);
+    if (g_pending_action.kind != WC3_PENDING_NONE &&
+        g_pending_action.thread_valid &&
+        pthread_equal(pthread_self(), g_pending_action.thread)) {
+        g_pending_action.lp = lp;
+        g_pending_action.move_dispatched = 0;
+        g_pending_action.move_ready = 0;
+    }
+    pthread_mutex_unlock(&g_pending_lock);
+}
+
+/* Called after the guest window procedure returns from WM_MOUSEMOVE.  This
+ * only records that the move ran: readiness belongs to the following idle
+ * GetCursorPos pass, where the guest has actually refreshed its hot control.
+ * A message-pump fallback must not publish the press before that pass. */
+static void pending_note_move_dispatched(uint32_t lp)
+{
+    int dispatched = 0;
+    pthread_mutex_lock(&g_pending_lock);
+    if (g_pending_action.kind != WC3_PENDING_NONE &&
+        lp == g_pending_action.lp) {
+        g_pending_action.move_dispatched = 1;
+        dispatched = 1;
+    }
+    pthread_mutex_unlock(&g_pending_lock);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (dispatched)
+        wc3_hle_direct_touch_tracef("probe native-down-move lp=%08X", lp);
+#else
+    (void)dispatched;
+#endif
+}
+
+static void pending_arm_locked(Wc3PendingAction *a, Wc3PendingKind kind,
+                               int button, uint32_t hwnd, uint32_t lp,
+                               const uint32_t *msgs, const uint32_t *wps,
+                               int count, uint32_t raise_mask, int raise_index)
+{
+    pending_clear_locked(a);
+    a->kind = kind;
+    a->button = button;
+    a->hwnd = hwnd;
+    a->lp = lp;
+    a->count = count;
+    a->raise_mask = raise_mask;
+    a->raise_index = raise_index;
+    for (int i = 0; i < count; i++) {
+        a->msg[i] = msgs[i];
+        a->wp[i] = wps[i];
+    }
+    a->thread = pthread_self();
+    a->thread_valid = 1;
+}
+
+/* Take and clear the armed sequence.  require_ready gates the idle pass;
+ * require_thread keeps a GetCursorPos on another guest thread from posting a
+ * press before the owning thread refreshed its hover. */
+static int pending_take_locked(Wc3PendingAction *a, int button,
+                               int require_ready, int require_thread,
+                               Wc3PendingAction *out)
+{
+    if (a->kind == WC3_PENDING_NONE) return 0;
+    if (button >= 0 && button != a->button) return 0;
+    if (require_ready && !a->move_ready) return 0;
+    if (require_thread &&
+        !(a->thread_valid && pthread_equal(pthread_self(), a->thread)))
+        return 0;
+    *out = *a;
+    pending_clear_locked(a);
+    return 1;
+}
+
+static void pending_post(const Wc3PendingAction *a)
+{
+    for (int i = 0; i < a->count; i++) {
+        /* Raise the logical button at post time, exactly like mouse_button_ex:
+         * a poll between this post and the guest's dispatch of the DOWN must
+         * observe a held button. */
+        if (i == a->raise_index) g_mouse_buttons |= a->raise_mask;
+        if (a->msg[i] == WM_LBUTTONDOWN) g_mouse_down = 1;
+        u_msg_post(a->hwnd, a->msg[i], a->wp[i], a->lp);
+    }
+}
+
+/* The guest polls the cursor in its idle pass before refreshing its hot
+ * control.  Publishing the sequence here puts every button message behind
+ * that refresh, so the first press of a gesture is never hit-tested against a
+ * control from the previous contact.  GetCursorPos is the normal call site;
+ * the direct-touch pump also calls this as a fallback because modal loops
+ * (building placement) can stop polling the cursor entirely.  Without the
+ * fallback an armed press would block the service forever. */
+int hle_android_mouse_flush_pending_ready(void)
+{
+    Wc3PendingAction taken;
+    memset(&taken, 0, sizeof taken);
+    pthread_mutex_lock(&g_pending_lock);
+    const int have = pending_take_locked(&g_pending_action, -1, 1, 1, &taken);
+    pthread_mutex_unlock(&g_pending_lock);
+    if (!have) return 0;
+
+    pending_post(&taken);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (taken.kind == WC3_PENDING_CAMERA) {
+        wc3_hle_direct_touch_tracef(
+            "probe camera-start-flush at=%d,%d lp=%08X",
+            (int)(int16_t)(taken.lp & 0xFFFF),
+            (int)(int16_t)((taken.lp >> 16) & 0xFFFF), taken.lp);
+    } else {
+        wc3_hle_direct_touch_tracef(
+            "probe barrier-flush msg=%04X at=%d,%d lp=%08X",
+            taken.msg[0], (int)(int16_t)(taken.lp & 0xFFFF),
+            (int)(int16_t)((taken.lp >> 16) & 0xFFFF), taken.lp);
+    }
+#endif
+    return 1;
 }
 
 /* Queue lookup with g_uq_lock already held.  GetMessageA needs the atomic
@@ -7919,13 +8145,15 @@ static void u_dispatch_message(CPU *c)
 
     /* Only the messages this HLE itself produces are dispatched.  Injecting
      * the game's own posted messages here changed startup behaviour, so the
-     * queue is deliberately mouse, key, soft-keyboard chars, the synthetic
-     * movie click and the DirectShow completion notification only. */
+     * queue is deliberately mouse, key, activation/focus, soft-keyboard chars,
+     * the synthetic movie click and the DirectShow completion notification
+     * only. */
     if (msg != WM_MOUSEMOVE && msg != WM_LBUTTONDOWN && msg != WM_LBUTTONUP &&
         msg != WM_RBUTTONDOWN && msg != WM_RBUTTONUP &&
         msg != WM_MBUTTONDOWN && msg != WM_MBUTTONUP && msg != WM_MOUSEWHEEL &&
         msg != WM_KEYDOWN && msg != WM_KEYUP &&
         msg != WM_SYSKEYDOWN && msg != WM_SYSKEYUP && msg != WM_CHAR &&
+        msg != WM_ACTIVATE && msg != WM_ACTIVATEAPP && msg != WM_SETFOCUS &&
         msg != 0x8001u /* WMU_CALL: DirectShow graph notification */) {
         c->eax = 0;
         return;
@@ -8033,6 +8261,10 @@ static void u_dispatch_message(CPU *c)
                 wndproc, hwnd, msg, wp,
                 (int)(int16_t)(lp & 0xFFFF),
                 (int)(int16_t)((lp >> 16) & 0xFFFF));
+    else if (msg == WM_ACTIVATE || msg == WM_ACTIVATEAPP ||
+             msg == WM_SETFOCUS)
+        fprintf(stderr, "[input] wndproc %08X hwnd=%08X msg=%04X wp=%08X\n",
+                wndproc, hwnd, msg, wp);
     else if (msg == WM_KEYDOWN || msg == WM_KEYUP ||
              msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) {
         static unsigned n;
@@ -8057,6 +8289,11 @@ static void u_dispatch_message(CPU *c)
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     wc3_hle_direct_touch_probe_mark("uq-dispatch-post", msg, c->eax);
 #endif
+    /* The move has now run through the guest's window procedure.  A deferred
+     * menu press may be released by the next GetCursorPos, which runs in the
+     * idle pass after this dispatch and refreshes the hot control first. */
+    if (msg == WM_MOUSEMOVE)
+        pending_note_move_dispatched(lp);
 #if WC3_DEBUG
     fprintf(stderr, "[input] wndproc %08X hwnd=%08X msg=%04X returned\n",
             wndproc, hwnd, msg);
@@ -8183,6 +8420,12 @@ int hle_android_mouse_is_down(int button)
 int hle_android_native_button_pending(void)
 {
     int pending = 0;
+    /* A press that must wait for the idle hover pass is not in the queue
+     * yet.  It does not close the applied-input barrier: in a modal loop
+     * without GetCursorPos the service has to reach the pointer release,
+     * which publishes the armed sequence itself.  Once ready, the press is
+     * owned by the queue and the barrier applies as before. */
+    if (pending_ready()) return 1;
     pthread_mutex_lock(&g_uq_lock);
     for (int i = 0; i < g_uq_count; i++) {
         const uint32_t msg = g_uq[(g_uq_head + i) % UMSG_MAX].msg;
@@ -8211,13 +8454,6 @@ static uint32_t mouse_mk(void)
     return mk;
 }
 
-static volatile int32_t  g_mouse_x = 400, g_mouse_y = 300;
-static volatile int      g_mouse_down;
-/* Separate from g_mouse_down: set only when WM_LBUTTONDOWN/UP has actually
- * been handed to the guest window procedure.  The automation hook waits on
- * this, so a slow frame cannot turn a tap into a hover. */
-static volatile int      g_mouse_dispatched_down;
-
 /* Host input follows the foreground window.  Before the movie path existed
  * every event targeted g_main_hwnd; the campaign cinematic is a separate
  * top-level "BlizPlay" window, and clicks/keys must reach it or the movie
@@ -8232,6 +8468,28 @@ static uint32_t input_target(void)
     return g_main_hwnd;
 }
 
+/* A real click on an inactive window activates and focuses it before the
+ * button message arrives.  The guest gates some of its input on that state;
+ * without it it consumes the first synthetic click after the map window is
+ * shown.  Post the activation once per main-window handle, ahead of the first
+ * mouse message.  The queue preserves order, so the guest pump dispatches
+ * activation before the click without calling guest code from the input
+ * thread.  The movie window is not activated here: its own DirectShow path
+ * owns the focus. */
+static void input_activate_main(void)
+{
+    uint32_t hwnd = g_main_hwnd;
+    if (!hwnd || hwnd != input_target()) return;
+    if (g_input_activated_hwnd == hwnd) return;
+    g_input_activated_hwnd = hwnd;
+    u_msg_post(hwnd, WM_ACTIVATEAPP, 1u, 0u);
+    u_msg_post(hwnd, WM_ACTIVATE, 1u, 0u);
+    u_msg_post(hwnd, WM_SETFOCUS, 0u, 0u);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    fprintf(stderr, "[input] activate main hwnd=%08X\n", hwnd);
+#endif
+}
+
 static void mouse_poll(void)
 {
     /* The message queue is authoritative; nothing to expire here.  Kept as a
@@ -8241,17 +8499,29 @@ static void mouse_poll(void)
 /* nx,ny are surface-normalised touch coordinates.  The game image fills the
  * physical surface (DXVK scales the selected back-buffer mode up to it), so
  * the same fraction maps directly onto the guest client rectangle. */
-void hle_android_mouse_move(float nx, float ny)
+static void mouse_client_point(float nx, float ny, int32_t *x, int32_t *y,
+                               uint32_t *w, uint32_t *h)
 {
     if (nx < 0.0f) nx = 0.0f;
     if (nx > 1.0f) nx = 1.0f;
     if (ny < 0.0f) ny = 0.0f;
     if (ny > 1.0f) ny = 1.0f;
-    uint32_t w = g_win_w > 1 ? g_win_w : 800;
-    uint32_t h = g_win_h > 1 ? g_win_h : 600;
-    g_mouse_x = (int32_t)(nx * (float)(w - 1) + 0.5f);
-    g_mouse_y = (int32_t)(ny * (float)(h - 1) + 0.5f);
-    uint32_t lp = ((uint32_t)g_mouse_y << 16) | (uint16_t)g_mouse_x;
+    *w = g_win_w > 1 ? g_win_w : 800;
+    *h = g_win_h > 1 ? g_win_h : 600;
+    *x = (int32_t)(nx * (float)(*w - 1) + 0.5f);
+    *y = (int32_t)(ny * (float)(*h - 1) + 0.5f);
+}
+
+void hle_android_mouse_move(float nx, float ny)
+{
+    input_activate_main();
+    int32_t x = 400, y = 300;
+    uint32_t w = 800, h = 600;
+    mouse_client_point(nx, ny, &x, &y, &w, &h);
+    g_mouse_x = x;
+    g_mouse_y = y;
+    uint32_t lp = ((uint32_t)y << 16) | (uint16_t)x;
+    pending_note_move_post(lp);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     if (wc3_hle_direct_touch_probe_active())
         wc3_hle_direct_touch_tracef(
@@ -8284,10 +8554,165 @@ static uint32_t mouse_button_up_msg(int button)
            button == 1 ? WM_MBUTTONUP : WM_RBUTTONUP;
 }
 
+/* Menu/HUD press whose DOWN waits for the guest's idle hover pass.  The move
+ * is armed before it is posted, so a WM_MOUSEMOVE that is dispatched
+ * immediately can mark the press ready instead of racing the arm.  See the
+ * pending-down block near u_msg_post for the full contract. */
+/* Universal native press.  The caller supplies only the gesture-level fact
+ * (button and whether this is a whole click pair).  There is no synchronous
+ * path: the move is always posted here first, and the press sequence is
+ * published by the idle GetCursorPos pass after that move is dispatched.
+ * Consequently no caller can ever produce a press that is hit-tested against
+ * a hot control from a previous contact — the ordering is a property of the
+ * gateway, not a convention at each call site. */
+void hle_android_mouse_press(float nx, float ny, int button, int release)
+{
+    const int bit = mouse_button_bit(button);
+    if (!bit) return;
+    input_activate_main();
+    int32_t x = 0, y = 0;
+    uint32_t w = 0, h = 0;
+    mouse_client_point(nx, ny, &x, &y, &w, &h);
+    const uint32_t lp = ((uint32_t)y << 16) | (uint16_t)x;
+    const uint32_t down_wp = mouse_mk() | (uint32_t)mouse_button_mk(button);
+    const uint32_t up_wp = mouse_mk() & ~(uint32_t)mouse_button_mk(button);
+
+    uint32_t msgs[WC3_PENDING_MSG_MAX];
+    uint32_t wps[WC3_PENDING_MSG_MAX];
+    int count = 0;
+    /* No LEFT UP cleanup here.  Sent at the new cursor position it is read
+     * by the menu as the end of a drag, so the button only highlights and
+     * the following DOWN is not activated.  The camera triplet keeps its
+     * own cleanup; a normal contact already ends with its matching UP. */
+    const int raise_index = 0;
+    msgs[count] = mouse_button_down_msg(button);
+    wps[count++] = down_wp;
+    if (release) {
+        msgs[count] = mouse_button_up_msg(button);
+        wps[count++] = up_wp;
+    }
+
+    pthread_mutex_lock(&g_pending_lock);
+    (void)pending_cancel_locked(&g_pending_action);
+    pending_arm_locked(&g_pending_action, WC3_PENDING_PRESS, button,
+                       input_target(), lp, msgs, wps, count,
+                       (uint32_t)bit, raise_index);
+    pthread_mutex_unlock(&g_pending_lock);
+    hle_android_mouse_move(nx, ny);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_tracef(
+        "probe barrier-defer msg=%04X at=%d,%d lp=%08X",
+        msgs[0], x, y, lp);
+#endif
+}
+
+int hle_android_mouse_cancel_pending_press(void)
+{
+    int was;
+    pthread_mutex_lock(&g_pending_lock);
+    was = pending_cancel_locked(&g_pending_action);
+    pthread_mutex_unlock(&g_pending_lock);
+    return was;
+}
+
+/* Guest-thread replay boundary for a click the arbiter has already resolved
+ * (field release → target, command-target drag confirmation).  HEAD posted
+ * this pair synchronously; routing it through the deferred slot broke
+ * building placement because the modal loop stops polling GetCursorPos.  All
+ * posting still happens here, so direct touch has no raw button API. */
+void hle_android_mouse_press_replay(float nx, float ny, int button)
+{
+    const int bit = mouse_button_bit(button);
+    if (!bit) return;
+    input_activate_main();
+    int32_t x = 0, y = 0;
+    uint32_t w = 0, h = 0;
+    mouse_client_point(nx, ny, &x, &y, &w, &h);
+    const uint32_t lp = ((uint32_t)y << 16) | (uint16_t)x;
+
+    pthread_mutex_lock(&g_pending_lock);
+    (void)pending_cancel_locked(&g_pending_action);
+    pthread_mutex_unlock(&g_pending_lock);
+
+    hle_android_mouse_move(nx, ny);
+    g_mouse_buttons |= (uint32_t)bit;
+    if (button == 0) g_mouse_down = 1;
+    u_msg_post(input_target(), mouse_button_down_msg(button), mouse_mk(), lp);
+    u_msg_post(input_target(), mouse_button_up_msg(button),
+               mouse_mk() & ~(uint32_t)mouse_button_mk(button), lp);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_tracef("probe replay-click button=%d at=%d,%d "
+                                "lp=%08X", button, x, y, lp);
+#endif
+}
+
+/* Same contract as the deferred press: arm first, post the move second, so a
+ * move dispatched immediately can already mark the sequence ready.  The
+ * caller must not post a second move or the old immediate release/down pair. */
+void hle_android_mouse_move_defer_camera_begin(float nx, float ny)
+{
+    input_activate_main();
+    int32_t x = 0, y = 0;
+    uint32_t w = 0, h = 0;
+    mouse_client_point(nx, ny, &x, &y, &w, &h);
+    const uint32_t lp = ((uint32_t)y << 16) | (uint16_t)x;
+    const uint32_t hwnd = input_target();
+    const uint32_t wp = mouse_mk() | mouse_button_mk(1);
+    const uint32_t left_bit = mouse_button_bit(0);
+    const uint32_t middle_bit = mouse_button_bit(1);
+    const uint32_t msgs[3] = { WM_LBUTTONUP, WM_MBUTTONUP, WM_MBUTTONDOWN };
+    const uint32_t wps[3] = { wp & ~left_bit & ~middle_bit,
+                              wp & ~middle_bit, wp };
+    int replaced;
+    pthread_mutex_lock(&g_pending_lock);
+    replaced = g_pending_action.kind != WC3_PENDING_NONE;
+    /* Arming replaces any previous sequence: a new gesture supersedes it. */
+    pending_arm_locked(&g_pending_action, WC3_PENDING_CAMERA, -1, hwnd, lp,
+                       msgs, wps, 3, middle_bit, 2);
+    pthread_mutex_unlock(&g_pending_lock);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (replaced)
+        wc3_hle_direct_touch_tracef(
+            "probe camera-start-defer-replaced at=%d,%d lp=%08X", x, y, lp);
+    else
+        wc3_hle_direct_touch_tracef(
+            "probe camera-start-defer at=%d,%d lp=%08X", x, y, lp);
+#else
+    (void)replaced;
+#endif
+    hle_android_mouse_move(nx, ny);
+}
+
+void hle_android_mouse_flush_pending_down(void)
+{
+    /* A release arriving before the idle pass must publish the armed sequence
+     * now, or its DOWN would be lost. */
+    Wc3PendingAction taken;
+    memset(&taken, 0, sizeof taken);
+    pthread_mutex_lock(&g_pending_lock);
+    const int have = pending_take_locked(&g_pending_action, -1, 0, 0, &taken);
+    pthread_mutex_unlock(&g_pending_lock);
+    if (have) pending_post(&taken);
+}
+
+int hle_android_mouse_cancel_pending_down(void)
+{
+    /* A context change that drops a menu press must also drop an armed
+     * camera start and any universal press sequence waiting for its idle
+     * pass. */
+    return pending_cancel_active();
+}
+
+int hle_android_mouse_cancel_pending_camera(void)
+{
+    return pending_cancel_active();
+}
+
 static void mouse_button_ex(int button, int down, int force)
 {
     int bit = mouse_button_bit(button);
     if (!bit) return;
+    input_activate_main();
 
     uint32_t lp = ((uint32_t)g_mouse_y << 16) | (uint16_t)g_mouse_x;
 #if WC3_DEBUG && WC3_DEBUG_INPUT
@@ -8326,14 +8751,12 @@ static void mouse_button_ex(int button, int down, int force)
             g_win_x, g_win_y, g_win_w, g_win_h);
 }
 
-void hle_android_mouse_button_ex(int button, int down)
+/* Only the legacy guest-import boundary may post a button without the touch
+ * barrier: the guest asked for the message itself, so the hot-control hazard
+ * belongs to that guest code. */
+void hle_android_guest_mouse_button(int button, int down)
 {
     mouse_button_ex(button, down, 0);
-}
-
-void hle_android_mouse_button_down_force(int button)
-{
-    mouse_button_ex(button, 1, 1);
 }
 
 void hle_android_mouse_button_up_force(int button)
@@ -8343,11 +8766,12 @@ void hle_android_mouse_button_up_force(int button)
 
 void hle_android_mouse_button(int down)
 {
-    hle_android_mouse_button_ex(0, down);
+    mouse_button_ex(0, down, 0);
 }
 
 void hle_android_mouse_move_delta(int dx, int dy)
 {
+    input_activate_main();
     int32_t w = g_win_w > 1 ? (int32_t)g_win_w : 800;
     int32_t h = g_win_h > 1 ? (int32_t)g_win_h : 600;
     int32_t x = g_mouse_x + dx;
@@ -8417,9 +8841,13 @@ static int is_specific_modifier(int vk)
 
 void hle_android_release_all(void)
 {
+    /* A press that never reached the guest must not survive a surface stop or
+     * an overlay release.  The direct-touch layer also cancels it on a context
+     * change; this covers the paths that only call the HLE. */
+    (void)pending_cancel_active();
     for (int b = 0; b < 3; b++) {
         if (g_mouse_buttons & mouse_button_bit(b))
-            hle_android_mouse_button_ex(b, 0);
+            mouse_button_ex(b, 0, 0);
     }
     g_mouse_buttons = 0;
     g_mouse_down = 0;
@@ -8863,6 +9291,11 @@ static void u_set_foreground_window(CPU *c)
 {
     uint32_t hwnd = arg32(c, 0);
     if (hwnd) g_active_hwnd = hwnd;
+    /* Making a window foreground activates it now.  Deliver the guest's
+     * activation state here, not in front of the first synthetic click:
+     * the engine treats the click that follows activation in the same input
+     * batch as the click that raised the window and does not act on it. */
+    input_activate_main();
     c->eax = 1;
 }
 static void u_set_active_window(CPU *c)
@@ -8926,8 +9359,15 @@ static void u_show_window(CPU *c)
 {
     uint32_t hwnd = arg32(c, 0);
     uint32_t cmd = arg32(c, 1);
-    if (cmd != 0 /* SW_HIDE */ && hle_window_proc(hwnd))
+    if (cmd != 0 /* SW_HIDE */ && hle_window_proc(hwnd)) {
         g_active_hwnd = hwnd;
+        /* Win32 activates and focuses a newly shown foreground window before
+         * it pumps any input.  The guest uses that state to tell a click that
+         * raised the window from a normal click, so post it here instead of
+         * lazily ahead of the first synthetic mouse message: otherwise the
+         * first menu tap shares a batch with activation and is discarded. */
+        input_activate_main();
+    }
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     fprintf(stderr, "[ui] ShowWindow(%08X, %u) active=%08X main=%08X\n",
             hwnd, cmd, g_active_hwnd, g_main_hwnd);
@@ -9016,13 +9456,27 @@ static void u_get_cursor_pos(CPU *c)
         }
     }
 #endif
+    /* The guest refreshes its hot control only in this idle pass.  Only a
+     * GetCursorPos after the move has run through the wndproc may arm the
+     * sequence; a message-pump fallback would otherwise publish the press
+     * before the hot control points at the touched control. */
+    pthread_mutex_lock(&g_pending_lock);
+    if (g_pending_action.kind != WC3_PENDING_NONE &&
+        g_pending_action.move_dispatched)
+        g_pending_action.move_ready = 1;
+    pthread_mutex_unlock(&g_pending_lock);
+    hle_android_mouse_flush_pending_ready();
 }
 static void u_set_cursor_pos(CPU *c)
 {
     int32_t x = (int32_t)arg32(c, 0), y = (int32_t)arg32(c, 1);
-    /* Apply the guest's own warps, but never while a finger is down: the
-     * engine must not pull the cursor back from under a touch drag. */
-    if (!g_mouse_buttons) { g_mouse_x = x; g_mouse_y = y; }
+    /* Apply the guest's own warps, but never while a finger is down or a
+     * native press is still waiting for its idle hover pass: the engine must
+     * not pull the cursor back from under a touch drag or a deferred press. */
+    if (!g_mouse_buttons && !pending_active() &&
+        !hle_android_native_button_pending()) {
+        g_mouse_x = x; g_mouse_y = y;
+    }
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     if (wc3_hle_direct_touch_probe_active())
         wc3_hle_direct_touch_tracef(
@@ -11062,7 +11516,10 @@ void vu_host_press(void) {}
 void vu_host_release(void) {}
 void vu_host_key_down(unsigned vk) { (void)vk; }
 void vu_host_key_up(unsigned vk) { (void)vk; }
-void vu_host_activate(void) {}
+/* The Android click path calls the same helper from its first native move.
+ * Keep the host.h contract real for any virtual-user caller: the first click
+ * must not be the message that discovers the window is not active. */
+void vu_host_activate(void) { input_activate_main(); }
 void vu_host_client_size(int *w, int *h) { if (w) *w = 0; if (h) *h = 0; }
 void vu_host_input_stats(unsigned *moves, unsigned *downs, unsigned *ups,
                          unsigned *dropped)

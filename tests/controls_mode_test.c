@@ -87,6 +87,12 @@ static Wc3DirectTouchRoute route_field(void *user)
     return WC3_DIRECT_TOUCH_ROUTE_FIELD;
 }
 
+static Wc3DirectTouchRoute route_legacy(void *user)
+{
+    (void)user;
+    return WC3_DIRECT_TOUCH_ROUTE_LEGACY;
+}
+
 static int portrait_rect(float *left, float *top, float *right,
                          float *bottom, void *user)
 {
@@ -472,6 +478,51 @@ int main(int argc, char **argv)
     assert(g_action_count == 0);
     assert(direct_has(WC3_DIRECT_TOUCH_TAP));
 
+    /* A LEGACY snapshot means the guest has no live CGameUI.  The main menu
+     * uses the same rectangle as the battlefield, so a point inside that
+     * rectangle must not be guessed as a FIELD gesture.  Forward it as raw
+     * native phases: the HLE resolves a live FIELD at release when the
+     * published snapshot was one pump stale, and otherwise posts the native
+     * menu click.  The first tap after map load still reaches FIELD through
+     * that live release resolver. */
+    controls_set_direct_touch_route_gate(route_legacy, NULL);
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 500.0f, 500.0f, 5310) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 500.0f, 500.0f, 5320) == 0);
+    controls_tick(5330);
+    assert(g_action_count == 0);
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
+    controls_set_direct_touch_route_gate(route_field, NULL);
+
+    /* The same snapshot outside the field is also a native click, not a
+     * vendor touch.  Direct mode has no legacy fallback for game input. */
+    controls_set_direct_touch_route_gate(route_legacy, NULL);
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 900.0f, 900.0f, 5360) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 900.0f, 900.0f, 5370) == 0);
+    controls_tick(5390);
+    assert(g_action_count == 0);
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
+    assert(direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+    controls_set_direct_touch_route_gate(route_field, NULL);
+
+    /* The menu overlay may still be SIMPLE during a load.  That policy must
+     * not send a battlefield contact to the legacy engine. */
+    assert(controls_set_overlay_mode(WC3_OVERLAY_MODE_SIMPLE) == 0);
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 500.0f, 500.0f, 5395) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 500.0f, 500.0f, 5397) == 0);
+    controls_tick(5399);
+    assert(direct_has(WC3_DIRECT_TOUCH_TAP));
+    assert(!direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
+    assert(controls_set_overlay_mode(WC3_OVERLAY_MODE_FULL) == 0);
+
     actions_clear();
     direct_clear();
     assert(controls_touch(WC3_TOUCH_DOWN, 0, 900.0f, 900.0f, 5400) == 0);
@@ -481,6 +532,32 @@ int main(int argc, char **argv)
     assert(direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
     assert(direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
     assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+
+    /* A native button is pressed on DOWN and confirmed only on UP.  Dragging
+     * off the button must forward the move and the release at the new point;
+     * controls must not synthesize a click at the original press point, nor
+     * keep the release at the button.  This is the menu press/slide-off
+     * contract: activation is the guest UI's hit-test on WM_LBUTTONUP. */
+    controls_set_direct_touch_route_gate(route_legacy, NULL);
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 900.0f, 224.0f, 5510) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, 950.0f, 300.0f, 5520) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 950.0f, 300.0f, 5530) == 0);
+    controls_tick(5540);
+    assert(g_action_count == 0);
+    assert(g_direct_count == 3);
+    assert(g_direct_kinds[0] == WC3_DIRECT_TOUCH_POINTER_DOWN);
+    assert(fabsf(g_direct_x[0] - 0.900f) < 0.0001f);
+    assert(fabsf(g_direct_y[0] - 0.224f) < 0.0001f);
+    assert(g_direct_kinds[1] == WC3_DIRECT_TOUCH_POINTER_MOVE);
+    assert(fabsf(g_direct_x[1] - 0.950f) < 0.0001f);
+    assert(fabsf(g_direct_y[1] - 0.300f) < 0.0001f);
+    assert(g_direct_kinds[2] == WC3_DIRECT_TOUCH_POINTER_UP);
+    assert(fabsf(g_direct_x[2] - 0.950f) < 0.0001f);
+    assert(fabsf(g_direct_y[2] - 0.300f) < 0.0001f);
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+    controls_set_direct_touch_route_gate(route_field, NULL);
 
     /* Portrait: follow starts immediately on DOWN and stops on UP.  No
      * long-press deadline and no separate tap action.  The portrait frame

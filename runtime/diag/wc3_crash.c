@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -30,6 +31,10 @@ static uint32_t g_message_caller;
 static int g_has_message;
 static int g_has_assert;
 static volatile int g_emitting;
+/* Set while a copy is in progress.  The activity teardown and the native
+ * end-of-loop path can both ask for the export; skipping a concurrent call
+ * keeps one writer from truncating the other's temporary file. */
+static atomic_int g_exporting;
 
 static void copy_text(char *dst, size_t capacity, const char *src)
 {
@@ -46,53 +51,82 @@ static void copy_text(char *dst, size_t capacity, const char *src)
     dst[length] = '\0';
 }
 
-static void write_full(int fd, const char *data, size_t length)
+static int write_full(int fd, const char *data, size_t length)
 {
     while (length) {
         ssize_t written = write(fd, data, length);
         if (written < 0) {
             if (errno == EINTR)
                 continue;
-            return;
+            return -1;
         }
         if (!written)
-            return;
+            return -1;
         data += written;
         length -= (size_t)written;
     }
+    return 0;
 }
 
-static void copy_log_to(int out, const char *path)
+static int copy_log_to(int out, const char *path)
 {
     char buffer[4096];
     int in;
+    int result = 0;
 
     if (!path || !*path)
-        return;
+        return -1;
     in = open(path, O_RDONLY);
     if (in < 0)
-        return;
+        return -1;
     for (;;) {
         ssize_t got = read(in, buffer, sizeof buffer);
         if (got < 0) {
             if (errno == EINTR)
                 continue;
+            result = -1;
             break;
         }
         if (!got)
             break;
-        write_full(out, buffer, (size_t)got);
+        if (write_full(out, buffer, (size_t)got) != 0) {
+            result = -1;
+            break;
+        }
     }
     close(in);
+    return result;
+}
+
+static int open_download_path(const char *path, int flags)
+{
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    return open(path, flags, 0666);
 }
 
 static int open_download(int append)
 {
-    int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-#ifdef O_CLOEXEC
-    flags |= O_CLOEXEC;
-#endif
-    return open(WC3_CRASH_DOWNLOAD_LOG, flags, 0666);
+    return open_download_path(
+        WC3_CRASH_DOWNLOAD_LOG,
+        O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC));
+}
+
+static int open_download_tmp(char *path, size_t capacity)
+{
+    int length;
+
+    /*
+     * A per-process temporary keeps the two host processes (default and :roc)
+     * from truncating each other's half-written file.  rename(2) then
+     * publishes one complete log; the target name is shared as before.
+     */
+    length = snprintf(path, capacity, "%s.%ld.tmp",
+                      WC3_CRASH_DOWNLOAD_LOG, (long)getpid());
+    if (length <= 0 || (size_t)length >= capacity)
+        return -1;
+    return open_download_path(path, O_WRONLY | O_CREAT | O_TRUNC);
 }
 
 static size_t report_append(char *buffer, size_t capacity, size_t offset,
@@ -123,21 +157,21 @@ static void persist_report(const char *report, size_t length)
     if (same_file) {
         out = open_download(1);
         if (out >= 0) {
-            write_full(out, report, length);
+            (void)write_full(out, report, length);
             close(out);
             return;
         }
-        write_full(2, report, length);
+        (void)write_full(2, report, length);
         return;
     }
 
     out = open_download(0);
     if (out >= 0) {
-        copy_log_to(out, g_log_path);
-        write_full(out, report, length);
+        (void)copy_log_to(out, g_log_path);
+        (void)write_full(out, report, length);
         close(out);
     }
-    write_full(2, report, length);
+    (void)write_full(2, report, length);
 }
 
 void wc3_crash_set_log_path(const char *path)
@@ -151,11 +185,16 @@ void wc3_crash_set_log_path(const char *path)
 
 void wc3_crash_export_log(void)
 {
+    char tmp_path[WC3_CRASH_PATH_MAX];
+    int expected = 0;
+    int ok;
     int in;
     int out;
 
     if (!g_log_path[0] || g_emitting ||
         !strcmp(g_log_path, WC3_CRASH_DOWNLOAD_LOG))
+        return;
+    if (!atomic_compare_exchange_strong(&g_exporting, &expected, 1))
         return;
 
     /* The boot log writer is line-buffered.  Drain it before copying so the
@@ -164,16 +203,30 @@ void wc3_crash_export_log(void)
     /* Probe the source first: a missing app-private log must not truncate an
      * older Download copy. */
     in = open(g_log_path, O_RDONLY);
-    if (in < 0)
+    if (in < 0) {
+        atomic_store(&g_exporting, 0);
         return;
+    }
     close(in);
 
-    out = open_download(0);
-    if (out < 0)
+    out = open_download_tmp(tmp_path, sizeof tmp_path);
+    if (out < 0) {
+        atomic_store(&g_exporting, 0);
         return;
-    copy_log_to(out, g_log_path);
+    }
+    ok = copy_log_to(out, g_log_path) == 0;
     (void)fsync(out);
-    close(out);
+    if (close(out) != 0)
+        ok = 0;
+    /* A crash report writes the target directly; never replace it with the
+     * plain log if the fatal path started while this copy was in flight. */
+    if (g_emitting)
+        ok = 0;
+    /* Only a complete copy replaces the previous Download file.  A killed
+     * process leaves the old file and at worst a stale .tmp behind. */
+    if (!ok || rename(tmp_path, WC3_CRASH_DOWNLOAD_LOG) != 0)
+        unlink(tmp_path);
+    atomic_store(&g_exporting, 0);
 }
 
 void wc3_crash_note_message_box(const char *text, const char *caption,

@@ -2808,9 +2808,15 @@ void wc3_sel_group_init(uint32_t pair_base)
  * original read for count <= 12 (bit-exact baseline) and defines the 13..40
  * range used by the 24/40-unit profile:
  *
- *   flag 1 (B/D, compact mode; 3 from count 6 on) -> 3
- *   flag 0 (A/C, grid mode) -> ceil(count / 3) for 13..24
- *                           -> ceil(count / 4) for 25..40
+ *   flag 1 (B/D, compact mode) -> 4 for 13..24, 5 for 25..40
+ *   flag 0 (A/C, grid mode)    -> ceil(count / 3) for 13..24
+ *                              -> ceil(count / 4) for 25..40
+ *
+ * The compact bands are the ready grids 3x4 / 4x6 / 5x8: the original table
+ * already returns 3 columns from count 6 on, so 12 -> 3x4, 24 -> 4x6 and
+ * 40 -> 5x8, with the intermediate counts filling the last row partially.
+ * The former constant 3 stood a 40-unit group 3 wide and 14 deep; the band
+ * rule keeps the formation close to the 3:4 shape at every count.
  *
  * The grid rule continues the table's own three-row shape: 13..15 -> 5,
  * 16..18 -> 6, 19..21 -> 7, 22..24 -> 8, which also matches the 8x3 panel
@@ -2831,7 +2837,7 @@ uint32_t wc3_sel_formation_columns(uint32_t index, uint32_t count,
 
     flag = (index - count) / 13u;
     if (flag != 0u)
-        value = 3u;
+        value = (count <= 24u) ? 4u : 5u;
     else if (count <= 24u)
         value = (count + 2u) / 3u;
     else

@@ -13,6 +13,7 @@
 
 #include "hle_registry.h"
 #include "hle_android.h"
+#include "hle_android_mouse_private.h"
 #include "hle_input_state.h"
 #include "hle_fast.h"
 #include "guest_memory.h"
@@ -510,7 +511,7 @@ void wc3_legacy_mouse_button(int down)
 
 void wc3_legacy_mouse_button_ex(int button, int down)
 {
-    hle_android_mouse_button_ex(button, down);
+    hle_android_guest_mouse_button(button, down);
 }
 
 void wc3_legacy_mouse_wheel(int delta)

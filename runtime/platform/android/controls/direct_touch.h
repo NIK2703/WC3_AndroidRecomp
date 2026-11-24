@@ -17,6 +17,14 @@
 extern "C" {
 #endif
 
+#if defined(WC3_DEBUG) && WC3_DEBUG && \
+    defined(WC3_DEBUG_INPUT) && WC3_DEBUG_INPUT
+/* Debug-only file trace shared by the controls router and the recognizer.
+ * Writes to touch_trace.txt under WC3_DATA_DIR; without that variable it is
+ * a no-op, so host tests do not create files. */
+void wc3_direct_touch_debug_log(const char *fmt, ...);
+#endif
+
 #define WC3_DIRECT_TOUCH_MAX_POINTERS 4
 
 /* Field gesture state.  A quick move before the long-press deadline becomes

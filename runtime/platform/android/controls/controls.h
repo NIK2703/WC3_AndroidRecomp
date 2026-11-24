@@ -35,8 +35,9 @@ typedef void (*Wc3ActionSink)(const TouchAction *actions, int count,
 /*
  * Semantic direct touch is an additional input variant.  It is disabled by
  * default: the host enables it only when the user selected it and a guest
- * sink is installed.  With no sink the controls layer keeps every touch on
- * the legacy vendor path instead of silently dropping field input.
+ * sink is installed.  If it is enabled without one, game touches are
+ * forwarded as raw native phases instead of silently falling back to the
+ * legacy overlay engine; only authored overlay controls stay on that path.
  * Wc3DirectTouchSink is defined by direct_touch_event.h.
  */
 void controls_set_direct_touch_enabled(bool enabled);
@@ -61,16 +62,18 @@ void controls_set_direct_touch_haptic_sink(Wc3DirectTouchHapticSink sink,
  * swipe driving the native camera drag and a held drag drawing the native
  * selection rectangle); NATIVE means
  * raw pointer phases for the native UI (HUD, menus, targeting/placement);
- * PORTRAIT and MINIMAP are claimed by their separate rectangle gates;
- * LEGACY means the touch stays on the legacy overlay path, either because it
- * hit an overlay control element or because direct touch cannot claim the
- * pointer yet (UI singleton not up).
+ * PORTRAIT and MINIMAP are claimed by their separate rectangle gates.
+ * LEGACY means direct touch is disabled or the touch hit an authored overlay
+ * control element.
  *
- * Legacy is only for overlay control elements.  In direct mode a native HUD
- * or targeting touch must not be sent through the overlay engine; it is
+ * Legacy is only for overlay control elements.  In direct mode a native HUD,
+ * menu or targeting touch must not be sent through the overlay engine; it is
  * forwarded as pointer phases and the guest side posts the native mouse
- * messages itself.  A NULL gate keeps the phase-1 FIELD behavior for tests
- * and host-only builds.
+ * messages itself.  A LEGACY snapshot means the guest has no live CGameUI
+ * (startup, loading screen or main menu); it is forwarded as NATIVE, never
+ * guessed as FIELD from the battlefield rectangle.  The HLE resolves a live
+ * field on release when the snapshot was only one pump stale.  A NULL gate
+ * keeps the phase-1 FIELD behavior for tests and host-only builds.
  */
 typedef Wc3DirectTouchRoute (*Wc3DirectTouchRouteGate)(void *user);
 void controls_set_direct_touch_route_gate(Wc3DirectTouchRouteGate gate,

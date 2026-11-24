@@ -802,14 +802,13 @@ $icfValue = 'ON'
 $configure += "-DWC3_ICF=$icfValue"
 $configure += "-DWC3_ICF_MODE=safe"
 $configure += "-DWC3_ICF_PRINT_SECTIONS=ON"
-# The debug package keeps the post-lift pass enabled so it carries the
-# WC3_DEBUG_PERF vertex dispatch counter.  The existing parallel paths are
-# included by the same pass but remain behind the runtime parallelExecution
-# switch, which defaults off.  Release stays on the exact serial corpus.
-# Appended before -CMakeArgs so an explicit override still wins.
-if ($isDebug) {
-    $configure += '-DWC3_PARALLEL_RAYCAST=ON'
-}
+# Keep the original serial corpus for every variant.  The post-lift parallel
+# pass rewrites guest call sites (raycast/vertex/triangle/phase); with the pass
+# off the generated C keeps the untouched lifted calls and the game executes
+# the sequential path.  This is passed explicitly so a stale ON in the CMake
+# cache cannot re-enable it.  Use -CMakeArgs "-DWC3_PARALLEL_RAYCAST=ON" only
+# for an explicit parallel experiment.
+$configure += '-DWC3_PARALLEL_RAYCAST=OFF'
 if ($CMakeArgs) {
     $configure += ($CMakeArgs -split '\s+')
 }

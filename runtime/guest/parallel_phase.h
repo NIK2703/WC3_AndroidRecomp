@@ -122,16 +122,20 @@ const CPU *wc3_phase_request_cpu(unsigned index);
 void wc3_phase_restore_frame(unsigned index);
 
 /* Caller continuation levels.  A collect half that saw the request count grow
- * calls wc3_phase_commit_level() with its own post-call CPU and a 0x200-byte
- * frame window ending at ebp + 8:
+ * calls wc3_phase_commit_level() with its own post-call CPU and a frame
+ * window anchored at ebp:
  *
- *     [ebp - (WC3_PHASE_FRAME_MAX - 8), ebp + 8)
+ *     [ebp - (WC3_PHASE_FRAME_MAX - 8 - args), ebp + 8 + args)
  *
- * The window is anchored at ebp, not at the post-call esp: after the callee's
- * ret the post-call esp sits above the caller's locals, so an [esp, ebp+8)
- * range would be empty.  The window covers the caller's locals, saved
- * registers, saved ebp and return address.  Level 0 is the innermost raycast
- * and must not be passed here. */
+ * where args is the callee's ret-n operand (0 for a tail-reached
+ * continuation).  The window covers the callee's locals and stack args.  It
+ * deliberately excludes the caller's return address at [ebp+4]: that slot
+ * is live in the caller's frame, so the generated apply half saves and
+ * restores it around wc3_phase_restore_frame_level().  The window is
+ * anchored at ebp, not at the post-call esp: after the callee's ret the
+ * post-call esp sits above the caller's locals, so an [esp, ebp+8) range
+ * would be empty.  Level 0 is the innermost raycast and must not be passed
+ * here. */
 void wc3_phase_commit_level(CPU *c, unsigned level, uint32_t frame_va,
                             uint32_t frame_len);
 const CPU *wc3_phase_request_cpu_level(unsigned index, unsigned level);
@@ -146,10 +150,20 @@ unsigned wc3_phase_count(void);
  * does not silently reorder the deferred postfixes. */
 int wc3_phase_window_full(void);
 
+/* True when the product phase is enabled.  The collect chain must stay on the
+ * original lifted functions when this is false, including a run disabled by
+ * WC3_PARALLEL_GAMEPLAY and a shadow-only run. */
+int wc3_phase_enabled(void);
+
 /* Arm flag for tail-reached collect halves.  Only the per-object wrapper arms
- * it; an unarmed tail target falls back to the original lifted function. */
+ * it; an unarmed tail target falls back to the original lifted function.
+ * Arming is refused while the product phase is disabled. */
 int wc3_phase_arm(int on);
 int wc3_phase_armed(void);
+
+/* Index (1-based) of the request currently being applied, or 0 when this
+ * thread is not inside wc3_phase_apply_all().  Debug HP-bar trace only. */
+unsigned wc3_phase_apply_index(void);
 
 /* Run the window through the pool, or sequentially if the pool cannot run it.
  * Returns 1 when every request has a valid result. */

@@ -106,6 +106,14 @@ public class Wc3GameActivity extends GameActivity {
     private native void nativeClearGridSurface(Surface surface);
     private native void nativeSetGridActive(boolean active);
 
+    /*
+     * Copy the app-private boot log to Download from the activity teardown.
+     * android_main exports the log when its loop exits, but a recents swipe
+     * can kill the process before that thread runs again; onDestroy with
+     * isFinishing() is the last synchronous point on that path.
+     */
+    private static native void nativeExportLog();
+
     private static native void nativeMovieFinished(int status);
 
     /* Current host-side IME translation in physical pixels.  The native input
@@ -218,7 +226,9 @@ public class Wc3GameActivity extends GameActivity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) applyImmersiveMode();
+        if (hasFocus) {
+            applyImmersiveMode();
+        }
     }
 
     private void applyImmersiveMode() {
@@ -444,13 +454,18 @@ public class Wc3GameActivity extends GameActivity {
 
     @Override
     protected void onDestroy() {
+        final boolean finishing = isFinishing();
+        /* The recents swipe destroys the activity without the guest's quit
+         * path; export first, before any teardown work, so the log is not
+         * lost when GameActivity terminates the native thread. */
+        if (finishing) nativeExportLog();
         if (moviePlayer != null) moviePlayer.stop();
         /* The source cancels the grid cycle callback in onDestroy.  The native
          * side owns the cycle worker, so stop it here as well; the later
          * surfaceDestroyed callback then only clears the surface and never
          * leaves a worker running against a torn-down window. */
         if (gridView != null) nativeClearGridSurface(null);
-        if (isFinishing()) {
+        if (finishing) {
             sNativeStarted = false;
         }
         super.onDestroy();

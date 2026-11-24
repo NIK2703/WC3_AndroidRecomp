@@ -781,15 +781,43 @@ typedef struct PhaseChainSpec {
     unsigned level;
     int make_apply;
     int call_entry;
+    /* Optional names for a chain whose collect and apply halves are not the
+     * same continuation.  NULL keeps the usual `<callee>_collect/_apply`. */
+    const char *collect_name;
+    const char *apply_name;
+    /* Save the CPU state after the collect call, not the caller entry.  This
+     * is required when the collect half runs the whole inner function (for
+     * example L_6F376490_collect) and the apply half only replays the
+     * innermost raycast postfix. */
+    int commit_after;
+    /* After the apply callee returns, restore the post-collect CPU before
+     * running the caller postfix.  The callee apply leaves the CPU inside the
+     * callee frame, which is not the caller post-call state. */
+    int restore_after_apply;
+    /* Bytes removed by the original callee's `ret n` when the collect half
+     * commits before that epilogue.  Includes the return address.  Zero for a
+     * tail-reached continuation. */
+    unsigned stack_cleanup;
 } PhaseChainSpec;
 
 static const PhaseChainSpec g_phase_chain[] = {
-    { "L_6F376490", "L_6F78D9B0",
-      "WC3_DIRECT_CALL_CLEAN(L_6F78D9B0, c)", 1u, 1, 1 },
+    /* Batch only the innermost pure raycast inside L_6F376730.  Its postfix
+     * writes the caller's output buffers and is safe to defer. */
+    { "L_6F376730", "L_6F78D9B0",
+      "WC3_DIRECT_CALL_CLEAN(L_6F78D9B0, c)", 1u, 1, 1,
+      NULL, NULL, 0, 0, 16u },
+    /* The caller continuation defers L_6F395888/88A's postfix until the
+     * inner raycast result has been written.  L_6F376490 itself is not
+     * split: its whole body runs in L_6F376490_collect, including the
+     * virtual call [[esi]+0xBC] and L_6F1D73B0.  That object is temporary
+     * and is not valid at apply time (device crash 2026-11-22:
+     * [esi]=41A40000, unknown dispatch target). */
     { "L_6F395888", "L_6F376490",
-      "WC3_DIRECT_CALL_CLEAN(L_6F376490, c)", 2u, 0, 0 },
+      "WC3_DIRECT_CALL_CLEAN(L_6F376490, c)", 2u, 0, 0,
+      "L_6F376490_collect", "L_6F376730_apply", 1, 1, 0u },
     { "L_6F39588A", "L_6F376490",
-      "WC3_DIRECT_CALL_CLEAN(L_6F376490, c)", 2u, 1, 0 },
+      "WC3_DIRECT_CALL_CLEAN(L_6F376490, c)", 2u, 1, 0,
+      "L_6F376490_collect", "L_6F376730_apply", 1, 1, 0u },
 };
 
 /* Insert `add` after the line that contains `anchor`.  Every occurrence is
@@ -812,28 +840,6 @@ static size_t buf_insert_after_line(Buf *cur, const char *anchor,
         buf_add(&next, cur->p + pos, line_end - pos);
         buf_str(&next, add);
         pos = line_end;
-        count++;
-    }
-    buf_add(&next, cur->p + pos, cur->n - pos);
-    free(cur->p);
-    *cur = next;
-    return count;
-}
-
-/* Replace every occurrence of `needle` with `with`.  Returns the number of
- * replacements. */
-static size_t buf_replace_all(Buf *cur, const char *needle, const char *with)
-{
-    Buf next = {0};
-    size_t count = 0;
-    size_t pos = 0;
-
-    for (;;) {
-        size_t at = find_sub(cur->p ? cur->p : "", cur->n, pos, needle);
-        if (at == (size_t)-1) break;
-        buf_add(&next, cur->p + pos, at - pos);
-        buf_str(&next, with);
-        pos = at + strlen(needle);
         count++;
     }
     buf_add(&next, cur->p + pos, cur->n - pos);
@@ -894,9 +900,13 @@ static int phase_chain_split_one(const char *text, size_t n, Buf *out,
     char *masked;
     char sig[128];
     char own_collect[128];
+    char own_collect_def[160];
     char callee_collect[128];
     char callee_apply[128];
+    const char *collect_name;
+    const char *apply_name;
     char num[32];
+    char args_num[32];
     size_t open = 0, close = 0, call = 0;
     size_t body_end;
     int found;
@@ -920,7 +930,9 @@ static int phase_chain_split_one(const char *text, size_t n, Buf *out,
         return 0;
     }
     snprintf(own_collect, sizeof own_collect, "%s_collect", spec->fn);
-    if (count_sub(masked, n, own_collect) != 0) {
+    snprintf(own_collect_def, sizeof own_collect_def,
+             "void %s_collect(CPU *c)", spec->fn);
+    if (count_sub(masked, n, own_collect_def) != 0) {
         snprintf(err, errn, "chain split already present for %s", spec->fn);
         free(masked);
         return 0;
@@ -936,6 +948,8 @@ static int phase_chain_split_one(const char *text, size_t n, Buf *out,
     snprintf(callee_collect, sizeof callee_collect, "%s_collect",
              spec->callee);
     snprintf(callee_apply, sizeof callee_apply, "%s_apply", spec->callee);
+    collect_name = spec->collect_name ? spec->collect_name : callee_collect;
+    apply_name = spec->apply_name ? spec->apply_name : callee_apply;
     body_end = close;
 
     buf_add(&res, text, close + 1u);
@@ -943,15 +957,18 @@ static int phase_chain_split_one(const char *text, size_t n, Buf *out,
     buf_str(&res, "void ");
     buf_str(&res, spec->fn);
     buf_str(&res, "_collect(CPU *c)\n{\n");
-    if (!spec->call_entry) {
-        buf_str(&res, "    if (!wc3_phase_armed()) {\n");
-        buf_str(&res, "        ");
-        buf_str(&res, spec->fn);
-        buf_str(&res, "(c);\n");
-        buf_str(&res, "        return;\n");
-        buf_str(&res, "    }\n");
-    }
+    buf_str(&res, "    if (!wc3_phase_enabled()");
+    if (!spec->call_entry)
+        buf_str(&res, " || !wc3_phase_armed()");
+    buf_str(&res, ") {\n");
+    buf_str(&res, "        ");
+    buf_str(&res, spec->fn);
+    buf_str(&res, "(c);\n");
+    buf_str(&res, "        return;\n");
+    buf_str(&res, "    }\n");
     buf_str(&res, "    CPU _entry = *c;\n");
+    if (spec->commit_after)
+        buf_str(&res, "    CPU _after;\n");
     buf_str(&res, "    uint32_t _count = wc3_phase_count();\n");
     buf_add(&res, text + open + 1u, call - (open + 1u));
     buf_str(&res,
@@ -961,21 +978,77 @@ static int phase_chain_split_one(const char *text, size_t n, Buf *out,
             "        c->disp_depth = _saved_depth + 1u;\n"
             "        c->disp_draining = 0u;\n"
             "        ");
-    buf_str(&res, callee_collect);
+    buf_str(&res, collect_name);
     buf_str(&res, "(c);\n");
+    if (spec->commit_after) {
+        /* The full collect clone may end in a tail call.  Drain it before
+         * snapshotting the post-call CPU; otherwise the deferred level would
+         * start with an unexecuted pending target and the tail would be
+         * skipped by the early return. */
+        buf_str(&res, "        c->disp_depth = _saved_depth;\n");
+        buf_str(&res, "        WC3_CLEAN_DRAIN(c);\n");
+        buf_str(&res, "        c->disp_depth = _saved_depth;\n");
+        buf_str(&res, "        c->disp_draining = _saved_draining;\n");
+        buf_str(&res, "        _after = *c;\n");
+    }
     buf_str(&res, "        if (wc3_phase_count() != _count) {\n");
     buf_str(&res, "            *c = _entry;\n");
-    if (spec->call_entry)
-        buf_str(&res, "            c->esp += 4u;\n");
+    if (spec->stack_cleanup) {
+        snprintf(num, sizeof num, "%uu", spec->stack_cleanup);
+        buf_str(&res, "            c->esp += ");
+        buf_str(&res, num);
+        buf_str(&res, ";\n");
+    }
     buf_str(&res, "            c->disp_depth = _saved_depth;\n");
     buf_str(&res, "            c->disp_draining = _saved_draining;\n");
-    buf_str(&res, "            wc3_phase_commit_level(c, ");
+    if (spec->commit_after) {
+        buf_str(&res, "            _after.disp_depth = _saved_depth;\n");
+        buf_str(&res, "            _after.disp_draining = _saved_draining;\n");
+        buf_str(&res, "            wc3_phase_commit_level(&_after, ");
+    } else {
+        buf_str(&res, "            wc3_phase_commit_level(c, ");
+    }
     snprintf(num, sizeof num, "%uu", spec->level);
     buf_str(&res, num);
-    buf_str(&res,
-            ",\n"
-            "                                   c->ebp - (WC3_PHASE_FRAME_MAX - 8u),\n"
-            "                                   WC3_PHASE_FRAME_MAX);\n");
+    {
+        /* The saved window covers the callee's locals and its stack args,
+         * but never the caller's return address at [ebp+4]: that slot is
+         * live in the caller's frame and the apply must not clobber it.
+         * args_size is the callee's ret-n operand (stack_cleanup includes
+         * the return address); a tail-reached continuation has no args. */
+        unsigned args_size = spec->stack_cleanup >= 4u
+                                 ? spec->stack_cleanup - 4u : 0u;
+        if (args_size) {
+            snprintf(args_num, sizeof args_num, "%u", args_size);
+            if (spec->commit_after) {
+                buf_str(&res,
+                        ",\n"
+                        "                                   _after.ebp - "
+                        "(WC3_PHASE_FRAME_MAX - 8u - ");
+                buf_str(&res, args_num);
+                buf_str(&res, "u),\n"
+                        "                                   WC3_PHASE_FRAME_MAX);\n");
+            } else {
+                buf_str(&res,
+                        ",\n"
+                        "                                   c->ebp - "
+                        "(WC3_PHASE_FRAME_MAX - 8u - ");
+                buf_str(&res, args_num);
+                buf_str(&res, "u),\n"
+                        "                                   WC3_PHASE_FRAME_MAX);\n");
+            }
+        } else if (spec->commit_after) {
+            buf_str(&res,
+                    ",\n"
+                    "                                   _after.ebp - (WC3_PHASE_FRAME_MAX - 8u),\n"
+                    "                                   WC3_PHASE_FRAME_MAX);\n");
+        } else {
+            buf_str(&res,
+                    ",\n"
+                    "                                   c->ebp - (WC3_PHASE_FRAME_MAX - 8u),\n"
+                    "                                   WC3_PHASE_FRAME_MAX);\n");
+        }
+    }
     buf_str(&res,
             "            return;\n"
             "        }\n"
@@ -1005,6 +1078,8 @@ static int phase_chain_split_one(const char *text, size_t n, Buf *out,
         if (needs_x87)
             buf_str(&res,
                     "    double st[8]; int x87_base; uint16_t x87_tag;\n");
+        if (spec->restore_after_apply)
+            buf_str(&res, "    CPU _post;\n");
         buf_str(&res,
                 "    const CPU *saved = wc3_phase_request_cpu_level(index, ");
         snprintf(num, sizeof num, "%uu", spec->level);
@@ -1013,23 +1088,31 @@ static int phase_chain_split_one(const char *text, size_t n, Buf *out,
                 ");\n"
                 "    uint32_t _depth;\n"
                 "    uint32_t _draining;\n"
+                "    uint32_t _wc3_frame_ra;\n"
                 "    if (!saved) return;\n"
                 "    *c = *saved;\n"
+                "    _wc3_frame_ra = rd32((c->ebp + 4));\n"
                 "    wc3_phase_restore_frame_level(index, ");
         snprintf(num, sizeof num, "%uu", spec->level);
         buf_str(&res, num);
-        buf_str(&res, ");\n");
+        buf_str(&res,
+                ");\n"
+                "    wr32((c->ebp + 4), _wc3_frame_ra);\n");
+        if (spec->restore_after_apply)
+            buf_str(&res, "    _post = *c;\n");
         buf_str(&res,
                 "    _depth = c->disp_depth;\n"
                 "    _draining = c->disp_draining;\n"
                 "    ");
-        buf_str(&res, callee_apply);
+        buf_str(&res, apply_name);
         buf_str(&res,
                 "(c, index);\n"
                 "    c->disp_depth = _depth;\n"
                 "    WC3_CLEAN_DRAIN(c);\n"
                 "    c->disp_depth = _depth;\n"
                 "    c->disp_draining = _draining;\n");
+        if (spec->restore_after_apply)
+            buf_str(&res, "    *c = _post;\n");
         buf_add(&res, text + call + strlen(spec->call),
                 body_end - (call + strlen(spec->call)));
         buf_str(&res, "}\n");
@@ -1042,11 +1125,81 @@ static int phase_chain_split_one(const char *text, size_t n, Buf *out,
     return 1;
 }
 
+/* Clone a whole function into `<fn>_collect` and replace one inner call with
+ * its collect form.  Unlike phase_chain_split_one this clone has no early
+ * return and no apply half: the entire body, including every dereference of
+ * the temporary object, runs while the object is still valid.  The caller
+ * continuation still defers its own postfix when the inner collect committed. */
+static int phase_chain_clone_full(const char *text, size_t n, Buf *out,
+                                  const char *fn, const char *needle,
+                                  const char *with, size_t *sites,
+                                  char *err, size_t errn)
+{
+    char sig[128];
+    char clone_name[128];
+    char clone_def[160];
+    char *masked;
+    size_t open = 0, close = 0, call = 0;
+    int found;
+    Buf res = {0};
+
+    *sites = 0;
+    snprintf(sig, sizeof sig, "void %s(CPU *restrict c)", fn);
+    snprintf(clone_name, sizeof clone_name, "%s_collect", fn);
+    snprintf(clone_def, sizeof clone_def, "void %s_collect(CPU *c)", fn);
+    masked = (char *)xmalloc(n + 1u);
+    mask_code(text, n, masked);
+    found = find_function_body(masked, n, sig, &open, &close);
+    if (found == 0) {
+        free(masked);
+        buf_add(out, text, n);
+        return 1;
+    }
+    if (found != 1) {
+        snprintf(err, errn, "ambiguous clone function %s", fn);
+        free(masked);
+        return 0;
+    }
+    if (count_sub(masked, n, clone_def) != 0) {
+        snprintf(err, errn, "full collect clone already present for %s", fn);
+        free(masked);
+        return 0;
+    }
+    call = find_sub(masked, close, open + 1u, needle);
+    if (call == (size_t)-1) {
+        snprintf(err, errn, "clone call site missing in %s", fn);
+        free(masked);
+        return 0;
+    }
+    free(masked);
+
+    buf_add(&res, text, close + 1u);
+    buf_str(&res, "\n\n#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n");
+    buf_str(&res, "void ");
+    buf_str(&res, clone_name);
+    buf_str(&res, "(CPU *c)\n{\n");
+    buf_str(&res, "    if (!wc3_phase_enabled()) {\n        ");
+    buf_str(&res, fn);
+    buf_str(&res, "(c);\n        return;\n    }\n");
+    buf_add(&res, text + open + 1u, call - (open + 1u));
+    buf_str(&res, with);
+    buf_add(&res, text + call + strlen(needle),
+            close - (call + strlen(needle)));
+    buf_str(&res, "}\n#endif\n");
+    buf_add(&res, text + close + 1u, n - (close + 1u));
+
+    *out = res;
+    *sites = 1;
+    return 1;
+}
+
 /* Per-object wrapper around L_6F395760.  The wrapper is the only place that
  * arms the collect chain: the original wrapper is a tail call, so the arm
  * flag stays set until the tail target has committed or fallen back.  On a
  * committed request the wrapper restores the loop's entry CPU and pops the
- * artificial return address; the loop keeps its own ebp/esp/registers. */
+ * artificial return address; the loop keeps its own ebp/esp/registers.
+ * A disabled product phase takes the original L_6F654BD0 path directly, so a
+ * WC3_PARALLEL_GAMEPLAY=0 or shadow-only run never enters a collect clone. */
 static int phase_chain_wrapper(const char *text, size_t n, Buf *out,
                                size_t *sites, char *err, size_t errn)
 {
@@ -1055,6 +1208,10 @@ static int phase_chain_wrapper(const char *text, size_t n, Buf *out,
         "\n\n#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n"
         "void L_6F654BD0_collect(CPU *c)\n"
         "{\n"
+        "    if (!wc3_phase_enabled()) {\n"
+        "        L_6F654BD0(c);\n"
+        "        return;\n"
+        "    }\n"
         "    CPU _entry = *c;\n"
         "    uint32_t _count = wc3_phase_count();\n"
         "    uint32_t _saved_depth;\n"
@@ -1118,12 +1275,15 @@ static int phase_chain_wrapper(const char *text, size_t n, Buf *out,
 
 static int phase_chain_has_marker(const char *masked, size_t n)
 {
-    return count_sub(masked, n, "void L_6F376490(CPU *restrict c)") != 0 ||
+    return count_sub(masked, n, "void L_6F376730(CPU *restrict c)") != 0 ||
+           count_sub(masked, n, "void L_6F376490(CPU *restrict c)") != 0 ||
            count_sub(masked, n, "void L_6F395888(CPU *restrict c)") != 0 ||
            count_sub(masked, n, "void L_6F39588A(CPU *restrict c)") != 0 ||
+           count_sub(masked, n,
+                     "WC3_DIRECT_TAIL(L_6F395888, c)") != 0 ||
+           count_sub(masked, n,
+                     "WC3_DIRECT_TAIL(L_6F39588A, c)") != 0 ||
            count_sub(masked, n, "void L_6F654BD0(CPU *restrict c)") != 0 ||
-           count_sub(masked, n, "WC3_DIRECT_TAIL(L_6F395888, c)") != 0 ||
-           count_sub(masked, n, "WC3_DIRECT_TAIL(L_6F39588A, c)") != 0 ||
            count_sub(masked, n, "WC3_DIRECT_CALL_CLEAN(L_6F654BD0, c)") != 0 ||
            count_sub(masked, n,
                      "if (c->cf) { WC3_DIRECT_TAIL(L_6F395BD0, c); return; }") != 0;
@@ -1133,18 +1293,6 @@ static int rewrite_phase_chain_text(const char *text, size_t n, Buf *out,
                                     size_t *sites_out, char *err,
                                     size_t errn)
 {
-    static const char tail888[] =
-        "\n#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n"
-        "    WC3_DIRECT_TAIL(L_6F395888_collect, c); return;\n"
-        "#else\n"
-        "    WC3_DIRECT_TAIL(L_6F395888, c); return;\n"
-        "#endif\n";
-    static const char tail88A[] =
-        "\n#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n"
-        "    WC3_DIRECT_TAIL(L_6F39588A_collect, c); return;\n"
-        "#else\n"
-        "    WC3_DIRECT_TAIL(L_6F39588A, c); return;\n"
-        "#endif\n";
     static const char loop_call[] =
         "\n#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n"
         "    L_6F654BD0_collect(c);\n"
@@ -1156,17 +1304,16 @@ static int rewrite_phase_chain_text(const char *text, size_t n, Buf *out,
         "    if (wc3_phase_count())\n"
         "        wc3_phase_apply_all(c, L_6F654BD0_apply);\n"
         "#endif\n";
+    static const char decl_0006[] =
+        "#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n"
+        "void L_6F376490_collect(CPU *c);\n"
+        "void L_6F376730_apply(CPU *c, unsigned index);\n"
+        "void L_6F39588A_apply(CPU *c, unsigned index);\n"
+        "#endif\n";
     static const char decl_0003[] =
         "#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n"
         "void L_6F395888_collect(CPU *c);\n"
         "void L_6F39588A_collect(CPU *c);\n"
-        "#endif\n";
-    static const char decl_0006[] =
-        "#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n"
-        "void L_6F376490_collect(CPU *c);\n"
-        "void L_6F376490_apply(CPU *c, unsigned index);\n"
-        "void L_6F39588A_collect(CPU *c);\n"
-        "void L_6F39588A_apply(CPU *c, unsigned index);\n"
         "#endif\n";
     static const char decl_0055[] =
         "#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n"
@@ -1217,12 +1364,59 @@ static int rewrite_phase_chain_text(const char *text, size_t n, Buf *out,
         total += one;
     }
 
-    total += buf_replace_all(&cur,
-                             "WC3_DIRECT_TAIL(L_6F395888, c); return;",
-                             tail888);
-    total += buf_replace_all(&cur,
-                             "WC3_DIRECT_TAIL(L_6F39588A, c); return;",
-                             tail88A);
+    /* L_6F376490 itself is not split: its whole body must run while the
+     * temporary object is alive.  The live caller continuations invoke this
+     * clone, whose inner L_6F376730 call commits the batched request. */
+    {
+        size_t one = 0;
+        Buf step = {0};
+        if (!phase_chain_clone_full(
+                cur.p ? cur.p : "", cur.n, &step, "L_6F376490",
+                "WC3_DIRECT_CALL_CLEAN(L_6F376730, c)",
+                "WC3_DIRECT_CALL_CLEAN(L_6F376730_collect, c)",
+                &one, err, errn)) {
+            free(cur.p);
+            return 0;
+        }
+        free(cur.p);
+        cur = step;
+        total += one;
+    }
+
+    /* The live L_6F395760 tail reaches L_6F395888/88A, not their original
+     * bodies.  Redirect those two tail edges to the collect continuations;
+     * without this the generated continuations are unreachable. */
+    {
+        static const char tail_sig[] = "void L_6F395760(CPU *restrict c)";
+        static const char tail_888[] =
+            "\n#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n"
+            "    WC3_DIRECT_TAIL(L_6F395888_collect, c)\n"
+            "#else\n"
+            "    WC3_DIRECT_TAIL(L_6F395888, c)\n"
+            "#endif\n";
+        static const char tail_88a[] =
+            "\n#if WC3_DEBUG && WC3_DEBUG_PARALLEL\n"
+            "    WC3_DIRECT_TAIL(L_6F39588A_collect, c)\n"
+            "#else\n"
+            "    WC3_DIRECT_TAIL(L_6F39588A, c)\n"
+            "#endif\n";
+        size_t one = buf_replace_in_function(
+            &cur, tail_sig, "WC3_DIRECT_TAIL(L_6F395888, c)", tail_888,
+            err, errn);
+        if (one == (size_t)-1) {
+            free(cur.p);
+            return 0;
+        }
+        total += one;
+        one = buf_replace_in_function(
+            &cur, tail_sig, "WC3_DIRECT_TAIL(L_6F39588A, c)", tail_88a,
+            err, errn);
+        if (one == (size_t)-1) {
+            free(cur.p);
+            return 0;
+        }
+        total += one;
+    }
 
     /* The 0055 object-loop fragments and the 0000 effect tail are the
      * per-object calls reached by the live gameplay loop.  The 0000 tail is
@@ -1267,10 +1461,10 @@ static int rewrite_phase_chain_text(const char *text, size_t n, Buf *out,
         total += one;
     }
 
-    (void)buf_insert_after_line(&cur, "void L_6F395888(CPU *c);",
-                                decl_0003);
     (void)buf_insert_after_line(&cur, "void L_6F376490(CPU *c);",
                                 decl_0006);
+    (void)buf_insert_after_line(&cur, "void L_6F395888(CPU *c);",
+                                decl_0003);
     (void)buf_insert_after_line(&cur, "void L_6F654BD0(CPU *c);",
                                 decl_0055);
     if (need_decl_0123)
@@ -1408,17 +1602,15 @@ typedef struct G15Change {
 static const G15Change g_g15_change_set[] = {
     { "L_6F78D9B0_collect", "added_debug" },
     { "L_6F78D9B0_apply", "added_debug" },
+    { "L_6F376730_collect", "added_debug" },
+    { "L_6F376730_apply", "added_debug" },
     { "L_6F376490_collect", "added_debug" },
-    { "L_6F376490_apply", "added_debug" },
     { "L_6F395888_collect", "added_debug" },
     { "L_6F39588A_collect", "added_debug" },
     { "L_6F39588A_apply", "added_debug" },
     { "L_6F654BD0_collect", "added_debug" },
     { "L_6F654BD0_apply", "added_debug" },
     { "L_6F78D9B0", "modified_debug_guarded" },
-    { "L_6F376490", "modified_debug_guarded" },
-    { "L_6F395888", "modified_debug_guarded" },
-    { "L_6F39588A", "modified_debug_guarded" },
     { "L_6F654BD0", "modified_debug_guarded" },
     { "L_6F395760", "modified_debug_guarded" },
     { "L_6F395C2C", "modified_debug_guarded" },
@@ -1779,24 +1971,51 @@ static int self_test(void)
         const char *chain =
             "#include \"cpu.h\"\n"
             "#include \"direct_call.h\"\n"
+            "void L_6F376490(CPU *c);\n"
+            "void L_6F395888(CPU *c);\n"
+            "void L_6F654BD0(CPU *c);\n"
+            "void L_6F376730(CPU *restrict c)\n"
+            "{\n"
+            "    c->eax = c->ecx;\n"
+            "    push32(c, 0x6F376810u);\n"
+            "    WC3_DIRECT_CALL_CLEAN(L_6F78D9B0, c);\n"
+            "    c->esi = c->eax;\n"
+            "}\n"
             "void L_6F376490(CPU *restrict c)\n"
             "{\n"
             "    c->eax = c->ecx;\n"
-            "    push32(c, 0x6F3765D6u);\n"
+            "    push32(c, 0x6F376585u);\n"
+            "    WC3_DIRECT_CALL_CLEAN(L_6F376730, c);\n"
+            "    c->esi = c->eax;\n"
+            "    push32(c, 0x6F3765DAu);\n"
             "    WC3_DIRECT_CALL_CLEAN(L_6F78D9B0, c);\n"
             "    c->esi = c->eax;\n"
             "}\n"
             "void L_6F395888(CPU *restrict c)\n"
             "{\n"
             "    c->eax = c->ecx;\n"
-            "    push32(c, 0x6F39588Au);\n"
+            "    push32(c, 0x6F3958E6u);\n"
             "    WC3_DIRECT_CALL_CLEAN(L_6F376490, c);\n"
-            "    c->esi = c->eax;\n"
+            "    c->eax = rd32(c->ebp - 0x2c);\n"
             "}\n"
-            "void L_6F6990FC(CPU *restrict c)\n"
+            "void L_6F39588A(CPU *restrict c)\n"
             "{\n"
-            "    c->ecx = c->ebx;\n"
-            "    push32(c, 0x6F6991DEu); WC3_DIRECT_CALL_CLEAN(L_6F654BD0, c);\n"
+            "    c->eax = c->ecx;\n"
+            "    push32(c, 0x6F3958E6u);\n"
+            "    WC3_DIRECT_CALL_CLEAN(L_6F376490, c);\n"
+            "    c->eax = rd32(c->ebp - 0x2c);\n"
+            "}\n"
+            "void L_6F395760(CPU *restrict c)\n"
+            "{\n"
+            "    if (c->eax) { WC3_DIRECT_TAIL(L_6F395888, c); return; }\n"
+            "    WC3_DIRECT_TAIL(L_6F39588A, c); return;\n"
+            "}\n"
+            "void L_6F654BD0(CPU *restrict c)\n"
+            "{\n"
+            "    c->ecx = rd32((c->ecx + 0x00000050u));\n"
+            "    flags_logicz(c, c->ecx, 4);\n"
+            "    if (!c->ecx) { c->esp += 4u; return; }\n"
+            "    WC3_DIRECT_CALL_CLEAN(L_6F395760, c);\n"
             "}\n";
         Buf cout = {0};
         size_t csites = 0;
@@ -1805,20 +2024,40 @@ static int self_test(void)
             fprintf(stderr, "self-test phase chain input failed: %s\n", err);
             return 1;
         }
-        if (csites != 3 || !strstr(cout.p, PHASE_INCLUDE) ||
-            !strstr(cout.p, "void L_6F376490_collect(CPU *c)") ||
+        if (csites != 8 || !strstr(cout.p, PHASE_INCLUDE) ||
+            !strstr(cout.p, "void L_6F376730_collect(CPU *c)") ||
+            !strstr(cout.p, "void L_6F376730_apply(CPU *c, unsigned index)") ||
             !strstr(cout.p, "L_6F78D9B0_collect(c);") ||
-            !strstr(cout.p, "L_6F654BD0_collect(c);") ||
-            !strstr(cout.p, "wc3_phase_commit_level(c, 1u,") ||
-            !strstr(cout.p, "void L_6F376490_apply(CPU *c, unsigned index)") ||
             !strstr(cout.p, "L_6F78D9B0_apply(c, index);") ||
-            !strstr(cout.p, "c->esp += 4u;") ||
+            !strstr(cout.p, "void L_6F376490_collect(CPU *c)") ||
+            !strstr(cout.p,
+                    "WC3_DIRECT_CALL_CLEAN(L_6F376730_collect, c);") ||
+            !strstr(cout.p, "if (!wc3_phase_enabled())") ||
+            !strstr(cout.p, "c->esp += 16u;") ||
             !strstr(cout.p, "void L_6F395888_collect(CPU *c)") ||
-            !strstr(cout.p, "if (!wc3_phase_armed())") ||
-            !strstr(cout.p, "L_6F395888(c);") ||
+            !strstr(cout.p, "void L_6F39588A_collect(CPU *c)") ||
+            !strstr(cout.p, "void L_6F39588A_apply(CPU *c, unsigned index)") ||
+            !strstr(cout.p, "void L_6F39588A_apply(CPU *c, unsigned index);") ||
             !strstr(cout.p, "L_6F376490_collect(c);") ||
-            !strstr(cout.p, "wc3_phase_commit_level(c, 2u,") ||
-            !strstr(cout.p, "c->ebp - (WC3_PHASE_FRAME_MAX - 8u)")) {
+            !strstr(cout.p, "L_6F376730_apply(c, index);") ||
+            !strstr(cout.p, "_after = *c;") ||
+            !strstr(cout.p, "wc3_phase_commit_level(&_after, 2u,") ||
+            !strstr(cout.p, "_post = *c;") ||
+            !strstr(cout.p, "*c = _post;") ||
+            !strstr(cout.p, "WC3_DIRECT_TAIL(L_6F395888_collect, c)") ||
+            !strstr(cout.p, "WC3_DIRECT_TAIL(L_6F39588A_collect, c)") ||
+            !strstr(cout.p, "void L_6F654BD0_collect(CPU *c)") ||
+            !strstr(cout.p, "wc3_phase_commit_level(c, 1u,") ||
+            !strstr(cout.p, "c->esp += 4u;") ||
+            !strstr(cout.p, "void L_6F654BD0_apply(CPU *c, unsigned index)") ||
+            !strstr(cout.p, "L_6F39588A_apply(c, index);") ||
+            !strstr(cout.p, "c->ebp - (WC3_PHASE_FRAME_MAX - 8u - 12u)") ||
+            !strstr(cout.p, "_after.ebp - (WC3_PHASE_FRAME_MAX - 8u)") ||
+            !strstr(cout.p, "_wc3_frame_ra = rd32((c->ebp + 4));") ||
+            !strstr(cout.p, "wr32((c->ebp + 4), _wc3_frame_ra);") ||
+            strstr(cout.p, "void L_6F376490_apply(CPU *c, unsigned index)") ||
+            strstr(cout.p, "wc3_phase_commit_level(c, 2u,") ||
+            strstr(cout.p, "wc3_phase_commit_level(c, 3u,")) {
             fprintf(stderr, "self-test phase chain output missing\n%s\n",
                     cout.p);
             return 1;
@@ -1855,11 +2094,14 @@ static int self_test(void)
             fprintf(stderr, "self-test phase wrapper input failed: %s\n", err);
             return 1;
         }
-        if (wsites != 2 || !strstr(wout.p, "wc3_phase_window_full()") ||
+        if (wsites != 2 || !strstr(wout.p, "wc3_phase_enabled()") ||
+            !strstr(wout.p, "L_6F654BD0(c);") ||
+            !strstr(wout.p, "wc3_phase_window_full()") ||
             !strstr(wout.p, "wc3_phase_apply_all(c, L_6F654BD0_apply);") ||
             !strstr(wout.p, "L_6F395760(c);") ||
             !strstr(wout.p,
-                    "void L_6F654BD0_apply(CPU *c, unsigned index)")) {
+                    "void L_6F654BD0_apply(CPU *c, unsigned index)") ||
+            !strstr(wout.p, "L_6F39588A_apply(c, index);")) {
             fprintf(stderr, "self-test phase wrapper output missing\n%s\n",
                     wout.p);
             return 1;
@@ -1881,7 +2123,7 @@ int main(int argc, char **argv)
     size_t expected_triangle = 1;
     size_t expected_dispatch = 1;
     size_t expected_phase = 1;
-    size_t expected_phase_chain = 18;
+    size_t expected_phase_chain = 19;
     int quiet = 0;
     int vertex = 0;
     int triangle = 0;

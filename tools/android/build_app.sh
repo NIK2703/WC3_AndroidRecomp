@@ -415,14 +415,13 @@ configure=(
     "-DWC3_ADRENOTOOLS_TRUST_MANIFEST=$([ -f "$adrenotools_dir/source-build.json" ] && echo ON || echo OFF)"
     "-DWC3_LD_PATH=$ld_path"
 )
-# The debug package keeps the post-lift pass enabled so it carries the
-# WC3_DEBUG_PERF vertex dispatch counter.  The existing parallel paths are
-# included by the same pass but remain behind the runtime parallelExecution
-# switch, which defaults off.  Release stays on the exact serial corpus.
-# Appended before the user --cmake-args so an explicit override still wins.
-if [ "$is_debug" = 1 ]; then
-    configure+=(-DWC3_PARALLEL_RAYCAST=ON)
-fi
+# Keep the original serial corpus for every variant.  The post-lift parallel
+# pass rewrites guest call sites (raycast/vertex/triangle/phase); with the pass
+# off the generated C keeps the untouched lifted calls and the game executes
+# the sequential path.  This is passed explicitly so a stale ON in the CMake
+# cache cannot re-enable it.  Use --cmake-args "-DWC3_PARALLEL_RAYCAST=ON" only
+# for an explicit parallel experiment.
+configure+=(-DWC3_PARALLEL_RAYCAST=OFF)
 [ "${#cmake_args[@]}" -gt 0 ] && configure+=("${cmake_args[@]}")
 
 echo "[app] ndk     $ndk"

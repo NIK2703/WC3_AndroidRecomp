@@ -10,6 +10,9 @@
 /out/
 /gen/
 /runtime/guest/generated/
+# Retired patch overlays and work trees are build output, never source.
+*.stale-*
+.work.stale-*
 /runtime/gfx/dxvk_*/build/
 /apps/android_gameactivity/build/
 /apps/android_gameactivity/app/build/
@@ -33,11 +36,21 @@
 *.ilk
 /third_party/softfloat/build-host/
 
-# --- caches -----------------------------------------------------------------
+# --- caches and editor leftovers --------------------------------------------
 __pycache__/
 *.pyc
 .pytest_cache/
 .mypy_cache/
+*.idsig
+*.profraw
+*.gcda
+*.gcno
+*.hprof
+*.orig
+*.rej
+*~
+.DS_Store
+Thumbs.db
 
 # --- generated reports (regenerate with the tools) --------------------------
 /reports/

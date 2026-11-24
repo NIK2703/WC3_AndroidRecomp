@@ -159,6 +159,15 @@ static inline int wc3_dt_field_drag_keep(Wc3DirectTouchRoute route,
     return drag_active || route == WC3_DIRECT_TOUCH_ROUTE_FIELD;
 }
 
+/* True when (x,y) is farther from (from_x,from_y) than the slop radius. */
+static inline int wc3_dt_past_slop(float from_x, float from_y,
+                                   float x, float y, float slop)
+{
+    const float dx = x - from_x;
+    const float dy = y - from_y;
+    return dx * dx + dy * dy > slop * slop;
+}
+
 typedef enum {
     WC3_DT_INTENT_NONE = 0,
     WC3_DT_INTENT_SELECT_UNIT,
@@ -237,9 +246,7 @@ static inline int wc3_dt_command_moved(float down_x, float down_y,
                                        float up_x, float up_y,
                                        float slop)
 {
-    const float dx = up_x - down_x;
-    const float dy = up_y - down_y;
-    return dx * dx + dy * dy > slop * slop;
+    return wc3_dt_past_slop(down_x, down_y, up_x, up_y, slop);
 }
 
 /*

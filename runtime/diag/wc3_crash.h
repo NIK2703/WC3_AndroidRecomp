@@ -5,8 +5,9 @@
  * path calls wc3_crash_emit() once; it copies the current log and a short
  * report to the public Download directory, and mirrors the report to logcat.
  * A normal game exit calls wc3_crash_export_log(), which copies the same log
- * to Download without a report.  Nothing is written to public storage before
- * the game ends.
+ * to Download without a report.  The Android activity calls it from onDestroy
+ * as well: a recents swipe can kill the process before android_main resumes.
+ * Nothing is written to public storage before the game ends.
  */
 #ifndef WC3_CRASH_H
 #define WC3_CRASH_H

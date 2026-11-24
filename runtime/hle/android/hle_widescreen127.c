@@ -25,10 +25,16 @@
  * The link uses --wrap so neither the generated dispatcher nor the generated
  * corpus is edited.
  */
+#include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "host.h"
+
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+#include "parallel_phase.h"
+#endif
 
 #ifdef __ANDROID__
 /* This file lives in runtime/host; the Android build's common flags do not
@@ -112,6 +118,46 @@ void __wrap_L_6F126E30(CPU *c)
     m[0] /= factor;
 }
 
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+/* HP-bar trace for the deferred-postfix investigation.  The first 512 builds
+ * are logged; WC3_HPBAR_TRACE=1 removes the budget and WC3_HPBAR_TRACE=0
+ * disables it.  The mode field says whether the build ran in the serial path,
+ * inside the collect prefix, or inside the phase apply. */
+static int hpb_trace_left = -1;
+
+static int hpb_trace_take(void)
+{
+    if (hpb_trace_left < 0) {
+        const char *s = getenv("WC3_HPBAR_TRACE");
+        if (s && s[0] == '0' && s[1] == '\0')
+            hpb_trace_left = 0;
+        else if (s && s[0] == '1' && s[1] == '\0')
+            hpb_trace_left = INT_MAX;
+        else
+            hpb_trace_left = 512;
+    }
+    if (hpb_trace_left <= 0) return 0;
+    hpb_trace_left--;
+    return 1;
+}
+
+static uint32_t hpb_rd32(uint32_t va)
+{
+    return hle_android_guest_ok(va, 4u) ? rd32(va) : 0xFFFFFFFFu;
+}
+
+static void hpb_dump_words(const char *tag, uint32_t va, uint32_t off,
+                           uint32_t n)
+{
+    fprintf(stderr, "%s va=%08x", tag, va);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t a = va + off + i * 4u;
+        fprintf(stderr, " %03x:%08x", off + i * 4u, hpb_rd32(a));
+    }
+    fprintf(stderr, "\n");
+}
+#endif
+
 /* L_6F654E20 is the only direct caller of BuildHPBars.  It receives
  *   ECX       = owner object
  *   [esp+4]   = argument 2 (0 selects the alternate path that does not call
@@ -125,6 +171,9 @@ void __wrap_L_6F654E20(CPU *c)
 {
     uint32_t owner = c->ecx;
     uint32_t arg2 = rd32(c->esp + 4);
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    uint32_t arg3 = rd32(c->esp + 8);
+#endif
 
     __real_L_6F654E20(c);
 
@@ -140,11 +189,55 @@ void __wrap_L_6F654E20(CPU *c)
         return;
 
     float factor = widescreen_factor_logged();
+    float *value = (float *)guest_host_ptr(frame + 0x58);
+
+#if WC3_DEBUG && WC3_DEBUG_PARALLEL
+    float before = *value;
+    if (factor != 1.0f)
+        *value = before / factor;
+
+    if (hpb_trace_take()) {
+        unsigned apply = wc3_phase_apply_index();
+        unsigned count = wc3_phase_count();
+        const char *mode = apply ? "apply"
+                                 : (wc3_phase_armed() ? "collect" : "serial");
+        fprintf(stderr,
+                "[hpb] mode=%s req=%u count=%u full=%d owner=%08x "
+                "arg2=%08x arg3=%08x bars=%08x frame=%08x "
+                "f58=%.6f->%.6f factor=%.6f caller=%p\n",
+                mode, apply, count, wc3_phase_window_full(), owner, arg2,
+                arg3, bars, frame, before, *value, factor,
+                __builtin_return_address(0));
+        hpb_dump_words("[hpb-frame]", frame, 0x000u, 0x20u);
+        hpb_dump_words("[hpb-frame]", frame, 0x080u, 0x20u);
+        hpb_dump_words("[hpb-frame]", frame, 0x100u, 0x16u);
+        hpb_dump_words("[hpb-bars]", bars, 0x000u, 0x04u);
+        hpb_dump_words("[hpb-owner]", owner, 0x000u, 0x08u);
+        fprintf(stderr,
+                "[hpb-owner] owner=%08x +50=%08x +280=%08x +284=%08x "
+                "+288=%08x +28c=%08x\n",
+                owner, hpb_rd32(owner + 0x50), hpb_rd32(owner + 0x280),
+                hpb_rd32(owner + 0x284), hpb_rd32(owner + 0x288),
+                hpb_rd32(owner + 0x28C));
+        hpb_dump_words("[hpb-owner2]", owner, 0x000u, 0x18u);
+        {
+            uint32_t sp = hpb_rd32(owner + 0x48u);
+            fprintf(stderr, "[hpb-sp] owner=%08x sp=%08x\n", owner, sp);
+            if (sp && sp != 0xFFFFFFFFu)
+                hpb_dump_words("[hpb-spd]", sp, 0x000u, 0x04u);
+        }
+        fprintf(stderr,
+                "[hpb-glob] ef6c=%08x ffc4=%08x 4470=%08x d687a8=%08x "
+                "d68610=%08x d6aac8=%08x\n",
+                hpb_rd32(0x6FA7EF6Cu), hpb_rd32(0x6FA7FFC4u),
+                hpb_rd32(0x6FA84470u), hpb_rd32(0x6FD687A8u),
+                hpb_rd32(0x6FD68610u), hpb_rd32(0x6FD6AAC8u));
+    }
+#else
     if (factor == 1.0f)
         return;
-
-    float *value = (float *)guest_host_ptr(frame + 0x58);
     *value /= factor;
+#endif
 }
 
 /* The 1.27 UI caches the first client rectangle it reads at 0x6FD3D3F8 and

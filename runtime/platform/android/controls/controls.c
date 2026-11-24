@@ -171,6 +171,8 @@ static void direct_touch_trace_gate(const char *name,
     do { \
         WC3_CTRL_LOG("dt route-out => %s (%s)", \
                      direct_route_name(route), (reason)); \
+        wc3_direct_touch_debug_log("gate => %s (%s)", \
+                                   direct_route_name(route), (reason)); \
         return (route); \
     } while (0)
 #else
@@ -839,22 +841,28 @@ static int direct_touch_command_contains(float x, float y) {
 }
 
 /*
- * Decide who owns a non-overlay touch.  In FULL direct mode the legacy
- * engine is only for overlay elements: a battlefield touch in CSelectMode
- * uses the semantic recognizer, and every other touch (native HUD, menu,
+ * Decide who owns a non-overlay touch.  Direct mode never hands a game touch
+ * to the legacy overlay engine: a battlefield touch in CSelectMode uses the
+ * semantic recognizer, and every other game touch (native HUD, menu,
  * targeting/placement) is forwarded as raw pointer phases to the guest-side
- * native mouse path.  The guest publishes the route lock-free; the input
- * thread never calls guest code.
+ * native mouse path.  The only LEGACY result is an authored overlay control,
+ * which is an app action, not game input.  The guest publishes the route
+ * lock-free; the input thread never calls guest code.  A LEGACY snapshot is
+ * not a field hint: it means the guest has no live CGameUI, so the touch is
+ * native (the HLE resolves the map-load race on release).
  */
 static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
-    if (!g_initialized || !g_direct_touch_enabled || !g_direct_touch.sink) {
-        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_LEGACY, "not-ready");
-    }
-    if (g_overlay_mode != WC3_OVERLAY_MODE_FULL) {
-        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_LEGACY, "overlay-mode");
+    if (!g_direct_touch_enabled) {
+        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_LEGACY, "disabled");
     }
     if (direct_touch_ui_contains(x, y)) {
         DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_LEGACY, "overlay-element");
+    }
+    /* A missing sink or an uninitialised recognizer means the semantic FIELD
+     * path is not available yet.  Raw native phases are still safe and keep
+     * the game touch out of the legacy engine. */
+    if (!g_initialized || !g_direct_touch.sink) {
+        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "direct-not-ready");
     }
     /* A NULL gate is the unit-test/host-only mode: preserve the phase-1
      * semantic field behavior. */
@@ -887,7 +895,16 @@ static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
     }
 #endif
     if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) {
-        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_LEGACY, "gate-legacy");
+        /* LEGACY from the guest means it has no live CGameUI: startup, a
+         * loading screen or the main menu.  The main menu uses the same
+         * rectangle as the battlefield, so geometry cannot turn this into a
+         * FIELD gesture.  Direct mode forwards every game touch as raw native
+         * pointer phases; the HLE resolves a live FIELD at release when the
+         * published snapshot was only one pump stale, and otherwise posts the
+         * native menu click.  Overlay elements and a disabled recognizer have
+         * already returned above, so this cannot intercept an authored
+         * control. */
+        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "snapshot-native");
     }
     /* The portrait, minimap and beacon button are native panels, but the
      * portrait frame has no click action of its own and the minimap drag must
@@ -918,7 +935,10 @@ static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
         DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE,
                         "gate-native-or-outside-field");
     }
-    DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_LEGACY, "fallback");
+    /* PORTRAIT/MINIMAP were not claimed by their geometric gates (for
+     * example, the frame is not published yet).  The guest still owns the
+     * click; native phases are the only non-legacy route. */
+    DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "gate-native");
 }
 
 static void direct_touch_configure(int width, int height,
@@ -1089,6 +1109,19 @@ static int direct_touch_begin(int pointer_id, float x, float y,
                  direct_owner_portrait_active(),
                  wc3_direct_touch_field_drag_active(&g_direct_touch),
                  wc3_direct_touch_active_count(&g_direct_touch));
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_direct_touch_debug_log("route ptr=%d px=%.1f,%.1f route=%s "
+                               "native=%d portrait=%d field_drag=%d "
+                               "active=%d event_t=%llu",
+                               pointer_id, x, y, direct_route_name(route),
+                               direct_owner_native_gesture(),
+                               direct_owner_portrait_active(),
+                               wc3_direct_touch_field_drag_active(
+                                   &g_direct_touch),
+                               wc3_direct_touch_active_count(
+                                   &g_direct_touch),
+                               (unsigned long long)event_time_ms);
+#endif
 
     if (direct_owner_native_gesture()) {
         /* Native HUD gestures are single-pointer.  Swallow the extra pointer
@@ -1205,6 +1238,14 @@ static void direct_touch_clamp_minimap(float *x, float *y,
 
 int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
                        uint64_t event_time_ms) {
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    if (phase != WC3_TOUCH_MOVE) {
+        wc3_direct_touch_debug_log(
+            "controls phase=%d ptr=%d px=%.1f,%.1f event_t=%llu",
+            (int)phase, pointer_id, x, y,
+            (unsigned long long)event_time_ms);
+    }
+#endif
     if (phase == WC3_TOUCH_CANCEL) {
         controls_cancel_all();
         return 0;
@@ -1227,6 +1268,13 @@ int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
                              pointer_id, x, y,
                              direct_owner_name(owner->owner),
                              owner->last_x, owner->last_y);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+                wc3_direct_touch_debug_log(
+                    "owner-up ptr=%d px=%.1f,%.1f owner=%s last=%.1f,%.1f "
+                    "event_t=%llu", pointer_id, x, y,
+                    direct_owner_name(owner->owner), owner->last_x,
+                    owner->last_y, (unsigned long long)event_time_ms);
+#endif
             } else if (owner->owner == DIRECT_OWNER_IGNORED ||
                        owner->owner == DIRECT_OWNER_VENDOR) {
                 WC3_CTRL_LOG("dt move ptr=%d px=%.1f,%.1f owner=%s",

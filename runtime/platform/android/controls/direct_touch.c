@@ -1,14 +1,78 @@
+#include "wc3_debug.h"
 #include "direct_touch.h"
 
 #include <math.h>
 #include <string.h>
 
-#include "wc3_debug.h"
-
 #if WC3_DEBUG && WC3_DEBUG_INPUT
 #include <android/log.h>
+#include <pthread.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
 #define DT_LOG(...) \
     __android_log_print(ANDROID_LOG_INFO, "Wc3DirectTouch", __VA_ARGS__)
+
+/*
+ * Debug-only touch trace.  logcat is a ring buffer and the controls logger
+ * runs on the input thread; this file survives a long menu/map session and
+ * records the raw DOWN/UP plus every semantic event, so a tap that produces
+ * no HLE event can still be seen.  Only opened when WC3_DATA_DIR is set.
+ */
+static FILE *g_touch_log;
+static int g_touch_log_failed;
+/* The input thread starts before wc3_app_boot_start() publishes
+ * WC3_DATA_DIR, so a menu touch can arrive first.  Do not latch a
+ * pthread_once on that missing variable: retry until boot sets it.  The
+ * lock covers file I/O only and is never held across a guest call. */
+static pthread_mutex_t g_touch_log_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void touch_ensure_log_locked(void)
+{
+    const char *dir;
+    char path[1024];
+
+    if (g_touch_log || g_touch_log_failed) return;
+    dir = getenv("WC3_DATA_DIR");
+    if (!dir || !*dir) return;
+    snprintf(path, sizeof(path), "%s/touch_trace.txt", dir);
+    g_touch_log = fopen(path, "w");
+    if (!g_touch_log) {
+        g_touch_log_failed = 1;
+        return;
+    }
+    setvbuf(g_touch_log, NULL, _IOLBF, 0);
+    fprintf(g_touch_log, "[touch] trace start\n");
+}
+
+static uint64_t touch_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000u +
+           (uint64_t)(ts.tv_nsec / 1000000);
+}
+
+void wc3_direct_touch_debug_log(const char *fmt, ...)
+{
+    va_list ap;
+
+    pthread_mutex_lock(&g_touch_log_lock);
+    touch_ensure_log_locked();
+    if (g_touch_log) {
+        va_start(ap, fmt);
+        fprintf(g_touch_log, "[touch] t=%llu ",
+                (unsigned long long)touch_now_ms());
+        vfprintf(g_touch_log, fmt, ap);
+        fputc('\n', g_touch_log);
+        va_end(ap);
+    }
+    pthread_mutex_unlock(&g_touch_log_lock);
+}
+
+#define TOUCH_LOG(...) wc3_direct_touch_debug_log(__VA_ARGS__)
 
 static const char *dt_route_name(uint32_t route)
 {
@@ -56,6 +120,7 @@ static const char *dt_mode_name(uint8_t mode)
 }
 #else
 #define DT_LOG(...) ((void)0)
+#define TOUCH_LOG(...) ((void)0)
 #endif
 
 static float clamp01(float value)
@@ -83,6 +148,16 @@ static void emit_event(Wc3DirectTouch *dt, Wc3DirectTouchKind kind,
            dt_kind_name((uint32_t)kind), (unsigned)kind, pointer_id, x, y,
            event.x, event.y, dt_route_name(route),
            (unsigned long long)now_ms);
+    /* Keep the file focused on contacts; the HLE trace already records the
+     * move stream, and a camera drag can otherwise produce thousands of
+     * lines. */
+    if (kind != WC3_DIRECT_TOUCH_POINTER_MOVE) {
+        TOUCH_LOG("emit kind=%s(%u) ptr=%d px=%.1f,%.1f n=%.4f,%.4f "
+                  "route=%s event_t=%llu",
+                  dt_kind_name((uint32_t)kind), (unsigned)kind, pointer_id,
+                  x, y, event.x, event.y, dt_route_name(route),
+                  (unsigned long long)now_ms);
+    }
     dt->sink(&event, dt->user);
 }
 
@@ -138,6 +213,11 @@ static void arm_hold(Wc3DirectTouch *dt, Wc3DirectTouchPointer *pointer,
      * release posts the matching UP.  A stationary release is therefore a
      * native click that selects one unit. */
     DT_LOG("hold ptr=%d -> SELECT_BEGIN", pointer->pointer_id);
+    TOUCH_LOG("hold ptr=%d -> SELECT_BEGIN n=%.4f,%.4f event_t=%llu",
+              pointer->pointer_id,
+              dt->width > 0.0f ? x / dt->width : 0.0f,
+              dt->height > 0.0f ? y / dt->height : 0.0f,
+              (unsigned long long)now_ms);
     emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN, pointer->pointer_id,
                x, y, now_ms, pointer->route);
 }
@@ -218,6 +298,13 @@ void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
 
     DT_LOG("down ptr=%d px=%.1f,%.1f route=%s active_before=%d",
            pointer_id, x, y, dt_route_name(route), active_count(dt));
+    TOUCH_LOG("down ptr=%d px=%.1f,%.1f n=%.4f,%.4f route=%s "
+              "active_before=%d event_t=%llu",
+              pointer_id, x, y,
+              dt->width > 0.0f ? x / dt->width : 0.0f,
+              dt->height > 0.0f ? y / dt->height : 0.0f,
+              dt_route_name(route), active_count(dt),
+              (unsigned long long)now_ms);
 
     Wc3DirectTouchPointer *pointer = find_pointer(dt, pointer_id);
     if (pointer) {
@@ -393,6 +480,16 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
                           now_ms - pointer->down_ms >= timeout;
     DT_LOG("up-state ptr=%d moved_sq=%.1f threshold_sq=%.1f held_long=%d",
            pointer_id, moved_sq, drag_threshold_sq(dt), held_long);
+    TOUCH_LOG("up ptr=%d px=%.1f,%.1f n=%.4f,%.4f route=%s mode=%s "
+              "multi=%d long_fired=%d moved_sq=%.1f threshold_sq=%.1f "
+              "held_long=%d event_t=%llu",
+              pointer_id, x, y,
+              dt->width > 0.0f ? x / dt->width : 0.0f,
+              dt->height > 0.0f ? y / dt->height : 0.0f,
+              dt_route_name(pointer->route), dt_mode_name(pointer->mode),
+              pointer->multi, pointer->long_fired, moved_sq,
+              drag_threshold_sq(dt), held_long,
+              (unsigned long long)now_ms);
 
     switch (pointer->mode) {
     case WC3_DIRECT_TOUCH_FIELD_CAMERA:
@@ -420,9 +517,9 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
                 emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END,
                            pointer_id, x, y, now_ms, pointer->route);
             } else if (moved_sq <= drag_threshold_sq(dt)) {
-                /* A fast flick can arrive as DOWN+UP with no MOVE at all;
-                 * the release point must still be inside the legacy drag
-                 * threshold. */
+                /* A flick can arrive as DOWN+UP with no MOVE: the release
+                 * point must still be inside the tap slop, otherwise the tap
+                 * is dropped. */
                 DT_LOG("up ptr=%d PENDING -> TAP", pointer_id);
                 emit_event(dt, WC3_DIRECT_TOUCH_TAP, pointer_id, x, y,
                            now_ms, pointer->route);
@@ -444,6 +541,9 @@ void wc3_direct_touch_reset(Wc3DirectTouch *dt)
         if (!pointer->active) continue;
         DT_LOG("reset ptr=%d route=%s mode=%s", pointer->pointer_id,
                dt_route_name(pointer->route), dt_mode_name(pointer->mode));
+        TOUCH_LOG("reset ptr=%d route=%s mode=%s", pointer->pointer_id,
+                  dt_route_name(pointer->route),
+                  dt_mode_name(pointer->mode));
         if (pointer->route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
             emit_event(dt, WC3_DIRECT_TOUCH_HOLD_RELEASE, pointer->pointer_id,
                        pointer->last_x, pointer->last_y, 0, pointer->route);

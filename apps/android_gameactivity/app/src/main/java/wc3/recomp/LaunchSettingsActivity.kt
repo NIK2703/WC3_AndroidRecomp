@@ -441,23 +441,27 @@ class LaunchSettingsActivity : AppCompatActivity() {
         updateGestureModeHint()
     }
 
-    /* The core table is the only parallel control.  Two or more selected
-     * cells enable the worker pool; one selected cell keeps the guest
-     * sequential.  The default is the most performant allowed CPU, so a fresh
-     * install starts without parallelism and pins the main thread there. */
+    /* The core table is a single-choice main-thread affinity.  The selected
+     * cell pins the guest main thread and there is no worker list.  The
+     * default is the most performant allowed CPU, so a fresh install starts
+     * sequential and pins the main thread there. */
     private fun bindCpuCores(saved: List<Int>) {
         parallelCpuGrid.removeAllViews()
         cpuCoreCells.clear()
 
         val availableIds = availableCpuCores.map { it.id }.toSet()
         val savedIds = saved.filter { it in availableIds }.toSet()
-        val selected = if (savedIds.isEmpty()) {
-            CpuTopology.pickBest(availableCpuCores)
-                ?.let { setOf(it.id) }
-                .orEmpty()
+        /* One cell is the main-thread core.  An old multi-core preference is
+         * collapsed to its most performant member so the serial product never
+         * starts with a worker list. */
+        val selectedId = if (savedIds.isEmpty()) {
+            CpuTopology.pickBest(availableCpuCores)?.id
         } else {
-            savedIds
+            CpuTopology.pickBest(
+                availableCpuCores.filter { it.id in savedIds }
+            )?.id ?: savedIds.minOrNull()
         }
+        val selected = selectedId?.let { setOf(it) }.orEmpty()
 
         /* Two rows, not two columns: all cores fill the first row and spill
          * into the second one.  The column count is derived from the core
@@ -512,18 +516,10 @@ class LaunchSettingsActivity : AppCompatActivity() {
     }
 
     private fun toggleCpuCore(cell: TextView) {
-        if (cell.isSelected) {
-            if (selectedCpuCores().size <= 1) {
-                Toast.makeText(
-                    this,
-                    R.string.launch_cpu_cores_required,
-                    Toast.LENGTH_SHORT
-                ).show()
-                return
-            }
-            cell.isSelected = false
-        } else {
-            cell.isSelected = true
+        /* Single choice: the selected cell is the main-thread affinity.
+         * Clicking the current cell keeps it; clicking another moves it. */
+        for (other in cpuCoreCells) {
+            other.isSelected = other === cell
         }
         updateParallelCpuHint()
         refreshValidation()
@@ -546,19 +542,11 @@ class LaunchSettingsActivity : AppCompatActivity() {
             parallelCpuHint.text = getString(R.string.launch_cpu_cores_required)
             return
         }
-        val mainCpu = CpuTopology.pickBest(
-            availableCpuCores.filter { it.id in selected }
-        )?.id ?: selected.maxOrNull() ?: return
-        parallelCpuHint.text = if (selected.size <= 1) {
-            getString(R.string.launch_cpu_cores_single, mainCpu)
-        } else {
-            getString(
-                R.string.launch_cpu_cores_hint,
-                selected.size,
-                availableCpuCores.size,
-                mainCpu
-            )
-        }
+        val mainCpu = selected.first()
+        parallelCpuHint.text = getString(
+            R.string.launch_cpu_cores_single,
+            mainCpu
+        )
     }
 
     private fun dp(value: Int): Int =

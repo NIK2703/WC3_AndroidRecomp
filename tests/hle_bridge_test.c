@@ -215,7 +215,7 @@ void hle_android_mouse_move_delta(int dx, int dy)
     g_mouse_dy = dy;
 }
 
-void hle_android_mouse_button_ex(int button, int down)
+void hle_android_guest_mouse_button(int button, int down)
 {
     g_mouse_button_ex = (button << 1) | (down ? 1 : 0);
 }

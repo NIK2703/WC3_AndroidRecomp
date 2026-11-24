@@ -1865,6 +1865,12 @@ def test_file_layout() -> int:
                 "--strict"])
 
 
+def test_no_junk() -> int:
+    """Reject tracked runtime artifacts, caches, and oversized dumps."""
+    return run([sys.executable, str(ROOT / "tools" / "check_no_junk.py"),
+                "--tracked"])
+
+
 def test_docs() -> int:
     """R11: index/link/policy checks; full path inventory arrives with M6."""
     return run([sys.executable, str(ROOT / "tools" / "check_docs.py")])
@@ -3657,7 +3663,97 @@ def test_overlay() -> int:
     return 0
 
 
+def test_native_press_barrier() -> int:
+    """T0: Native Input Gateway is the only way touch code can press a button.
+
+    The gateway has no synchronous press path and no per-gesture defer flag:
+    every press is published from the idle GetCursorPos pass, behind the
+    dispatched move.  The camera triplet keeps its own LEFT UP cleanup; a
+    normal press does not.  Direct touch has no raw button-posting API at
+    all.  A future
+    fast path or menu-only special case would reintroduce the whole "first tap
+    after the panel is idle" class, so that shape is part of the contract.
+    """
+    def strip_comments(text: str) -> str:
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        return re.sub(r"//[^\n]*", "", text)
+
+    dt = strip_comments(
+        (ROOT / "runtime" / "hle" / "android" / "hle_direct_touch.c")
+        .read_text(encoding="utf-8", errors="replace"))
+    ha = strip_comments(
+        (ROOT / "runtime" / "hle" / "android" / "hle_android.c")
+        .read_text(encoding="utf-8", errors="replace"))
+    hdr = strip_comments(
+        (ROOT / "runtime" / "hle" / "android" / "hle_android.h")
+        .read_text(encoding="utf-8", errors="replace"))
+    bridge = strip_comments(
+        (ROOT / "runtime" / "hle" / "hle_bridge.c")
+        .read_text(encoding="utf-8", errors="replace"))
+    gateway_hdr = strip_comments(
+        (ROOT / "runtime" / "hle" / "android" / "native_input_gateway.h")
+        .read_text(encoding="utf-8", errors="replace"))
+    private_hdr = (ROOT / "runtime" / "hle" / "android"
+                   / "hle_android_mouse_private.h")
+
+    forbidden = (
+        "hle_android_mouse_button_ex",
+        "hle_android_mouse_button_down_force",
+        "hle_android_mouse_button(",
+        "hle_android_mouse_move_defer_down",
+        "u_msg_post",
+    )
+    errors: list[str] = []
+    for token in forbidden:
+        if token in dt:
+            errors.append(f"hle_direct_touch.c posts a button directly: {token}")
+    for token in ("hle_android_mouse_button_ex",
+                  "hle_android_mouse_button_down_force",
+                  "hle_android_mouse_move_defer_down"):
+        if token in hdr:
+            errors.append(f"hle_android.h exposes a bypass: {token}")
+    for token in ("g_pending_action", "pending_arm_locked(&g_pending_action",
+                  "hle_android_mouse_press",
+                  "hle_android_guest_mouse_button"):
+        if token not in ha:
+            errors.append(f"hle_android.c lost gateway primitive: {token}")
+    # The architecture has no synchronous press path and no menu/HUD-only
+    # special case.  A future "fast path" or a second pending slot would
+    # reintroduce the whole class.
+    for token in ("g_hot_control_dirty", "g_pending_down", "g_pending_press",
+                  "g_pending_camera", "g_native_synthetic",
+                  "dt_native_ui_pointer", "dt_native_pointer_impl",
+                  "defer_down)"):
+        if token in dt or token in ha:
+            errors.append(f"gateway bypass reintroduced: {token}")
+    if "hle_android_guest_mouse_button" not in bridge:
+        errors.append("hle_bridge.c must use the legacy-only button boundary")
+    # Compile-time boundary: raw mouse posting is not visible through the
+    # public header or the gateway; it lives only in the private header.
+    if not private_hdr.is_file():
+        errors.append("hle_android_mouse_private.h is missing")
+    if "native_input_gateway.h" not in hdr:
+        errors.append("hle_android.h must expose only the gateway")
+    for token in ("hle_android_mouse_move_delta", "hle_android_mouse_button(",
+                  "hle_android_guest_mouse_button", "hle_android_mouse_wheel"):
+        if token in hdr or token in gateway_hdr:
+            errors.append(f"raw mouse API leaked into public surface: {token}")
+    for token in ("hle_android_mouse_press", "hle_android_mouse_press_replay",
+                  "hle_android_mouse_move", "hle_android_mouse_button_up_force"):
+        if token not in gateway_hdr:
+            errors.append(f"gateway header lost primitive: {token}")
+    if "hle_android_mouse_private.h" in dt:
+        errors.append("direct touch must not include the raw mouse header")
+    if errors:
+        for line in errors:
+            print(f"native-press-barrier: {line}", file=sys.stderr)
+        return 1
+    print("native-press-barrier: single press entry point, no touch-side bypass")
+    return 0
+
+
 TESTS = {
+    "native_press_barrier": test_native_press_barrier,
     "cpu_helpers": test_cpu_helpers,
     "cpu_selftest": test_cpu_selftest,
     "grid_pattern": test_grid_pattern,
@@ -3747,6 +3843,7 @@ TESTS = {
     "input_adapter": test_input_adapter,
     "overlay": test_overlay,
     "file_layout": test_file_layout,
+    "no_junk": test_no_junk,
     "docs": test_docs,
     "upstream_pin": test_upstream_pin,
     "layout": test_layout,

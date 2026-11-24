@@ -119,12 +119,13 @@ void wc3_sel_group_sort(uint32_t group);
  * returned unchanged, so the 12-unit profile and the exact 1.27 behaviour
  * stay bit-identical.  The table only has 13 entries per block and is
  * followed by a vtable, so the 13..40 columns are defined here: the compact
- * mode continues its constant 3, the grid mode continues the three-row shape
- * with ceil(count / 3) for 13..24 (13..15 -> 5, 16..18 -> 6, 19..21 -> 7,
- * 22..24 -> 8) and the four-row shape with ceil(count / 4) for 25..40
- * (25..28 -> 7, 29..32 -> 8, 33..36 -> 9, 37..40 -> 10).  The value is a row
- * length: the order loop clamps it to the units left, so every value >= 1
- * advances the loop.
+ * mode uses the ready 3x4 / 4x6 / 5x8 grids (4 columns for 13..24 and 5 for
+ * 25..40, with the original table's 3 columns up to 12), the grid mode
+ * continues the three-row shape with ceil(count / 3) for 13..24 (13..15 -> 5,
+ * 16..18 -> 6, 19..21 -> 7, 22..24 -> 8) and the four-row shape with
+ * ceil(count / 4) for 25..40 (25..28 -> 7, 29..32 -> 8, 33..36 -> 9,
+ * 37..40 -> 10).  The value is a row length: the order loop clamps it to the
+ * units left, so every value >= 1 advances the loop.
  */
 uint32_t wc3_sel_formation_columns(uint32_t index, uint32_t count,
                                      uint32_t pair);

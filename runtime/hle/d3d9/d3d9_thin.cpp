@@ -40,6 +40,7 @@
 
 #include "d3d9_thin.h"
 #include "d3d9_thin_iids.h"
+#include "hle_android_mouse_private.h"
 #include "platform.h"
 
 #include <stdio.h>
