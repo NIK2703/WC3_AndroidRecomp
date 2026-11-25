@@ -29,6 +29,8 @@ static void actions_clear(void)
 #define DIRECT_RECORDED 16
 static Wc3DirectTouchKind g_direct_kinds[DIRECT_RECORDED];
 static Wc3DirectTouchRoute g_direct_routes[DIRECT_RECORDED];
+static uint32_t g_direct_pointer_ids[DIRECT_RECORDED];
+static uint64_t g_direct_times[DIRECT_RECORDED];
 static float g_direct_x[DIRECT_RECORDED];
 static float g_direct_y[DIRECT_RECORDED];
 static int g_direct_count;
@@ -39,6 +41,8 @@ static void direct_sink(const Wc3DirectTouchEvent *event, void *user)
     if (!event || g_direct_count >= DIRECT_RECORDED) return;
     g_direct_kinds[g_direct_count] = (Wc3DirectTouchKind)event->kind;
     g_direct_routes[g_direct_count] = (Wc3DirectTouchRoute)event->route;
+    g_direct_pointer_ids[g_direct_count] = event->pointer_id;
+    g_direct_times[g_direct_count] = event->time_ms;
     g_direct_x[g_direct_count] = event->x;
     g_direct_y[g_direct_count] = event->y;
     g_direct_count++;
@@ -79,6 +83,37 @@ static int direct_nth_index(Wc3DirectTouchKind kind, int nth)
         if (g_direct_kinds[i] == kind && nth-- == 0) return i;
     }
     return -1;
+}
+
+static int direct_has_signal(uint32_t vk, int down)
+{
+    for (int i = 0; i < g_direct_count; i++) {
+        if (g_direct_kinds[i] == WC3_DIRECT_TOUCH_KEY_SIGNAL &&
+            g_direct_pointer_ids[i] == vk &&
+            g_direct_routes[i] == (down ? 1u : 0u))
+            return 1;
+    }
+    return 0;
+}
+
+/* The production host installs the legacy X11 table.  The test only needs
+ * the keys this file presses; returning 0 keeps any other key on the old
+ * keyboard path, which is exactly the documented fallback. */
+static int test_key_vk(int keycode, void *user)
+{
+    (void)user;
+    switch (keycode) {
+    case 50: return 0xA0;  /* KEY_SHIFT_L -> VK_LSHIFT */
+    case 37: return 0xA2;  /* KEY_CTRL_L -> VK_LCONTROL */
+    case 111: return 0x26; /* KEY_UP -> VK_UP */
+    case 113: return 0x25; /* KEY_LEFT -> VK_LEFT */
+    case 114: return 0x27; /* KEY_RIGHT -> VK_RIGHT */
+    case 116: return 0x28; /* KEY_DOWN -> VK_DOWN */
+    case 9: return 0x1B;   /* KEY_ESC -> VK_ESCAPE */
+    case 36: return 0x0D;  /* KEY_ENTER -> VK_RETURN */
+    case 10: return 0x31;  /* KEY_1 -> '1' */
+    default: return 0;
+    }
 }
 
 static Wc3DirectTouchRoute route_field(void *user)
@@ -456,6 +491,7 @@ int main(int argc, char **argv)
     controls_set_direct_touch_beacon_gate(beacon_rect, NULL);
     controls_set_direct_touch_command_gate(command_rect, NULL);
     controls_set_direct_touch_enabled(true);
+    controls_set_key_signal_vk_map(test_key_vk, NULL);
 
     const TouchElement *shift_element = find_key(50);
     assert(shift_element);
@@ -466,9 +502,72 @@ int main(int argc, char **argv)
     assert(controls_touch(WC3_TOUCH_UP, 0, shift_element->x,
                           shift_element->y, 5050) == 0);
     controls_tick(5100);
-    assert(has_key(50, 1));
-    assert(has_key(50, 0));
-    assert(g_direct_count == 0);
+    assert(!has_key(50, 1));
+    assert(!has_key(50, 0));
+    assert(direct_has_signal(0xA0, 1)); /* VK_LSHIFT press */
+    assert(direct_has_signal(0xA0, 0)); /* VK_LSHIFT release */
+
+    /* A D-pad arrow is a direct binding signal in direct mode.  It must leave
+     * the keyboard action stream and arrive on the direct-touch queue with
+     * the arrow's VK and the press/release phase. */
+    const TouchElement *dpad = NULL;
+    for (int i = 0; i < g_state.element_count; i++) {
+        if (g_state.elements[i].type == D_PAD) {
+            dpad = &g_state.elements[i];
+            break;
+        }
+    }
+    assert(dpad);
+    const float dpad_x = dpad->x - dpad->hw * 0.9f;
+    const float dpad_y = dpad->y;
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, dpad_x, dpad_y, 5400) == 0);
+    controls_tick(5410);
+    assert(!has_key(111, 1)); /* X11 KEY_LEFT never reaches the HLE */
+    assert(direct_has_signal(0x25, 1)); /* VK_LEFT press */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_UP, 0, dpad_x, dpad_y, 5420) == 0);
+    controls_tick(5430);
+    assert(!has_key(111, 0));
+    assert(direct_has_signal(0x25, 0)); /* VK_LEFT release */
+
+    /* The command-card buttons are key signals too: button 1 is bound to
+     * KEY_1 in the authored profile and must not stay on the keyboard path. */
+    const TouchElement *one = find_key(10);
+    assert(one);
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, one->x, one->y, 5440) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, one->x, one->y, 5450) == 0);
+    controls_tick(5460);
+    assert(!has_key(10, 1));
+    assert(!has_key(10, 0));
+    assert(direct_has_signal('1', 1));
+    assert(direct_has_signal('1', 0));
+
+    /* Long press on that same button fires its alternate binding
+     * KEY_1 + MOD_CTRL.  Both are key bindings, so both must arrive as
+     * direct key signals and neither may reappear in the keyboard stream. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, one->x, one->y, 5500) == 0);
+    controls_tick(5700);
+    assert(!has_key(10, 1));
+    assert(!has_key(37, 1));
+    assert(direct_has_signal(0x31, 1));
+    assert(direct_has_signal(0xA2, 1));
+    int mod_idx = -1;
+    int key_idx = -1;
+    for (int i = 0; i < g_direct_count; i++) {
+        if (g_direct_kinds[i] != WC3_DIRECT_TOUCH_KEY_SIGNAL) continue;
+        if (g_direct_pointer_ids[i] == 0xA2 && mod_idx < 0) mod_idx = i;
+        if (g_direct_pointer_ids[i] == 0x31 && key_idx < 0) key_idx = i;
+    }
+    assert(mod_idx >= 0 && key_idx >= 0 && mod_idx < key_idx);
+    assert(controls_touch(WC3_TOUCH_UP, 0, one->x, one->y, 5750) == 0);
+    controls_tick(5800);
 
     actions_clear();
     direct_clear();
@@ -616,7 +715,8 @@ int main(int argc, char **argv)
     assert(controls_touch(WC3_TOUCH_DOWN, 1, shift_element->x,
                           shift_element->y, 6530) == 0);
     controls_tick(6550);
-    assert(has_key(50, 1));
+    assert(!has_key(50, 1));
+    assert(direct_has_signal(0xA0, 1));
     assert(direct_has_route(WC3_DIRECT_TOUCH_FOLLOW_START,
                             WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
     assert(!direct_has(WC3_DIRECT_TOUCH_HOLD_RELEASE));
@@ -624,7 +724,8 @@ int main(int argc, char **argv)
                           shift_element->y, 6560) == 0);
     assert(controls_touch(WC3_TOUCH_UP, 0, 70.0f, 850.0f, 6570) == 0);
     controls_tick(6580);
-    assert(has_key(50, 0));
+    assert(!has_key(50, 0));
+    assert(direct_has_signal(0xA0, 0));
     assert(direct_has_route(WC3_DIRECT_TOUCH_HOLD_RELEASE,
                             WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
 

@@ -80,7 +80,26 @@ typedef enum {
      * is a later message.  Without it the target mode keeps the previous
      * contact's cursor and the first click after a command card is resolved
      * against the old position.  In select mode this event is ignored. */
-    WC3_DIRECT_TOUCH_FIELD_HOVER = 15
+    WC3_DIRECT_TOUCH_FIELD_HOVER = 15,
+    /* Direct key signal.  In direct mode an overlay key action is removed
+     * from the keyboard action stream and sent here instead.  pointer_id
+     * carries the Windows virtual key and route carries 1 for press and 0
+     * for release.  This covers overlay buttons, their gestures and long
+     * presses alike: every key binding the vendored engine fires goes
+     * through this event.  The guest service invokes its own native signal
+     * for the key (SetKeyState for arrows, the key-binding dispatcher for
+     * other keys), so the action assigned to the key or key combination in
+     * the game fires without a keyboard message. */
+    WC3_DIRECT_TOUCH_KEY_SIGNAL = 16,
+    /* Direct control-group action.  A chord binding from the vendored engine
+     * is [KEY_N, MOD_CTRL] or [KEY_N, MOD_SHIFT].  Instead of publishing the
+     * chord as a modifier state plus a key action, controls publishes one of
+     * these events: pointer_id carries the group number (1..8) and route
+     * carries the action (0 = recall, 1 = store, 2 = add to selection).  The
+     * guest service resolves it in one call to the game's own control-group
+     * action handler; no keyboard message and no separate modifier signal is
+     * involved. */
+    WC3_DIRECT_TOUCH_GROUP_SIGNAL = 17
 } Wc3DirectTouchKind;
 
 /*

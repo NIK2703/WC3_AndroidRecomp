@@ -136,6 +136,15 @@ int wc3_hle_direct_touch_portrait_rect(float *left, float *top,
 int wc3_hle_direct_touch_minimap_rect(float *left, float *top,
                                       float *right, float *bottom);
 
+/* Lock-free snapshot of the minimap's full input area.  It shares the
+ * native frame's left/right/bottom edges but extends the top edge to the
+ * console top, because the visible minimap panel reaches higher than the
+ * frame the native mouse handler accepts.  The controls gate claims touches
+ * in this rectangle; the guest service maps their coordinates back into the
+ * native frame before posting mouse messages. */
+int wc3_hle_direct_touch_minimap_input_rect(float *left, float *top,
+                                            float *right, float *bottom);
+
 /* Lock-free snapshot of the visible beacon button (MinimapSignal) frame,
  * same contract as the portrait rectangle.  The controls layer forces a touch
  * that starts inside it to the raw NATIVE route so the guest beacon gesture

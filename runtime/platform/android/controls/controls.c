@@ -46,6 +46,22 @@ void udp_mouse_send(int flags, int dx, int dy, int wheel) {
 
 static Wc3ActionSink g_sink;
 static void *g_sink_user;
+/*
+ * In direct mode the authored overlay is not a keyboard emulator.  A key
+ * action from an overlay element is removed from the keyboard stream and
+ * republished as WC3_DIRECT_TOUCH_KEY_SIGNAL, so the guest fires whatever
+ * action the player bound to that key.  The VK map is installed by the host
+ * from the same X11 table the legacy path uses.
+ */
+static Wc3KeyVkMap g_key_vk_map;
+static void *g_key_vk_user;
+static uint64_t g_last_event_ms;
+
+void controls_set_key_signal_vk_map(Wc3KeyVkMap map, void *user)
+{
+    g_key_vk_map = map;
+    g_key_vk_user = user;
+}
 static char *g_profile_json;
 static ProfileData *g_profile_full;
 static ProfileData *g_profile_simple;
@@ -243,6 +259,58 @@ int controls_opacity_percent(void) {
 /* A move delivered by the engine, but not yet followed by an LMB press. */
 static bool g_pointer_move_pending;
 
+/* Publish a key signal to the guest instead of letting it reach the keyboard
+ * HLE.  The event queue is the same one used by direct touch, so the guest
+ * service stays the only thread that calls into the body. */
+static bool emit_key_signal(int vk, int down, uint64_t time_ms)
+{
+    if (!g_direct_touch_enabled || !g_direct_touch.sink || !vk) return false;
+    Wc3DirectTouchEvent event;
+    memset(&event, 0, sizeof(event));
+    event.kind = WC3_DIRECT_TOUCH_KEY_SIGNAL;
+    event.pointer_id = (uint32_t)vk;
+    event.route = down ? 1u : 0u;
+    event.time_ms = time_ms;
+    g_direct_touch.sink(&event, g_direct_touch.user);
+    return true;
+}
+
+static bool signal_is_modifier(int vk)
+{
+    return vk == 0x10 || vk == 0x11 || vk == 0x12 ||
+           (vk >= 0xA0 && vk <= 0xA5);
+}
+
+/* The overlay profile binds long presses and gestures as KEY_N + MOD_CTRL /
+ * MOD_SHIFT.  Those are not three independent inputs: they name one game
+ * action (assign / add to control group N).  KEY_1..KEY_8 are keycodes
+ * 10..17 in the vendored engine's table. */
+static int group_of_keycode(int keycode)
+{
+    return (keycode >= 10 && keycode <= 17) ? keycode - 9 : 0;
+}
+
+static int modifier_action_of_keycode(int keycode)
+{
+    if (keycode == 37 || keycode == 105) return 1; /* MOD_CTRL  */
+    if (keycode == 50 || keycode == 62) return 2;  /* MOD_SHIFT */
+    return 0;
+}
+
+static bool emit_group_signal(int group, int action, uint64_t time_ms)
+{
+    if (!g_direct_touch_enabled || !g_direct_touch.sink || !group) return false;
+    Wc3DirectTouchEvent event;
+    memset(&event, 0, sizeof(event));
+    event.kind = WC3_DIRECT_TOUCH_GROUP_SIGNAL;
+    event.pointer_id = (uint32_t)group;
+    /* route = 0 recall, 1 store (Ctrl), 2 add-to-selection (Shift). */
+    event.route = (uint32_t)action;
+    event.time_ms = time_ms;
+    g_direct_touch.sink(&event, g_direct_touch.user);
+    return true;
+}
+
 /*
  * The vendored engine can release the same binding twice, and can schedule
  * two presses of the same binding without an intervening release (second
@@ -253,8 +321,40 @@ static bool g_pointer_move_pending;
 static void emit_actions(const TouchActionResult *result) {
     if (!g_sink || !result || result->count <= 0) return;
 
+    /* In direct mode every key action produced by the vendored engine is a
+     * binding signal.  Field contacts never reach that engine, so this covers
+     * both the overlay buttons and the gestures bound on them. */
+    const bool overlay_keys =
+        g_direct_touch_enabled && g_key_vk_map && g_direct_touch.sink;
+
     TouchAction filtered[MAX_TOUCH_RESULT_ACTIONS];
     int filtered_count = 0;
+    /* Key actions are collected first so a chord can be collapsed into one
+     * group signal.  The modifier half of a chord is never published as a
+     * separate key signal. */
+    int sig_vk[MAX_TOUCH_RESULT_ACTIONS];
+    uint8_t sig_down[MAX_TOUCH_RESULT_ACTIONS];
+    int sig_count = 0;
+
+    /* A digit press and its modifier arrive in the same result batch.  Find
+     * the modifier once so the digit can be bound directly to the action the
+     * combination names. */
+    int chord_action = 0;
+    if (overlay_keys) {
+        bool has_digit = false;
+        int digit_action = 0;
+        for (int i = 0; i < (int)result->count; i++) {
+            const TouchAction *a = &result->actions[i];
+            if (a->type != ACT_KEY_PRESS && a->type != ACT_KEY_RELEASE)
+                continue;
+            if (group_of_keycode(a->key.keycode)) has_digit = true;
+            if (a->type == ACT_KEY_PRESS) {
+                int action = modifier_action_of_keycode(a->key.keycode);
+                if (action) digit_action = action;
+            }
+        }
+        if (has_digit) chord_action = digit_action;
+    }
 
     for (int i = 0; i < (int)result->count; i++) {
         const TouchAction *action = &result->actions[i];
@@ -263,6 +363,25 @@ static void emit_actions(const TouchActionResult *result) {
         switch (action->type) {
             case ACT_KEY_PRESS: {
                 int keycode = action->key.keycode;
+                int vk = overlay_keys ? g_key_vk_map(keycode, g_key_vk_user) : 0;
+                bool chord = false;
+                if (overlay_keys) {
+                    int group = group_of_keycode(keycode);
+                    if (group) {
+                        (void)emit_group_signal(group, chord_action,
+                                                g_last_event_ms);
+                        chord = true;
+                    } else if (modifier_action_of_keycode(keycode) &&
+                               chord_action) {
+                        chord = true; /* modifier half of the chord */
+                    }
+                }
+                if (vk && !chord && sig_count < MAX_TOUCH_RESULT_ACTIONS) {
+                    sig_vk[sig_count] = vk;
+                    sig_down[sig_count] = 1;
+                    sig_count++;
+                    keep = false;
+                }
                 if (keycode >= 0 && keycode < (int)(sizeof(g_key_down) /
                                                     sizeof(g_key_down[0]))) {
                     if (g_key_down[keycode]) {
@@ -271,10 +390,25 @@ static void emit_actions(const TouchActionResult *result) {
                         g_key_down[keycode] = true;
                     }
                 }
+                if (chord) keep = false;
                 break;
             }
             case ACT_KEY_RELEASE: {
                 int keycode = action->key.keycode;
+                int vk = overlay_keys ? g_key_vk_map(keycode, g_key_vk_user) : 0;
+                bool chord = false;
+                if (overlay_keys) {
+                    int group = group_of_keycode(keycode);
+                    if (group) chord = true;
+                    else if (modifier_action_of_keycode(keycode) && chord_action)
+                        chord = true;
+                }
+                if (vk && !chord && sig_count < MAX_TOUCH_RESULT_ACTIONS) {
+                    sig_vk[sig_count] = vk;
+                    sig_down[sig_count] = 0;
+                    sig_count++;
+                    keep = false;
+                }
                 if (keycode >= 0 && keycode < (int)(sizeof(g_key_down) /
                                                     sizeof(g_key_down[0]))) {
                     if (!g_key_down[keycode]) {
@@ -283,6 +417,7 @@ static void emit_actions(const TouchActionResult *result) {
                         g_key_down[keycode] = false;
                     }
                 }
+                if (chord) keep = false;
                 break;
             }
             case ACT_POINTER_BUTTON_PRESS: {
@@ -315,6 +450,16 @@ static void emit_actions(const TouchActionResult *result) {
 
         if (keep && filtered_count < MAX_TOUCH_RESULT_ACTIONS) {
             filtered[filtered_count++] = *action;
+        }
+    }
+
+    /* Publish modifier signals first: the guest resolves a chord by reading
+     * GetKeyState() when the key action is dispatched. */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < sig_count; i++) {
+            if (signal_is_modifier(sig_vk[i]) != (pass == 0)) continue;
+            (void)emit_key_signal(sig_vk[i], sig_down[i] ? 1 : 0,
+                                  g_last_event_ms);
         }
     }
 
@@ -1284,6 +1429,8 @@ int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
                      (int)phase, pointer_id, x, y);
     }
 
+    g_last_event_ms = event_time_ms;
+
     uint64_t tick = engine_tick_from_ms(event_time_ms);
     TouchActionResult result;
     memset(&result, 0, sizeof(result));
@@ -1321,6 +1468,7 @@ int controls_tick(uint64_t now_ms) {
         return -1;
     }
 
+    g_last_event_ms = now_ms;
     uint64_t tick = engine_tick_from_ms(now_ms);
     TouchActionResult result;
     memset(&result, 0, sizeof(result));

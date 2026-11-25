@@ -198,6 +198,12 @@ uint32_t hle_mss_hook_trace(const char *name, uint32_t real);
 /* vk may be a specific left/right modifier VK; the HLE maps it to the generic
  * WM_KEYDOWN/WM_SYSKEYDOWN wParam and keeps GetKeyState coherent. */
 void hle_android_key_event(int vk, int down);
+
+/* Direct overlay key signals need the same modifier state GetKeyState() would
+ * see after a real key message, but must not post that message.  This updates
+ * only the HLE key state (including the generic SHIFT/CONTROL/MENU bits). */
+void wc3_hle_set_modifier_state(int vk, int down);
+
 /* Post UP messages and clear state for every synthetic key/button still down. */
 void hle_android_release_all(void);
 /* Wait until the guest's message loop has dispatched the requested button

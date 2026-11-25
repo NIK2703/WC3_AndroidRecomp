@@ -315,30 +315,14 @@ static inline int wc3_dt_command_target_live(uint32_t active,
     return select_mode && active && active != select_mode;
 }
 
-/* CGameUI+0x21C is the dedicated camera input mode object.  It is not a
- * command target; a release must never confirm into it just because it is
- * different from CSelectMode. */
+/* CGameUI+0x21C is the dedicated camera input mode object.  Direct-touch
+ * camera is mode-neutral and never sets it; the guard remains for a native
+ * or legacy source.  The camera mode is not a command target, so a release
+ * must never confirm into it just because it differs from CSelectMode. */
 static inline int wc3_dt_camera_mode_active(uint32_t active_mode,
                                             uint32_t camera_mode)
 {
     return camera_mode != 0u && active_mode == camera_mode;
-}
-
-/*
- * The native middle-button path calls CGameUI::SetInputMode(camera), which
- * deactivates the current input mode.  Doing that while a command
- * target/placement mode is active tears down its preview and leaves the
- * release with a mode that is no longer live.  Only the plain select mode
- * may be stacked under the camera drag; a live command gesture or a
- * queued confirmation keeps its mode even if the card click has not switched
- * it yet.
- */
-static inline int wc3_dt_camera_mode_switch(uint32_t active_mode,
-                                            uint32_t select_mode,
-                                            int command_owns_mode)
-{
-    return select_mode != 0u && active_mode == select_mode &&
-           !command_owns_mode;
 }
 
 /*
@@ -363,6 +347,56 @@ static inline int wc3_dt_field_click_defer(int inside_field, int ui_present,
 {
     return inside_field && ui_present && world_present && select_present &&
            select_active && (!click_gate || !ready_field);
+}
+
+/*
+ * A new semantic gesture supersedes a tap held for the map-load replay.
+ * A camera begin joins that set only after dt_camera_pan_begin accepted it:
+ * with a mode-neutral camera the semantic route stays FIELD, so a stale
+ * replay at the old screen point could otherwise run during the pan.  A
+ * rejected begin starts no pan and must leave the held tap for replay.
+ */
+static inline int wc3_dt_event_cancels_field_click(uint32_t kind,
+                                                   int camera_started)
+{
+    if (kind == WC3_DIRECT_TOUCH_POINTER_DOWN ||
+        kind == WC3_DIRECT_TOUCH_TAP ||
+        kind == WC3_DIRECT_TOUCH_FIELD_HOVER)
+        return 1;
+    return camera_started && kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN;
+}
+
+/*
+ * The visible minimap panel reaches the console top edge, while the native
+ * map frame that receives mouse moves only covers its lower part.  A touch
+ * must be claimed over the whole panel, then mapped into the smaller native
+ * frame before it is posted as a mouse message.  The command card publishes
+ * that console top edge on the same surface-normalised axis; use it instead
+ * of a hardcoded fraction so the gate tracks UI layout changes.
+ */
+static inline int wc3_dt_minimap_input_rect(float map_left, float map_top,
+                                            float map_right, float map_bottom,
+                                            int console_valid,
+                                            float console_top,
+                                            float *out_left, float *out_top,
+                                            float *out_right,
+                                            float *out_bottom)
+{
+    if (!out_left || !out_top || !out_right || !out_bottom) return 0;
+    if (!(map_right > map_left) || !(map_bottom > map_top)) return 0;
+    if (!isfinite(map_left) || !isfinite(map_top) ||
+        !isfinite(map_right) || !isfinite(map_bottom)) return 0;
+    *out_left = map_left;
+    *out_right = map_right;
+    *out_bottom = map_bottom;
+    *out_top = map_top;
+    /* 0.5 rejects an empty or pixel-form console snapshot; the real card
+     * starts near 0.782 on the 2400x1080 surface. */
+    if (console_valid && isfinite(console_top) && console_top > 0.5f &&
+        console_top < map_top) {
+        *out_top = console_top;
+    }
+    return 1;
 }
 
 /*

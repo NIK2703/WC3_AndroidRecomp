@@ -8843,6 +8843,13 @@ void hle_android_key_event(int vk, int down)
     RES_LOG("key vk=%02X %s", vk, down ? "down" : "up");
 }
 
+void wc3_hle_set_modifier_state(int vk, int down)
+{
+    if (!vk) return;
+    hle_key_state_set(&g_key_state, vk, down);
+    RES_LOG("modifier-state vk=%02X %s", vk, down ? "down" : "up");
+}
+
 static int is_specific_modifier(int vk)
 {
     return vk == HLE_VK_LCONTROL || vk == HLE_VK_RCONTROL ||

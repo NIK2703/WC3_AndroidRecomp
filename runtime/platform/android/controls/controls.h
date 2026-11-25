@@ -33,6 +33,16 @@ typedef void (*Wc3ActionSink)(const TouchAction *actions, int count,
                               void *user);
 
 /*
+ * Direct-mode overlay keys are emitted as native key signals instead of
+ * keyboard actions: the guest looks up whatever the player bound to that key.
+ * The host installs the same X11-keycode-to-VK translation the legacy layer
+ * uses, so both modes agree on which virtual key a profile binding means.
+ * A NULL map keeps the keyboard path for every key.
+ */
+typedef int (*Wc3KeyVkMap)(int keycode, void *user);
+void controls_set_key_signal_vk_map(Wc3KeyVkMap map, void *user);
+
+/*
  * Semantic direct touch is an additional input variant.  It is disabled by
  * default: the host enables it only when the user selected it and a guest
  * sink is installed.  If it is enabled without one, game touches are
@@ -95,11 +105,14 @@ void controls_set_direct_touch_portrait_gate(
     Wc3DirectTouchPortraitRectGate gate, void *user);
 
 /*
- * Lock-free minimap rectangle supplied by the host, same contract as the
- * portrait gate.  The input thread claims a touch that starts inside this
+ * Lock-free minimap input rectangle supplied by the host, same contract as
+ * the portrait gate.  It covers the whole visible minimap panel, whose top
+ * edge reaches the console while the native mouse frame only covers its
+ * lower part.  The input thread claims a touch that starts inside this
  * rectangle for the minimap and clamps every later pointer phase to it, so a
  * finger that leaves the minimap keeps dragging the camera until it is
- * released.
+ * released.  The guest service maps the clamped point into the native frame
+ * before posting mouse messages.
  */
 typedef Wc3DirectTouchRectGate Wc3DirectTouchMinimapRectGate;
 void controls_set_direct_touch_minimap_gate(

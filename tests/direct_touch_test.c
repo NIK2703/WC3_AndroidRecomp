@@ -510,6 +510,42 @@ static void test_action_first_second_finger_camera(void)
     assert(wc3_direct_touch_active_count(&dt) == 0);
 }
 
+static void test_camera_first_second_finger_tap(void)
+{
+    Wc3DirectTouch dt = make_recognizer();
+    events_clear();
+
+    /* The camera finger is already panning. */
+    wc3_direct_touch_down(&dt, 60, 100.0f, 100.0f, 0);
+    wc3_direct_touch_move(&dt, 60, 130.0f, 100.0f, 20);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
+
+    /* A second finger must be a full ACTION cursor immediately, not a
+     * camera candidate and not a one-shot that is consumed by the pan. */
+    wc3_direct_touch_down(&dt, 61, 500.0f, 500.0f, 60);
+    assert(wc3_direct_touch_contact_role(&dt, 61) == WC3_DT_CONTACT_ACTION);
+    assert(g_event_count == 1);
+    assert(g_hover_count == 0);
+
+    /* Its first tap reaches the semantic path while the camera continues. */
+    wc3_direct_touch_up(&dt, 61, 500.0f, 500.0f, 80);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_TAP);
+    assert(g_events[1].owner_role == WC3_DT_OWNER_ACTION);
+    assert(g_events[1].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
+    assert(g_hover_count == 1);
+
+    wc3_direct_touch_move(&dt, 60, 160.0f, 120.0f, 100);
+    assert(g_event_count == 3);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE);
+
+    wc3_direct_touch_up(&dt, 60, 160.0f, 120.0f, 120);
+    assert(g_event_count == 4);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(wc3_direct_touch_active_count(&dt) == 0);
+}
+
 static void test_reset_discards_pending(void)
 {
     Wc3DirectTouch dt = make_recognizer();
@@ -821,27 +857,26 @@ static void test_command_target_live(void)
     assert(wc3_dt_command_target_live(0x43400088, 0x42AD0088));
 }
 
-static void test_camera_mode_switch(void)
+static void test_camera_mode_active(void)
 {
-    /* Native middle-drag deactivates the current input mode through
-     * SetInputMode(camera).  During building placement the target mode is
-     * live and owns the ghost, so the camera must drive the drag frame
-     * without touching the mode stack. */
+    /* Direct-touch camera is mode-neutral: it never calls SetInputMode, so
+     * select/target mode stays live and a second finger can act immediately.
+     * CGameUI+0x21C is still the dedicated camera mode and is never a command
+     * target if a native or legacy source sets it. */
     const uint32_t select_mode = 0x42AD0088u;
     const uint32_t target_mode = 0x43420088u;
-    assert(wc3_dt_camera_mode_switch(select_mode, select_mode, 0));
-    assert(!wc3_dt_camera_mode_switch(target_mode, select_mode, 0));
-    assert(!wc3_dt_camera_mode_switch(0u, select_mode, 0));
-    assert(!wc3_dt_camera_mode_switch(select_mode, 0u, 0));
-    /* The card DOWN click may not have entered target mode yet, and a queued
-     * confirmation must also keep the camera off the mode stack. */
-    assert(!wc3_dt_camera_mode_switch(select_mode, select_mode, 1));
-
-    /* CGameUI+0x21C is the camera mode, never a command target. */
     const uint32_t camera_mode = 0x42B10088u;
+
     assert(wc3_dt_camera_mode_active(camera_mode, camera_mode));
     assert(!wc3_dt_camera_mode_active(target_mode, camera_mode));
+    assert(!wc3_dt_camera_mode_active(select_mode, camera_mode));
     assert(!wc3_dt_camera_mode_active(camera_mode, 0u));
+
+    /* The generic live-mode check cannot distinguish camera from target; the
+     * camera guard above is what keeps a camera mode out of a command
+     * confirmation. */
+    assert(wc3_dt_command_target_live(camera_mode, select_mode));
+    assert(!wc3_dt_command_target_live(select_mode, select_mode));
 }
 
 static void test_field_click_defer(void)
@@ -867,6 +902,26 @@ static void test_field_click_defer(void)
     /* The gate is still closed during the load. */
     assert(wc3_dt_field_click_defer(1, 1, 1, 1, 1, 0, 0));
     assert(wc3_dt_field_click_defer(1, 1, 1, 1, 1, 0, 1));
+}
+
+static void test_event_cancels_field_click(void)
+{
+    /* A new semantic gesture supersedes a held map-load tap.  A camera begin
+     * joins only after the camera accepted it; a rejected begin starts no pan
+     * and must leave the held tap for replay. */
+    assert(wc3_dt_event_cancels_field_click(WC3_DIRECT_TOUCH_POINTER_DOWN, 0));
+    assert(wc3_dt_event_cancels_field_click(WC3_DIRECT_TOUCH_TAP, 0));
+    assert(wc3_dt_event_cancels_field_click(WC3_DIRECT_TOUCH_FIELD_HOVER, 0));
+    assert(!wc3_dt_event_cancels_field_click(
+        WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN, 0));
+    assert(wc3_dt_event_cancels_field_click(
+        WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN, 1));
+    assert(!wc3_dt_event_cancels_field_click(
+        WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE, 1));
+    assert(!wc3_dt_event_cancels_field_click(
+        WC3_DIRECT_TOUCH_FIELD_CAMERA_END, 1));
+    assert(!wc3_dt_event_cancels_field_click(
+        WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN, 0));
 }
 
 static void test_command_movement_slop(void)
@@ -977,6 +1032,55 @@ static void test_minimap_local_point(void)
                                        &x, &y));
 }
 
+static void test_minimap_input_rect_and_mapping(void)
+{
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+
+    /* Native map frame: the lower part of the visible panel.  The command
+     * card publishes the console top, which is the top of the whole panel. */
+    assert(wc3_dt_minimap_input_rect(0.0094f, 0.8550f, 0.1488f, 0.9931f,
+                                     1, 0.7817f,
+                                     &left, &top, &right, &bottom));
+    expect_near("minimap input left", left, 0.0094f);
+    expect_near("minimap input top", top, 0.7817f);
+    expect_near("minimap input right", right, 0.1488f);
+    expect_near("minimap input bottom", bottom, 0.9931f);
+
+    /* No console snapshot: fall back to the native frame, never to a
+     * hardcoded guess. */
+    assert(wc3_dt_minimap_input_rect(0.0094f, 0.8550f, 0.1488f, 0.9931f,
+                                     0, 0.0f,
+                                     &left, &top, &right, &bottom));
+    expect_near("minimap input fallback top", top, 0.8550f);
+
+    /* A bogus console top cannot swallow the battlefield. */
+    assert(wc3_dt_minimap_input_rect(0.0094f, 0.8550f, 0.1488f, 0.9931f,
+                                     1, 0.1f,
+                                     &left, &top, &right, &bottom));
+    expect_near("minimap input rejected console top", top, 0.8550f);
+
+    /* Full-panel top maps to the native map top; panel bottom to map bottom.
+     * This is what removes the invisible barrier during an upward drag. */
+    float mx = 0.0f;
+    float my = 0.0f;
+    assert(wc3_dt_minimap_local_point(0.0094f, 0.7817f,
+                                      0.7817f, 0.0094f, 0.9931f, 0.1488f,
+                                      0.8550f, 0.0094f, 0.9931f, 0.1488f,
+                                      &mx, &my));
+    expect_near("minimap panel top to map top x", mx, 0.0094f);
+    expect_near("minimap panel top to map top y", my, 0.8550f);
+
+    assert(wc3_dt_minimap_local_point(0.0791f, 0.9931f,
+                                      0.7817f, 0.0094f, 0.9931f, 0.1488f,
+                                      0.8550f, 0.0094f, 0.9931f, 0.1488f,
+                                      &mx, &my));
+    expect_near("minimap panel bottom to map bottom x", mx, 0.0791f);
+    expect_near("minimap panel bottom to map bottom y", my, 0.9931f);
+}
+
 int main(void)
 {
     test_queue();
@@ -993,6 +1097,7 @@ int main(void)
     test_reset_releases_field_drag();
     test_two_finger_camera_and_action();
     test_action_first_second_finger_camera();
+    test_camera_first_second_finger_tap();
     test_reset_discards_pending();
     test_pointer_snapshot();
     test_coordinate_mapping();
@@ -1007,11 +1112,13 @@ int main(void)
     test_command_release_resolution();
     test_command_target_mode();
     test_command_target_live();
-    test_camera_mode_switch();
+    test_camera_mode_active();
     test_field_click_defer();
+    test_event_cancels_field_click();
     test_command_movement_slop();
     test_console_rect_scale();
     test_minimap_local_point();
+    test_minimap_input_rect_and_mapping();
     test_minimap_inverse();
     puts("direct_touch: ok");
     return 0;

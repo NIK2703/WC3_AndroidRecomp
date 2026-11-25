@@ -61,6 +61,8 @@ int wc3_hle_direct_touch_portrait_rect(float *left, float *top,
                                        float *right, float *bottom);
 int wc3_hle_direct_touch_minimap_rect(float *left, float *top,
                                       float *right, float *bottom);
+int wc3_hle_direct_touch_minimap_input_rect(float *left, float *top,
+                                            float *right, float *bottom);
 int wc3_hle_direct_touch_beacon_rect(float *left, float *top,
                                      float *right, float *bottom);
 int wc3_hle_direct_touch_command_rect(float *left, float *top,
@@ -85,7 +87,8 @@ static int host_direct_touch_minimap_gate(float *left, float *top,
                                           void *user)
 {
     (void)user;
-    return wc3_hle_direct_touch_minimap_rect(left, top, right, bottom);
+    return wc3_hle_direct_touch_minimap_input_rect(left, top, right,
+                                                   bottom);
 }
 
 static int host_direct_touch_beacon_gate(float *left, float *top,
@@ -2306,6 +2309,15 @@ static void host_haptic_sink(int effect, void *user)
     if (g_haptics_ready) haptics_android_perform(effect);
 }
 
+/* The controls layer and the legacy action layer must agree on which VK a
+ * profile keycode means.  The legacy table is the single owner of that
+ * mapping; this wrapper only adapts its user pointer parameter. */
+static int host_key_vk_map(int keycode, void *user)
+{
+    (void)user;
+    return overlay_actions_keycode_to_vk(keycode);
+}
+
 /* A rejected transition is retried only after the published bits change, not
  * on every touch wake. */
 static uint32_t g_switch_rejected_bits;
@@ -2435,6 +2447,7 @@ static int overlay_input_start(int width, int height)
     overlay_actions_set_haptic_sink(host_haptic_sink, NULL);
     controls_set_action_sink(overlay_actions_handle, NULL);
     controls_set_direct_touch_sink(wc3_hle_direct_touch_enqueue, NULL);
+    controls_set_key_signal_vk_map(host_key_vk_map, NULL);
     controls_set_direct_touch_route_gate(host_direct_touch_route_gate, NULL);
     controls_set_direct_touch_portrait_gate(host_direct_touch_portrait_gate,
                                             NULL);
@@ -2448,6 +2461,7 @@ static int overlay_input_start(int width, int height)
 #else
     controls_set_action_sink(NULL, NULL);
     controls_set_direct_touch_sink(NULL, NULL);
+    controls_set_key_signal_vk_map(NULL, NULL);
     controls_set_direct_touch_haptic_sink(NULL, NULL);
     controls_set_direct_touch_route_gate(NULL, NULL);
     controls_set_direct_touch_portrait_gate(NULL, NULL);
@@ -2474,6 +2488,7 @@ static int overlay_input_start(int width, int height)
             OVERLAY_LOGE("controls profile missing; using the one-finger fallback");
             controls_set_action_sink(NULL, NULL);
             controls_set_direct_touch_sink(NULL, NULL);
+            controls_set_key_signal_vk_map(NULL, NULL);
             controls_set_direct_touch_haptic_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
             overlay_actions_set_haptic_sink(NULL, NULL);
@@ -2489,6 +2504,7 @@ static int overlay_input_start(int width, int height)
             free(profile);
             controls_set_action_sink(NULL, NULL);
             controls_set_direct_touch_sink(NULL, NULL);
+            controls_set_key_signal_vk_map(NULL, NULL);
             controls_set_direct_touch_haptic_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
             overlay_actions_set_haptic_sink(NULL, NULL);
@@ -2521,6 +2537,7 @@ static int overlay_input_start(int width, int height)
 #endif
         controls_set_action_sink(NULL, NULL);
         controls_set_direct_touch_sink(NULL, NULL);
+        controls_set_key_signal_vk_map(NULL, NULL);
         controls_set_direct_touch_haptic_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
         overlay_actions_set_haptic_sink(NULL, NULL);
@@ -2545,6 +2562,7 @@ static int overlay_input_start(int width, int height)
 #endif
         controls_set_action_sink(NULL, NULL);
         controls_set_direct_touch_sink(NULL, NULL);
+        controls_set_key_signal_vk_map(NULL, NULL);
         controls_set_direct_touch_haptic_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
         overlay_actions_set_haptic_sink(NULL, NULL);
@@ -2581,6 +2599,7 @@ static void overlay_input_stop(void)
 #endif
     controls_set_action_sink(NULL, NULL);
     controls_set_direct_touch_sink(NULL, NULL);
+    controls_set_key_signal_vk_map(NULL, NULL);
     controls_set_direct_touch_haptic_sink(NULL, NULL);
 #if WC3_WITH_ASBUILT_HLE
     overlay_actions_set_haptic_sink(NULL, NULL);
