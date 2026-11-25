@@ -9,7 +9,10 @@ so ``ssh`` can use it directly.  Android hides the neighbour table from
 ordinary apps; when root ``su`` is available the table is read through it.
 If the table has no entry yet, an optional TCP scan of the local IPv4 subnet
 finds hosts with the SSH port open and keeps only an address whose neighbour
-entry carries the configured MAC.  A wrong host is therefore never selected.
+entry carries the configured MAC.  When the table is unreadable (Android
+hides it from ordinary apps), the scan instead verifies the SSH host key
+pinned under the ``wc3-pc`` / ``wc3-ideapad`` aliases in ``known_hosts``.
+A wrong host is therefore never selected, and no IPv4 address is hard-coded.
 
 The known names have their own MAC defaults: ``ideacentre`` (the desktop) and
 ``ideapad`` (the laptop).  ``--mac ''`` disables MAC matching for a host that
@@ -32,6 +35,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -319,6 +323,57 @@ def dns_candidates(name):
     return result
 
 
+def known_host_keys(alias):
+    """Return {key type: {base64 key}} for an alias in ~/.ssh/known_hosts.
+
+    Unlike the neighbour table this identity survives DHCP lease changes and
+    is readable by an ordinary Termux app.
+    """
+    if not alias:
+        return {}
+    path = env("WC3_SSH_KNOWN_HOSTS") or os.path.join(
+        os.path.expanduser("~"), ".ssh", "known_hosts")
+    keys = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) < 3 or parts[0].startswith("|1|"):
+                    continue
+                if alias not in parts[0].split(","):
+                    continue
+                keys.setdefault(parts[1], set()).add(parts[2].rstrip(","))
+    except OSError:
+        pass
+    return keys
+
+
+def host_key_matches(address, port, keys, timeout):
+    """True when the SSH host key of address matches the pinned worker key."""
+    if not keys:
+        return False
+    scanner = shutil.which("ssh-keyscan")
+    if not scanner:
+        return False
+    cmd = [scanner, "-T", str(max(1, int(timeout))), "-p", str(port)]
+    for kind in sorted(keys):
+        cmd += ["-t", kind]
+    cmd.append(address)
+    try:
+        out = subprocess.run(cmd, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, timeout=2 * timeout + 4)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if out.returncode != 0:
+        return False
+    for line in (out.stdout or b"").decode("utf-8", "replace").splitlines():
+        parts = line.split()
+        if (len(parts) >= 3 and parts[1] in keys and
+                parts[2] in keys[parts[1]]):
+            return True
+    return False
+
+
 def scan_subnet(iface, port, timeout, workers, mac):
     """Scan the local /24 for an open port, then attribute it by MAC.
 
@@ -399,6 +454,13 @@ def resolve(args):
         return any(addr.split("%", 1)[0].lower() == bare and entry_mac == mac
                    for addr, entry_mac in neighbor_table(iface))
 
+    keys = known_host_keys(args.host_key_alias)
+
+    def matches_identity(address):
+        if matches_mac(address):
+            return True
+        return host_key_matches(address, args.port, keys, args.timeout)
+
     explicit = []
     if args.host:
         explicit.append(args.host)
@@ -421,11 +483,10 @@ def resolve(args):
         hit = probe(address, args.port, args.timeout, iface)
         if not hit:
             continue
-        if mac:
-            if matches_mac(hit):
-                return found(hit, "name+neighbour")
-        else:
-            return found(hit, "name")
+        if not mac or matches_mac(hit):
+            return found(hit, "name" if not mac else "name+neighbour")
+        if matches_identity(hit):
+            return found(hit, "name+host-key")
 
     if mac:
         derived = mac_to_eui64(mac)
@@ -437,14 +498,19 @@ def resolve(args):
         hit = probe(address, args.port, args.timeout, iface)
         if not hit:
             continue
-        if mac:
-            if matches_mac(hit):
-                return found(hit, "cache+neighbour")
-        else:
-            return found(hit, "cache")
+        if not mac or matches_mac(hit):
+            return found(hit, "cache" if not mac else "cache+neighbour")
+        if matches_identity(hit):
+            return found(hit, "cache+host-key")
 
     if mac and args.scan != "never":
         scan_subnet(iface, args.port, min(args.timeout, 0.4), 32, mac)
+
+    if keys and args.scan != "never":
+        for address in scan_subnet(iface, args.port, min(args.timeout, 0.4),
+                                   32, None):
+            if host_key_matches(address, args.port, keys, args.timeout):
+                return found(address, "host-key-scan")
 
     for address in neighbour_addresses():
         hit = probe(address, args.port, args.timeout, iface)
@@ -474,6 +540,8 @@ def main():
     parser.add_argument("--ipv6", default=env("WC3_PC_IPV6"))
     parser.add_argument("--ipv4", default=env("WC3_PC_IPV4"))
     parser.add_argument("--name", default=env("WC3_PC_NAME", DEFAULT_NAME))
+    parser.add_argument("--host-key-alias", default=None,
+                        help="known_hosts alias used as a stable worker identity")
     parser.add_argument("--cache", default=env("WC3_PC_CACHE"))
     parser.add_argument("--port", type=int,
                         default=int(env("WC3_PC_SSH_PORT", "22")))
@@ -491,6 +559,11 @@ def main():
         args.host = args.host or env("WC3_IDEAPAD_HOST")
         args.ipv6 = args.ipv6 or env("WC3_IDEAPAD_IPV6")
         args.ipv4 = args.ipv4 or env("WC3_IDEAPAD_IPV4")
+    if args.host_key_alias is None:
+        args.host_key_alias = env("WC3_PC_HOST_KEY_ALIAS")
+    if args.host_key_alias is None:
+        args.host_key_alias = ("wc3-ideapad" if args.name.lower() == "ideapad"
+                               else "wc3-pc")
 
     result = resolve(args)
     if args.json:

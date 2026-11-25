@@ -197,6 +197,7 @@ The manifest form writes a text file with one report path per line and passes
 | `leaf_call` | batch | all | Direct-call rewriting over the whole corpus. |
 | `parallel_raycast` | batch | all | Parallel-raycast rewriting after `leaf_call`. |
 | `local_base` | batch | all | Per-function snapshot of the write-once guest base; enabled in the product build. |
+| `esp_local` | batch | all | Write-through promotion of guest `esp` to a host local; always last so pattern-matching stages keep their templates. |
 
 `xmm_local`, `xmm_lane`, `devirtualize`, `return_address_elide` and
 `dead_flags` are present but disabled by default because the current build base
@@ -248,7 +249,7 @@ ladder, and runs:
 2. `patch_pipeline.py apply` with stages selected from the existing CMake flags
    (`devirtualize`, `return_address_elide`, `dead_flags`, `xmm_local`,
    `xmm_lane`, `w3l_compat`, `selection`, `leaf_call`, `local_base`,
-   `parallel_raycast`; `local_base` is appended when
+   `parallel_raycast`, `esp_local`; `local_base` is appended when
    `WC3_GUEST_BASE_LOCAL=ON`, which the product build now selects).
 3. The chunk list from `patch-overlay/overlay.json` becomes
    `WC3_RELIFTED_SOURCES`.

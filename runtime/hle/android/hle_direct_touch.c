@@ -743,7 +743,11 @@ static void dt_field_click_queue(const Wc3DirectTouchEvent *ev)
 
 static int dt_guest_readable(uint32_t va, uint32_t size)
 {
-    return va && hle_android_guest_ok(va, size);
+    /* A selection/handle list link left over from a released VirtualAlloc
+     * block still passes hle_android_guest_ok() because the whole arena is a
+     * legal layout range.  The debug trace walks those links, so require the
+     * live-block check before dereferencing one. */
+    return va && hle_android_guest_committed(va, size);
 }
 
 #if WC3_DEBUG && WC3_DEBUG_INPUT

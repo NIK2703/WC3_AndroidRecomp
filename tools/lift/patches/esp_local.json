@@ -1,0 +1,43 @@
+{
+  "schema": 2,
+  "id": "esp_local",
+  "rev": 1,
+  "description": "Promote the guest stack pointer to a host local with write-through updates; runs after all pattern-matching patch stages so their templates stay intact.",
+  "engine": "esp_local",
+  "kind": "transform",
+  "mode": "batch",
+  "scope": "all",
+  "order": 80,
+  "after": [
+    "leaf_call"
+  ],
+  "output_layout": "flat",
+  "command": {
+    "args": [
+      "--inputs",
+      "{inputs}",
+      "--out-dir",
+      "{out_dir}",
+      "--report",
+      "{report}",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "verdict",
+      "equals": "pass"
+    },
+    {
+      "kind": "field_equals",
+      "path": "inputs",
+      "equals_chunk_count": true
+    },
+    {
+      "kind": "field_equals",
+      "path": "files_skipped_existing",
+      "equals": 0
+    }
+  ]
+}

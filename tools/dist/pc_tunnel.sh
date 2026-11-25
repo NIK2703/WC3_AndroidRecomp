@@ -232,6 +232,7 @@ resolve_target() {
     [ -n "$iface_override" ] && iface_args=(--iface "$iface_override")
     if ! json=$("$python" "$root/tools/dist/pc_resolve.py" \
             --mac "$mac" --name "$name" --port "$ssh_port" \
+            --host-key-alias "$host_key_alias" \
             ${iface_args[@]+"${iface_args[@]}"} \
             --cache "$cache_file" --json 2>"$resolve_err"); then
         warn "could not resolve $worker ($name) by MAC '$mac': $(tail -n 2 "$resolve_err" 2>/dev/null | tr '\n' ' ')"

@@ -812,6 +812,17 @@ static int va_fixed_mapped(uint32_t addr, uint32_t size)
     return guest_ok(addr, size) && !va_arena_range(addr, size);
 }
 
+/* Like hle_android_guest_ok() but also refuses the reserved-but-not-committed
+ * part of a VirtualAlloc arena.  Diagnostics that walk guest-owned lists must
+ * use this: a stale link can point into a released block, and guest_ok() still
+ * accepts it because the whole arena is in the layout table. */
+int hle_android_guest_committed(uint32_t addr, uint32_t size)
+{
+    if (!size || !guest_ok(addr, size)) return 0;
+    if (va_arena_range(addr, size)) return va_live_covers(addr, size);
+    return 1;
+}
+
 /* Win32 requires dwSize == 0 for MEM_RELEASE, so the size has to come from the
  * table rather than from the call. */
 static uint32_t va_live_take(uint32_t addr)

@@ -316,6 +316,10 @@ if [ "$variant" = release ]; then
     corpus_opt_level=O3
     omit_frame_pointer=ON
     polly=ON
+    # AArch64 machine outliner: only +1/+2 instruction growth in a handful of
+    # functions on the regression-heavy chunks, .text ~33% smaller.  Enabled
+    # by explicit user request; --cmake-args can override for an A/B.
+    machine_outliner=ON
     hidden_visibility=ON
     no_semantic_interposition=ON
     lto=THIN
@@ -360,6 +364,7 @@ else
     corpus_opt_level=O2
     omit_frame_pointer=OFF
     polly=OFF
+    machine_outliner=OFF
     hidden_visibility=OFF
     no_semantic_interposition=OFF
     lto=OFF
@@ -404,6 +409,7 @@ configure=(
     "-DWC3_LTO_WHOLE_PROGRAM_VISIBILITY=$lto_whole_program_visibility"
     "-DWC3_THINLTO_CACHE=$thinlto_cache"
     -DWC3_EMIT_RELOCS=OFF "-DWC3_POLLY=$polly"
+    "-DWC3_CORPUS_MACHINE_OUTLINER=$machine_outliner"
     "-DWC3_HIDDEN_VISIBILITY=$hidden_visibility"
     "-DWC3_NO_SEMANTIC_INTERPOSITION=$no_semantic_interposition"
     -DWC3_SYMBOL_ORDER_FILE=
@@ -431,7 +437,7 @@ echo "[app] debug_tags '$debug_tags'"
 echo "[app] corpus  $corpus_abs"
 echo "[app] patch   registry pipeline (default ON; --cmake-args can override)"
 echo "[app] jobs    $jobs"
-echo "[app] opt     $opt_level corpus $corpus_opt_level lto $lto polly $polly"
+echo "[app] opt     $opt_level corpus $corpus_opt_level lto $lto polly $polly machine_outliner $machine_outliner"
 "$cmake" "${configure[@]}" || { echo '[app] configure failed' >&2; exit 1; }
 "$cmake" --build "$cmake_dir" --parallel "$jobs" || {
     echo '[app] build failed' >&2; exit 1; }

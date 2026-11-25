@@ -292,6 +292,22 @@ option(WC3_EMIT_RELOCS
 # passes OFF for debug; -Polly:$false disables it for an A/B.
 option(WC3_POLLY
     "Enable Polly for the generated corpus (exactness-sensitive experiment)" OFF)
+# AArch64 machine outliner.  Unlike the source-level WC3_CALLSITE_OUTLINE
+# helper it shares repeated machine sequences after register allocation, so
+# it never changes which lifted functions the compiler inlines.  On the
+# regression-heavy chunks it leaves only +1/+2 instruction growth in a handful
+# of functions while shrinking .text by ~33%; the source-level call_outline
+# helper still regresses and is deliberately not ported.  Enabled for the
+# arm64 product by explicit user request; the device performance A/B is still
+# outstanding, so -DWC3_CORPUS_MACHINE_OUTLINER=OFF remains an A/B path.
+if(ANDROID AND ANDROID_ABI STREQUAL "arm64-v8a")
+    set(WC3_CORPUS_MACHINE_OUTLINER_DEFAULT ON)
+else()
+    set(WC3_CORPUS_MACHINE_OUTLINER_DEFAULT OFF)
+endif()
+option(WC3_CORPUS_MACHINE_OUTLINER
+    "Enable the AArch64 machine outliner for the generated corpus"
+    ${WC3_CORPUS_MACHINE_OUTLINER_DEFAULT})
 option(WC3_HIDDEN_VISIBILITY
     "Compile product code with hidden visibility (JNI surface stays default)" OFF)
 option(WC3_NO_SEMANTIC_INTERPOSITION
@@ -445,10 +461,25 @@ if(WC3_PRODUCT_LINK_OPTIONS)
 endif()
 
 # Corpus options mirror the product profile but keep the exactness constraints
-# that already live in Wc3ReliftedCorpus.cmake.  Polly and machine-function
-# splitting are experiments: debug passes OFF, release enables Polly by default
+# that already live in Wc3ReliftedCorpus.cmake.  Polly, machine-function
+# splitting and the AArch64 machine outliner are experiments: debug passes OFF
+# for all three; release enables Polly and the outliner by default
 # (split-MF remains profile/warning-gated).
+# The generated corpus calls the full-mask flag helpers at many sites.  LLVM
+# otherwise inlines a fresh copy of the add/sub/logicz/adc/sbb classification
+# into every site.  Outlining only those full helpers keeps the exact-mask
+# helpers inline (their mask is a compile-time constant) and leaves the tiny
+# inc/dec wrappers inline around the outlined add/sub.  This is a code-size
+# option, not a semantic change; the runtime call cost is measured separately.
+option(WC3_NOINLINE_FULL_FLAGS
+    "Outline full-mask flag helpers in the generated corpus" ON)
+
 set(WC3_CORPUS_COMPILE_OPTIONS "-${WC3_CORPUS_OPT_LEVEL_EFFECTIVE}")
+if(WC3_NOINLINE_FULL_FLAGS)
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -DWC3_NOINLINE_FULL_FLAGS=1)
+else()
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -DWC3_NOINLINE_FULL_FLAGS=0)
+endif()
 if(WC3_MTUNE)
     list(APPEND WC3_CORPUS_COMPILE_OPTIONS "-mtune=${WC3_MTUNE}")
 endif()
@@ -470,10 +501,22 @@ endif()
 if(WC3_POLLY)
     list(APPEND WC3_CORPUS_COMPILE_OPTIONS -mllvm -polly)
 endif()
+if(WC3_CORPUS_MACHINE_OUTLINER)
+    if(ANDROID AND NOT ANDROID_ABI STREQUAL "arm64-v8a")
+        message(FATAL_ERROR
+            "WC3_CORPUS_MACHINE_OUTLINER is AArch64-only; got ANDROID_ABI=${ANDROID_ABI}")
+    endif()
+    if(NOT ANDROID AND NOT CMAKE_C_COMPILER_TARGET MATCHES "aarch64")
+        message(FATAL_ERROR
+            "WC3_CORPUS_MACHINE_OUTLINER requires an AArch64 target")
+    endif()
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -mllvm -enable-machine-outliner)
+endif()
 if(NOT _wc3_corpus_opt_upper STREQUAL "O2" OR
    WC3_MTUNE OR WC3_OMIT_FRAME_POINTER OR
    WC3_NO_SEMANTIC_INTERPOSITION OR WC3_HIDDEN_VISIBILITY OR
-   WC3_SPLIT_MACHINE_FUNCTIONS OR WC3_SYMBOL_ORDER_FILE OR WC3_POLLY)
+   WC3_SPLIT_MACHINE_FUNCTIONS OR WC3_SYMBOL_ORDER_FILE OR WC3_POLLY OR
+   WC3_CORPUS_MACHINE_OUTLINER)
     message(STATUS
         "release: corpus flags ${WC3_CORPUS_COMPILE_OPTIONS}")
 endif()

@@ -149,6 +149,16 @@ if(WC3_GUEST_BASE_LOCAL AND NOT WC3_GUEST_BASE_EXE)
         "before configuring with -DWC3_GUEST_BASE_LOCAL=ON")
 endif()
 
+find_program(WC3_ESP_LOCAL_EXE
+    NAMES esp_local esp_local.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+if(NOT WC3_ESP_LOCAL_EXE)
+    message(FATAL_ERROR
+        "esp_local.exe missing; run tools/lift/build_tools.ps1 "
+        "before configuring the relifted corpus")
+endif()
+
 find_program(WC3_PARALLEL_RAYCAST_EXE
     NAMES parallel_raycast parallel_raycast.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -827,6 +837,8 @@ if(WC3_PATCH_PIPELINE)
         "${WC3_ROOT}/tools/lift/csrc_local/xmm_lane.c")
     wc3_require_fresh_pass("${WC3_LEAF_CALL_EXE}"
         "${WC3_ROOT}/tools/lift/csrc_local/leaf_call.c")
+    wc3_require_fresh_pass("${WC3_ESP_LOCAL_EXE}"
+        "${WC3_ROOT}/tools/lift/csrc_local/esp_local.c")
     if(WC3_X87_FPSR)
         wc3_require_fresh_pass("${WC3_X87_FPSR_EXE}"
             "${WC3_ROOT}/tools/lift/csrc_local/x87_fpsr.c")
@@ -898,6 +910,9 @@ if(WC3_PATCH_PIPELINE)
     if(WC3_GUEST_BASE_LOCAL)
         list(APPEND _patch_stage_args --patch local_base)
     endif()
+    # Must be last: every earlier stage matches exact generated-C templates,
+    # and esp_local inserts its own synchronisation lines.
+    list(APPEND _patch_stage_args --patch esp_local)
     set(_patch_param_args)
     file(SHA256 "${WC3_ROOT}/tools/lift/patch_pipeline.py" _patch_pipeline_sha)
     list(APPEND _patch_param_args --param "pipeline_sha=${_patch_pipeline_sha}")

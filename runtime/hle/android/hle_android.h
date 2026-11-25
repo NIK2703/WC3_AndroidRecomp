@@ -119,6 +119,11 @@ void hle_android_note_cpu(CPU *c);
  * a native COM method reads a guest pointer. */
 int hle_android_guest_ok(uint32_t addr, uint32_t size);
 
+/* Stronger form for guest-list walkers: hle_android_guest_ok() accepts the
+ * reserved part of a VirtualAlloc arena, but a stale list link can point at a
+ * released block.  This one requires a live block for arena addresses. */
+int hle_android_guest_committed(uint32_t addr, uint32_t size);
+
 /* Guest-heap helpers shared with the boot harness. */
 uint32_t hle_guest_alloc(uint32_t size);
 void     hle_guest_free(uint32_t addr);

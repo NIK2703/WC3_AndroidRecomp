@@ -64,6 +64,7 @@ param(
     [switch]$NoThinLtoCache,
     [switch]$EmitRelocs,
     [switch]$Polly,
+    [switch]$MachineOutliner,
     [switch]$HiddenVisibility,
     [switch]$NoSemanticInterposition,
     [string]$SymbolOrderFile = '',
@@ -127,7 +128,8 @@ $experimentalParams = @(
     'PgoKind', 'OptLevel', 'CorpusOptLevel', 'Mtune', 'OmitFramePointer',
     'SplitMachineFunctions', 'CallGraphSort', 'LtoOptLevel',
     'LtoWholeProgramVisibility', 'NoThinLtoCache', 'EmitRelocs', 'Polly',
-    'HiddenVisibility', 'NoSemanticInterposition', 'SymbolOrderFile'
+    'MachineOutliner', 'HiddenVisibility', 'NoSemanticInterposition',
+    'SymbolOrderFile'
 )
 if ($isDebug) {
     foreach ($name in $experimentalParams) {
@@ -226,6 +228,18 @@ $effectivePolly = if ($PSBoundParameters.ContainsKey('Polly')) {
 } else {
     $false
 }
+# The AArch64 machine outliner removes the call_outline per-function growth
+# without touching the generated C and is enabled for release by explicit
+# user request.  -MachineOutliner:$false keeps the PM-19 A/B path open; the
+# debug variant keeps it off with the rest of the conservative profile.
+$effectiveMachineOutliner =
+    if ($PSBoundParameters.ContainsKey('MachineOutliner')) {
+        [bool]$MachineOutliner
+    } elseif ($isRelease) {
+        $true
+    } else {
+        $false
+    }
 $effectiveHiddenVisibility = if ($PSBoundParameters.ContainsKey('HiddenVisibility')) {
     [bool]$HiddenVisibility
 } elseif ($isRelease) {
@@ -780,6 +794,7 @@ $configure += "-DWC3_LTO_WHOLE_PROGRAM_VISIBILITY=$(ConvertTo-CMakeBool $effecti
 $configure += "-DWC3_THINLTO_CACHE=$(ConvertTo-CMakeBool $effectiveThinLtoCache)"
 $configure += "-DWC3_EMIT_RELOCS=$(ConvertTo-CMakeBool $effectiveEmitRelocs)"
 $configure += "-DWC3_POLLY=$(ConvertTo-CMakeBool $effectivePolly)"
+$configure += "-DWC3_CORPUS_MACHINE_OUTLINER=$(ConvertTo-CMakeBool $effectiveMachineOutliner)"
 $configure += "-DWC3_HIDDEN_VISIBILITY=$(ConvertTo-CMakeBool $effectiveHiddenVisibility)"
 $configure += "-DWC3_NO_SEMANTIC_INTERPOSITION=$(ConvertTo-CMakeBool $effectiveNoSemanticInterposition)"
 $configure += "-DWC3_SYMBOL_ORDER_FILE=$effectiveSymbolOrderFile"
@@ -827,7 +842,7 @@ Write-Host "[app] pgo   $Pgo kind $effectivePgoKind"
 Write-Host "[app] opt   $effectiveOptLevel corpus $effectiveCorpusOptLevel mtune '$Mtune'"
 Write-Host "[app] frame_pointer $(-not $effectiveOmitFramePointer) split_mf $effectiveSplitMachineFunctions"
 Write-Host "[app] layout cg_sort $effectiveCallGraphSort lto_opt $effectiveLtoOptLevel wpv $effectiveLtoWholeProgramVisibility thinlto_cache $effectiveThinLtoCache"
-Write-Host "[app] codegen hidden_visibility $effectiveHiddenVisibility no_semantic_interposition $effectiveNoSemanticInterposition polly $effectivePolly emit_relocs $effectiveEmitRelocs"
+Write-Host "[app] codegen hidden_visibility $effectiveHiddenVisibility no_semantic_interposition $effectiveNoSemanticInterposition polly $effectivePolly machine_outliner $effectiveMachineOutliner emit_relocs $effectiveEmitRelocs"
 if ($effectiveSymbolOrderFile) {
     Write-Host "[app] symbol_order $effectiveSymbolOrderFile"
 }

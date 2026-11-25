@@ -486,6 +486,15 @@ through `build_app.sh`. Workers are independent and optional: if one is
 missing, unreachable, has the wrong NDK or has no `distccd`, the build still
 uses the other worker and the local slots.
 
+`pc_resolve.py` normally identifies a worker by its Ethernet MAC in the
+neighbour table. Android hides that table from ordinary apps, so on Termux the
+resolver falls back to the SSH host key pinned in `~/.ssh/known_hosts` under the
+aliases `wc3-ideapad` and `wc3-pc`: it scans the local /24 for an open SSH port
+and accepts a host only when its key matches the alias. This keeps discovery
+independent of DHCP leases and of any hard-coded IPv4 address. Set
+`WC3_PC_HOST_KEY_ALIAS` / `WC3_IDEAPAD_HOST_KEY_ALIAS` to override the alias, or
+`--host-key-alias ''` to disable the fallback.
+
 One-time setup on the phone:
 
 ```sh

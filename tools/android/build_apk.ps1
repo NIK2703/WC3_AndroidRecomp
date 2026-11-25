@@ -46,6 +46,7 @@ param(
     [switch]$NoThinLtoCache,
     [switch]$EmitRelocs,
     [switch]$Polly,
+    [switch]$MachineOutliner,
     [switch]$HiddenVisibility,
     [switch]$NoSemanticInterposition,
     [string]$SymbolOrderFile = '',
@@ -108,7 +109,8 @@ $experimentalParams = @(
     'PgoKind', 'OptLevel', 'CorpusOptLevel', 'Mtune', 'OmitFramePointer',
     'SplitMachineFunctions', 'CallGraphSort', 'LtoOptLevel',
     'LtoWholeProgramVisibility', 'NoThinLtoCache', 'EmitRelocs', 'Polly',
-    'HiddenVisibility', 'NoSemanticInterposition', 'SymbolOrderFile'
+    'MachineOutliner', 'HiddenVisibility', 'NoSemanticInterposition',
+    'SymbolOrderFile'
 )
 if ($isDebug) {
     foreach ($name in $experimentalParams) {
@@ -348,6 +350,9 @@ if ($isRelease) {
     }
     if ($PSBoundParameters.ContainsKey('Polly')) {
         $nativeParams['Polly'] = [bool]$Polly
+    }
+    if ($PSBoundParameters.ContainsKey('MachineOutliner')) {
+        $nativeParams['MachineOutliner'] = [bool]$MachineOutliner
     }
     if ($PSBoundParameters.ContainsKey('HiddenVisibility')) {
         $nativeParams['HiddenVisibility'] = [bool]$HiddenVisibility

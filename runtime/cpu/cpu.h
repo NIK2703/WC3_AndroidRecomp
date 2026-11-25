@@ -573,6 +573,14 @@ static inline void eflags_unpack(CPU *c, uint32_t v) {
 static inline void push32(CPU *c, uint32_t v) { c->esp -= 4; wr32(STACK_BASE(c) + c->esp, v); }
 static inline uint32_t pop32(CPU *c) { uint32_t v = rd32(STACK_BASE(c) + c->esp); c->esp += 4; return v; }
 
+/* WC3_POP_ESP: emitted by the lift-time esp-promotion pass (lf_esp_local).
+ * The pass owns the write-back of c->esp after the whole generated line, so
+ * the macro itself only updates the cached local.  Existing corpora keep
+ * pop32(c). */
+#define WC3_POP_ESP(c, esp) \
+    ({ uint32_t _wc3_pop_v_ = rd32(STACK_BASE(c) + (esp)); \
+       (esp) += 4u; _wc3_pop_v_; })
+
 /* An instruction the lifter could not express. Plain abort() by default, so a
  * project that includes only cpu.h is unchanged; a runtime that can say
  * something useful - which guest address, which mnemonic, how it got there -
@@ -705,21 +713,39 @@ static inline uint32_t sbb32(CPU *c, uint32_t a, uint32_t b, int sz) {
     return (uint32_t)full & mask_sz(sz);
 }
 
-static inline uint32_t flags_sub(CPU *c, uint32_t a, uint32_t b, int sz) {
+/* WC3_NOINLINE_FULL_FLAGS: the full-mask flag helpers are large and LLVM
+ * inlines a fresh copy into every call site.  The exact-mask `flags_*_mask`
+ * helpers stay inline: their mask is a compile-time constant, so outlining
+ * them turns a constant into a runtime argument and grows .text.
+ *
+ * `flags_incs`/`flags_decs` also stay inline.  Their body is only the CF
+ * save/restore around an outlined add/sub; making them noinline would add a
+ * second call per inc/dec site.  The flag classification itself is still
+ * shared through flags_add/flags_sub. */
+#ifndef WC3_NOINLINE_FULL_FLAGS
+#define WC3_NOINLINE_FULL_FLAGS 0
+#endif
+#if WC3_NOINLINE_FULL_FLAGS
+#define WC3_FULL_FLAG_FN static __attribute__((noinline, unused))
+#else
+#define WC3_FULL_FLAG_FN static inline
+#endif
+
+WC3_FULL_FLAG_FN uint32_t flags_sub(CPU *c, uint32_t a, uint32_t b, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz);
     a &= m; b &= m; uint32_t r = (a - b) & m;
     c->cf = (a < b); c->zf = (r == 0); c->sf = (r & s) != 0;
     c->of = (((a ^ b) & (a ^ r)) & s) != 0; WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
     WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
-static inline uint32_t flags_add(CPU *c, uint32_t a, uint32_t b, int sz) {
+WC3_FULL_FLAG_FN uint32_t flags_add(CPU *c, uint32_t a, uint32_t b, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz);
     a &= m; b &= m; uint32_t r = (a + b) & m;
     c->cf = (r < a); c->zf = (r == 0); c->sf = (r & s) != 0;
     c->of = ((~(a ^ b) & (a ^ r)) & s) != 0; WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
     WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
-static inline uint32_t flags_logicz(CPU *c, uint32_t r, int sz) {
+WC3_FULL_FLAG_FN uint32_t flags_logicz(CPU *c, uint32_t r, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz); r &= m;
     c->cf = 0; c->of = 0; c->sf = (r & s) != 0; c->zf = (r == 0);
     WC3_SET_PF(c, parity8((uint8_t)r)); return r;
@@ -730,14 +756,14 @@ static inline uint32_t flags_incs(CPU *c, uint32_t a, int sz) {
 static inline uint32_t flags_decs(CPU *c, uint32_t a, int sz) {
     uint32_t keep = c->cf, r = flags_sub(c, a, 1, sz); c->cf = keep; return r;
 }
-static inline uint32_t flags_adc(CPU *c, uint32_t a, uint32_t b, int sz) {
+WC3_FULL_FLAG_FN uint32_t flags_adc(CPU *c, uint32_t a, uint32_t b, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz), cin = c->cf & 1;
     a &= m; b &= m; uint64_t full = (uint64_t)a + b + cin; uint32_t r = (uint32_t)full & m;
     c->cf = (full >> (sz * 8)) & 1; c->zf = (r == 0); c->sf = (r & s) != 0;
     c->of = ((~(a ^ b) & (a ^ r)) & s) != 0; WC3_SET_AF(c, ((a ^ b ^ r) & 0x10) != 0);
     WC3_SET_PF(c, parity8((uint8_t)r)); return r;
 }
-static inline uint32_t flags_sbb(CPU *c, uint32_t a, uint32_t b, int sz) {
+WC3_FULL_FLAG_FN uint32_t flags_sbb(CPU *c, uint32_t a, uint32_t b, int sz) {
     uint32_t m = mask_sz(sz), s = sign_sz(sz), bin = c->cf & 1;
     a &= m; b &= m; uint64_t full = (uint64_t)a - b - bin; uint32_t r = (uint32_t)full & m;
     c->cf = (full >> (sz * 8)) & 1; c->zf = (r == 0); c->sf = (r & s) != 0;
