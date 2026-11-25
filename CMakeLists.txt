@@ -498,8 +498,11 @@ endif()
 if(WC3_SYMBOL_ORDER_FILE)
     list(APPEND WC3_CORPUS_COMPILE_OPTIONS -ffunction-sections -fdata-sections)
 endif()
+# Use the joined -mllvm=<flag> form for every LLVM pass flag.  CMake removes
+# duplicate compile options, so two separate "-mllvm <flag>" pairs collapse to
+# one bare -mllvm and the second flag is passed to the driver instead of LLVM.
 if(WC3_POLLY)
-    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -mllvm -polly)
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -mllvm=-polly)
 endif()
 if(WC3_CORPUS_MACHINE_OUTLINER)
     if(ANDROID AND NOT ANDROID_ABI STREQUAL "arm64-v8a")
@@ -510,7 +513,7 @@ if(WC3_CORPUS_MACHINE_OUTLINER)
         message(FATAL_ERROR
             "WC3_CORPUS_MACHINE_OUTLINER requires an AArch64 target")
     endif()
-    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -mllvm -enable-machine-outliner)
+    list(APPEND WC3_CORPUS_COMPILE_OPTIONS -mllvm=-enable-machine-outliner)
 endif()
 if(NOT _wc3_corpus_opt_upper STREQUAL "O2" OR
    WC3_MTUNE OR WC3_OMIT_FRAME_POINTER OR
