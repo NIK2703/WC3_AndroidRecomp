@@ -315,6 +315,32 @@ static inline int wc3_dt_command_target_live(uint32_t active,
     return select_mode && active && active != select_mode;
 }
 
+/* CGameUI+0x21C is the dedicated camera input mode object.  It is not a
+ * command target; a release must never confirm into it just because it is
+ * different from CSelectMode. */
+static inline int wc3_dt_camera_mode_active(uint32_t active_mode,
+                                            uint32_t camera_mode)
+{
+    return camera_mode != 0u && active_mode == camera_mode;
+}
+
+/*
+ * The native middle-button path calls CGameUI::SetInputMode(camera), which
+ * deactivates the current input mode.  Doing that while a command
+ * target/placement mode is active tears down its preview and leaves the
+ * release with a mode that is no longer live.  Only the plain select mode
+ * may be stacked under the camera drag; a live command gesture or a
+ * queued confirmation keeps its mode even if the card click has not switched
+ * it yet.
+ */
+static inline int wc3_dt_camera_mode_switch(uint32_t active_mode,
+                                            uint32_t select_mode,
+                                            int command_owns_mode)
+{
+    return select_mode != 0u && active_mode == select_mode &&
+           !command_owns_mode;
+}
+
 /*
  * A field press can arrive while the game is not ready for semantic input:
  * the map is loading/fading in, the player manager is not live yet, or the

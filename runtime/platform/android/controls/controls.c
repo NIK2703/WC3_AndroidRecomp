@@ -1080,14 +1080,18 @@ static int direct_touch_begin(int pointer_id, float x, float y,
 #endif
 
     if (direct_owner_native_gesture()) {
-        /* Native HUD gestures are single-pointer.  Swallow the extra pointer
-         * instead of handing it to the vendor engine: a second finger on the
-         * minimap or command card must not turn the first click into a
-         * camera gesture.  An overlay element is the exception: it still
-         * belongs to the legacy engine. */
+        /* Native HUD gestures are single-pointer.  Swallow an extra pointer
+         * over another HUD control instead of handing it to the vendor engine:
+         * a second finger on the minimap or command card must not turn the
+         * first click into a camera gesture.  A finger in the battlefield is
+         * different: the first finger may already be the native cursor, and a
+         * quick swipe in the world must still be able to pan the camera.  The
+         * recognizer keeps that pointer isolated from the virtual mouse. */
         if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) return 0;
-        (void)direct_owner_add(pointer_id, DIRECT_OWNER_IGNORED, x, y);
-        return 1;
+        if (route != WC3_DIRECT_TOUCH_ROUTE_FIELD) {
+            (void)direct_owner_add(pointer_id, DIRECT_OWNER_IGNORED, x, y);
+            return 1;
+        }
     }
     if (direct_owner_portrait_active()) {
         /* The follow belongs to the finger that landed on the portrait.  A

@@ -158,7 +158,9 @@ static void test_field_hover(void)
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_TAP);
     assert(g_events[0].owner_role == WC3_DT_OWNER_ACTION);
 
-    /* Two DOWN events emit no hover either; roles are resolved on MOVE. */
+    /* Two DOWN events emit no hover either; roles are resolved on MOVE or at
+     * the long-press deadline.  Both field contacts stay camera candidates
+     * until then, even when one of them is already a cursor. */
     events_clear();
     wc3_direct_touch_down(&dt, 41, 500.0f, 500.0f, 1000);
     wc3_direct_touch_down(&dt, 42, 600.0f, 600.0f, 1001);
@@ -166,7 +168,7 @@ static void test_field_hover(void)
     assert(wc3_direct_touch_contact_role(&dt, 41) ==
            WC3_DT_CONTACT_UNASSIGNED);
     assert(wc3_direct_touch_contact_role(&dt, 42) ==
-           WC3_DT_CONTACT_ACTION);
+           WC3_DT_CONTACT_UNASSIGNED);
 
     wc3_direct_touch_reset(&dt);
 }
@@ -425,13 +427,13 @@ static void test_two_finger_camera_and_action(void)
     Wc3DirectTouch dt = make_recognizer();
     events_clear();
 
-    /* The first field contact keeps the camera claim; the second one owns
-     * the virtual mouse from the moment it lands. */
+    /* Both field contacts stay camera candidates until one of them crosses
+     * the drag threshold or reaches the long-press deadline. */
     wc3_direct_touch_down(&dt, 4, 100.0f, 100.0f, 0);
     wc3_direct_touch_down(&dt, 5, 500.0f, 500.0f, 10);
     assert(wc3_direct_touch_active_count(&dt) == 2);
     assert(wc3_direct_touch_contact_role(&dt, 4) == WC3_DT_CONTACT_UNASSIGNED);
-    assert(wc3_direct_touch_contact_role(&dt, 5) == WC3_DT_CONTACT_ACTION);
+    assert(wc3_direct_touch_contact_role(&dt, 5) == WC3_DT_CONTACT_UNASSIGNED);
     assert(wc3_direct_touch_camera_pointer(&dt) == -1);
 
     wc3_direct_touch_move(&dt, 4, 130.0f, 100.0f, 50);
@@ -439,15 +441,16 @@ static void test_two_finger_camera_and_action(void)
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
     assert(g_events[0].owner_role == WC3_DT_OWNER_CAMERA);
     assert(wc3_direct_touch_camera_pointer(&dt) == 4);
-    assert(wc3_direct_touch_action_pointer(&dt) == 5);
+    assert(wc3_direct_touch_action_pointer(&dt) == -1);
     assert(g_hover_count == 0);
 
-    /* The action finger reaches its long-press deadline and owns the native
+    /* The other finger reaches its long-press deadline and owns the native
      * left button while the camera keeps panning. */
     assert(wc3_direct_touch_tick(&dt, 130) == 1);
     assert(g_event_count == 2);
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
     assert(g_events[1].owner_role == WC3_DT_OWNER_ACTION);
+    assert(wc3_direct_touch_action_pointer(&dt) == 5);
     assert(g_hover_count == 1);
 
     wc3_direct_touch_move(&dt, 4, 160.0f, 100.0f, 200);
@@ -462,6 +465,48 @@ static void test_two_finger_camera_and_action(void)
     wc3_direct_touch_up(&dt, 4, 160.0f, 100.0f, 300);
     assert(g_event_count == 5);
     assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(wc3_direct_touch_active_count(&dt) == 0);
+}
+
+static void test_action_first_second_finger_camera(void)
+{
+    Wc3DirectTouch dt = make_recognizer();
+    events_clear();
+
+    /* The first finger is already the ACTION cursor after a long press. */
+    wc3_direct_touch_down(&dt, 40, 200.0f, 200.0f, 0);
+    assert(wc3_direct_touch_tick(&dt, 130) == 1);
+    assert(wc3_direct_touch_contact_role(&dt, 40) == WC3_DT_CONTACT_ACTION);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
+
+    /* The second finger lands later and still owns a camera claim: a quick
+     * swipe in the field must become the camera, not a second cursor. */
+    wc3_direct_touch_down(&dt, 41, 700.0f, 300.0f, 200);
+    assert(wc3_direct_touch_contact_role(&dt, 41) == WC3_DT_CONTACT_UNASSIGNED);
+    wc3_direct_touch_move(&dt, 41, 730.0f, 300.0f, 240);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
+    assert(g_events[1].owner_role == WC3_DT_OWNER_CAMERA);
+    assert(g_events[1].gesture_id != 0u);
+    assert(wc3_direct_touch_camera_pointer(&dt) == 41);
+    assert(wc3_direct_touch_action_pointer(&dt) == 40);
+    assert(g_hover_count == 1);
+
+    /* The cursor keeps its native selection drag while the camera pans. */
+    wc3_direct_touch_move(&dt, 40, 220.0f, 210.0f, 260);
+    assert(g_event_count == 3);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
+    wc3_direct_touch_move(&dt, 41, 760.0f, 320.0f, 280);
+    assert(g_event_count == 4);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE);
+    assert(g_events[3].owner_role == WC3_DT_OWNER_CAMERA);
+
+    wc3_direct_touch_up(&dt, 41, 760.0f, 320.0f, 300);
+    wc3_direct_touch_up(&dt, 40, 220.0f, 210.0f, 320);
+    assert(g_event_count == 6);
+    assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(g_events[5].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
     assert(wc3_direct_touch_active_count(&dt) == 0);
 }
 
@@ -776,6 +821,29 @@ static void test_command_target_live(void)
     assert(wc3_dt_command_target_live(0x43400088, 0x42AD0088));
 }
 
+static void test_camera_mode_switch(void)
+{
+    /* Native middle-drag deactivates the current input mode through
+     * SetInputMode(camera).  During building placement the target mode is
+     * live and owns the ghost, so the camera must drive the drag frame
+     * without touching the mode stack. */
+    const uint32_t select_mode = 0x42AD0088u;
+    const uint32_t target_mode = 0x43420088u;
+    assert(wc3_dt_camera_mode_switch(select_mode, select_mode, 0));
+    assert(!wc3_dt_camera_mode_switch(target_mode, select_mode, 0));
+    assert(!wc3_dt_camera_mode_switch(0u, select_mode, 0));
+    assert(!wc3_dt_camera_mode_switch(select_mode, 0u, 0));
+    /* The card DOWN click may not have entered target mode yet, and a queued
+     * confirmation must also keep the camera off the mode stack. */
+    assert(!wc3_dt_camera_mode_switch(select_mode, select_mode, 1));
+
+    /* CGameUI+0x21C is the camera mode, never a command target. */
+    const uint32_t camera_mode = 0x42B10088u;
+    assert(wc3_dt_camera_mode_active(camera_mode, camera_mode));
+    assert(!wc3_dt_camera_mode_active(target_mode, camera_mode));
+    assert(!wc3_dt_camera_mode_active(camera_mode, 0u));
+}
+
 static void test_field_click_defer(void)
 {
     /* inside, ui, world, select present, select active, gate, ready field */
@@ -924,6 +992,7 @@ int main(void)
     test_raw_routes_never_emit_semantics();
     test_reset_releases_field_drag();
     test_two_finger_camera_and_action();
+    test_action_first_second_finger_camera();
     test_reset_discards_pending();
     test_pointer_snapshot();
     test_coordinate_mapping();
@@ -938,6 +1007,7 @@ int main(void)
     test_command_release_resolution();
     test_command_target_mode();
     test_command_target_live();
+    test_camera_mode_switch();
     test_field_click_defer();
     test_command_movement_slop();
     test_console_rect_scale();

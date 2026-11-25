@@ -370,6 +370,7 @@ typedef struct {
     uint8_t  active;
     uint8_t  pending;          /* one coalesced MOVE awaits apply */
     uint8_t  rebase_pending;
+    uint8_t  mode_switched;    /* camera mode is live in CGameUI+0x1B4 */
     uint8_t  pointer;
     uint32_t gesture_id;
     uint32_t ui;
@@ -4218,6 +4219,29 @@ static int dt_camera_conflict_active(void)
     return g_portrait_follow_active || g_minimap.pressed;
 }
 
+/* Native 0x6F394490 refuses middle-drag while the drag-scroll manager gate is
+ * set.  That gate is also left dirty by a UI contact, and the first finger may
+ * already be an ACTION cursor holding the game's virtual mouse.  The direct
+ * camera drag owns no mouse button and neither posts nor waits for messages,
+ * so clear the gate only for the guest call and put it back afterwards. */
+static uint32_t dt_camera_manager_gate_clear(uint32_t manager)
+{
+    if (!manager || !dt_guest_readable(manager + DT_DRAG_MANAGER_GATE, 4u))
+        return 0u;
+    const uint32_t saved = wc3_rd32g(manager + DT_DRAG_MANAGER_GATE);
+    if (saved != 0u)
+        wc3_wr32g(manager + DT_DRAG_MANAGER_GATE, 0u);
+    return saved;
+}
+
+static void dt_camera_manager_gate_restore(uint32_t manager, uint32_t saved)
+{
+    if (saved == 0u) return;
+    if (!manager || !dt_guest_readable(manager + DT_DRAG_MANAGER_GATE, 4u))
+        return;
+    wc3_wr32g(manager + DT_DRAG_MANAGER_GATE, saved);
+}
+
 /* Safety net for map changes and stale queue entries.  No mouse state is
  * touched: the recognizer's END is the normal path for a live gesture. */
 static void dt_camera_pan_reset(void)
@@ -4236,7 +4260,8 @@ static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
 {
     if (!c || !ctx || !ctx->ui || !ctx->world) return 0;
     if (g_camera_pan.active) {
-        if (g_camera_pan.ui && g_camera_pan.ui == ctx->ui)
+        if (g_camera_pan.mode_switched && g_camera_pan.ui &&
+            g_camera_pan.ui == ctx->ui)
             dt_camera_input_mode(c, ctx->ui, g_camera_pan.saved_mode, 0);
         dt_camera_pan_reset();
     }
@@ -4246,26 +4271,35 @@ static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
         !dt_guest_readable(ctx->ui + DT_UI_DRAG_FRAME, 4u)) return 0;
 
     const uint32_t manager = wc3_rd32g(ctx->ui + DT_UI_DRAG_MANAGER);
-    if (!manager || !dt_guest_readable(manager + DT_DRAG_MANAGER_GATE, 4u) ||
-        wc3_rd32g(manager + DT_DRAG_MANAGER_GATE) != 0u) {
-        dt_trace("field-camera-gate-busy", manager, 0);
+    const uint32_t manager_gate = dt_camera_manager_gate_clear(manager);
+    if (manager_gate != 0u)
+        dt_trace("field-camera-gate-bypass", manager_gate, manager);
+    const uint32_t frame = wc3_rd32g(ctx->ui + DT_UI_DRAG_FRAME);
+    if (!frame || !dt_guest_readable(frame, DT_DRAG_MARK + 4u)) {
+        dt_camera_manager_gate_restore(manager, manager_gate);
         return 0;
     }
-    const uint32_t frame = wc3_rd32g(ctx->ui + DT_UI_DRAG_FRAME);
-    if (!frame || !dt_guest_readable(frame, DT_DRAG_MARK + 4u)) return 0;
     const uint32_t camera = dt_camera(ctx->ui);
-    if (!camera) return 0;
+    if (!camera) {
+        dt_camera_manager_gate_restore(manager, manager_gate);
+        return 0;
+    }
     if (dt_call_thiscall(c, camera, DT_FN_CAMERA_CAN_DRAG, 0, NULL) != 0u) {
         dt_trace("field-camera-can-drag", camera, 0);
+        dt_camera_manager_gate_restore(manager, manager_gate);
         return 0;
     }
 
     const uint32_t scratch = dt_scratch_alloc();
-    if (!scratch) return 0;
+    if (!scratch) {
+        dt_camera_manager_gate_restore(manager, manager_gate);
+        return 0;
+    }
     const uint32_t point = scratch + DT_POINT_OFFSET;
     const uint32_t pick = scratch + DT_PICK_OFFSET;
     if (!dt_event_point(c, ev->x, ev->y, width, height, point)) {
         dt_scratch_free(scratch);
+        dt_camera_manager_gate_restore(manager, manager_gate);
         return 0;
     }
     uint32_t wx = 0u;
@@ -4276,6 +4310,7 @@ static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
         !isfinite(dt_float(wz))) {
         dt_trace("field-camera-pick", dt_bits(ev->x), dt_bits(ev->y));
         dt_scratch_free(scratch);
+        dt_camera_manager_gate_restore(manager, manager_gate);
         return 0;
     }
     const float z = dt_float(wz);
@@ -4294,15 +4329,32 @@ static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
     dt_camera_scope_save(saved);
     dt_camera_scope_set(event_x, event_y, z);
     const uint32_t saved_mode = wc3_rd32g(ctx->ui + DT_UI_INPUT_MODE);
-    dt_camera_input_mode(c, ctx->ui,
-                         wc3_rd32g(ctx->ui + DT_UI_CAMERA_MODE), 1u);
+    const uint32_t select_mode = dt_ui_mode_read(ctx->ui, DT_UI_SELECT_MODE);
+    /* SetInputMode is what removes a placement ghost: it deactivates the
+     * target mode before the camera drag starts.  Only the normal select mode
+     * can be put on the input-mode stack and restored safely; when the first
+     * finger already owns a target/placement mode, keep that mode active and
+     * drive the camera frame directly.  The command release then still sees
+     * its live target mode instead of the camera mode and confirms normally. */
+    const int mode_switched = wc3_dt_camera_mode_switch(
+        saved_mode, select_mode, g_cmd_active || g_cmd_target.pending);
+    if (mode_switched) {
+        dt_camera_input_mode(c, ctx->ui,
+                             wc3_rd32g(ctx->ui + DT_UI_CAMERA_MODE), 1u);
+        dt_trace("field-camera-mode-switch", saved_mode, select_mode);
+    } else {
+        dt_trace("field-camera-mode-keep", saved_mode, select_mode);
+    }
     const uint32_t arg = point;
     const uint32_t started =
         dt_call_thiscall(c, frame, DT_FN_CAMERA_DRAG_BEGIN, 1, &arg);
     if (started == 0u) {
         wc3_wr32g(frame + DT_DRAG_ACTIVE, 0u);
         wc3_wr32g(frame + DT_DRAG_MARK, 0u);
+        if (mode_switched)
+            dt_camera_input_mode(c, ctx->ui, saved_mode, 0);
         dt_camera_scope_restore(saved);
+        dt_camera_manager_gate_restore(manager, manager_gate);
         dt_scratch_free(scratch);
         dt_trace("field-camera-begin-rejected", frame, 0);
         return 0;
@@ -4321,14 +4373,18 @@ static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
     (void)dt_call_thiscall(c, frame, DT_FN_CAMERA_DRAG_CANCEL, 0, NULL);
     wc3_wr32g(frame + DT_DRAG_MARK, 0u);
     dt_camera_scope_restore(saved);
+    dt_camera_manager_gate_restore(manager, manager_gate);
     dt_scratch_free(scratch);
 
     if (!dt_camera_vec_finite(target) || !dt_camera_vec_finite(world)) {
+        if (mode_switched)
+            dt_camera_input_mode(c, ctx->ui, saved_mode, 0);
         dt_trace("field-camera-projection", dt_bits(target[0]),
                  dt_bits(world[0]));
         return 0;
     }
     g_camera_pan.active = 1;
+    g_camera_pan.mode_switched = (uint8_t)(mode_switched ? 1 : 0);
     g_camera_pan.pointer = (uint8_t)ev->pointer_id;
     g_camera_pan.gesture_id = ev->gesture_id;
     g_camera_pan.ui = ctx->ui;
@@ -4375,7 +4431,7 @@ static void dt_camera_pan_end(CPU *c, const Wc3DirectTouchEvent *ev)
         wc3_wr32g(g_camera_pan.frame + DT_DRAG_ACTIVE, 0u);
         wc3_wr32g(g_camera_pan.frame + DT_DRAG_MARK, 0u);
     }
-    if (g_camera_pan.ui)
+    if (g_camera_pan.mode_switched && g_camera_pan.ui)
         dt_camera_input_mode(c, g_camera_pan.ui, g_camera_pan.saved_mode, 0);
     memset(&g_camera_pan, 0, sizeof(g_camera_pan));
     dt_trace("field-camera-end", dt_bits(ev->x), dt_bits(ev->y));
@@ -4411,6 +4467,10 @@ static void dt_camera_pan_apply(CPU *c, const DtContext *ctx,
     g_camera_pan.pending = 0;
     if (!g_camera_pan.frame ||
         !dt_guest_readable(g_camera_pan.frame, DT_DRAG_MARK + 4u)) {
+        if (g_camera_pan.mode_switched && g_camera_pan.ui &&
+            dt_guest_readable(g_camera_pan.ui, DT_UI_INPUT_MODE + 4u))
+            dt_camera_input_mode(c, g_camera_pan.ui,
+                                 g_camera_pan.saved_mode, 0);
         dt_camera_pan_reset();
         return;
     }
@@ -5181,7 +5241,8 @@ static int dt_command_context(uint32_t *bar_out, int allow_targeting,
  * dropped every drag confirmation.  The live input mode is the authoritative
  * signal: selecting a command leaves CSelectMode, and confirming the target
  * returns to it.  The select-mode object is also the only mode a field drag
- * can set, so a non-select mode during a command gesture is the target mode. */
+ * can set, so a non-select mode during a command gesture is the target mode;
+ * the dedicated camera mode is the one exception and is never confirmed. */
 static int dt_command_targeting(uint32_t type)
 {
     (void)type;
@@ -5190,10 +5251,18 @@ static int dt_command_targeting(uint32_t type)
     if (!ui) return 0;
     const uint32_t active = dt_ui_mode_read(ui, DT_UI_ACTIVE_MODE);
     const uint32_t select = dt_ui_mode_read(ui, DT_UI_SELECT_MODE);
+    const uint32_t camera = dt_ui_mode_read(ui, DT_UI_CAMERA_MODE);
     /* The target mode keeps the click gate open in 1.27b, so the gate is not
      * evidence either way.  The live mode decides, and the first non-select
      * mode seen after the card click is remembered. */
     if (!wc3_dt_command_target_live(active, select)) return 0;
+    /* A camera drag is not a command target.  If one is live here (camera
+     * started before the card, or a leaked mode switch), confirming would
+     * post the target click into the camera mode. */
+    if (wc3_dt_camera_mode_active(active, camera)) {
+        dt_trace("cmd-target-camera", active, camera);
+        return 0;
+    }
     /* The target mode object is stable for the command.  Record the first one
      * seen after the card click and require the same object: the field select
      * drag mode is also non-select, but it is a different object. */
