@@ -35,6 +35,11 @@
     "w3l_compat.json",
     "selection.json",
     "leaf_call.json",
+    "x87_fpsr.json",
+    {
+      "manifest": "x87_invalid_outline.json",
+      "enabled": false
+    },
     {
       "manifest": "local_base.json",
       "enabled": false
@@ -59,6 +64,7 @@
       "w3l_compat",
       "selection",
       "leaf_call",
+      "x87_fpsr",
       "parallel_raycast"
     ],
     "post_save": [
@@ -72,6 +78,7 @@
       "w3l_compat",
       "selection",
       "leaf_call",
+      "x87_fpsr",
       "parallel_raycast"
     ],
     "raw": [
@@ -86,6 +93,7 @@
       "w3l_compat",
       "selection",
       "leaf_call",
+      "x87_fpsr",
       "parallel_raycast"
     ]
   }

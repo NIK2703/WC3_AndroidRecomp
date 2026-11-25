@@ -1,8 +1,8 @@
 {
   "schema": 2,
   "id": "local_base",
-  "rev": 1,
-  "description": "Cache the write-once guest window base once per lifted function; default-off optimization candidate.",
+  "rev": 2,
+  "description": "Use the write-once guest window base through a const accessor in profitable functions; skip x87-heavy and branchy/call-heavy small functions where the live range costs more than the saved reloads.",
   "engine": "guest_base",
   "kind": "transform",
   "mode": "batch",

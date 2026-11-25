@@ -1,0 +1,38 @@
+{
+  "schema": 2,
+  "id": "x87_fpsr",
+  "rev": 3,
+  "description": "Defer x87 IE to ARM64 FPSR.IOC in profitable leaf functions; rejects guest calls, x87 observers, dead abort bodies and functions whose guard overhead exceeds the saved NaN checks; source-level rewrite of the generated corpus.",
+  "engine": "x87_fpsr",
+  "kind": "transform",
+  "mode": "batch",
+  "scope": "all",
+  "order": 55,
+  "after": [
+    "leaf_call"
+  ],
+  "output_layout": "flat",
+  "command": {
+    "args": [
+      "--inputs",
+      "{inputs}",
+      "--out-dir",
+      "{out_dir}",
+      "--report",
+      "{report}",
+      "--quiet"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "verdict",
+      "equals": "pass"
+    },
+    {
+      "kind": "field_equals",
+      "path": "inputs",
+      "equals_chunk_count": true
+    }
+  ]
+}

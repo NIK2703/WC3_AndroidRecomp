@@ -114,6 +114,31 @@ if(NOT WC3_LEAF_CALL_EXE)
         "before configuring")
 endif()
 
+find_program(WC3_X87_FPSR_EXE
+    NAMES x87_fpsr x87_fpsr.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+if(WC3_X87_FPSR AND NOT WC3_X87_FPSR_EXE)
+    message(FATAL_ERROR
+        "x87_fpsr.exe missing; run tools/lift/build_tools.ps1 "
+        "before configuring with -DWC3_X87_FPSR=ON")
+endif()
+
+find_program(WC3_X87_INVALID_OUTLINE_EXE
+    NAMES x87_invalid_outline x87_invalid_outline.exe
+    HINTS "${WC3_ROOT}/build/lift-tools"
+    NO_DEFAULT_PATH)
+if(WC3_X87_INVALID_OUTLINE AND NOT WC3_X87_INVALID_OUTLINE_EXE)
+    message(FATAL_ERROR
+        "x87_invalid_outline.exe missing; run tools/lift/build_tools.ps1 "
+        "before configuring with -DWC3_X87_INVALID_OUTLINE=ON")
+endif()
+if(NOT WC3_X87_INVALID_OUTLINE_MIN_SITES MATCHES "^[0-9]+$"
+   OR WC3_X87_INVALID_OUTLINE_MIN_SITES LESS 1)
+    message(FATAL_ERROR
+        "WC3_X87_INVALID_OUTLINE_MIN_SITES must be a positive integer")
+endif()
+
 find_program(WC3_GUEST_BASE_EXE
     NAMES guest_base guest_base.exe
     HINTS "${WC3_ROOT}/build/lift-tools"
@@ -802,6 +827,14 @@ if(WC3_PATCH_PIPELINE)
         "${WC3_ROOT}/tools/lift/csrc_local/xmm_lane.c")
     wc3_require_fresh_pass("${WC3_LEAF_CALL_EXE}"
         "${WC3_ROOT}/tools/lift/csrc_local/leaf_call.c")
+    if(WC3_X87_FPSR)
+        wc3_require_fresh_pass("${WC3_X87_FPSR_EXE}"
+            "${WC3_ROOT}/tools/lift/csrc_local/x87_fpsr.c")
+    endif()
+    if(WC3_X87_INVALID_OUTLINE)
+        wc3_require_fresh_pass("${WC3_X87_INVALID_OUTLINE_EXE}"
+            "${WC3_ROOT}/tools/lift/csrc_local/x87_invalid_outline.c")
+    endif()
     if(WC3_GUEST_BASE_LOCAL)
         wc3_require_fresh_pass("${WC3_GUEST_BASE_EXE}"
             "${WC3_ROOT}/tools/lift/csrc_local/guest_base.c")
@@ -851,6 +884,14 @@ if(WC3_PATCH_PIPELINE)
         list(APPEND _patch_stage_args --patch selection)
     endif()
     list(APPEND _patch_stage_args --patch leaf_call)
+    if(WC3_X87_FPSR)
+        list(APPEND _patch_stage_args --patch x87_fpsr)
+    endif()
+    if(WC3_X87_INVALID_OUTLINE)
+        # Must follow x87_fpsr: eligible functions are rewritten there and
+        # leave no plain x87_* calls for this stage to outline.
+        list(APPEND _patch_stage_args --patch x87_invalid_outline)
+    endif()
     if(WC3_PARALLEL_RAYCAST)
         list(APPEND _patch_stage_args --patch parallel_raycast)
     endif()
@@ -860,6 +901,8 @@ if(WC3_PATCH_PIPELINE)
     set(_patch_param_args)
     file(SHA256 "${WC3_ROOT}/tools/lift/patch_pipeline.py" _patch_pipeline_sha)
     list(APPEND _patch_param_args --param "pipeline_sha=${_patch_pipeline_sha}")
+    list(APPEND _patch_param_args --param
+         "x87_invalid_outline_min_sites=${WC3_X87_INVALID_OUTLINE_MIN_SITES}")
     if(WC3_LEAF_GS_COOKIE)
         list(APPEND _patch_param_args --param "gs_cookie=1")
     else()

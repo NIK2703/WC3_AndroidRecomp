@@ -1358,6 +1358,16 @@ def test_leaf_call_pass() -> int:
     return run_host_tool("leaf_call", ["--self-test"])
 
 
+def test_x87_fpsr_pass() -> int:
+    """FPSR source check: no guest calls, observers or dead abort bodies."""
+    return run_host_tool("x87_fpsr", ["--self-test"])
+
+
+def test_x87_invalid_outline_pass() -> int:
+    """x87 IE outlining: only non-FPSR functions above the site threshold."""
+    return run_host_tool("x87_invalid_outline", ["--self-test"])
+
+
 def test_patch_pipeline() -> int:
     """Build-time patch registry: modes, DAG, assertions and provenance."""
     return subprocess.call(
@@ -3768,6 +3778,8 @@ TESTS = {
     "dead_flags_pass": test_dead_flags_pass,
     "patch_pipeline": test_patch_pipeline,
     "leaf_call_pass": test_leaf_call_pass,
+    "x87_fpsr_pass": test_x87_fpsr_pass,
+    "x87_invalid_outline_pass": test_x87_invalid_outline_pass,
     "lift_cond_fold": test_lift_cond_fold,
     "lift_flag_plan": test_lift_flag_plan,
     "lift_x87_summary": test_lift_x87_summary,

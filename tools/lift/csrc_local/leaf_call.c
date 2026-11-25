@@ -77,6 +77,16 @@
 #define CALL_DEPTH CALL_MACRO "_DEPTH"
 #define CALL_CLEAN CALL_MACRO "_CLEAN"
 #define CALL_CLEAN_LEN (sizeof(CALL_CLEAN) - 1u)
+
+/* Set once from --call-outline before the parallel rewrite starts.  Collapses
+ * `push32(c, const); <clean call>` into one shared noinline host call.  The
+ * line-local rewrite keeps the trailing VA comment; the function-level gate
+ * below reverts sites where the helper costs more than the inline frame. */
+#define CALLSITE_OUTLINE "WC3_CALLSITE_OUTLINE"
+#define CALLSITE_OUTLINE_LEN (sizeof(CALLSITE_OUTLINE) - 1u)
+static int g_call_outline;
+static size_t g_outline_rw;
+static size_t g_outline_skipped;
 #define TAIL_MACRO "WC3_DIRECT_TAIL"
 #define TAIL_MACRO_LEN (sizeof(TAIL_MACRO) - 1u)
 #define TAIL_LEAF TAIL_MACRO "_LEAF"

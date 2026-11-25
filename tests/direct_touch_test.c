@@ -143,30 +143,30 @@ static void test_field_hover(void)
     Wc3DirectTouch dt = make_recognizer();
     events_clear();
 
-    /* The first pointer of a field contact announces its press point before
-     * the semantic tap exists.  The executor uses this to move the game's
-     * targeting cursor while the finger is down; without it the release
-     * click is resolved against the previous contact's cursor. */
+    /* A camera candidate never moves the shared cursor, so DOWN emits no
+     * hover.  The action hover is emitted immediately before its click. */
     wc3_direct_touch_down(&dt, 40, 300.0f, 400.0f, 0);
-    assert(g_hover_count == 1);
+    assert(g_hover_count == 0);
     assert(g_event_count == 0);
 
-    /* Moves do not repeat the hover; the target gesture owns the move
-     * stream after the press. */
     wc3_direct_touch_move(&dt, 40, 310.0f, 410.0f, 10);
-    assert(g_hover_count == 1);
+    assert(g_hover_count == 0);
 
     wc3_direct_touch_up(&dt, 40, 310.0f, 410.0f, 50);
     assert(g_hover_count == 1);
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_TAP);
+    assert(g_events[0].owner_role == WC3_DT_OWNER_ACTION);
 
-    /* A second finger is a multi-touch camera gesture, not a targeting
-     * hover. */
+    /* Two DOWN events emit no hover either; roles are resolved on MOVE. */
     events_clear();
     wc3_direct_touch_down(&dt, 41, 500.0f, 500.0f, 1000);
     wc3_direct_touch_down(&dt, 42, 600.0f, 600.0f, 1001);
-    assert(g_hover_count == 1);
+    assert(g_hover_count == 0);
+    assert(wc3_direct_touch_contact_role(&dt, 41) ==
+           WC3_DT_CONTACT_UNASSIGNED);
+    assert(wc3_direct_touch_contact_role(&dt, 42) ==
+           WC3_DT_CONTACT_ACTION);
 
     wc3_direct_touch_reset(&dt);
 }
@@ -183,10 +183,15 @@ static void test_tap_cancelled_by_motion(void)
     wc3_direct_touch_move(&dt, 2, 130.0f, 100.0f, 100);
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
-    assert(wc3_direct_touch_field_drag_active(&dt) == 1);
+    assert(g_events[0].owner_role == WC3_DT_OWNER_CAMERA);
+    assert(g_events[0].gesture_id != 0u);
+    assert(wc3_direct_touch_field_drag_active(&dt) == 0);
+    assert(wc3_direct_touch_camera_pointer(&dt) == 2);
     wc3_direct_touch_up(&dt, 2, 130.0f, 100.0f, 200);
     assert(g_event_count == 2);
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(g_events[1].owner_role == WC3_DT_OWNER_CAMERA);
+    assert(g_events[1].gesture_id == g_events[0].gesture_id);
     assert(wc3_direct_touch_field_drag_active(&dt) == 0);
     assert(g_haptic_count == 0);
 }
@@ -322,6 +327,9 @@ static void test_quick_swipe_camera(void)
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
     assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
+    assert(g_events[0].owner_role == WC3_DT_OWNER_CAMERA);
+    assert(g_events[0].gesture_id != 0u);
+    assert(g_hover_count == 0);
 
     /* Once the camera drag owns the pointer, the hold deadline must not arm
      * a second gesture. */
@@ -331,6 +339,8 @@ static void test_quick_swipe_camera(void)
     wc3_direct_touch_move(&dt, 10, 160.0f, 120.0f, 510);
     assert(g_event_count == 2);
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE);
+    assert(g_events[1].owner_role == WC3_DT_OWNER_CAMERA);
+    assert(g_events[1].gesture_id == g_events[0].gesture_id);
 
     wc3_direct_touch_up(&dt, 10, 170.0f, 130.0f, 600);
     assert(g_event_count == 3);
@@ -410,19 +420,49 @@ static void test_reset_releases_field_drag(void)
     assert(wc3_direct_touch_field_drag_active(&dt) == 0);
 }
 
-static void test_second_pointer_cancels(void)
+static void test_two_finger_camera_and_action(void)
 {
     Wc3DirectTouch dt = make_recognizer();
     events_clear();
 
+    /* The first field contact keeps the camera claim; the second one owns
+     * the virtual mouse from the moment it lands. */
     wc3_direct_touch_down(&dt, 4, 100.0f, 100.0f, 0);
-    wc3_direct_touch_down(&dt, 5, 200.0f, 200.0f, 10);
+    wc3_direct_touch_down(&dt, 5, 500.0f, 500.0f, 10);
     assert(wc3_direct_touch_active_count(&dt) == 2);
-    assert(wc3_direct_touch_tick(&dt, 1000) == 0);
-    wc3_direct_touch_up(&dt, 4, 100.0f, 100.0f, 1100);
-    wc3_direct_touch_up(&dt, 5, 200.0f, 200.0f, 1110);
-    assert(g_event_count == 0);
-    assert(g_haptic_count == 0);
+    assert(wc3_direct_touch_contact_role(&dt, 4) == WC3_DT_CONTACT_UNASSIGNED);
+    assert(wc3_direct_touch_contact_role(&dt, 5) == WC3_DT_CONTACT_ACTION);
+    assert(wc3_direct_touch_camera_pointer(&dt) == -1);
+
+    wc3_direct_touch_move(&dt, 4, 130.0f, 100.0f, 50);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
+    assert(g_events[0].owner_role == WC3_DT_OWNER_CAMERA);
+    assert(wc3_direct_touch_camera_pointer(&dt) == 4);
+    assert(wc3_direct_touch_action_pointer(&dt) == 5);
+    assert(g_hover_count == 0);
+
+    /* The action finger reaches its long-press deadline and owns the native
+     * left button while the camera keeps panning. */
+    assert(wc3_direct_touch_tick(&dt, 130) == 1);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
+    assert(g_events[1].owner_role == WC3_DT_OWNER_ACTION);
+    assert(g_hover_count == 1);
+
+    wc3_direct_touch_move(&dt, 4, 160.0f, 100.0f, 200);
+    assert(g_event_count == 3);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE);
+    assert(g_events[2].owner_role == WC3_DT_OWNER_CAMERA);
+
+    wc3_direct_touch_up(&dt, 5, 520.0f, 520.0f, 250);
+    assert(g_event_count == 4);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+
+    wc3_direct_touch_up(&dt, 4, 160.0f, 100.0f, 300);
+    assert(g_event_count == 5);
+    assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(wc3_direct_touch_active_count(&dt) == 0);
 }
 
 static void test_reset_discards_pending(void)
@@ -660,8 +700,12 @@ static void test_portrait_gesture(void)
     wc3_direct_touch_up(&dt, 24, 100.0f, 850.0f, 5100);
     assert(g_event_count == 2);
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_HOLD_RELEASE);
+    /* The second finger is an action cursor, even while a portrait follow is
+     * held: a quick tap is a real TAP, not a swallowed multi-touch contact. */
     wc3_direct_touch_up(&dt, 25, 200.0f, 200.0f, 5110);
-    assert(g_event_count == 2);
+    assert(g_event_count == 3);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_TAP);
+    assert(g_events[2].owner_role == WC3_DT_OWNER_ACTION);
 }
 
 static void test_beacon_release_resolution(void)
@@ -879,7 +923,7 @@ int main(void)
     test_late_move_starts_select();
     test_raw_routes_never_emit_semantics();
     test_reset_releases_field_drag();
-    test_second_pointer_cancels();
+    test_two_finger_camera_and_action();
     test_reset_discards_pending();
     test_pointer_snapshot();
     test_coordinate_mapping();

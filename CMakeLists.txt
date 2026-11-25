@@ -698,6 +698,31 @@ if(WC3_OUTLINE_CLEAN_DRAIN)
     add_compile_definitions(WC3_OUTLINE_CLEAN_DRAIN=1)
 endif()
 
+# Deferred x87 IE for eligible leaf functions.  The x87_fpsr patch stage
+# rewrites the corpus; on arm64 the hot path uses FPSR.IOC instead of per-op
+# software NaN classification.  Headless/x86 keeps the exact software path.
+option(WC3_X87_FPSR
+       "Defer x87 IE to ARM64 FPSR.IOC in eligible leaf functions"
+       ON)
+if(WC3_X87_FPSR)
+    add_compile_definitions(WC3_X87_FPSR=1)
+else()
+    add_compile_definitions(WC3_X87_FPSR=0)
+endif()
+
+# Outlined x87 IE classification for non-FPSR x87-heavy functions.  The
+# x87_invalid_outline patch stage runs after x87_fpsr and rewrites only plain
+# x87_add/sub/mul/div calls.  Below the site threshold a call would turn a
+# small leaf function into a non-leaf one and be a net size regression; the
+# measured break-even on the x87-heavy corpus is four sites.
+option(WC3_X87_INVALID_OUTLINE
+       "Outline x87 IE classification in non-FPSR x87-heavy functions"
+       ON)
+set(WC3_X87_INVALID_OUTLINE_MIN_SITES "4" CACHE STRING
+    "Minimum x87 add/sub/mul/div sites before outlining IE classification")
+set_property(CACHE WC3_X87_INVALID_OUTLINE_MIN_SITES
+             PROPERTY STRINGS 4 8)
+
 # Optional post-lift parallel raycast.  The pass rewrites exactly one call to
 # L_6F749F90 in the generated leaf corpus; it needs a generated corpus, the
 # Android app target and the as-built HLE library that owns the runtime pool.

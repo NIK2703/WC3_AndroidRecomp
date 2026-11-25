@@ -219,6 +219,23 @@
 #define DT_FN_UNIT_POSITION    0x6F058900u
 #define DT_FN_CAMERA_PAN       0x6F361B90u
 #define DT_FN_CAMERA_FOLLOW    0x6F3635E0u
+/* Cursor-free camera drag.  CSimpleMessageFrame at CGameUI+0x250 owns the
+ * native drag state; CDragScrollManager at +0x24C only provides the +0xA0
+ * gate.  0x6F391170 captures projection/target, 0x6F390DE0 clears +0x84, and
+ * 0x6F399CB0 applies one native update using global mouse input. */
+#define DT_FN_CAMERA_DRAG_BEGIN  0x6F391170u
+#define DT_FN_CAMERA_DRAG_CANCEL 0x6F390DE0u
+#define DT_FN_CAMERA_DRAG_UPDATE 0x6F399CB0u
+#define DT_FN_CAMERA_CAN_DRAG    0x6F360990u
+#define DT_UI_DRAG_MANAGER       0x0000024Cu
+#define DT_UI_DRAG_FRAME         0x00000250u
+#define DT_DRAG_MANAGER_GATE     0x000000A0u
+#define DT_DRAG_TARGET           0x0000006Cu /* 12 bytes: x,y,z */
+#define DT_DRAG_WORLD            0x00000078u /* 12 bytes: x,y,z */
+#define DT_DRAG_ACTIVE           0x00000084u
+#define DT_DRAG_MARK             0x00000088u
+#define DT_MOUSE_INPUT_XY        0x6FD4789Cu
+#define DT_MOUSE_INPUT_Z         0x6FD478A4u
 #define DT_FN_GRID_ACTIVATE    0x6F293480u
 #define DT_FN_SUBGROUP_HAS_UNIT 0x6F290820u
 #define DT_FN_GRID_SELECT_UNIT 0x6F396CF0u
@@ -332,13 +349,9 @@ typedef struct {
 } DtBeaconGesture;
 
 static DtBeaconGesture g_beacon;
-/* Field camera and selection drags own a native mouse button for the whole
- * gesture.  The recognizer starts them only after the finger crosses the
- * legacy drag threshold, so the button is never pressed for a tap.  Main
- * guest thread only. */
+/* Field selection and target gestures.  The camera drag has its own state
+ * (Wc3CameraPan) and owns no mouse button.  Main guest thread only. */
 typedef struct {
-    uint8_t camera_active;
-    uint8_t camera_pointer;
     uint8_t select_active;
     uint8_t select_pointer;
     uint8_t target_active;
@@ -346,6 +359,31 @@ typedef struct {
 } DtFieldGesture;
 
 static DtFieldGesture g_field_drag;
+
+/*
+ * Cursor-free camera pan.  It owns no virtual mouse button: the native drag
+ * manager is driven directly, with global mouse input swapped only around the
+ * guest calls.  The recognizer's END and the service's reset paths clear it,
+ * never a mouse message.  Main guest thread only.
+ */
+typedef struct {
+    uint8_t  active;
+    uint8_t  pending;          /* one coalesced MOVE awaits apply */
+    uint8_t  rebase_pending;
+    uint8_t  pointer;
+    uint32_t gesture_id;
+    uint32_t ui;
+    uint32_t frame;            /* CSimpleMessageFrame at ui+0x250 */
+    uint32_t camera;
+    float    z;
+    float    last_world[3];    /* frame+0x78 */
+    float    target[3];        /* frame+0x6C */
+    float    pending_x;
+    float    pending_y;
+} Wc3CameraPan;
+
+static Wc3CameraPan g_camera_pan;
+
 /* A battlefield drag that starts while target/placement/transient owns the
  * world.  The recognizer still sees the physical FIELD gesture, but the
  * gesture must confirm/settle the target instead of rotating the camera or
@@ -381,6 +419,10 @@ static DtRectSnapshot g_command_snapshot;
  * in-game UI.  The service, on the main guest thread, clears the camera
  * follow before it drops the queue. */
 static int g_portrait_release_pending;
+/* True while the native camera follow started by a portrait finger is live.
+ * A direct camera pan yields to it; otherwise both controllers fight over the
+ * same camera target.  Main guest thread only. */
+static int g_portrait_follow_active;
 /* Selected-unit grid drag.  The native grid only reacts on a completed click,
  * so a touch that starts on a button is consumed here and the subgroup under
  * the finger is activated on DOWN and on every MOVE to a different button.
@@ -2516,18 +2558,21 @@ static void dt_portrait_follow_start(CPU *c, const DtContext *ctx)
     }
     const uint32_t args[5] = { unit, 0u, 0u, 0u, 0u };
     (void)dt_call_thiscall(c, camera, DT_FN_CAMERA_FOLLOW, 5, args);
+    g_portrait_follow_active = 1;
     dt_trace("portrait-follow", unit, 0);
 }
 
 /* Release: a null unit makes the native follow path drop its reference. */
 static void dt_portrait_release(CPU *c)
 {
+    g_portrait_follow_active = 0;
     if (!dt_guest_readable(DT_UI_GLOBAL, 4u)) return;
     const uint32_t ui = wc3_rd32g(DT_UI_GLOBAL);
     const uint32_t camera = dt_camera(ui);
     if (!camera) return;
     const uint32_t args[5] = { 0u, 0u, 0u, 0u, 0u };
     (void)dt_call_thiscall(c, camera, DT_FN_CAMERA_FOLLOW, 5, args);
+    g_portrait_follow_active = 0;
     dt_trace("portrait-release", 0, 0);
 }
 
@@ -3974,16 +4019,15 @@ static void dt_native_minimap_pointer(const Wc3DirectTouchEvent *ev,
         float bottom = 0.0f;
         const int inside =
             !g_native_down && !g_field_drag.select_active &&
-            !g_field_drag.camera_active &&
             (!hle_android_mouse_is_down(0) || g_native_release.left) &&
             dt_minimap_native_rect(&left, &top, &right, &bottom) &&
             ev->x >= left && ev->x <= right &&
             ev->y >= top && ev->y <= bottom;
         dt_log("minimap-native-down ptr=%u n=%.4f,%.4f inside=%d "
-               "native_down=%d field_select=%d field_camera=%d "
+               "native_down=%d field_select=%d "
                "up_pending=%d hw_down=%d rect=%.4f,%.4f..%.4f,%.4f",
                ev->pointer_id, ev->x, ev->y, inside, g_native_down,
-               g_field_drag.select_active, g_field_drag.camera_active,
+               g_field_drag.select_active,
                g_native_release.left, hle_android_mouse_is_down(0),
                left, top, right, bottom);
         if (!inside) {
@@ -4098,87 +4142,278 @@ static void dt_field_target_gesture_end(const Wc3DirectTouchEvent *ev)
 }
 
 /*
- * Field camera drag.  Legacy singleTapDragAction is MOUSE_MIDDLE_BUTTON; the
- * native game rotates the camera for a middle-button drag.  The recognizer
- * starts it only after the finger crosses the legacy drag threshold, so a
- * tap never presses the middle button.
+ * Cursor-free camera pan.  The guest's native drag manager is driven directly
+ * through CSimpleMessageFrame at CGameUI+0x250.  No mouse message is posted and
+ * no virtual button is latched, so the second finger keeps the full cursor.
+ *
+ * Global mouse input (0x6FD4789C/A4) is swapped only around guest calls and
+ * restored on every path.  frame+0x84 and frame+0x88 are zero between camera
+ * events; otherwise the game's frame update would pan from the action finger.
  */
-static void dt_field_camera_begin(const Wc3DirectTouchEvent *ev)
+#define DT_FN_CAMERA_UNPROJECT   0x6F391F80u
+#define DT_FN_CAMERA_READ_TARGET 0x6F360900u
+
+static void dt_camera_vec_read(uint32_t va, float out[3])
 {
-    dt_log("field-camera-begin ptr=%u n=%.4f,%.4f active=%d "
-           "hw_middle=%d",
-           ev->pointer_id, ev->x, ev->y, g_field_drag.camera_active,
-           hle_android_mouse_is_down(1));
-    if (g_field_drag.camera_active) {
-        /* Defensive: a duplicate BEGIN must not leave the previous press
-         * without its release, nor a not-yet-flushed start behind it.  Only
-         * release a button that was actually armed or is still held. */
-        const int had_start = hle_android_mouse_cancel_pending_camera();
-        if (had_start || hle_android_mouse_is_down(1))
-            hle_android_mouse_button_up_force(1);
+    for (int i = 0; i < 3; i++) out[i] = dt_float(wc3_rd32g(va + (uint32_t)i * 4u));
+}
+
+static void dt_camera_vec_write(uint32_t va, const float v[3])
+{
+    for (int i = 0; i < 3; i++) wc3_wr32g(va + (uint32_t)i * 4u, dt_bits(v[i]));
+}
+
+static int dt_camera_vec_finite(const float v[3])
+{
+    return isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2]);
+}
+
+static void dt_camera_scope_save(uint32_t saved[3])
+{
+    if (!dt_guest_readable(DT_MOUSE_INPUT_XY, 12u)) {
+        saved[0] = saved[1] = saved[2] = 0u;
+        return;
     }
-    /*
-     * A native UI contact (bottom panel, menu, command card) leaves the
-     * guest's hot control stale: it is refreshed in the idle GetCursorPos
-     * pass, not on WM_MOUSEMOVE.  Posting the cleanup LEFT UP with the move
-     * still hit-tests against that old control, so the selection manager keeps
-     * its +0xA0 gate and the first middle DOWN early-exits in 0x6F394490
-     * before SetInputMode.  Arm the release and both middle messages behind
-     * that idle pass so the first camera switches mode on its own press.
-     */
-    g_native_down = 0;
-    g_native_release.left = 0;
-    /* The camera triplet carries its own LEFT UP cleanup; do not leave
-     * another press sequence armed for the same idle pass. */
-    (void)hle_android_mouse_cancel_pending_press();
-    dt_trace("field-camera-prerelease", dt_bits(ev->x), dt_bits(ev->y));
-    hle_android_mouse_move_defer_camera_begin(ev->x, ev->y);
-    g_field_drag.camera_active = 1;
-    g_field_drag.camera_pointer = (int)ev->pointer_id;
+    saved[0] = wc3_rd32g(DT_MOUSE_INPUT_XY);
+    saved[1] = wc3_rd32g(DT_MOUSE_INPUT_XY + 4u);
+    saved[2] = wc3_rd32g(DT_MOUSE_INPUT_Z);
+}
+
+static void dt_camera_scope_set(float x, float y, float z)
+{
+    if (!dt_guest_readable(DT_MOUSE_INPUT_XY, 12u)) return;
+    wc3_wr32g(DT_MOUSE_INPUT_XY, dt_bits(x));
+    wc3_wr32g(DT_MOUSE_INPUT_XY + 4u, dt_bits(y));
+    wc3_wr32g(DT_MOUSE_INPUT_Z, dt_bits(z));
+}
+
+static void dt_camera_scope_restore(const uint32_t saved[3])
+{
+    if (!dt_guest_readable(DT_MOUSE_INPUT_XY, 12u)) return;
+    wc3_wr32g(DT_MOUSE_INPUT_XY, saved[0]);
+    wc3_wr32g(DT_MOUSE_INPUT_XY + 4u, saved[1]);
+    wc3_wr32g(DT_MOUSE_INPUT_Z, saved[2]);
+}
+
+static int dt_camera_conflict_active(void)
+{
+    return g_portrait_follow_active || g_minimap.pressed;
+}
+
+/* Safety net for map changes and stale queue entries.  No mouse state is
+ * touched: the recognizer's END is the normal path for a live gesture. */
+static void dt_camera_pan_reset(void)
+{
+    if (g_camera_pan.active && g_camera_pan.frame &&
+        dt_guest_readable(g_camera_pan.frame, DT_DRAG_MARK + 4u)) {
+        wc3_wr32g(g_camera_pan.frame + DT_DRAG_ACTIVE, 0u);
+        wc3_wr32g(g_camera_pan.frame + DT_DRAG_MARK, 0u);
+    }
+    memset(&g_camera_pan, 0, sizeof(g_camera_pan));
+}
+
+static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
+                               const Wc3DirectTouchEvent *ev,
+                               uint32_t width, uint32_t height)
+{
+    if (!c || !ctx || !ctx->ui || !ctx->world) return 0;
+    if (g_camera_pan.active) dt_camera_pan_reset();
+    if (dt_paused(c)) return 0;
+    if (!dt_call_ui_bool(c, ctx->ui, DT_FN_IN_GAME)) return 0;
+    if (!dt_guest_readable(ctx->ui + DT_UI_DRAG_MANAGER, 4u) ||
+        !dt_guest_readable(ctx->ui + DT_UI_DRAG_FRAME, 4u)) return 0;
+
+    const uint32_t manager = wc3_rd32g(ctx->ui + DT_UI_DRAG_MANAGER);
+    if (!manager || !dt_guest_readable(manager + DT_DRAG_MANAGER_GATE, 4u) ||
+        wc3_rd32g(manager + DT_DRAG_MANAGER_GATE) != 0u) {
+        dt_trace("field-camera-gate-busy", manager, 0);
+        return 0;
+    }
+    const uint32_t frame = wc3_rd32g(ctx->ui + DT_UI_DRAG_FRAME);
+    if (!frame || !dt_guest_readable(frame, DT_DRAG_MARK + 4u)) return 0;
+    const uint32_t camera = dt_camera(ctx->ui);
+    if (!camera) return 0;
+    if (dt_call_thiscall(c, camera, DT_FN_CAMERA_CAN_DRAG, 0, NULL) != 0u) {
+        dt_trace("field-camera-can-drag", camera, 0);
+        return 0;
+    }
+
+    const uint32_t scratch = dt_scratch_alloc();
+    if (!scratch) return 0;
+    const uint32_t point = scratch + DT_POINT_OFFSET;
+    const uint32_t pick = scratch + DT_PICK_OFFSET;
+    if (!dt_event_point(c, ev->x, ev->y, width, height, point)) {
+        dt_scratch_free(scratch);
+        return 0;
+    }
+    uint32_t wx = 0u;
+    uint32_t wy = 0u;
+    uint32_t wz = 0u;
+    if (!dt_pick_world(c, ctx, wc3_rd32g(point), wc3_rd32g(point + 4u),
+                       pick, &wx, &wy, &wz) ||
+        !isfinite(dt_float(wz))) {
+        dt_trace("field-camera-pick", dt_bits(ev->x), dt_bits(ev->y));
+        dt_scratch_free(scratch);
+        return 0;
+    }
+    const float z = dt_float(wz);
+    wc3_wr32g(point + 8u, dt_bits(z));
+
+    uint32_t saved[3];
+    dt_camera_scope_save(saved);
+    dt_camera_scope_set(wc3_dt_client_pixel(ev->x, width),
+                        wc3_dt_client_pixel(ev->y, height), z);
+    const uint32_t arg = point;
+    const uint32_t started =
+        dt_call_thiscall(c, frame, DT_FN_CAMERA_DRAG_BEGIN, 1, &arg);
+    if (started == 0u) {
+        wc3_wr32g(frame + DT_DRAG_ACTIVE, 0u);
+        wc3_wr32g(frame + DT_DRAG_MARK, 0u);
+        dt_camera_scope_restore(saved);
+        dt_scratch_free(scratch);
+        dt_trace("field-camera-begin-rejected", frame, 0);
+        return 0;
+    }
+    float target[3] = { 0.0f, 0.0f, 0.0f };
+    float world[3] = { 0.0f, 0.0f, 0.0f };
+    dt_camera_vec_read(frame + DT_DRAG_TARGET, target);
+    dt_camera_vec_read(frame + DT_DRAG_WORLD, world);
+    (void)dt_call_thiscall(c, frame, DT_FN_CAMERA_DRAG_CANCEL, 0, NULL);
+    wc3_wr32g(frame + DT_DRAG_MARK, 0u);
+    dt_camera_scope_restore(saved);
+    dt_scratch_free(scratch);
+
+    if (!dt_camera_vec_finite(target) || !dt_camera_vec_finite(world)) {
+        dt_trace("field-camera-projection", dt_bits(target[0]),
+                 dt_bits(world[0]));
+        return 0;
+    }
+    g_camera_pan.active = 1;
+    g_camera_pan.pointer = (uint8_t)ev->pointer_id;
+    g_camera_pan.gesture_id = ev->gesture_id;
+    g_camera_pan.ui = ctx->ui;
+    g_camera_pan.frame = frame;
+    g_camera_pan.camera = camera;
+    g_camera_pan.z = z;
+    memcpy(g_camera_pan.target, target, sizeof(target));
+    memcpy(g_camera_pan.last_world, world, sizeof(world));
+    g_camera_pan.pending = 0;
+    g_camera_pan.rebase_pending = 0;
     dt_trace("field-camera-begin", dt_bits(ev->x), dt_bits(ev->y));
+    return 1;
 }
 
-static void dt_field_camera_move(const Wc3DirectTouchEvent *ev)
+/* MOVE only records the latest point.  One native update is applied after the
+ * service drains its batch, so a 120 Hz touch stream does not cause 120 guest
+ * camera dispatches per pump. */
+static void dt_camera_pan_move(const Wc3DirectTouchEvent *ev)
 {
-    if (!g_field_drag.camera_active ||
-        (int)ev->pointer_id != g_field_drag.camera_pointer) {
-        dt_log("field-camera-move ignored ptr=%u active=%d owner=%d",
-               ev->pointer_id, g_field_drag.camera_active,
-               g_field_drag.camera_pointer);
+    if (!g_camera_pan.active ||
+        (int)ev->pointer_id != (int)g_camera_pan.pointer ||
+        ev->gesture_id != g_camera_pan.gesture_id) {
+        dt_log("field-camera-move ignored ptr=%u gid=%u", ev->pointer_id,
+               ev->gesture_id);
         return;
     }
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-    {
-        static uint32_t move_count;
-        if ((move_count++ & 7u) == 0u) {
-            dt_log("field-camera-move ptr=%u n=%.4f,%.4f",
-                   ev->pointer_id, ev->x, ev->y);
-        }
-    }
-#endif
-    hle_android_mouse_move(ev->x, ev->y);
+    g_camera_pan.pending_x = ev->x;
+    g_camera_pan.pending_y = ev->y;
+    g_camera_pan.pending = 1;
 }
 
-static void dt_field_camera_end(const Wc3DirectTouchEvent *ev)
+static void dt_camera_pan_end(CPU *c, const Wc3DirectTouchEvent *ev)
 {
-    dt_log("field-camera-end ptr=%u n=%.4f,%.4f active=%d owner=%d",
-           ev->pointer_id, ev->x, ev->y, g_field_drag.camera_active,
-           g_field_drag.camera_pointer);
-    if (!g_field_drag.camera_active ||
-        (int)ev->pointer_id != g_field_drag.camera_pointer) {
+    if (!g_camera_pan.active ||
+        (int)ev->pointer_id != (int)g_camera_pan.pointer ||
+        ev->gesture_id != g_camera_pan.gesture_id) {
         return;
     }
-    /* A gesture that ended before the idle pass must not leave an armed
-     * camera start to post a middle DOWN after its own release.  If neither
-     * a start was armed nor the button is held, there is no queued press to
-     * pair with and the forced UP would be a synthetic message nobody owns. */
-    const int had_start = hle_android_mouse_cancel_pending_camera();
-    hle_android_mouse_move(ev->x, ev->y);
-    if (had_start || hle_android_mouse_is_down(1))
-        hle_android_mouse_button_up_force(1);
-    g_field_drag.camera_active = 0;
-    g_field_drag.camera_pointer = 0;
+    if (g_camera_pan.frame &&
+        dt_guest_readable(g_camera_pan.frame, DT_DRAG_MARK + 4u)) {
+        (void)dt_call_thiscall(c, g_camera_pan.frame,
+                               DT_FN_CAMERA_DRAG_CANCEL, 0, NULL);
+        wc3_wr32g(g_camera_pan.frame + DT_DRAG_ACTIVE, 0u);
+        wc3_wr32g(g_camera_pan.frame + DT_DRAG_MARK, 0u);
+    }
+    memset(&g_camera_pan, 0, sizeof(g_camera_pan));
     dt_trace("field-camera-end", dt_bits(ev->x), dt_bits(ev->y));
+}
+
+static void dt_camera_pan_apply(CPU *c, const DtContext *ctx,
+                                uint32_t width, uint32_t height)
+{
+    (void)ctx;
+    if (!c || !g_camera_pan.active || !g_camera_pan.pending) return;
+    /* A queued native click must be dispatched by the Win32 pump first; the
+     * camera update is kept pending for the next service call. */
+    if (hle_android_native_button_pending()) return;
+    g_camera_pan.pending = 0;
+    if (!g_camera_pan.frame ||
+        !dt_guest_readable(g_camera_pan.frame, DT_DRAG_MARK + 4u)) {
+        dt_camera_pan_reset();
+        return;
+    }
+
+    const float px = wc3_dt_client_pixel(g_camera_pan.pending_x, width);
+    const float py = wc3_dt_client_pixel(g_camera_pan.pending_y, height);
+    if (dt_camera_conflict_active()) {
+        /* Rebase the world anchor so the pan does not jump after the portrait
+         * follow or minimap drag releases the camera. */
+        uint32_t saved[3];
+        dt_camera_scope_save(saved);
+        dt_camera_scope_set(px, py, g_camera_pan.z);
+        const uint32_t out = dt_scratch_alloc();
+        if (out) {
+            const uint32_t args[2] = { out, dt_bits(g_camera_pan.z) };
+            (void)dt_call_thiscall(c, g_camera_pan.frame,
+                                   DT_FN_CAMERA_UNPROJECT, 2, args);
+            float cur[3] = { 0.0f, 0.0f, 0.0f };
+            dt_camera_vec_read(out, cur);
+            if (dt_camera_vec_finite(cur))
+                memcpy(g_camera_pan.last_world, cur, sizeof(cur));
+            dt_scratch_free(out);
+        }
+        dt_camera_scope_restore(saved);
+        g_camera_pan.rebase_pending = 1;
+        return;
+    }
+
+    uint32_t saved[3];
+    dt_camera_scope_save(saved);
+    dt_camera_scope_set(px, py, g_camera_pan.z);
+    dt_camera_vec_write(g_camera_pan.frame + DT_DRAG_WORLD,
+                        g_camera_pan.last_world);
+    wc3_wr32g(g_camera_pan.frame + DT_DRAG_ACTIVE, 1u);
+    wc3_wr32g(g_camera_pan.frame + DT_DRAG_MARK, 1u);
+    (void)dt_call_thiscall(c, g_camera_pan.frame,
+                           DT_FN_CAMERA_DRAG_UPDATE, 0, NULL);
+    wc3_wr32g(g_camera_pan.frame + DT_DRAG_ACTIVE, 0u);
+    wc3_wr32g(g_camera_pan.frame + DT_DRAG_MARK, 0u);
+    dt_camera_scope_restore(saved);
+
+    float target[3] = { 0.0f, 0.0f, 0.0f };
+    float world[3] = { 0.0f, 0.0f, 0.0f };
+    dt_camera_vec_read(g_camera_pan.frame + DT_DRAG_TARGET, target);
+    dt_camera_vec_read(g_camera_pan.frame + DT_DRAG_WORLD, world);
+    if (dt_camera_vec_finite(target) && dt_camera_vec_finite(world)) {
+        memcpy(g_camera_pan.target, target, sizeof(target));
+        memcpy(g_camera_pan.last_world, world, sizeof(world));
+    }
+    if (g_camera_pan.rebase_pending && g_camera_pan.camera) {
+        const uint32_t out = dt_scratch_alloc();
+        if (out) {
+            (void)dt_call_thiscall(c, g_camera_pan.camera,
+                                   DT_FN_CAMERA_READ_TARGET, 1, &out);
+            float live[3] = { 0.0f, 0.0f, 0.0f };
+            dt_camera_vec_read(out, live);
+            if (dt_camera_vec_finite(live)) {
+                memcpy(g_camera_pan.target, live, sizeof(live));
+                dt_camera_vec_write(g_camera_pan.frame + DT_DRAG_TARGET,
+                                    g_camera_pan.target);
+            }
+            dt_scratch_free(out);
+        }
+        g_camera_pan.rebase_pending = 0;
+    }
 }
 
 /*
@@ -4260,14 +4495,6 @@ static void dt_field_reset(void)
 {
     g_field_drag.target_active = 0;
     g_field_drag.target_pointer = 0;
-    if (g_field_drag.camera_active) {
-        dt_log("field-reset camera ptr=%d", g_field_drag.camera_pointer);
-        const int had_start = hle_android_mouse_cancel_pending_camera();
-        if (had_start || hle_android_mouse_is_down(1))
-            hle_android_mouse_button_up_force(1);
-        g_field_drag.camera_active = 0;
-        g_field_drag.camera_pointer = 0;
-    }
     if (g_field_drag.select_active) {
         dt_log("field-reset select ptr=%d native_down=%d",
                g_field_drag.select_pointer, g_native_down);
@@ -4283,8 +4510,7 @@ static void dt_field_reset(void)
 
 static int dt_field_drag_active(void)
 {
-    return g_field_drag.camera_active || g_field_drag.select_active ||
-           g_field_drag.target_active;
+    return g_field_drag.select_active || g_field_drag.target_active;
 }
 
 static int dt_is_field_drag_kind(uint32_t kind)
@@ -5410,6 +5636,26 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
         }
     }
 #endif
+    /* A camera gesture never owns the mouse and never enters the target-mode
+     * gesture path: the action finger may be targeting at the same time. */
+    if (ev->owner_role == WC3_DT_OWNER_CAMERA) {
+        switch (ev->kind) {
+        case WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN:
+            g_beacon.armed = 0;
+            (void)dt_camera_pan_begin(c, ctx, ev, width, height);
+            break;
+        case WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE:
+            dt_camera_pan_move(ev);
+            break;
+        case WC3_DIRECT_TOUCH_FIELD_CAMERA_END:
+            dt_camera_pan_end(c, ev);
+            break;
+        default:
+            dt_trace("camera-role-unexpected", ev->kind, ev->pointer_id);
+            break;
+        }
+        return;
+    }
     switch (ev->kind) {
     case WC3_DIRECT_TOUCH_TAP: {
         /* The controls gate normally routes a press on the signal button to
@@ -5494,27 +5740,17 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
     case WC3_DIRECT_TOUCH_HOLD_RELEASE:
         dt_portrait_release(c);
         break;
+    /* Legacy camera events (role 0) from an older producer: keep them as a
+     * cursor-free pan rather than reviving the removed middle-button path. */
     case WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN:
         g_beacon.armed = 0;
-        if (dt_field_target_active(c, ctx)) {
-            dt_field_target_gesture_begin(ev);
-        } else {
-            dt_field_camera_begin(ev);
-        }
+        (void)dt_camera_pan_begin(c, ctx, ev, width, height);
         break;
     case WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE:
-        if (g_field_drag.target_active) {
-            dt_field_target_gesture_move(ev);
-        } else {
-            dt_field_camera_move(ev);
-        }
+        dt_camera_pan_move(ev);
         break;
     case WC3_DIRECT_TOUCH_FIELD_CAMERA_END:
-        if (g_field_drag.target_active) {
-            dt_field_target_gesture_end(ev);
-        } else {
-            dt_field_camera_end(ev);
-        }
+        dt_camera_pan_end(c, ev);
         break;
     case WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN:
         g_beacon.armed = 0;
@@ -5610,6 +5846,7 @@ void wc3_hle_direct_touch_start(void)
     dt_command_reset();
     dt_command_target_reset();
     dt_field_reset();
+    dt_camera_pan_reset();
     dt_field_click_reset();
     dt_native_release();
     dt_portrait_publish(0.0f, 0.0f, 0.0f, 0.0f);
@@ -5617,6 +5854,7 @@ void wc3_hle_direct_touch_start(void)
     dt_beacon_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_publish_route(WC3_DIRECT_TOUCH_ROUTE_LEGACY);
+    g_portrait_follow_active = 0;
     g_last_ui = 0;
     g_last_world = 0;
     wc3_direct_touch_clear();
@@ -5648,6 +5886,7 @@ void wc3_hle_direct_touch_reset(void)
     dt_command_reset();
     dt_command_target_reset();
     dt_field_reset();
+    dt_camera_pan_reset();
     dt_field_click_reset();
     dt_native_release();
     dt_portrait_publish(0.0f, 0.0f, 0.0f, 0.0f);
@@ -5655,6 +5894,7 @@ void wc3_hle_direct_touch_reset(void)
     dt_beacon_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_publish_route(WC3_DIRECT_TOUCH_ROUTE_LEGACY);
+    g_portrait_follow_active = 0;
     wc3_direct_touch_clear();
 }
 
@@ -5798,6 +6038,7 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
         dt_command_reset();
         dt_command_target_reset();
         dt_field_reset();
+        dt_camera_pan_reset();
         dt_field_click_reset();
         dt_native_release();
         /* A queued HOLD_RELEASE may be dropped with the batch; clear the
@@ -5871,7 +6112,9 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
         if (now_ms && event.time_ms && now_ms > event.time_ms &&
             now_ms - event.time_ms > DT_EVENT_MAX_AGE_MS) {
             dt_trace("stale-event", event.kind, event.pointer_id);
-            if (dt_is_field_drag_kind(event.kind)) {
+            if (event.owner_role == WC3_DT_OWNER_CAMERA) {
+                dt_camera_pan_reset();
+            } else if (dt_is_field_drag_kind(event.kind)) {
                 dt_field_reset();
             } else if (dt_is_native_pointer(event.kind)) {
                 dt_grid_reset();
@@ -5948,6 +6191,10 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
                     break;
                 }
             }
+        } else if (event.owner_role == WC3_DT_OWNER_CAMERA) {
+            /* Camera events are independent of the semantic route and of the
+             * target-mode gesture owned by another finger. */
+            dt_dispatch(c, &ctx, &event, width, height);
         } else if (dt_is_field_drag_end(event.kind)) {
             /* The END only releases a native mouse button.  It must run even
              * if the game changed context between BEGIN and END; otherwise
@@ -6048,6 +6295,7 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
                 dt_command_reset();
                 dt_command_target_reset();
                 dt_field_reset();
+                dt_camera_pan_reset();
                 dt_field_click_reset();
                 dt_native_release();
                 /* The pending HOLD_RELEASE belongs to the old context;
@@ -6062,6 +6310,10 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
             ctx = probe;
         }
     }
+
+    /* One native camera update for the whole batch, using the latest camera
+     * finger point.  No host lock is held and no mouse message is posted. */
+    dt_camera_pan_apply(c, &ctx, width, height);
 
     /* A native click can dismiss a modal or open a menu; refresh the frames
      * once at the end of the batch so the input thread sees the new UI. */

@@ -193,6 +193,44 @@ static inline double x87_from_i64(int64_t i) { return x87_from_f64((double)i); }
 static inline void x87_raise_invalid(CPU *c) {
     c->fpu_sw |= X87_IE;
 }
+
+/* Outlined IE classification for non-FPSR functions with many x87 ops.
+ *
+ * Inlining x87_invalid_result() into every add/sub/mul/div duplicates the
+ * operand-classification block at each site.  A noinline helper removes that
+ * duplication, but a normal call turns an otherwise leaf function into a
+ * non-leaf one and forces LLVM to spill live guest state around every call.
+ * On functions with only one to three sites that is a net size regression.
+ *
+ * Two things make the helper profitable:
+ *
+ *   - __attribute__((preserve_most)) lets the callee preserve most registers,
+ *     so a cold NaN call does not spill the hot path.  The attribute is
+ *     clang/AArch64 only; other targets keep the plain cold helper.
+ *   - the NaN test already happened at the call site, so the helper takes
+ *     only the operands, not the result r.  Recomputing isnan(r) inside the
+ *     helper would be redundant.
+ *
+ * The x87_invalid_outline patch stage applies x87_out_* only to functions with
+ * at least WC3_X87_INVALID_OUTLINE_MIN_SITES arithmetic sites; FPSR-eligible
+ * functions are skipped because the FPSR stage runs first and leaves no
+ * plain x87_add/sub/mul/div calls for the outline stage to rewrite. */
+#if defined(__clang__) && defined(__aarch64__)
+#define WC3_X87_OUTLINE_CC __attribute__((preserve_most))
+#else
+#define WC3_X87_OUTLINE_CC
+#endif
+#define WC3_X87_OUTLINE_FN static __attribute__((noinline, unused, cold))
+
+WC3_X87_OUTLINE_FN WC3_X87_OUTLINE_CC
+void x87_invalid_arith_cold(CPU *c, double a, double b)
+{
+    const uint64_t ab = x87_bits(a), bb = x87_bits(b);
+    if (x87_is_snan_bits(ab) || x87_is_snan_bits(bb)
+        || (!x87_is_nan_bits(ab) && !x87_is_nan_bits(bb)))
+        x87_raise_invalid(c);
+}
+
 static inline void x87_set_top(CPU *c) {
     c->fpu_sw = (c->fpu_sw & ~0x3800u) | ((uint32_t)(c->fpu_top & 7) << 11);
 }
@@ -496,6 +534,81 @@ static inline void x87_fxam(CPU *c) {
     c->fpu_sw = (c->fpu_sw & ~X87_C1) | (sign ? X87_C1 : 0);
 }
 
+/* ---- deferred x87 IE on ARM64 ------------------------------------------ */
+
+#ifndef WC3_X87_FPSR
+#define WC3_X87_FPSR 1
+#endif
+
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__)) && WC3_X87_FPSR
+#define WC3_X87_FPSR_AVAILABLE 1
+/* FPCR exception enables are bits [6:0]; RMode [23:22] and FZ/DN [24:25]
+ * must be preserved because the guest control word drives rounding. */
+#define WC3_X87_FPSR_BEGIN(c)                                                 \
+    uint64_t _wc3_fpcr, _wc3_fpsr_saved, _wc3_fpsr_now;                        \
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(_wc3_fpcr) : : "memory");       \
+    __asm__ __volatile__("msr fpcr, %0"                                       \
+                         : : "r"(_wc3_fpcr & ~UINT64_C(0x7F)) : "memory");    \
+    __asm__ __volatile__("mrs %0, fpsr" : "=r"(_wc3_fpsr_saved) : : "memory"); \
+    __asm__ __volatile__("msr fpsr, %0" : : "r"(UINT64_C(0)) : "memory")
+#define WC3_X87_FPSR_END(c) do {                                              \
+    __asm__ __volatile__("mrs %0, fpsr" : "=r"(_wc3_fpsr_now) : : "memory");   \
+    if (_wc3_fpsr_now & UINT64_C(1)) (c)->fpu_sw |= X87_IE;                    \
+    __asm__ __volatile__("msr fpsr, %0" : : "r"(_wc3_fpsr_saved) : "memory"); \
+    __asm__ __volatile__("msr fpcr, %0" : : "r"(_wc3_fpcr) : "memory");       \
+} while (0)
+
+/* Cheap exit for paths that cannot have executed the four replaced x87
+ * arithmetic ops: restore the saved FPCR/FPSR without transferring IE.  IE
+ * cannot be set there because every other x87 helper raises it in software
+ * through c->fpu_sw.  The patch stage emits this only for exits proven
+ * unreachable from an arithmetic site. */
+#define WC3_X87_FPSR_END_CLEAN(c) do {                                        \
+    (void)_wc3_fpsr_now;                                                      \
+    __asm__ __volatile__("msr fpsr, %0" : : "r"(_wc3_fpsr_saved) : "memory"); \
+    __asm__ __volatile__("msr fpcr, %0" : : "r"(_wc3_fpcr) : "memory");       \
+} while (0)
+
+static inline double x87_add_fpsr(CPU *c, double a, double b) {
+    (void)c; return a + b;
+}
+static inline double x87_sub_fpsr(CPU *c, double a, double b) {
+    (void)c; return a - b;
+}
+static inline double x87_mul_fpsr(CPU *c, double a, double b) {
+    (void)c; return a * b;
+}
+static inline double x87_div_fpsr(CPU *c, double a, double b) {
+    (void)c; return a / b;
+}
+#else
+#define WC3_X87_FPSR_AVAILABLE 0
+#define WC3_X87_FPSR_BEGIN(c) do { } while (0)
+#define WC3_X87_FPSR_END(c) do { } while (0)
+#define WC3_X87_FPSR_END_CLEAN(c) do { } while (0)
+/* Headless/x86 and -DWC3_X87_FPSR=0 keep the exact software path. */
+static inline double x87_add_fpsr(CPU *c, double a, double b) {
+    const double r = a + b;
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    return r;
+}
+static inline double x87_sub_fpsr(CPU *c, double a, double b) {
+    const double r = a - b;
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    return r;
+}
+static inline double x87_mul_fpsr(CPU *c, double a, double b) {
+    const double r = a * b;
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    return r;
+}
+static inline double x87_div_fpsr(CPU *c, double a, double b) {
+    const double r = a / b;
+    if (x87_invalid_result(r, a, b)) x87_raise_invalid(c);
+    return r;
+}
+#endif
+
 /* ---- arithmetic --------------------------------------------------------- */
 
 static inline double x87_add(CPU *c, double a, double b) {
@@ -522,6 +635,31 @@ static inline double x87_div(CPU *c, double a, double b) {
     a = r;
     return a;
 }
+
+/* Outlined twins used by the x87_invalid_outline patch stage.  The inline
+ * versions above remain the exact fallback for small functions, headless/x86
+ * and configurations where the patch stage is disabled. */
+static inline double x87_out_add(CPU *c, double a, double b) {
+    const double r = a + b;
+    if (isnan(r)) x87_invalid_arith_cold(c, a, b);
+    return r;
+}
+static inline double x87_out_sub(CPU *c, double a, double b) {
+    const double r = a - b;
+    if (isnan(r)) x87_invalid_arith_cold(c, a, b);
+    return r;
+}
+static inline double x87_out_mul(CPU *c, double a, double b) {
+    const double r = a * b;
+    if (isnan(r)) x87_invalid_arith_cold(c, a, b);
+    return r;
+}
+static inline double x87_out_div(CPU *c, double a, double b) {
+    const double r = a / b;
+    if (isnan(r)) x87_invalid_arith_cold(c, a, b);
+    return r;
+}
+
 static inline double x87_sqrt(CPU *c, double a) {
     const double r = sqrt(a);
     if (x87_invalid_result(r, a, a)) x87_raise_invalid(c);

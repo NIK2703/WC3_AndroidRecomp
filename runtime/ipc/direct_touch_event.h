@@ -53,12 +53,13 @@ typedef enum {
      * follow for the displayed unit.  The follow stays active while that
      * finger is on the screen, even if it moves outside the portrait. */
     WC3_DIRECT_TOUCH_FOLLOW_START = 8,
-    /* Field camera drag.  A quick swipe on the battlefield starts the same
-     * native middle-button drag the legacy profile binds to
-     * singleTapDragAction; the guest-side executor posts WM_MBUTTONDOWN/
-     * WM_MOUSEMOVE/WM_MBUTTONUP.  BEGIN carries the point where the drag
-     * crossed the legacy drag threshold, MOVE the later positions, and END
-     * the release.  These events are only valid on the FIELD route. */
+    /* Field camera drag.  A quick swipe on the battlefield starts a native
+     * camera drag, but the guest-side executor drives the drag manager
+     * directly: these events own no virtual mouse button and post no
+     * WM_*MOUSE* messages, so a second finger stays a full cursor.  BEGIN
+     * carries the point where the drag crossed the legacy drag threshold,
+     * MOVE the later positions, and END the release.  owner_role is CAMERA
+     * and gesture_id identifies one continuous drag. */
     WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN = 9,
     WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE = 10,
     WC3_DIRECT_TOUCH_FIELD_CAMERA_END = 11,
@@ -72,14 +73,13 @@ typedef enum {
     WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN = 12,
     WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE = 13,
     WC3_DIRECT_TOUCH_FIELD_SELECT_END = 14,
-    /* Field press hover.  Emitted once on DOWN for the first pointer of a
-     * battlefield contact, before any semantic classification.  The service
-     * posts it as a native WM_MOUSEMOVE when the live mode is target/transient,
-     * so the game's targeting cursor sees the tap point before the release
-     * click.  Without it the target mode keeps the previous contact's cursor
-     * and the first click after a command card is resolved against the old
-     * position.  In select mode this event is ignored: native cursor movement
-     * there would move the selection/camera cursor. */
+    /* Field press hover.  Emitted immediately before an action click (TAP or
+     * FIELD_SELECT_BEGIN), after the contact's role is known.  A camera
+     * contact emits no hover.  The service posts it as a native WM_MOUSEMOVE
+     * when the live mode is target/transient, and stops the batch so the click
+     * is a later message.  Without it the target mode keeps the previous
+     * contact's cursor and the first click after a command card is resolved
+     * against the old position.  In select mode this event is ignored. */
     WC3_DIRECT_TOUCH_FIELD_HOVER = 15
 } Wc3DirectTouchKind;
 
@@ -92,11 +92,12 @@ typedef enum {
  *         the host has no sink), or the touch hits an overlay control
  *         element.  This is not a per-feature fallback.
  * FIELD:  the touch is in the battlefield and CSelectMode owns input.  Use
- *         the semantic tap recognizer, the native middle-button camera drag
- *         for a quick swipe, and the native left-button selection press at
- *         the long-press deadline.  The left button stays down until the
- *         finger is released, so a stationary hold is a native click and a
- *         drag is a native box selection.
+ *         the semantic tap recognizer, a cursor-free camera drag for a quick
+ *         swipe, and the native left-button selection press at the long-press
+ *         deadline.  The left button stays down until the finger is released,
+ *         so a stationary hold is a native click and a drag is a native box
+ *         selection.  The camera drag does not own the mouse; a second
+ *         finger remains the full virtual cursor.
  * NATIVE: the touch belongs to the native UI (HUD, menu, targeting or
  *         placement).  Forward raw pointer phases so the guest-side service
  *         can post native mouse messages.  The service claims a gesture that
@@ -121,6 +122,17 @@ typedef enum {
     WC3_DIRECT_TOUCH_ROUTE_MINIMAP = 4
 } Wc3DirectTouchRoute;
 
+/*
+ * Which gesture owns a semantic contact.  A camera contact must never post
+ * mouse messages or move the shared cursor; an action contact is the only
+ * owner of the virtual mouse.  Zero is treated as ACTION so events queued by
+ * an older build stay harmless.
+ */
+typedef enum {
+    WC3_DT_OWNER_ACTION = 1u,
+    WC3_DT_OWNER_CAMERA = 2u
+} Wc3DirectTouchOwnerRole;
+
 typedef struct {
     uint32_t kind;       /* Wc3DirectTouchKind */
     uint32_t pointer_id; /* source pointer, diagnostics only */
@@ -128,6 +140,8 @@ typedef struct {
     float y;             /* normalised surface y, 0..1, top-left origin */
     uint64_t time_ms;    /* monotonic ms (uptimeMillis/CLOCK_MONOTONIC) */
     uint32_t route;      /* Wc3DirectTouchRoute that produced the gesture */
+    uint32_t gesture_id; /* monotonic camera gesture id, 0 for action events */
+    uint32_t owner_role; /* Wc3DirectTouchOwnerRole, 0 means ACTION */
 } Wc3DirectTouchEvent;
 
 /* The recognizer publishes through this sink.  It runs on the Android input

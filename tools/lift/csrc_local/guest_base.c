@@ -52,6 +52,12 @@
 #define MARKER "WC3_LOCAL_BASE"
 #define HEADER_INCLUDE "#include \"guest_base_local.h\""
 
+/* Measured profitability gate.  The base snapshot saves one global load per
+ * memory helper beyond the first; below ten uses the live range costs more
+ * than it saves on arm64.  Use --no-size-policy for the old all-eligible
+ * behaviour. */
+#define SIZE_POLICY_MIN_USES 10
+
 typedef struct {
     char *p;
     size_t n;
@@ -68,7 +74,11 @@ typedef struct {
     size_t hdr;
     size_t open;
     size_t close;
-    int uses_mem;
+    size_t mem_uses;
+    size_t fp_uses;
+    size_t calls;
+    size_t gotos;
+    int keep;
 } Func;
 
 typedef struct {
@@ -83,6 +93,7 @@ typedef struct {
     size_t files_skipped;
     size_t functions;
     size_t functions_rewritten;
+    size_t functions_skipped;
     size_t memory_uses;
 } Stats;
 
@@ -148,7 +159,8 @@ static void buf_str(Buf *b, const char *s)
 }
 
 static void func_push(FuncVec *v, size_t hdr, size_t open, size_t close,
-                      int uses_mem)
+                      size_t mem_uses, size_t fp_uses, size_t calls,
+                      size_t gotos, int keep)
 {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2u : 1024u;
@@ -157,7 +169,11 @@ static void func_push(FuncVec *v, size_t hdr, size_t open, size_t close,
     v->p[v->n].hdr = hdr;
     v->p[v->n].open = open;
     v->p[v->n].close = close;
-    v->p[v->n].uses_mem = uses_mem;
+    v->p[v->n].mem_uses = mem_uses;
+    v->p[v->n].fp_uses = fp_uses;
+    v->p[v->n].calls = calls;
+    v->p[v->n].gotos = gotos;
+    v->p[v->n].keep = keep;
     v->n++;
 }
 
@@ -326,22 +342,23 @@ static size_t find_func(const char *s, size_t n, size_t start)
     return SIZE_MAX;
 }
 
-static int region_has_word(const char *s, size_t n, const char *w)
+static size_t region_count_word(const char *s, size_t n, const char *w)
 {
     size_t len = strlen(w);
-    size_t i;
+    size_t i, count = 0;
     if (!len || len > n) return 0;
     for (i = 0; i + len <= n; i++) {
         if (s[i] != w[0]) continue;
         if (i > 0 && word_char((unsigned char)s[i - 1u])) continue;
         if (strncmp(s + i, w, len) != 0) continue;
         if (i + len < n && word_char((unsigned char)s[i + len])) continue;
-        return 1;
+        count++;
+        i += len - 1u;
     }
-    return 0;
+    return count;
 }
 
-static int body_uses_mem(const char *s, size_t n)
+static size_t body_mem_uses(const char *s, size_t n)
 {
     static const char *const words[] = {
         "guest_host_ptr",
@@ -350,21 +367,58 @@ static int body_uses_mem(const char *s, size_t n)
         "push32", "pop32",
         "rdss", "rdsd", "rdxm",
         "wrss", "wrsd", "wrxm",
+        /* The old direct-call header expands this to push32(). */
+        "WC3_CALLSITE_OUTLINE",
         "FS_RD8", "FS_RD16", "FS_RD32",
         "FS_WR8", "FS_WR16", "FS_WR32"
     };
-    size_t i;
+    size_t i, count = 0;
     for (i = 0; i < sizeof words / sizeof words[0]; i++)
-        if (region_has_word(s, n, words[i])) return 1;
-    return 0;
+        count += region_count_word(s, n, words[i]);
+    return count;
+}
+
+static size_t count_text(const char *s, size_t n, const char *w)
+{
+    size_t len = strlen(w), i, count = 0;
+    if (!len || len > n) return 0;
+    for (i = 0; i + len <= n; i++) {
+        if (!strncmp(s + i, w, len)) {
+            count++;
+            i += len - 1u;
+        }
+    }
+    return count;
+}
+
+static size_t body_count_words(const char *s, size_t n,
+                               const char *const *words, size_t count)
+{
+    size_t i, total = 0;
+    for (i = 0; i < count; i++) total += count_text(s, n, words[i]);
+    return total;
+}
+
+/* Keep the explicit-base accessor when it is clearly profitable, and also in
+ * small straight-line functions: those are often inlined into callers where
+ * the saved base load matters.  Skip x87-heavy and branchy/call-heavy small
+ * functions, where two base streams and register pressure outweigh the win. */
+static int size_policy_ok(size_t mem, size_t fp, size_t calls, size_t gotos,
+                          int use_size_policy)
+{
+    if (!use_size_policy) return 1;
+    if (mem >= SIZE_POLICY_MIN_USES) return 1;
+    return fp == 0 && calls <= 1 && gotos == 0;
 }
 
 static void append_macro_block(Buf *out)
 {
     buf_str(out,
         "\n"
-        "/* " MARKER ": the guest window base is write-once.  This snapshot is\n"
-        " * taken after boot and is not a new address-space model. */\n"
+        "/* " MARKER ": the guest window base is write-once.  wc3_guest_base()\n"
+        " * states that promise to the compiler; it is not a new address-space\n"
+        " * model. */\n"
+        "#define wc3_ghb wc3_guest_base()\n"
         "#define guest_host_ptr(a) guest_host_ptr_at((a), wc3_ghb)\n"
         "#define rd8(a) rd8_at((a), wc3_ghb)\n"
         "#define rd16(a) rd16_at((a), wc3_ghb)\n"
@@ -387,7 +441,8 @@ static void append_macro_block(Buf *out)
 static void append_undef_block(Buf *out)
 {
     buf_str(out,
-        "\n#undef guest_host_ptr\n"
+        "\n#undef wc3_ghb\n"
+        "#undef guest_host_ptr\n"
         "#undef rd8\n#undef rd16\n#undef rd32\n#undef rd64\n"
         "#undef wr8\n#undef wr16\n#undef wr32\n#undef wr64\n"
         "#undef push32\n#undef pop32\n"
@@ -398,15 +453,18 @@ static void append_undef_block(Buf *out)
 
 /* Transform one translation unit.  Returns 1 when at least one function was
  * rewritten.  The output buffer is always complete, including the no-op case. */
-static int transform_text(const char *text, size_t n, Buf *out, Stats *st)
+static int transform_text(const char *text, size_t n, Buf *out, Stats *st,
+                          int use_size_policy)
 {
     char *masked;
     FuncVec funcs = {0};
     size_t start = 0;
     size_t last = 0;
-    size_t ins = SIZE_MAX;
     size_t i;
     int any = 0;
+    /* 0: macros not emitted, 1: wc3_ghb is the const accessor,
+     * 2: temporarily overridden to the global for a skipped function. */
+    int ghb_mode = 0;
 
     if (strstr(text, HEADER_INCLUDE) || strstr(text, MARKER)) {
         buf_add(out, text, n);
@@ -422,7 +480,14 @@ static int transform_text(const char *text, size_t n, Buf *out, Stats *st)
         size_t nl;
         size_t open;
         size_t close;
-        int mem;
+        size_t uses, fp, calls, gotos;
+        static const char *const fp_words[] = { "x87_", "VS_" };
+        static const char *const call_words[] = {
+            "dispatch(", "WC3_DIRECT_CALL", "WC3_DIRECT_TAIL",
+            "WC3_CLEAN_CALL_HELPER", "WC3_CALLSITE_OUTLINE"
+        };
+        static const char *const goto_words[] = { "goto " };
+        int keep;
         if (hdr == SIZE_MAX) break;
         nl = (size_t)((const char *)memchr(masked + hdr, '\n', n - hdr) - masked);
         open = nl + 1u;
@@ -437,10 +502,21 @@ static int transform_text(const char *text, size_t n, Buf *out, Stats *st)
             free(funcs.p);
             die("unbalanced function at byte %zu", hdr);
         }
-        mem = body_uses_mem(masked + open + 1u, close - open - 1u);
-        func_push(&funcs, hdr, open, close, mem);
-        if (mem && ins == SIZE_MAX) ins = hdr;
-        if (mem) any = 1;
+        uses = body_mem_uses(masked + open + 1u, close - open - 1u);
+        fp = body_count_words(masked + open + 1u, close - open - 1u,
+                              fp_words, sizeof fp_words / sizeof fp_words[0]);
+        calls = body_count_words(masked + open + 1u, close - open - 1u,
+                                 call_words,
+                                 sizeof call_words / sizeof call_words[0]);
+        gotos = body_count_words(masked + open + 1u, close - open - 1u,
+                                 goto_words,
+                                 sizeof goto_words / sizeof goto_words[0]);
+        keep = uses > 0 && size_policy_ok(uses, fp, calls, gotos,
+                                          use_size_policy);
+        func_push(&funcs, hdr, open, close, uses, fp, calls, gotos, keep);
+        st->memory_uses += uses;
+        if (keep) any = 1;
+        else if (uses > 0) st->functions_skipped++;
         start = close + 1u;
     }
     free(masked);
@@ -454,16 +530,32 @@ static int transform_text(const char *text, size_t n, Buf *out, Stats *st)
 
     for (i = 0; i < funcs.n; i++) {
         Func *f = &funcs.p[i];
-        if (!f->uses_mem) continue;
-        if (last <= ins) {
-            buf_add(out, text + last, ins - last);
+
+        if (!f->keep) {
+            /* Skipped functions must keep the original global-base semantics
+             * even after the file-level macros have been emitted. */
+            if (f->mem_uses > 0 && ghb_mode == 1) {
+                buf_add(out, text + last, f->hdr - last);
+                buf_str(out, "#define wc3_ghb g_guest_host_base\n");
+                last = f->hdr;
+                ghb_mode = 2;
+            }
+            continue;
+        }
+
+        if (ghb_mode == 2) {
+            buf_add(out, text + last, f->hdr - last);
+            buf_str(out, "#undef wc3_ghb\n#define wc3_ghb wc3_guest_base()\n");
+            last = f->hdr;
+            ghb_mode = 1;
+        }
+        if (ghb_mode == 0) {
+            buf_add(out, text + last, f->hdr - last);
             buf_str(out, HEADER_INCLUDE "\n");
             append_macro_block(out);
-            last = ins;
+            last = f->hdr;
+            ghb_mode = 1;
         }
-        buf_add(out, text + last, f->open + 1u - last);
-        buf_str(out, "\n    const uintptr_t wc3_ghb = g_guest_host_base;\n");
-        last = f->open + 1u;
         st->functions_rewritten++;
     }
     buf_add(out, text + last, n - last);
@@ -506,10 +598,14 @@ static void write_report(const char *path, const Stats *st)
             "  \"files_rewritten\": %zu,\n"
             "  \"files_skipped_existing\": %zu,\n"
             "  \"functions\": %zu,\n"
-            "  \"functions_rewritten\": %zu\n"
+            "  \"functions_rewritten\": %zu,\n"
+            "  \"functions_skipped\": %zu,\n"
+            "  \"memory_uses\": %zu,\n"
+            "  \"size_policy\": \"mem_uses_ge_%d_or_straightline_no_x87\"\n"
             "}\n",
             st->files, st->files_rewritten, st->files_skipped,
-            st->functions, st->functions_rewritten);
+            st->functions, st->functions_rewritten, st->functions_skipped,
+            st->memory_uses, SIZE_POLICY_MIN_USES);
     fclose(f);
 }
 
@@ -523,12 +619,44 @@ static int self_test(void)
         "void L_00000001(CPU *restrict c)\n"
         "{\n"
         "    c->eax = rd32(c->ecx + 4u);\n"
+        "    c->eax = rd32(c->ecx + 8u);\n"
+        "    c->eax = rd32(c->ecx + 12u);\n"
+        "    c->eax = rd32(c->ecx + 16u);\n"
+        "    c->eax = rd32(c->ecx + 20u);\n"
+        "    c->eax = rd32(c->ecx + 24u);\n"
+        "    c->eax = rd32(c->ecx + 28u);\n"
+        "    c->eax = rd32(c->ecx + 32u);\n"
+        "    c->eax = rd32(c->ecx + 36u);\n"
+        "    c->eax = rd32(c->ecx + 40u);\n"
         "    c->esp += 4; return;\n"
         "}\n"
         "\n"
         "void L_00000002(CPU *restrict c)\n"
         "{\n"
+        "    c->eax = rd32(c->ecx + 4u);\n"
+        "    if (c->eax) goto L_00000002_done;\n"
+        "L_00000002_done:\n"
+        "    c->esp += 4; return;\n"
+        "}\n"
+        "\n"
+        "void L_00000003(CPU *restrict c)\n"
+        "{\n"
         "    c->eax = 1u;\n"
+        "    c->esp += 4; return;\n"
+        "}\n"
+        "\n"
+        "void L_00000004(CPU *restrict c)\n"
+        "{\n"
+        "    c->eax = rd32(c->ecx + 4u);\n"
+        "    c->eax = rd32(c->ecx + 8u);\n"
+        "    c->eax = rd32(c->ecx + 12u);\n"
+        "    c->eax = rd32(c->ecx + 16u);\n"
+        "    c->eax = rd32(c->ecx + 20u);\n"
+        "    c->eax = rd32(c->ecx + 24u);\n"
+        "    c->eax = rd32(c->ecx + 28u);\n"
+        "    c->eax = rd32(c->ecx + 32u);\n"
+        "    c->eax = rd32(c->ecx + 36u);\n"
+        "    c->eax = rd32(c->ecx + 40u);\n"
         "    c->esp += 4; return;\n"
         "}\n";
     static const char comment_only[] =
@@ -545,23 +673,37 @@ static int self_test(void)
     const char *hdr;
     const char *fake;
 
-    if (!transform_text(input, sizeof input - 1u, &out, &st)) {
+    if (size_policy_ok(SIZE_POLICY_MIN_USES - 1u, 1, 2, 1, 1) ||
+        !size_policy_ok(SIZE_POLICY_MIN_USES, 99, 99, 99, 1) ||
+        !size_policy_ok(1u, 0, 1, 0, 1) ||
+        size_policy_ok(1u, 0, 2, 0, 1) ||
+        size_policy_ok(1u, 1, 0, 0, 1) ||
+        size_policy_ok(1u, 0, 0, 1, 1) ||
+        !size_policy_ok(1u, 9, 9, 9, 0)) {
+        fprintf(stderr, "guest_base self-test: size policy boundary\n");
+        return 1;
+    }
+    if (!transform_text(input, sizeof input - 1u, &out, &st, 1)) {
         fprintf(stderr, "guest_base self-test: expected a rewrite\n");
         free(out.p);
         return 1;
     }
     if (!strstr(out.p, HEADER_INCLUDE) ||
-        !strstr(out.p, "const uintptr_t wc3_ghb = g_guest_host_base;") ||
+        !strstr(out.p, "#define wc3_ghb wc3_guest_base()") ||
         !strstr(out.p, "#define rd32(a) rd32_at") ||
-        !strstr(out.p, "c->eax = rd32(c->ecx + 4u);") ||
-        strstr(out.p, "const uintptr_t wc3_ghb = g_guest_host_base;\n    c->eax = 1u")) {
+        !strstr(out.p, "#define wc3_ghb g_guest_host_base") ||
+        !strstr(out.p, "#undef wc3_ghb\n#define wc3_ghb wc3_guest_base()") ||
+        strstr(out.p, "const uintptr_t wc3_ghb = g_guest_host_base;")) {
         fprintf(stderr, "guest_base self-test: bad rewritten text\n");
         free(out.p);
         return 1;
     }
-    if (st.functions != 2 || st.functions_rewritten != 1) {
-        fprintf(stderr, "guest_base self-test: function accounting %zu/%zu\n",
-                st.functions, st.functions_rewritten);
+    if (st.functions != 4 || st.functions_rewritten != 2 ||
+        st.functions_skipped != 1 || st.memory_uses != 21) {
+        fprintf(stderr,
+                "guest_base self-test: accounting %zu/%zu skipped=%zu uses=%zu\n",
+                st.functions, st.functions_rewritten, st.functions_skipped,
+                st.memory_uses);
         free(out.p);
         return 1;
     }
@@ -577,7 +719,7 @@ static int self_test(void)
         Stats st2 = {0};
         char *first = out.p;
         size_t first_n = out.n;
-        int changed = transform_text(first, first_n, &again, &st2);
+        int changed = transform_text(first, first_n, &again, &st2, 1);
         if (changed || st2.files_skipped != 1u ||
             again.n != first_n || memcmp(again.p, first, first_n) != 0) {
             fprintf(stderr, "guest_base self-test: second pass is not a no-op\n");
@@ -593,7 +735,7 @@ static int self_test(void)
     out.p = NULL;
     out.n = out.cap = 0;
     st = (Stats){0};
-    if (transform_text(comment_only, sizeof comment_only - 1u, &out, &st)) {
+    if (transform_text(comment_only, sizeof comment_only - 1u, &out, &st, 1)) {
         fprintf(stderr, "guest_base self-test: comment counted as code\n");
         free(out.p);
         return 1;
@@ -619,7 +761,7 @@ int main(int argc, char **argv)
     const char *inputs = NULL;
     const char *out_dir = NULL;
     const char *report = NULL;
-    int quiet = 0;
+    int quiet = 0, use_size_policy = 1;
     PathVec paths = {0};
     Stats st = {0};
     size_t i;
@@ -634,8 +776,11 @@ int main(int argc, char **argv)
             report = argv[++i];
         } else if (!strcmp(argv[i], "--quiet")) {
             quiet = 1;
+        } else if (!strcmp(argv[i], "--no-size-policy")) {
+            use_size_policy = 0;
         } else if (!strcmp(argv[i], "--help")) {
             puts("guest_base --inputs FILE --out-dir DIR [--report JSON] [--quiet]\n"
+                 "           [--no-size-policy]\n"
                  "guest_base --self-test");
             return 0;
         } else {
@@ -654,7 +799,7 @@ int main(int argc, char **argv)
         size_t need = strlen(out_dir) + strlen(base) + 2u;
         char *out_path = (char *)xmalloc(need);
         snprintf(out_path, need, "%s/%s", out_dir, base);
-        transform_text(text, n, &out, &st);
+        transform_text(text, n, &out, &st, use_size_policy);
         write_file(out_path, out.p ? out.p : "", out.n);
         free(out_path);
         free(out.p);
@@ -663,9 +808,9 @@ int main(int argc, char **argv)
     if (!quiet)
         fprintf(stderr,
                 "guest_base: %zu files, %zu rewritten, %zu functions, "
-                "%zu function bodies\n",
+                "%zu kept, %zu skipped by size policy\n",
                 st.files, st.files_rewritten, st.functions,
-                st.functions_rewritten);
+                st.functions_rewritten, st.functions_skipped);
     write_report(report, &st);
     return 0;
 }

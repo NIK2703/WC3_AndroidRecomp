@@ -1035,56 +1035,12 @@ void controls_set_direct_touch_command_gate(
 }
 
 /*
- * A second finger during a pending tap or an armed hold turns the gesture
- * into a camera/zoom candidate.  The direct recognizer cannot represent that,
- * and letting both paths see the gesture would produce a tap plus a camera
- * move.  Hand the already-owned field pointers to the vendor engine at their
- * current positions and let it own the continuation; no direct event is
- * emitted for the cancelled gesture.  A camera/selection drag is not handed
- * off: it owns a native mouse button and the second finger is swallowed.
+ * A second finger no longer hijacks the first field contact.  The recognizer
+ * assigns roles: one contact may claim the cursor-free camera, the other owns
+ * the virtual mouse.  A camera drag holds no native button, so there is no
+ * handoff and no swallow here.  Native HUD/portrait gestures still swallow
+ * extra pointers because they really own the cursor/follow.
  */
-static void direct_touch_handoff(int new_pointer_id, float new_x, float new_y,
-                                 uint64_t tick) {
-    int ids[WC3_DIRECT_TOUCH_MAX_POINTERS];
-    float xs[WC3_DIRECT_TOUCH_MAX_POINTERS];
-    float ys[WC3_DIRECT_TOUCH_MAX_POINTERS];
-    int count = 0;
-    for (int i = 0;
-         i < WC3_DIRECT_TOUCH_MAX_POINTERS &&
-         count < WC3_DIRECT_TOUCH_MAX_POINTERS;
-         i++) {
-        if (!wc3_direct_touch_pointer_at(&g_direct_touch, i,
-                                         &ids[count], &xs[count], &ys[count])) {
-            break;
-        }
-        count++;
-    }
-
-    TouchActionResult result;
-    memset(&result, 0, sizeof(result));
-
-    TP_STATE_LOCK();
-    ELEMENTS_LOCK();
-    for (int i = 0; i < count; i++) {
-        DirectOwner *slot = direct_owner_add(ids[i], DIRECT_OWNER_VENDOR,
-                                             xs[i], ys[i]);
-        if (slot) {
-            slot->last_x = xs[i];
-            slot->last_y = ys[i];
-        }
-        touch_processor_on_finger_down(&result, ids[i], xs[i], ys[i], tick);
-    }
-    wc3_direct_touch_reset(&g_direct_touch);
-    direct_owner_add(new_pointer_id, DIRECT_OWNER_VENDOR, new_x, new_y);
-    touch_processor_on_finger_down(&result, new_pointer_id, new_x, new_y,
-                                   tick);
-    ELEMENTS_UNLOCK();
-    TP_STATE_UNLOCK();
-
-    g_last_engine_tick = tick;
-    emit_actions(&result);
-}
-
 static int direct_touch_begin(int pointer_id, float x, float y,
                               uint64_t event_time_ms) {
     /* Once any pointer belongs to the vendor engine, the gesture is a
@@ -1142,24 +1098,10 @@ static int direct_touch_begin(int pointer_id, float x, float y,
         (void)direct_owner_add(pointer_id, DIRECT_OWNER_IGNORED, x, y);
         return 1;
     }
-    if (wc3_direct_touch_field_drag_active(&g_direct_touch)) {
-        /* A camera or selection drag already holds a native mouse button.
-         * Handing the gesture to the vendor engine would leave that button
-         * latched, so swallow the second finger until the owner is released.
-         * Overlay elements are still allowed to take the press. */
-        if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) return 0;
-        (void)direct_owner_add(pointer_id, DIRECT_OWNER_IGNORED, x, y);
-        return 1;
-    }
-    if (wc3_direct_touch_active_count(&g_direct_touch) > 0) {
-        /* A second finger during a pending tap or an armed hold becomes a
-         * camera/zoom candidate, even if that finger landed on an overlay
-         * element.  Without the handoff the first finger would still emit a
-         * tap/order in the middle of a camera gesture. */
-        direct_touch_handoff(pointer_id, x, y,
-                             engine_tick_from_ms(event_time_ms));
-        return 1;
-    }
+    /* An active camera drag holds no mouse button; a second finger is routed
+     * normally and may become the action cursor.  A selection drag still owns
+     * the left button, but the recognizer handles its owner by role, so no
+     * pointer is swallowed here. */
 
     if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) return 0;
     if (route == WC3_DIRECT_TOUCH_ROUTE_MINIMAP) {

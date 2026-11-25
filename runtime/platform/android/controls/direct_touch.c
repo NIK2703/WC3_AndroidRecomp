@@ -118,6 +118,17 @@ static const char *dt_mode_name(uint8_t mode)
     default: return "?";
     }
 }
+
+static const char *dt_role_name(uint8_t role)
+{
+    switch (role) {
+    case WC3_DT_CONTACT_UNASSIGNED: return "UNASSIGNED";
+    case WC3_DT_CONTACT_ACTION: return "ACTION";
+    case WC3_DT_CONTACT_CAMERA: return "CAMERA";
+    case WC3_DT_CONTACT_IGNORED: return "IGNORED";
+    default: return "?";
+    }
+}
 #else
 #define DT_LOG(...) ((void)0)
 #define TOUCH_LOG(...) ((void)0)
@@ -132,7 +143,8 @@ static float clamp01(float value)
 
 static void emit_event(Wc3DirectTouch *dt, Wc3DirectTouchKind kind,
                        int pointer_id, float x, float y, uint64_t now_ms,
-                       uint32_t route)
+                       uint32_t route, uint32_t owner_role,
+                       uint32_t gesture_id)
 {
     if (!dt->sink) return;
     Wc3DirectTouchEvent event;
@@ -143,22 +155,44 @@ static void emit_event(Wc3DirectTouch *dt, Wc3DirectTouchKind kind,
     event.y = clamp01(dt->height > 0.0f ? y / dt->height : 0.0f);
     event.time_ms = now_ms;
     event.route = route;
+    event.gesture_id = gesture_id;
+    event.owner_role = owner_role;
     DT_LOG("emit kind=%s(%u) ptr=%d px=%.1f,%.1f n=%.4f,%.4f "
-           "route=%s t=%llu",
+           "route=%s role=%u gid=%u t=%llu",
            dt_kind_name((uint32_t)kind), (unsigned)kind, pointer_id, x, y,
-           event.x, event.y, dt_route_name(route),
+           event.x, event.y, dt_route_name(route), owner_role, gesture_id,
            (unsigned long long)now_ms);
     /* Keep the file focused on contacts; the HLE trace already records the
      * move stream, and a camera drag can otherwise produce thousands of
      * lines. */
     if (kind != WC3_DIRECT_TOUCH_POINTER_MOVE) {
         TOUCH_LOG("emit kind=%s(%u) ptr=%d px=%.1f,%.1f n=%.4f,%.4f "
-                  "route=%s event_t=%llu",
+                  "route=%s role=%u gid=%u event_t=%llu",
                   dt_kind_name((uint32_t)kind), (unsigned)kind, pointer_id,
-                  x, y, event.x, event.y, dt_route_name(route),
-                  (unsigned long long)now_ms);
+                  x, y, event.x, event.y, dt_route_name(route), owner_role,
+                  gesture_id, (unsigned long long)now_ms);
     }
     dt->sink(&event, dt->user);
+}
+
+/* Emit from a classified pointer.  Hover is forced to ACTION even before the
+ * contact has a role; every other semantic event follows the pointer's role. */
+static void emit_pointer_event(Wc3DirectTouch *dt, Wc3DirectTouchKind kind,
+                               const Wc3DirectTouchPointer *p, float x,
+                               float y, uint64_t now_ms)
+{
+    const int is_camera = p->role == WC3_DT_CONTACT_CAMERA;
+    emit_event(dt, kind, p->pointer_id, x, y, now_ms, p->route,
+               is_camera ? WC3_DT_OWNER_CAMERA : WC3_DT_OWNER_ACTION,
+               is_camera ? p->gesture_id : 0u);
+}
+
+static void emit_action_hover(Wc3DirectTouch *dt,
+                              const Wc3DirectTouchPointer *p,
+                              float x, float y, uint64_t now_ms)
+{
+    emit_event(dt, WC3_DIRECT_TOUCH_FIELD_HOVER, p->pointer_id, x, y, now_ms,
+               p->route, WC3_DT_OWNER_ACTION, 0u);
 }
 
 static float distance_sq(float ax, float ay, float bx, float by)
@@ -189,8 +223,10 @@ static int hold_due(const Wc3DirectTouch *dt,
                     const Wc3DirectTouchPointer *pointer, uint64_t now_ms)
 {
     if (pointer->route != WC3_DIRECT_TOUCH_ROUTE_FIELD ||
-        pointer->multi || pointer->long_fired ||
-        pointer->mode != WC3_DIRECT_TOUCH_FIELD_PENDING) {
+        pointer->long_fired ||
+        pointer->mode != WC3_DIRECT_TOUCH_FIELD_PENDING ||
+        pointer->role == WC3_DT_CONTACT_CAMERA ||
+        pointer->role == WC3_DT_CONTACT_IGNORED) {
         return 0;
     }
     const uint64_t timeout = dt->long_press_ms > 0
@@ -204,6 +240,8 @@ static void arm_hold(Wc3DirectTouch *dt, Wc3DirectTouchPointer *pointer,
 {
     pointer->long_fired = 1;
     pointer->mode = WC3_DIRECT_TOUCH_FIELD_SELECT;
+    pointer->role = WC3_DT_CONTACT_ACTION;
+    pointer->camera_claim = 0;
     /* The legacy engine plays gestureLongPressHaptic exactly when the
      * long-press timer expires, before any drag. */
     fire_haptic(dt);
@@ -218,8 +256,30 @@ static void arm_hold(Wc3DirectTouch *dt, Wc3DirectTouchPointer *pointer,
               dt->width > 0.0f ? x / dt->width : 0.0f,
               dt->height > 0.0f ? y / dt->height : 0.0f,
               (unsigned long long)now_ms);
-    emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN, pointer->pointer_id,
-               x, y, now_ms, pointer->route);
+    /* The action finger owns the cursor: hover first so a target-mode click
+     * resolves against this contact's point.  The service keeps the click in
+     * a later pump. */
+    emit_action_hover(dt, pointer, x, y, now_ms);
+    emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN, pointer,
+                       x, y, now_ms);
+}
+
+/* Claim the camera role for a FIELD contact that crossed the drag threshold.
+ * No hover is emitted: the camera drives the native drag manager directly
+ * and must not move the shared virtual cursor. */
+static void claim_camera(Wc3DirectTouch *dt, Wc3DirectTouchPointer *pointer,
+                         float x, float y, uint64_t now_ms)
+{
+    pointer->role = WC3_DT_CONTACT_CAMERA;
+    pointer->camera_claim = 0;
+    pointer->mode = WC3_DIRECT_TOUCH_FIELD_CAMERA;
+    pointer->moved = 1;
+    dt->g_camera_seq++;
+    pointer->gesture_id = dt->g_camera_seq;
+    DT_LOG("move ptr=%d PENDING -> CAMERA gid=%u", pointer->pointer_id,
+           pointer->gesture_id);
+    emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN, pointer,
+                       x, y, now_ms);
 }
 
 static int active_count(const Wc3DirectTouch *dt)
@@ -290,6 +350,18 @@ void wc3_direct_touch_set_size(Wc3DirectTouch *dt, float width, float height)
     dt->height = height;
 }
 
+/* One camera at a time.  A pending FIELD contact that can still claim the
+ * camera reserves the slot, so a second finger never steals it. */
+static int camera_slot_busy(const Wc3DirectTouch *dt)
+{
+    for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
+        const Wc3DirectTouchPointer *p = &dt->pointers[i];
+        if (!p->active) continue;
+        if (p->role == WC3_DT_CONTACT_CAMERA || p->camera_claim) return 1;
+    }
+    return 0;
+}
+
 void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
                                  float x, float y, uint64_t now_ms,
                                  uint32_t route)
@@ -325,6 +397,10 @@ void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
         }
     }
 
+    const int can_claim_camera =
+        route == WC3_DIRECT_TOUCH_ROUTE_FIELD && !camera_slot_busy(dt);
+    const int too_many = others >= WC3_DIRECT_TOUCH_MAX_POINTERS;
+
     pointer->pointer_id = pointer_id;
     pointer->down_x = x;
     pointer->down_y = y;
@@ -335,28 +411,25 @@ void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
     pointer->active = 1;
     pointer->multi = others > 0 ? 1 : 0;
     pointer->mode = WC3_DIRECT_TOUCH_FIELD_PENDING;
-    DT_LOG("down-state ptr=%d mode=%s multi=%d others=%d down_ms=%llu",
-           pointer_id, dt_mode_name(pointer->mode), pointer->multi, others,
-           (unsigned long long)now_ms);
-    if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD && others == 0) {
-        /* One hover for the contact, not one per MOVE.  A target-mode field
-         * tap otherwise posts its first WM_MOUSEMOVE only on release, in the
-         * same pump as its click; the game then resolves the click against
-         * the command-card cursor and ignores it.  Emitting at DOWN gives the
-         * targeting cursor the whole press duration to reach the tap point.
-         * Select-mode service ignores this event, so selection rings and the
-         * native camera drag keep their old move stream. */
-        emit_event(dt, WC3_DIRECT_TOUCH_FIELD_HOVER, pointer_id, x, y,
-                   now_ms, route);
-    }
+    pointer->role = too_many ? WC3_DT_CONTACT_IGNORED
+                             : (can_claim_camera ? WC3_DT_CONTACT_UNASSIGNED
+                                                 : WC3_DT_CONTACT_ACTION);
+    pointer->camera_claim = (uint8_t)(can_claim_camera && !too_many);
+    DT_LOG("down-state ptr=%d mode=%s role=%s claim=%d multi=%d others=%d "
+           "down_ms=%llu",
+           pointer_id, dt_mode_name(pointer->mode),
+           dt_role_name(pointer->role), pointer->camera_claim,
+           pointer->multi, others, (unsigned long long)now_ms);
+    /* No hover on DOWN: the camera must not move the shared cursor, and the
+     * action hover is emitted immediately before its click. */
     if (route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
         /* The portrait is a tracking control, not a long-press gesture.
          * Start the native camera follow as soon as the finger lands on it;
          * the follow stays active until this pointer is released, even when
          * the finger moves outside the portrait. */
         pointer->long_fired = 1;
-        emit_event(dt, WC3_DIRECT_TOUCH_FOLLOW_START, pointer_id, x, y,
-                   now_ms, route);
+        emit_pointer_event(dt, WC3_DIRECT_TOUCH_FOLLOW_START, pointer,
+                           x, y, now_ms);
     }
 }
 
@@ -394,8 +467,8 @@ void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
                pointer_id, x, y, dt_route_name(pointer->route));
         return;
     }
-    if (pointer->multi) {
-        DT_LOG("move ptr=%d px=%.1f,%.1f multi ignored", pointer_id, x, y);
+    if (pointer->role == WC3_DT_CONTACT_IGNORED) {
+        DT_LOG("move ptr=%d px=%.1f,%.1f role=IGNORED", pointer_id, x, y);
         return;
     }
 
@@ -409,30 +482,29 @@ void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
 
     const float moved_sq =
         distance_sq(x, y, pointer->down_x, pointer->down_y);
-    DT_LOG("move ptr=%d px=%.1f,%.1f mode=%s moved_sq=%.1f "
+    DT_LOG("move ptr=%d px=%.1f,%.1f mode=%s role=%s claim=%d moved_sq=%.1f "
            "threshold_sq=%.1f route=%s",
-           pointer_id, x, y, dt_mode_name(pointer->mode), moved_sq,
+           pointer_id, x, y, dt_mode_name(pointer->mode),
+           dt_role_name(pointer->role), pointer->camera_claim, moved_sq,
            drag_threshold_sq(dt), dt_route_name(pointer->route));
     switch (pointer->mode) {
     case WC3_DIRECT_TOUCH_FIELD_CAMERA:
-        emit_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE, pointer_id,
-                   x, y, now_ms, pointer->route);
+        emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE, pointer,
+                           x, y, now_ms);
         break;
     case WC3_DIRECT_TOUCH_FIELD_SELECT:
-        emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE, pointer_id,
-                   x, y, now_ms, pointer->route);
+        emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE, pointer,
+                           x, y, now_ms);
         break;
     case WC3_DIRECT_TOUCH_FIELD_PENDING:
     default:
-        if (moved_sq > drag_threshold_sq(dt)) {
-            /* Legacy singleTapDragAction is the middle button: rotate the
-             * camera with the native drag instead of emitting a tap. */
-            pointer->mode = WC3_DIRECT_TOUCH_FIELD_CAMERA;
-            pointer->moved = 1;
-            DT_LOG("move ptr=%d PENDING -> CAMERA", pointer_id);
-            emit_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN, pointer_id,
-                       x, y, now_ms, pointer->route);
+        if (pointer->role == WC3_DT_CONTACT_UNASSIGNED &&
+            pointer->camera_claim &&
+            moved_sq > drag_threshold_sq(dt)) {
+            claim_camera(dt, pointer, x, y, now_ms);
         }
+        /* An ACTION contact that moved before the long-press deadline is a
+         * quick flick, not an order.  Wait for the deadline or the release. */
         break;
     }
 }
@@ -459,8 +531,8 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
         /* The follow started on DOWN and is owned by this finger.  Lifting
          * it stops the follow unconditionally; the portrait has no separate
          * tap or long-press action. */
-        emit_event(dt, WC3_DIRECT_TOUCH_HOLD_RELEASE, pointer_id, x, y,
-                   now_ms, pointer->route);
+        emit_pointer_event(dt, WC3_DIRECT_TOUCH_HOLD_RELEASE, pointer,
+                           x, y, now_ms);
         memset(pointer, 0, sizeof(*pointer));
         return;
     }
@@ -493,40 +565,41 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
 
     switch (pointer->mode) {
     case WC3_DIRECT_TOUCH_FIELD_CAMERA:
-        DT_LOG("up ptr=%d camera end", pointer_id);
-        emit_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_END, pointer_id,
-                   x, y, now_ms, pointer->route);
+        DT_LOG("up ptr=%d camera end gid=%u", pointer_id,
+               pointer->gesture_id);
+        emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_END, pointer,
+                           x, y, now_ms);
         memset(pointer, 0, sizeof(*pointer));
         return;
     case WC3_DIRECT_TOUCH_FIELD_SELECT:
         DT_LOG("up ptr=%d select end", pointer_id);
-        emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END, pointer_id,
-                   x, y, now_ms, pointer->route);
+        emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END, pointer,
+                           x, y, now_ms);
         memset(pointer, 0, sizeof(*pointer));
         return;
     case WC3_DIRECT_TOUCH_FIELD_PENDING:
     default:
-        if (!pointer->multi) {
-            if (held_long) {
-                /* The tick was late.  The finger is already up, so press
-                 * and release the native left button in one step instead of
-                 * degrading into a tap or leaving the button latched. */
-                DT_LOG("up ptr=%d late-hold -> SELECT_BEGIN/END",
-                       pointer_id);
-                arm_hold(dt, pointer, x, y, now_ms);
-                emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END,
-                           pointer_id, x, y, now_ms, pointer->route);
-            } else if (moved_sq <= drag_threshold_sq(dt)) {
-                /* A flick can arrive as DOWN+UP with no MOVE: the release
-                 * point must still be inside the tap slop, otherwise the tap
-                 * is dropped. */
-                DT_LOG("up ptr=%d PENDING -> TAP", pointer_id);
-                emit_event(dt, WC3_DIRECT_TOUCH_TAP, pointer_id, x, y,
-                           now_ms, pointer->route);
-            } else {
-                DT_LOG("up ptr=%d PENDING -> no event moved_sq=%.1f", pointer_id,
-                       moved_sq);
-            }
+        if (pointer->role == WC3_DT_CONTACT_IGNORED) {
+            DT_LOG("up ptr=%d IGNORED", pointer_id);
+        } else if (held_long) {
+            /* The tick was late.  The finger is already up, so press
+             * and release the native left button in one step instead of
+             * degrading into a tap or leaving the button latched. */
+            DT_LOG("up ptr=%d late-hold -> SELECT_BEGIN/END", pointer_id);
+            arm_hold(dt, pointer, x, y, now_ms);
+            emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END,
+                               pointer, x, y, now_ms);
+        } else if (moved_sq <= drag_threshold_sq(dt)) {
+            /* A flick can arrive as DOWN+UP with no MOVE: the release
+             * point must still be inside the tap slop, otherwise the tap
+             * is dropped. */
+            DT_LOG("up ptr=%d PENDING -> TAP", pointer_id);
+            emit_action_hover(dt, pointer, x, y, now_ms);
+            emit_pointer_event(dt, WC3_DIRECT_TOUCH_TAP, pointer,
+                               x, y, now_ms);
+        } else {
+            DT_LOG("up ptr=%d PENDING -> no event moved_sq=%.1f", pointer_id,
+                   moved_sq);
         }
         memset(pointer, 0, sizeof(*pointer));
         return;
@@ -545,16 +618,14 @@ void wc3_direct_touch_reset(Wc3DirectTouch *dt)
                   dt_route_name(pointer->route),
                   dt_mode_name(pointer->mode));
         if (pointer->route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
-            emit_event(dt, WC3_DIRECT_TOUCH_HOLD_RELEASE, pointer->pointer_id,
-                       pointer->last_x, pointer->last_y, 0, pointer->route);
-        } else if (pointer->mode == WC3_DIRECT_TOUCH_FIELD_CAMERA) {
-            emit_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_END,
-                       pointer->pointer_id, pointer->last_x,
-                       pointer->last_y, 0, pointer->route);
+            emit_pointer_event(dt, WC3_DIRECT_TOUCH_HOLD_RELEASE, pointer,
+                               pointer->last_x, pointer->last_y, 0);
+        } else if (pointer->role == WC3_DT_CONTACT_CAMERA) {
+            emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_END, pointer,
+                               pointer->last_x, pointer->last_y, 0);
         } else if (pointer->mode == WC3_DIRECT_TOUCH_FIELD_SELECT) {
-            emit_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END,
-                       pointer->pointer_id, pointer->last_x,
-                       pointer->last_y, 0, pointer->route);
+            emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END, pointer,
+                               pointer->last_x, pointer->last_y, 0);
         }
     }
     memset(dt->pointers, 0, sizeof(dt->pointers));
@@ -580,9 +651,11 @@ uint64_t wc3_direct_touch_next_deadline_ms(const Wc3DirectTouch *dt)
     uint64_t next = 0;
     for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
         const Wc3DirectTouchPointer *pointer = &dt->pointers[i];
-        if (!pointer->active || pointer->multi || pointer->long_fired ||
+        if (!pointer->active || pointer->long_fired ||
             pointer->route != WC3_DIRECT_TOUCH_ROUTE_FIELD ||
-            pointer->mode != WC3_DIRECT_TOUCH_FIELD_PENDING) {
+            pointer->mode != WC3_DIRECT_TOUCH_FIELD_PENDING ||
+            pointer->role == WC3_DT_CONTACT_CAMERA ||
+            pointer->role == WC3_DT_CONTACT_IGNORED) {
             continue;
         }
         const uint64_t timeout = dt->long_press_ms > 0
@@ -600,10 +673,9 @@ int wc3_direct_touch_field_drag_active(const Wc3DirectTouch *dt)
     for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
         const Wc3DirectTouchPointer *pointer = &dt->pointers[i];
         if (!pointer->active) continue;
-        if (pointer->mode == WC3_DIRECT_TOUCH_FIELD_CAMERA ||
-            pointer->mode == WC3_DIRECT_TOUCH_FIELD_SELECT) {
-            return 1;
-        }
+        /* Only the left-button selection drag owns a mouse button.  A camera
+         * drag uses no cursor, so a second finger must stay actionable. */
+        if (pointer->mode == WC3_DIRECT_TOUCH_FIELD_SELECT) return 1;
     }
     return 0;
 }
@@ -640,9 +712,47 @@ void wc3_direct_touch_emit_pointer(Wc3DirectTouch *dt,
     case WC3_DIRECT_TOUCH_POINTER_UP:
     case WC3_DIRECT_TOUCH_POINTER_CANCEL:
         emit_event(dt, kind, pointer_id, x, y, now_ms,
-                   WC3_DIRECT_TOUCH_ROUTE_NATIVE);
+                   WC3_DIRECT_TOUCH_ROUTE_NATIVE, WC3_DT_OWNER_ACTION, 0u);
         break;
     default:
         break;
     }
+}
+
+int wc3_direct_touch_camera_pointer(const Wc3DirectTouch *dt)
+{
+    if (!dt) return -1;
+    for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
+        const Wc3DirectTouchPointer *p = &dt->pointers[i];
+        if (p->active && p->role == WC3_DT_CONTACT_CAMERA)
+            return p->pointer_id;
+    }
+    return -1;
+}
+
+int wc3_direct_touch_action_pointer(const Wc3DirectTouch *dt)
+{
+    if (!dt) return -1;
+    for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
+        const Wc3DirectTouchPointer *p = &dt->pointers[i];
+        if (p->active && p->role == WC3_DT_CONTACT_ACTION)
+            return p->pointer_id;
+    }
+    return -1;
+}
+
+uint32_t wc3_direct_touch_contact_role(const Wc3DirectTouch *dt, int pointer_id)
+{
+    if (!dt) return WC3_DT_CONTACT_IGNORED;
+    const Wc3DirectTouchPointer *p = find_pointer((Wc3DirectTouch *)dt,
+                                                  pointer_id);
+    return p ? p->role : (uint32_t)WC3_DT_CONTACT_IGNORED;
+}
+
+uint32_t wc3_direct_touch_gesture_id(const Wc3DirectTouch *dt, int pointer_id)
+{
+    if (!dt) return 0u;
+    const Wc3DirectTouchPointer *p = find_pointer((Wc3DirectTouch *)dt,
+                                                  pointer_id);
+    return p && p->role == WC3_DT_CONTACT_CAMERA ? p->gesture_id : 0u;
 }

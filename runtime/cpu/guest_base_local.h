@@ -27,6 +27,20 @@
 extern "C" {
 #endif
 
+/* g_guest_host_base is written once during boot and only read afterwards.
+ * The const attribute states that promise to the compiler: two calls in the
+ * same function return the same value even across guest stores and calls.
+ * This lets the optimizer keep the base in a register where it is profitable
+ * without forcing a function-wide local snapshot.  It is not a second
+ * addressing model: the value still comes from g_guest_host_base. */
+#if defined(__clang__) || defined(__GNUC__)
+__attribute__((const))
+#endif
+static inline uintptr_t wc3_guest_base(void)
+{
+    return g_guest_host_base;
+}
+
 static inline void *guest_host_ptr_at(uint32_t va, uintptr_t base)
 {
     return (void *)(base + (uintptr_t)va);

@@ -110,6 +110,8 @@ $targets = @(
     @{ out = 'xmm_local.exe'; src = @('xmm_local.c'); dir = $csrcLocal },
     @{ out = 'xmm_lane.exe'; src = @('xmm_lane.c'); dir = $csrcLocal },
     @{ out = 'leaf_call.exe'; src = @('leaf_call.c'); dir = $csrcLocal },
+    @{ out = 'x87_fpsr.exe'; src = @('x87_fpsr.c'); dir = $csrcLocal },
+    @{ out = 'x87_invalid_outline.exe'; src = @('x87_invalid_outline.c'); dir = $csrcLocal },
     @{ out = 'guest_base.exe'; src = @('guest_base.c'); dir = $csrcLocal },
     @{ out = 'parallel_raycast.exe'; src = @('parallel_raycast.c'); dir = $csrcLocal },
     @{ out = 'return_address_elide.exe'; src = @('return_address_elide.c', 'sha256.c'); dir = $csrcLocal },

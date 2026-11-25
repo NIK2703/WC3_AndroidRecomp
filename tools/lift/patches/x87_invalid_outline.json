@@ -1,0 +1,42 @@
+{
+  "schema": 2,
+  "id": "x87_invalid_outline",
+  "rev": 1,
+  "description": "Outline x87 IE classification in non-FPSR functions with at least min_sites x87 arithmetic sites; source-level rewrite of the generated corpus.",
+  "engine": "x87_invalid_outline",
+  "kind": "transform",
+  "mode": "batch",
+  "scope": "all",
+  "order": 60,
+  "after": [
+    "x87_fpsr"
+  ],
+  "output_layout": "flat",
+  "params": {
+    "x87_invalid_outline_min_sites": "4"
+  },
+  "command": {
+    "args": [
+      "--inputs",
+      "{inputs}",
+      "--out-dir",
+      "{out_dir}",
+      "--report",
+      "{report}",
+      "--quiet",
+      "--min-sites={x87_invalid_outline_min_sites}"
+    ]
+  },
+  "assertions": [
+    {
+      "kind": "field_equals",
+      "path": "verdict",
+      "equals": "pass"
+    },
+    {
+      "kind": "field_equals",
+      "path": "inputs",
+      "equals_chunk_count": true
+    }
+  ]
+}
