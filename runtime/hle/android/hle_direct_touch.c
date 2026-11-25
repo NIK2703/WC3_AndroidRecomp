@@ -375,6 +375,7 @@ typedef struct {
     uint32_t ui;
     uint32_t frame;            /* CSimpleMessageFrame at ui+0x250 */
     uint32_t camera;
+    uint32_t saved_mode;       /* CGameUI+0x1B4 before the camera mode switch */
     float    z;
     float    last_world[3];    /* frame+0x78 */
     float    target[3];        /* frame+0x6C */
@@ -4156,6 +4157,19 @@ static void dt_field_target_gesture_end(const Wc3DirectTouchEvent *ev)
  */
 #define DT_FN_CAMERA_UNPROJECT   0x6F391F80u
 #define DT_FN_CAMERA_READ_TARGET 0x6F360900u
+/* Native middle-button down (L_6F394490) switches CGameUI into the camera
+ * input mode before it calls 0x6F391170.  Reproduce that side effect instead
+ * of posting a mouse message, so the gesture owns no virtual button. */
+#define DT_FN_CAMERA_INPUT_MODE  0x6F374260u
+#define DT_UI_CAMERA_MODE        0x0000021Cu
+#define DT_UI_INPUT_MODE         0x000001B4u
+
+static void dt_camera_input_mode(CPU *c, uint32_t ui, uint32_t mode,
+                                 uint32_t flags)
+{
+    const uint32_t args[2] = { mode, flags };
+    (void)dt_call_thiscall(c, ui, DT_FN_CAMERA_INPUT_MODE, 2, args);
+}
 
 static void dt_camera_vec_read(uint32_t va, float out[3])
 {
@@ -4221,7 +4235,11 @@ static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
                                uint32_t width, uint32_t height)
 {
     if (!c || !ctx || !ctx->ui || !ctx->world) return 0;
-    if (g_camera_pan.active) dt_camera_pan_reset();
+    if (g_camera_pan.active) {
+        if (g_camera_pan.ui && g_camera_pan.ui == ctx->ui)
+            dt_camera_input_mode(c, ctx->ui, g_camera_pan.saved_mode, 0);
+        dt_camera_pan_reset();
+    }
     if (dt_paused(c)) return 0;
     if (!dt_call_ui_bool(c, ctx->ui, DT_FN_IN_GAME)) return 0;
     if (!dt_guest_readable(ctx->ui + DT_UI_DRAG_MANAGER, 4u) ||
@@ -4263,10 +4281,21 @@ static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
     const float z = dt_float(wz);
     wc3_wr32g(point + 8u, dt_bits(z));
 
+    /* Exactly the middle-button sequence: globals at the finger first, then
+     * 0x6F374260(ui, [ui+0x21C], 1), then 0x6F391170(frame, &point).  No mouse
+     * message is posted and no button is latched, so the action finger keeps
+     * its own cursor and left button.  Native 0x6F0EF2C5 copies event+0x24/
+     * +0x28 into the global mouse, i.e. the pick-event space produced by
+     * 0x6F8B38A0 (nx*0.8, (1-ny)*0.6), not raw client pixels.  Client pixels
+     * skew the ray by 1/0.8 in X and 1/0.6 in Y and couple the screen axes. */
+    const float event_x = dt_float(wc3_rd32g(point));
+    const float event_y = dt_float(wc3_rd32g(point + 4u));
     uint32_t saved[3];
     dt_camera_scope_save(saved);
-    dt_camera_scope_set(wc3_dt_client_pixel(ev->x, width),
-                        wc3_dt_client_pixel(ev->y, height), z);
+    dt_camera_scope_set(event_x, event_y, z);
+    const uint32_t saved_mode = wc3_rd32g(ctx->ui + DT_UI_INPUT_MODE);
+    dt_camera_input_mode(c, ctx->ui,
+                         wc3_rd32g(ctx->ui + DT_UI_CAMERA_MODE), 1u);
     const uint32_t arg = point;
     const uint32_t started =
         dt_call_thiscall(c, frame, DT_FN_CAMERA_DRAG_BEGIN, 1, &arg);
@@ -4282,6 +4311,13 @@ static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
     float world[3] = { 0.0f, 0.0f, 0.0f };
     dt_camera_vec_read(frame + DT_DRAG_TARGET, target);
     dt_camera_vec_read(frame + DT_DRAG_WORLD, world);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    dt_log("cam-begin px=%08X py=%08X z=%08X "
+           "target=%08X/%08X/%08X world=%08X/%08X/%08X",
+           dt_bits(event_x), dt_bits(event_y), dt_bits(z),
+           dt_bits(target[0]), dt_bits(target[1]), dt_bits(target[2]),
+           dt_bits(world[0]), dt_bits(world[1]), dt_bits(world[2]));
+#endif
     (void)dt_call_thiscall(c, frame, DT_FN_CAMERA_DRAG_CANCEL, 0, NULL);
     wc3_wr32g(frame + DT_DRAG_MARK, 0u);
     dt_camera_scope_restore(saved);
@@ -4298,6 +4334,7 @@ static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
     g_camera_pan.ui = ctx->ui;
     g_camera_pan.frame = frame;
     g_camera_pan.camera = camera;
+    g_camera_pan.saved_mode = saved_mode;
     g_camera_pan.z = z;
     memcpy(g_camera_pan.target, target, sizeof(target));
     memcpy(g_camera_pan.last_world, world, sizeof(world));
@@ -4338,8 +4375,29 @@ static void dt_camera_pan_end(CPU *c, const Wc3DirectTouchEvent *ev)
         wc3_wr32g(g_camera_pan.frame + DT_DRAG_ACTIVE, 0u);
         wc3_wr32g(g_camera_pan.frame + DT_DRAG_MARK, 0u);
     }
+    if (g_camera_pan.ui)
+        dt_camera_input_mode(c, g_camera_pan.ui, g_camera_pan.saved_mode, 0);
     memset(&g_camera_pan, 0, sizeof(g_camera_pan));
     dt_trace("field-camera-end", dt_bits(ev->x), dt_bits(ev->y));
+}
+
+/* Same conversion as 0x6F074010 + 0x6F8B38A0: the global mouse that
+ * 0x6F391F80 consumes is in pick-event space, not client pixels. */
+static void dt_camera_event_point(CPU *c, float nx, float ny,
+                                  uint32_t width, uint32_t height,
+                                  float *out_x, float *out_y)
+{
+    (void)width;
+    (void)height;
+    *out_x = 0.0f;
+    *out_y = 0.0f;
+    const uint32_t out = dt_scratch_alloc();
+    if (!out) return;
+    if (dt_event_point(c, nx, ny, width, height, out)) {
+        *out_x = dt_float(wc3_rd32g(out));
+        *out_y = dt_float(wc3_rd32g(out + 4u));
+    }
+    dt_scratch_free(out);
 }
 
 static void dt_camera_pan_apply(CPU *c, const DtContext *ctx,
@@ -4357,8 +4415,10 @@ static void dt_camera_pan_apply(CPU *c, const DtContext *ctx,
         return;
     }
 
-    const float px = wc3_dt_client_pixel(g_camera_pan.pending_x, width);
-    const float py = wc3_dt_client_pixel(g_camera_pan.pending_y, height);
+    float px = 0.0f;
+    float py = 0.0f;
+    dt_camera_event_point(c, g_camera_pan.pending_x, g_camera_pan.pending_y,
+                          width, height, &px, &py);
     if (dt_camera_conflict_active()) {
         /* Rebase the world anchor so the pan does not jump after the portrait
          * follow or minimap drag releases the camera. */
@@ -4384,6 +4444,26 @@ static void dt_camera_pan_apply(CPU *c, const DtContext *ctx,
     uint32_t saved[3];
     dt_camera_scope_save(saved);
     dt_camera_scope_set(px, py, g_camera_pan.z);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    {
+        const uint32_t out = dt_scratch_alloc();
+        if (out) {
+            const uint32_t args[2] = { out, dt_bits(g_camera_pan.z) };
+            (void)dt_call_thiscall(c, g_camera_pan.frame,
+                                   DT_FN_CAMERA_UNPROJECT, 2, args);
+            float cur[3] = { 0.0f, 0.0f, 0.0f };
+            dt_camera_vec_read(out, cur);
+            dt_log("cam-apply px=%08X py=%08X z=%08X "
+                   "anchor=%08X/%08X/%08X cur=%08X/%08X/%08X",
+                   dt_bits(px), dt_bits(py), dt_bits(g_camera_pan.z),
+                   dt_bits(g_camera_pan.last_world[0]),
+                   dt_bits(g_camera_pan.last_world[1]),
+                   dt_bits(g_camera_pan.last_world[2]),
+                   dt_bits(cur[0]), dt_bits(cur[1]), dt_bits(cur[2]));
+            dt_scratch_free(out);
+        }
+    }
+#endif
     dt_camera_vec_write(g_camera_pan.frame + DT_DRAG_WORLD,
                         g_camera_pan.last_world);
     wc3_wr32g(g_camera_pan.frame + DT_DRAG_ACTIVE, 1u);
@@ -4398,6 +4478,11 @@ static void dt_camera_pan_apply(CPU *c, const DtContext *ctx,
     float world[3] = { 0.0f, 0.0f, 0.0f };
     dt_camera_vec_read(g_camera_pan.frame + DT_DRAG_TARGET, target);
     dt_camera_vec_read(g_camera_pan.frame + DT_DRAG_WORLD, world);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    dt_log("cam-apply-out target=%08X/%08X/%08X world=%08X/%08X/%08X",
+           dt_bits(target[0]), dt_bits(target[1]), dt_bits(target[2]),
+           dt_bits(world[0]), dt_bits(world[1]), dt_bits(world[2]));
+#endif
     if (dt_camera_vec_finite(target) && dt_camera_vec_finite(world)) {
         memcpy(g_camera_pan.target, target, sizeof(target));
         memcpy(g_camera_pan.last_world, world, sizeof(world));
