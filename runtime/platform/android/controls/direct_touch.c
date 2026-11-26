@@ -350,18 +350,6 @@ void wc3_direct_touch_set_size(Wc3DirectTouch *dt, float width, float height)
     dt->height = height;
 }
 
-/* One camera at a time.  A pending FIELD contact does not reserve the slot:
- * whoever crosses the drag threshold first becomes the camera, including a
- * second finger arriving while the first one already owns the cursor. */
-static int camera_active(const Wc3DirectTouch *dt)
-{
-    for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
-        const Wc3DirectTouchPointer *p = &dt->pointers[i];
-        if (p->active && p->role == WC3_DT_CONTACT_CAMERA) return 1;
-    }
-    return 0;
-}
-
 void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
                                  float x, float y, uint64_t now_ms,
                                  uint32_t route)
@@ -397,11 +385,10 @@ void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
         }
     }
 
-    /* Any FIELD contact that lands while no camera drag is active stays a
-     * camera candidate.  The first finger may already be an ACTION cursor;
-     * a quick swipe with the second finger still has to be able to pan. */
-    const int can_claim_camera =
-        route == WC3_DIRECT_TOUCH_ROUTE_FIELD && !camera_active(dt);
+    /* Every FIELD contact is a camera candidate.  A second finger may land
+     * while another camera drag is already active: it can still tap or hold,
+     * and a quick swipe of its own must join the camera pan. */
+    const int can_claim_camera = route == WC3_DIRECT_TOUCH_ROUTE_FIELD;
     const int too_many = others >= WC3_DIRECT_TOUCH_MAX_POINTERS;
 
     pointer->pointer_id = pointer_id;
@@ -502,7 +489,7 @@ void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
     case WC3_DIRECT_TOUCH_FIELD_PENDING:
     default:
         if (pointer->role == WC3_DT_CONTACT_UNASSIGNED &&
-            pointer->camera_claim && !camera_active(dt) &&
+            pointer->camera_claim &&
             moved_sq > drag_threshold_sq(dt)) {
             claim_camera(dt, pointer, x, y, now_ms);
         }

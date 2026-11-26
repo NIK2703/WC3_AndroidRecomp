@@ -56,10 +56,11 @@ typedef enum {
     /* Field camera drag.  A quick swipe on the battlefield starts a native
      * camera drag, but the guest-side executor drives the drag manager
      * directly: these events own no virtual mouse button and post no
-     * WM_*MOUSE* messages, so a second finger stays a full cursor.  BEGIN
-     * carries the point where the drag crossed the legacy drag threshold,
-     * MOVE the later positions, and END the release.  owner_role is CAMERA
-     * and gesture_id identifies one continuous drag. */
+     * WM_*MOUSE* messages.  BEGIN carries the point where the drag crossed
+     * the legacy drag threshold, MOVE the later positions, and END the
+     * release.  owner_role is CAMERA and gesture_id identifies one
+     * continuous drag.  Several fingers may own camera gestures at once;
+     * each has its own gesture_id and contributes its relative movement. */
     WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN = 9,
     WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE = 10,
     WC3_DIRECT_TOUCH_FIELD_CAMERA_END = 11,
@@ -115,7 +116,8 @@ typedef enum {
  *         deadline.  The left button stays down until the finger is released,
  *         so a stationary hold is a native click and a drag is a native box
  *         selection.  The camera drag does not own the mouse; a second
- *         finger remains the full virtual cursor.
+ *         finger can remain the virtual cursor or join the camera pan with
+ *         its own quick swipe.
  * NATIVE: the touch belongs to the native UI (HUD, menu, targeting or
  *         placement).  Forward raw pointer phases so the guest-side service
  *         can post native mouse messages.  The service claims a gesture that

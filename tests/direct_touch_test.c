@@ -521,10 +521,13 @@ static void test_camera_first_second_finger_tap(void)
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
 
-    /* A second finger must be a full ACTION cursor immediately, not a
-     * camera candidate and not a one-shot that is consumed by the pan. */
+    /* A second finger stays a full camera candidate while the first camera
+     * drag is active.  A stationary release is still an ACTION tap, and a
+     * quick swipe can instead join the camera pan (covered separately). */
     wc3_direct_touch_down(&dt, 61, 500.0f, 500.0f, 60);
-    assert(wc3_direct_touch_contact_role(&dt, 61) == WC3_DT_CONTACT_ACTION);
+    assert(wc3_direct_touch_contact_role(&dt, 61) ==
+           WC3_DT_CONTACT_UNASSIGNED);
+    assert(wc3_direct_touch_camera_pointer(&dt) == 60);
     assert(g_event_count == 1);
     assert(g_hover_count == 0);
 
@@ -544,6 +547,76 @@ static void test_camera_first_second_finger_tap(void)
     assert(g_event_count == 4);
     assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
     assert(wc3_direct_touch_active_count(&dt) == 0);
+}
+
+static void test_second_finger_joins_camera(void)
+{
+    Wc3DirectTouch dt = make_recognizer();
+    events_clear();
+
+    wc3_direct_touch_down(&dt, 70, 100.0f, 100.0f, 0);
+    wc3_direct_touch_move(&dt, 70, 130.0f, 100.0f, 20);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
+    const uint32_t first_gid = g_events[0].gesture_id;
+    assert(first_gid != 0u);
+
+    /* The second finger stays a camera candidate even while the first pan
+     * is live.  Its quick swipe claims its own camera gesture. */
+    wc3_direct_touch_down(&dt, 71, 500.0f, 500.0f, 30);
+    assert(wc3_direct_touch_contact_role(&dt, 71) ==
+           WC3_DT_CONTACT_UNASSIGNED);
+    wc3_direct_touch_move(&dt, 71, 540.0f, 500.0f, 50);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
+    assert(g_events[1].owner_role == WC3_DT_OWNER_CAMERA);
+    assert(g_events[1].pointer_id == 71);
+    assert(g_events[1].gesture_id != 0u);
+    assert(g_events[1].gesture_id != first_gid);
+    const uint32_t second_gid = g_events[1].gesture_id;
+    assert(wc3_direct_touch_contact_role(&dt, 70) ==
+           WC3_DT_CONTACT_CAMERA);
+    assert(wc3_direct_touch_contact_role(&dt, 71) ==
+           WC3_DT_CONTACT_CAMERA);
+    assert(wc3_direct_touch_camera_pointer(&dt) == 70);
+    assert(g_hover_count == 0);
+
+    /* Both fingers keep their own camera stream. */
+    wc3_direct_touch_move(&dt, 70, 160.0f, 120.0f, 70);
+    assert(g_event_count == 3);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE);
+    assert(g_events[2].pointer_id == 70);
+    assert(g_events[2].gesture_id == first_gid);
+    wc3_direct_touch_move(&dt, 71, 580.0f, 520.0f, 90);
+    assert(g_event_count == 4);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE);
+    assert(g_events[3].pointer_id == 71);
+    assert(g_events[3].gesture_id == second_gid);
+
+    /* Releasing the first finger must not cancel the second camera pan. */
+    wc3_direct_touch_up(&dt, 70, 160.0f, 120.0f, 110);
+    assert(g_event_count == 5);
+    assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(g_events[4].pointer_id == 70);
+    assert(g_events[4].gesture_id == first_gid);
+    assert(wc3_direct_touch_active_count(&dt) == 1);
+    assert(wc3_direct_touch_contact_role(&dt, 71) ==
+           WC3_DT_CONTACT_CAMERA);
+    assert(wc3_direct_touch_camera_pointer(&dt) == 71);
+
+    wc3_direct_touch_move(&dt, 71, 620.0f, 540.0f, 130);
+    assert(g_event_count == 6);
+    assert(g_events[5].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE);
+    assert(g_events[5].pointer_id == 71);
+    assert(g_events[5].gesture_id == second_gid);
+
+    wc3_direct_touch_up(&dt, 71, 620.0f, 540.0f, 150);
+    assert(g_event_count == 7);
+    assert(g_events[6].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(g_events[6].pointer_id == 71);
+    assert(g_events[6].gesture_id == second_gid);
+    assert(wc3_direct_touch_active_count(&dt) == 0);
+    assert(wc3_direct_touch_camera_pointer(&dt) == -1);
 }
 
 static void test_reset_discards_pending(void)
@@ -1218,6 +1291,7 @@ int main(void)
     test_two_finger_camera_and_action();
     test_action_first_second_finger_camera();
     test_camera_first_second_finger_tap();
+    test_second_finger_joins_camera();
     test_reset_discards_pending();
     test_pointer_snapshot();
     test_coordinate_mapping();

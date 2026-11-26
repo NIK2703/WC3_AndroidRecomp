@@ -1197,9 +1197,10 @@ static int direct_touch_begin(int pointer_id, float x, float y,
         return 1;
     }
     /* An active camera drag holds no mouse button; a second finger is routed
-     * normally and may become the action cursor.  A selection drag still owns
-     * the left button, but the recognizer handles its owner by role, so no
-     * pointer is swallowed here. */
+     * normally and may become the action cursor or join the camera pan with
+     * its own quick swipe.  A selection drag still owns the left button, but
+     * the recognizer handles its owner by role, so no pointer is swallowed
+     * here. */
 
     if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) return 0;
     if (route == WC3_DIRECT_TOUCH_ROUTE_MINIMAP) {

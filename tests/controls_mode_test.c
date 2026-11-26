@@ -30,6 +30,7 @@ static void actions_clear(void)
 static Wc3DirectTouchKind g_direct_kinds[DIRECT_RECORDED];
 static Wc3DirectTouchRoute g_direct_routes[DIRECT_RECORDED];
 static uint32_t g_direct_pointer_ids[DIRECT_RECORDED];
+static uint32_t g_direct_gesture_ids[DIRECT_RECORDED];
 static uint64_t g_direct_times[DIRECT_RECORDED];
 static float g_direct_x[DIRECT_RECORDED];
 static float g_direct_y[DIRECT_RECORDED];
@@ -42,6 +43,7 @@ static void direct_sink(const Wc3DirectTouchEvent *event, void *user)
     g_direct_kinds[g_direct_count] = (Wc3DirectTouchKind)event->kind;
     g_direct_routes[g_direct_count] = (Wc3DirectTouchRoute)event->route;
     g_direct_pointer_ids[g_direct_count] = event->pointer_id;
+    g_direct_gesture_ids[g_direct_count] = event->gesture_id;
     g_direct_times[g_direct_count] = event->time_ms;
     g_direct_x[g_direct_count] = event->x;
     g_direct_y[g_direct_count] = event->y;
@@ -632,6 +634,35 @@ int main(int argc, char **argv)
     assert(direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
     assert(direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
     assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+
+    /* Two field fingers can own the camera pan at the same time.  The second
+     * finger is not forced to ACTION while the first camera gesture is live;
+     * its own quick swipe emits a separate camera gesture, and releasing the
+     * first finger leaves the second one panning. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 500.0f, 500.0f, 5460) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, 530.0f, 500.0f, 5470) == 0);
+    assert(controls_touch(WC3_TOUCH_DOWN, 1, 700.0f, 600.0f, 5475) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 1, 740.0f, 600.0f, 5480) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 530.0f, 500.0f, 5485) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 1, 780.0f, 620.0f, 5490) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 1, 780.0f, 620.0f, 5495) == 0);
+    assert(g_direct_count == 5);
+    assert(g_direct_kinds[0] == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
+    assert(g_direct_pointer_ids[0] == 0);
+    assert(g_direct_kinds[1] == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN);
+    assert(g_direct_pointer_ids[1] == 1);
+    assert(g_direct_gesture_ids[0] != 0u);
+    assert(g_direct_gesture_ids[1] != 0u);
+    assert(g_direct_gesture_ids[0] != g_direct_gesture_ids[1]);
+    assert(g_direct_kinds[2] == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(g_direct_pointer_ids[2] == 0);
+    assert(g_direct_kinds[3] == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE);
+    assert(g_direct_pointer_ids[3] == 1);
+    assert(g_direct_kinds[4] == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(g_direct_pointer_ids[4] == 1);
+    controls_tick(5500);
 
     /* A native button is pressed on DOWN and confirmed only on UP.  Dragging
      * off the button must forward the move and the release at the new point;

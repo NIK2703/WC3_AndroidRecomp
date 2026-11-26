@@ -403,22 +403,33 @@ static DtFieldGesture g_field_drag;
 /*
  * Cursor-free camera pan.  It owns no virtual mouse button: the native drag
  * manager is driven directly, with global mouse input swapped only around the
- * guest calls.  The recognizer's END and the service's reset paths clear it,
- * never a mouse message.  Main guest thread only.
+ * guest calls.  Several fingers may own the same camera pan at once; each
+ * keeps its own world anchor and coalesced pending point, while the native
+ * frame target is shared.  The recognizer's END and the service's reset paths
+ * clear a finger, never a mouse message.  Main guest thread only.
  */
+#define DT_CAMERA_PAN_MAX 4u
+
 typedef struct {
     uint8_t  active;
     uint8_t  pending;          /* one coalesced MOVE awaits apply */
-    uint8_t  rebase_pending;
     uint8_t  pointer;
     uint32_t gesture_id;
+    float    z;
+    float    last_world[3];    /* world anchor under last_x/last_y */
+    float    last_x;           /* pick-event space of last processed point */
+    float    last_y;
+    float    pending_x;        /* surface-normalised latest MOVE */
+    float    pending_y;
+} Wc3CameraPanPointer;
+
+typedef struct {
+    uint8_t  active;           /* at least one camera finger owns the pan */
+    uint8_t  rebase_pending;
     uint32_t frame;            /* CSimpleMessageFrame at ui+0x250 */
     uint32_t camera;
-    float    z;
-    float    last_world[3];    /* frame+0x78 */
-    float    target[3];        /* frame+0x6C */
-    float    pending_x;
-    float    pending_y;
+    float    target[3];        /* frame+0x6C, diagnostics */
+    Wc3CameraPanPointer pointers[DT_CAMERA_PAN_MAX];
 } Wc3CameraPan;
 
 static Wc3CameraPan g_camera_pan;
@@ -4798,6 +4809,51 @@ static void dt_camera_manager_gate_restore(uint32_t manager, uint32_t saved)
     wc3_wr32g(manager + DT_DRAG_MANAGER_GATE, saved);
 }
 
+static int dt_camera_pan_count(void)
+{
+    int count = 0;
+    for (uint32_t i = 0; i < DT_CAMERA_PAN_MAX; i++) {
+        if (g_camera_pan.pointers[i].active) count++;
+    }
+    return count;
+}
+
+static Wc3CameraPanPointer *dt_camera_pan_find(uint32_t pointer_id,
+                                               uint32_t gesture_id)
+{
+    for (uint32_t i = 0; i < DT_CAMERA_PAN_MAX; i++) {
+        Wc3CameraPanPointer *p = &g_camera_pan.pointers[i];
+        if (p->active && (uint32_t)p->pointer == pointer_id &&
+            p->gesture_id == gesture_id) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* Unproject one finger point under the current camera.  The caller's global
+ * mouse scope is restored on every path. */
+static int dt_camera_unproject_at(CPU *c, uint32_t frame, float x, float y,
+                                  float z, float out[3])
+{
+    if (!c || !frame || !dt_guest_readable(frame, DT_DRAG_MARK + 4u))
+        return 0;
+    uint32_t saved[3];
+    dt_camera_scope_save(saved);
+    dt_camera_scope_set(x, y, z);
+    const uint32_t scratch = dt_scratch_alloc();
+    if (!scratch) {
+        dt_camera_scope_restore(saved);
+        return 0;
+    }
+    const uint32_t args[2] = { scratch, dt_bits(z) };
+    (void)dt_call_thiscall(c, frame, DT_FN_CAMERA_UNPROJECT, 2, args);
+    dt_camera_vec_read(scratch, out);
+    dt_scratch_free(scratch);
+    dt_camera_scope_restore(saved);
+    return dt_camera_vec_finite(out);
+}
+
 /* Safety net for map changes and stale queue entries.  No mouse state is
  * touched: the recognizer's END is the normal path for a live gesture. */
 static void dt_camera_pan_reset(void)
@@ -4810,31 +4866,125 @@ static void dt_camera_pan_reset(void)
     memset(&g_camera_pan, 0, sizeof(g_camera_pan));
 }
 
+/* Add a second (or later) camera finger to the live pan.  The native drag
+ * manager already has a target; only this finger's own anchor is needed. */
+static int dt_camera_pan_add(CPU *c, const DtContext *ctx,
+                             const Wc3DirectTouchEvent *ev,
+                             uint32_t width, uint32_t height,
+                             uint32_t frame)
+{
+    if (!c || !ctx || !ctx->world || !frame) return 0;
+
+    int slot_index = -1;
+    for (uint32_t i = 0; i < DT_CAMERA_PAN_MAX; i++) {
+        const Wc3CameraPanPointer *p = &g_camera_pan.pointers[i];
+        if (p->active && (uint32_t)p->pointer == ev->pointer_id) {
+            slot_index = (int)i;
+            break;
+        }
+    }
+    if (slot_index < 0) {
+        for (uint32_t i = 0; i < DT_CAMERA_PAN_MAX; i++) {
+            if (!g_camera_pan.pointers[i].active) {
+                slot_index = (int)i;
+                break;
+            }
+        }
+    }
+    if (slot_index < 0) return 0;
+
+    const uint32_t scratch = dt_scratch_alloc();
+    if (!scratch) return 0;
+    const uint32_t point = scratch + DT_POINT_OFFSET;
+    const uint32_t pick = scratch + DT_PICK_OFFSET;
+    if (!dt_event_point(c, ev->x, ev->y, width, height, point)) {
+        dt_scratch_free(scratch);
+        return 0;
+    }
+    uint32_t wx = 0u;
+    uint32_t wy = 0u;
+    uint32_t wz = 0u;
+    if (!dt_pick_world(c, ctx, wc3_rd32g(point), wc3_rd32g(point + 4u),
+                       pick, &wx, &wy, &wz) ||
+        !isfinite(dt_float(wz))) {
+        dt_trace("field-camera-add-pick", dt_bits(ev->x), dt_bits(ev->y));
+        dt_scratch_free(scratch);
+        return 0;
+    }
+    const float z = dt_float(wz);
+    const float event_x = dt_float(wc3_rd32g(point));
+    const float event_y = dt_float(wc3_rd32g(point + 4u));
+    wc3_wr32g(point + 8u, dt_bits(z));
+    float world[3] = { 0.0f, 0.0f, 0.0f };
+    const int projected =
+        dt_camera_unproject_at(c, frame, event_x, event_y, z, world);
+    dt_scratch_free(scratch);
+    if (!projected) {
+        dt_trace("field-camera-add-projection",
+                 dt_bits(event_x), dt_bits(event_y));
+        return 0;
+    }
+
+    Wc3CameraPanPointer *p = &g_camera_pan.pointers[slot_index];
+    memset(p, 0, sizeof(*p));
+    p->active = 1;
+    p->pointer = (uint8_t)ev->pointer_id;
+    p->gesture_id = ev->gesture_id;
+    p->z = z;
+    p->last_x = event_x;
+    p->last_y = event_y;
+    memcpy(p->last_world, world, sizeof(world));
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    dt_log("cam-add ptr=%u gid=%u px=%08X py=%08X z=%08X "
+           "world=%08X/%08X/%08X",
+           ev->pointer_id, ev->gesture_id, dt_bits(event_x), dt_bits(event_y),
+           dt_bits(z), dt_bits(world[0]), dt_bits(world[1]),
+           dt_bits(world[2]));
+#endif
+    dt_trace("field-camera-add", ev->pointer_id, ev->gesture_id);
+    return 1;
+}
+
+static void dt_camera_pan_cancel_field_click(const Wc3DirectTouchEvent *ev)
+{
+    (void)ev;
+    if (g_field_click_pending &&
+        wc3_dt_event_cancels_field_click(
+            WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN, 1)) {
+        dt_trace("field-click-cancel", dt_bits(ev->x), dt_bits(ev->y));
+        g_field_click_pending = 0;
+    }
+}
+
 static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
                                const Wc3DirectTouchEvent *ev,
                                uint32_t width, uint32_t height)
 {
     if (!c || !ctx || !ctx->ui || !ctx->world) return 0;
-    if (g_camera_pan.active) dt_camera_pan_reset();
     if (dt_paused(c)) return 0;
     if (!dt_call_ui_bool(c, ctx->ui, DT_FN_IN_GAME)) return 0;
     if (!dt_guest_readable(ctx->ui + DT_UI_DRAG_MANAGER, 4u) ||
         !dt_guest_readable(ctx->ui + DT_UI_DRAG_FRAME, 4u)) return 0;
 
+    const uint32_t frame = wc3_rd32g(ctx->ui + DT_UI_DRAG_FRAME);
+    if (!frame || !dt_guest_readable(frame, DT_DRAG_MARK + 4u)) return 0;
+    const uint32_t camera = dt_camera(ctx->ui);
+    if (!camera) return 0;
+
+    if (g_camera_pan.active) {
+        if (g_camera_pan.frame == frame && g_camera_pan.camera == camera) {
+            const int added =
+                dt_camera_pan_add(c, ctx, ev, width, height, frame);
+            if (added) dt_camera_pan_cancel_field_click(ev);
+            return added;
+        }
+        dt_camera_pan_reset();
+    }
+
     const uint32_t manager = wc3_rd32g(ctx->ui + DT_UI_DRAG_MANAGER);
     const uint32_t manager_gate = dt_camera_manager_gate_clear(manager);
     if (manager_gate != 0u)
         dt_trace("field-camera-gate-bypass", manager_gate, manager);
-    const uint32_t frame = wc3_rd32g(ctx->ui + DT_UI_DRAG_FRAME);
-    if (!frame || !dt_guest_readable(frame, DT_DRAG_MARK + 4u)) {
-        dt_camera_manager_gate_restore(manager, manager_gate);
-        return 0;
-    }
-    const uint32_t camera = dt_camera(ctx->ui);
-    if (!camera) {
-        dt_camera_manager_gate_restore(manager, manager_gate);
-        return 0;
-    }
     if (dt_call_thiscall(c, camera, DT_FN_CAMERA_CAN_DRAG, 0, NULL) != 0u) {
         dt_trace("field-camera-can-drag", camera, 0);
         dt_camera_manager_gate_restore(manager, manager_gate);
@@ -4917,51 +5067,55 @@ static int dt_camera_pan_begin(CPU *c, const DtContext *ctx,
                  dt_bits(world[0]));
         return 0;
     }
+    memset(&g_camera_pan, 0, sizeof(g_camera_pan));
     g_camera_pan.active = 1;
-    g_camera_pan.pointer = (uint8_t)ev->pointer_id;
-    g_camera_pan.gesture_id = ev->gesture_id;
     g_camera_pan.frame = frame;
     g_camera_pan.camera = camera;
-    g_camera_pan.z = z;
     memcpy(g_camera_pan.target, target, sizeof(target));
-    memcpy(g_camera_pan.last_world, world, sizeof(world));
-    g_camera_pan.pending = 0;
-    g_camera_pan.rebase_pending = 0;
-    if (g_field_click_pending &&
-        wc3_dt_event_cancels_field_click(
-            WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN, 1)) {
-        dt_trace("field-click-cancel", dt_bits(ev->x), dt_bits(ev->y));
-        g_field_click_pending = 0;
-    }
+    Wc3CameraPanPointer *pan = &g_camera_pan.pointers[0];
+    pan->active = 1;
+    pan->pointer = (uint8_t)ev->pointer_id;
+    pan->gesture_id = ev->gesture_id;
+    pan->z = z;
+    pan->last_x = event_x;
+    pan->last_y = event_y;
+    memcpy(pan->last_world, world, sizeof(world));
+    dt_camera_pan_cancel_field_click(ev);
     dt_trace("field-camera-begin", dt_bits(ev->x), dt_bits(ev->y));
     return 1;
 }
 
-/* MOVE only records the latest point.  One native update is applied after the
- * service drains its batch, so a 120 Hz touch stream does not cause 120 guest
- * camera dispatches per pump. */
+/* MOVE only records the latest point for that finger.  One native update per
+ * pending finger is applied after the service drains its batch, so a 120 Hz
+ * touch stream does not cause 120 guest camera dispatches per pump. */
 static void dt_camera_pan_move(const Wc3DirectTouchEvent *ev)
 {
-    if (!g_camera_pan.active ||
-        (int)ev->pointer_id != (int)g_camera_pan.pointer ||
-        ev->gesture_id != g_camera_pan.gesture_id) {
+    Wc3CameraPanPointer *p = dt_camera_pan_find(ev->pointer_id,
+                                                ev->gesture_id);
+    if (!p) {
         dt_log("field-camera-move ignored ptr=%u gid=%u", ev->pointer_id,
                ev->gesture_id);
         return;
     }
-    g_camera_pan.pending_x = ev->x;
-    g_camera_pan.pending_y = ev->y;
-    g_camera_pan.pending = 1;
+    p->pending_x = ev->x;
+    p->pending_y = ev->y;
+    p->pending = 1;
 }
 
 static void dt_camera_pan_end(CPU *c, const Wc3DirectTouchEvent *ev)
 {
-    if (!g_camera_pan.active ||
-        (int)ev->pointer_id != (int)g_camera_pan.pointer ||
-        ev->gesture_id != g_camera_pan.gesture_id) {
+    Wc3CameraPanPointer *p = dt_camera_pan_find(ev->pointer_id,
+                                                ev->gesture_id);
+    if (!p) return;
+
+    const int remaining = dt_camera_pan_count() - 1;
+    memset(p, 0, sizeof(*p));
+    if (remaining > 0) {
+        dt_trace("field-camera-end-one", ev->pointer_id,
+                 (uint32_t)remaining);
         return;
     }
-    if (g_camera_pan.frame &&
+    if (c && g_camera_pan.frame &&
         dt_guest_readable(g_camera_pan.frame, DT_DRAG_MARK + 4u)) {
         (void)dt_call_thiscall(c, g_camera_pan.frame,
                                DT_FN_CAMERA_DRAG_CANCEL, 0, NULL);
@@ -4974,115 +5128,166 @@ static void dt_camera_pan_end(CPU *c, const Wc3DirectTouchEvent *ev)
 
 /* Same conversion as 0x6F074010 + 0x6F8B38A0: the global mouse that
  * 0x6F391F80 consumes is in pick-event space, not client pixels. */
-static void dt_camera_event_point(CPU *c, float nx, float ny,
-                                  uint32_t width, uint32_t height,
-                                  float *out_x, float *out_y)
+static int dt_camera_event_point(CPU *c, float nx, float ny,
+                                 uint32_t width, uint32_t height,
+                                 float *out_x, float *out_y)
 {
-    (void)width;
-    (void)height;
     *out_x = 0.0f;
     *out_y = 0.0f;
     const uint32_t out = dt_scratch_alloc();
-    if (!out) return;
-    if (dt_event_point(c, nx, ny, width, height, out)) {
+    if (!out) return 0;
+    const int ok = dt_event_point(c, nx, ny, width, height, out);
+    if (ok) {
         *out_x = dt_float(wc3_rd32g(out));
         *out_y = dt_float(wc3_rd32g(out + 4u));
     }
     dt_scratch_free(out);
+    return ok;
 }
 
-static void dt_camera_pan_apply(CPU *c, const DtContext *ctx,
-                                uint32_t width, uint32_t height)
+/* Rebase one idle finger after another finger moved the camera.  Its own
+ * anchor must follow the camera so its next MOVE does not undo that pan. */
+static void dt_camera_pan_rebase_pointer(CPU *c, Wc3CameraPanPointer *p)
 {
-    (void)ctx;
-    if (!c || !g_camera_pan.active || !g_camera_pan.pending) return;
-    /* A queued native click must be dispatched by the Win32 pump first; the
-     * camera update is kept pending for the next service call. */
-    if (hle_android_native_button_pending()) return;
-    g_camera_pan.pending = 0;
-    if (!g_camera_pan.frame ||
-        !dt_guest_readable(g_camera_pan.frame, DT_DRAG_MARK + 4u)) {
-        dt_camera_pan_reset();
-        return;
+    float cur[3] = { 0.0f, 0.0f, 0.0f };
+    if (dt_camera_unproject_at(c, g_camera_pan.frame, p->last_x, p->last_y,
+                               p->z, cur)) {
+        memcpy(p->last_world, cur, sizeof(cur));
     }
+}
 
-    float px = 0.0f;
-    float py = 0.0f;
-    dt_camera_event_point(c, g_camera_pan.pending_x, g_camera_pan.pending_y,
-                          width, height, &px, &py);
-    if (dt_camera_conflict_active()) {
-        /* Rebase the world anchor so the pan does not jump after the portrait
-         * follow or minimap drag releases the camera. */
-        uint32_t saved[3];
-        dt_camera_scope_save(saved);
-        dt_camera_scope_set(px, py, g_camera_pan.z);
-        const uint32_t out = dt_scratch_alloc();
-        if (out) {
-            const uint32_t args[2] = { out, dt_bits(g_camera_pan.z) };
-            (void)dt_call_thiscall(c, g_camera_pan.frame,
-                                   DT_FN_CAMERA_UNPROJECT, 2, args);
-            float cur[3] = { 0.0f, 0.0f, 0.0f };
-            dt_camera_vec_read(out, cur);
-            if (dt_camera_vec_finite(cur))
-                memcpy(g_camera_pan.last_world, cur, sizeof(cur));
-            dt_scratch_free(out);
+static void dt_camera_pan_rebase_others(CPU *c,
+                                        const Wc3CameraPanPointer *skip)
+{
+    for (uint32_t i = 0; i < DT_CAMERA_PAN_MAX; i++) {
+        Wc3CameraPanPointer *p = &g_camera_pan.pointers[i];
+        if (p->active && p != skip)
+            dt_camera_pan_rebase_pointer(c, p);
+    }
+}
+
+/* A portrait follow or minimap drag owns the camera for now.  Drop the queued
+ * movement of every camera finger and re-anchor all of them, so the pan does
+ * not jump when the conflict clears. */
+static void dt_camera_pan_rebase_conflict(CPU *c, uint32_t width,
+                                          uint32_t height)
+{
+    for (uint32_t i = 0; i < DT_CAMERA_PAN_MAX; i++) {
+        Wc3CameraPanPointer *p = &g_camera_pan.pointers[i];
+        if (!p->active) continue;
+        float px = p->last_x;
+        float py = p->last_y;
+        if (p->pending) {
+            float nx = 0.0f;
+            float ny = 0.0f;
+            if (dt_camera_event_point(c, p->pending_x, p->pending_y,
+                                      width, height, &nx, &ny)) {
+                px = nx;
+                py = ny;
+                p->last_x = px;
+                p->last_y = py;
+            }
+            p->pending = 0;
         }
-        dt_camera_scope_restore(saved);
-        g_camera_pan.rebase_pending = 1;
-        return;
+        float cur[3] = { 0.0f, 0.0f, 0.0f };
+        if (dt_camera_unproject_at(c, g_camera_pan.frame, px, py, p->z,
+                                   cur)) {
+            memcpy(p->last_world, cur, sizeof(cur));
+        }
     }
+    g_camera_pan.rebase_pending = 1;
+}
 
-    uint32_t saved[3];
-    dt_camera_scope_save(saved);
-    dt_camera_scope_set(px, py, g_camera_pan.z);
+static void dt_camera_pan_update(CPU *c, Wc3CameraPanPointer *p,
+                                 float px, float py)
+{
 #if WC3_DEBUG && WC3_DEBUG_INPUT
-    {
-        const uint32_t out = dt_scratch_alloc();
-        if (out) {
-            const uint32_t args[2] = { out, dt_bits(g_camera_pan.z) };
-            (void)dt_call_thiscall(c, g_camera_pan.frame,
-                                   DT_FN_CAMERA_UNPROJECT, 2, args);
-            float cur[3] = { 0.0f, 0.0f, 0.0f };
-            dt_camera_vec_read(out, cur);
-            dt_log("cam-apply px=%08X py=%08X z=%08X "
-                   "anchor=%08X/%08X/%08X cur=%08X/%08X/%08X",
-                   dt_bits(px), dt_bits(py), dt_bits(g_camera_pan.z),
-                   dt_bits(g_camera_pan.last_world[0]),
-                   dt_bits(g_camera_pan.last_world[1]),
-                   dt_bits(g_camera_pan.last_world[2]),
-                   dt_bits(cur[0]), dt_bits(cur[1]), dt_bits(cur[2]));
-            dt_scratch_free(out);
-        }
-    }
+    dt_log("cam-apply ptr=%u gid=%u px=%08X py=%08X z=%08X "
+           "anchor=%08X/%08X/%08X",
+           p->pointer, p->gesture_id, dt_bits(px), dt_bits(py), dt_bits(p->z),
+           dt_bits(p->last_world[0]), dt_bits(p->last_world[1]),
+           dt_bits(p->last_world[2]));
 #endif
-    dt_camera_vec_write(g_camera_pan.frame + DT_DRAG_WORLD,
-                        g_camera_pan.last_world);
+    dt_camera_scope_set(px, py, p->z);
+    dt_camera_vec_write(g_camera_pan.frame + DT_DRAG_WORLD, p->last_world);
     wc3_wr32g(g_camera_pan.frame + DT_DRAG_ACTIVE, 1u);
     wc3_wr32g(g_camera_pan.frame + DT_DRAG_MARK, 1u);
     (void)dt_call_thiscall(c, g_camera_pan.frame,
                            DT_FN_CAMERA_DRAG_UPDATE, 0, NULL);
     wc3_wr32g(g_camera_pan.frame + DT_DRAG_ACTIVE, 0u);
     wc3_wr32g(g_camera_pan.frame + DT_DRAG_MARK, 0u);
-    dt_camera_scope_restore(saved);
 
     float target[3] = { 0.0f, 0.0f, 0.0f };
     float world[3] = { 0.0f, 0.0f, 0.0f };
     dt_camera_vec_read(g_camera_pan.frame + DT_DRAG_TARGET, target);
     dt_camera_vec_read(g_camera_pan.frame + DT_DRAG_WORLD, world);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
-    dt_log("cam-apply-out target=%08X/%08X/%08X world=%08X/%08X/%08X",
+    dt_log("cam-apply-out ptr=%u gid=%u "
+           "target=%08X/%08X/%08X world=%08X/%08X/%08X",
+           p->pointer, p->gesture_id,
            dt_bits(target[0]), dt_bits(target[1]), dt_bits(target[2]),
            dt_bits(world[0]), dt_bits(world[1]), dt_bits(world[2]));
 #endif
     if (dt_camera_vec_finite(target) && dt_camera_vec_finite(world)) {
         memcpy(g_camera_pan.target, target, sizeof(target));
-        memcpy(g_camera_pan.last_world, world, sizeof(world));
+        memcpy(p->last_world, world, sizeof(world));
     }
+    p->pending = 0;
+    p->last_x = px;
+    p->last_y = py;
+}
+
+static void dt_camera_pan_apply(CPU *c, const DtContext *ctx,
+                                uint32_t width, uint32_t height)
+{
+    (void)ctx;
+    if (!c || !g_camera_pan.active) return;
+    int pending = 0;
+    for (uint32_t i = 0; i < DT_CAMERA_PAN_MAX; i++) {
+        if (g_camera_pan.pointers[i].active &&
+            g_camera_pan.pointers[i].pending) {
+            pending = 1;
+            break;
+        }
+    }
+    if (!pending) return;
+    /* A queued native click must be dispatched by the Win32 pump first; the
+     * camera update is kept pending for the next service call. */
+    if (hle_android_native_button_pending()) return;
+    if (!g_camera_pan.frame ||
+        !dt_guest_readable(g_camera_pan.frame, DT_DRAG_MARK + 4u)) {
+        dt_camera_pan_reset();
+        return;
+    }
+
+    if (dt_camera_conflict_active()) {
+        dt_camera_pan_rebase_conflict(c, width, height);
+        return;
+    }
+
+    uint32_t saved[3];
+    dt_camera_scope_save(saved);
+    for (uint32_t i = 0; i < DT_CAMERA_PAN_MAX; i++) {
+        Wc3CameraPanPointer *p = &g_camera_pan.pointers[i];
+        if (!p->active || !p->pending) continue;
+        float px = 0.0f;
+        float py = 0.0f;
+        if (!dt_camera_event_point(c, p->pending_x, p->pending_y,
+                                   width, height, &px, &py)) {
+            p->pending = 0;
+            continue;
+        }
+        dt_camera_pan_update(c, p, px, py);
+        dt_camera_pan_rebase_others(c, p);
+    }
+    dt_camera_scope_restore(saved);
+
     if (g_camera_pan.rebase_pending && g_camera_pan.camera) {
         const uint32_t out = dt_scratch_alloc();
         if (out) {
+            const uint32_t args[1] = { out };
             (void)dt_call_thiscall(c, g_camera_pan.camera,
-                                   DT_FN_CAMERA_READ_TARGET, 1, &out);
+                                   DT_FN_CAMERA_READ_TARGET, 1, args);
             float live[3] = { 0.0f, 0.0f, 0.0f };
             dt_camera_vec_read(out, live);
             if (dt_camera_vec_finite(live)) {
@@ -7086,8 +7291,10 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
         }
     }
 
-    /* One native camera update for the whole batch, using the latest camera
-     * finger point.  No host lock is held and no mouse message is posted. */
+    /* One native camera update per camera finger with a pending point.  The
+     * updates are coalesced per batch, so a 120 Hz touch stream does not
+     * become 120 guest dispatches per pump.  No host lock is held and no
+     * mouse message is posted. */
     dt_camera_pan_apply(c, &ctx, width, height);
 
     /* A native click can dismiss a modal or open a menu; refresh the frames

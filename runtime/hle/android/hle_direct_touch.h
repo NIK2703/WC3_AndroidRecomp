@@ -26,8 +26,9 @@
  *     logical button bit.  Leaving the minimap therefore cannot latch the
  *     native camera drag.
  *   - FIELD_CAMERA_BEGIN/MOVE/END: the quick battlefield swipe.  The executor
- *     presses the native middle button at the start point and releases it at
- *     the end, so the game performs its own camera drag.
+ *     drives the native camera drag manager directly without a virtual mouse
+ *     button.  Several fingers may own camera gestures at once; each keeps
+ *     its own world anchor and contributes its relative movement.
  *   - FIELD_SELECT_BEGIN/MOVE/END: the battlefield selection press.  At the
  *     long-press deadline the executor posts the native left button DOWN and
  *     keeps it down for the whole gesture; moves are the native selection

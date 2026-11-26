@@ -38,13 +38,12 @@ typedef enum {
 } Wc3DirectTouchFieldMode;
 
 /*
- * A FIELD contact starts UNASSIGNED while no camera drag is active.  The first
- * one to cross the drag threshold before its long-press deadline claims the
- * CAMERA role; a contact that reaches the deadline instead becomes ACTION and
- * owns the virtual mouse.  A pointer that is already ACTION does not reserve
- * the camera slot, so a second finger can still become the camera with a quick
- * swipe in the field.  Only contacts arriving during an active camera are
- * ACTION/IGNORED; CAMERA never touches the virtual mouse.
+ * A FIELD contact starts UNASSIGNED.  Any contact that crosses the drag
+ * threshold before its long-press deadline claims the CAMERA role; a contact
+ * that reaches the deadline instead becomes ACTION and owns the virtual
+ * mouse.  Several contacts may own CAMERA at once, each with its own gesture
+ * id, so a second quick swipe joins an already active camera pan instead of
+ * being forced to ACTION.  CAMERA never touches the virtual mouse.
  */
 typedef enum {
     WC3_DT_CONTACT_UNASSIGNED = 0,
@@ -120,9 +119,10 @@ void wc3_direct_touch_set_size(Wc3DirectTouch *dt, float width, float height);
  * A FIELD down stays pending: a move beyond drag_threshold_px before its own
  * long-press deadline claims the CAMERA role and emits FIELD_CAMERA_BEGIN with
  * an owning gesture_id; that drag uses no virtual mouse.  This is true for any
- * FIELD pointer, including the second finger when the first one is already an
- * ACTION cursor.  At the deadline the pointer becomes ACTION and emits
- * FIELD_SELECT_BEGIN, with every later move FIELD_SELECT_MOVE and the release
+ * FIELD pointer, including a second finger while another finger already owns
+ * the camera or the ACTION cursor.  At the deadline the pointer becomes
+ * ACTION and emits FIELD_SELECT_BEGIN, with every later move FIELD_SELECT_MOVE
+ * and the release
  * FIELD_SELECT_END.  The executor turns
  * BEGIN into a native left-button DOWN, each MOVE into a native mouse move,
  * and END into the matching UP.  A hover is emitted immediately before an
