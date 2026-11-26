@@ -58,6 +58,11 @@ typedef struct {
     float down_y;
     float last_x;
     float last_y;
+    /* Point where the long-press deadline was recognized.  A post-deadline
+     * move beyond drag_threshold_px from here is the first real drag, not a
+     * long tap. */
+    float hold_x;
+    float hold_y;
     uint64_t down_ms;
     uint32_t route;      /* Wc3DirectTouchRoute that owns the gesture */
     uint32_t gesture_id; /* monotonic id of the claimed camera gesture */
@@ -68,6 +73,7 @@ typedef struct {
     uint8_t mode;        /* Wc3DirectTouchFieldMode */
     uint8_t role;        /* Wc3DirectTouchContactRole */
     uint8_t camera_claim;/* this FIELD contact may still claim the camera */
+    uint8_t drag_started;/* FIELD_SELECT_DRAG_BEGIN already emitted */
 } Wc3DirectTouchPointer;
 
 /* Legacy haptic callback.  It runs on the Android input thread when the
@@ -121,13 +127,16 @@ void wc3_direct_touch_set_size(Wc3DirectTouch *dt, float width, float height);
  * an owning gesture_id; that drag uses no virtual mouse.  This is true for any
  * FIELD pointer, including a second finger while another finger already owns
  * the camera or the ACTION cursor.  At the deadline the pointer becomes
- * ACTION and emits FIELD_SELECT_BEGIN, with every later move FIELD_SELECT_MOVE
- * and the release
- * FIELD_SELECT_END.  The executor turns
- * BEGIN into a native left-button DOWN, each MOVE into a native mouse move,
- * and END into the matching UP.  A hover is emitted immediately before an
- * action click, never for the camera.  Raw pointer phases always carry NATIVE
- * and the ACTION role. */
+ * ACTION and emits FIELD_SELECT_BEGIN.  The executor normally turns BEGIN
+ * into a native left-button DOWN; for a controlled selection on terrain it
+ * may defer that press.  A post-deadline move beyond drag_threshold_px from
+ * the hold point then emits FIELD_SELECT_DRAG_BEGIN once, carrying the hold
+ * point, followed by FIELD_SELECT_MOVE; the release emits FIELD_SELECT_END.
+ * The executor turns DRAG_BEGIN into the native DOWN at the hold point, each
+ * MOVE into a native mouse move, and END into the matching UP, the attack
+ * order, or the native fallback click.  A hover is emitted immediately before
+ * an action click, never for the camera.  Raw pointer phases always carry
+ * NATIVE and the ACTION role. */
 void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
                                  float x, float y, uint64_t now_ms,
                                  uint32_t route);
@@ -146,9 +155,12 @@ void wc3_direct_touch_reset(Wc3DirectTouch *dt);
 /*
  * Arm field holds whose deadline has expired, fire the haptic once per
  * pointer, and emit FIELD_SELECT_BEGIN at the hold point.  Returns the number
- * of holds armed.  The pointer then stays in FIELD_SELECT: moves emit
- * FIELD_SELECT_MOVE and the release emits FIELD_SELECT_END, so the executor
- * can keep the native left button down for the whole gesture.
+ * of holds armed.  The pointer then stays in FIELD_SELECT: a move beyond
+ * drag_threshold_px from the hold point emits FIELD_SELECT_DRAG_BEGIN once,
+ * later moves emit FIELD_SELECT_MOVE, and the release emits FIELD_SELECT_END.
+ * The executor normally keeps the native left button down for the whole
+ * gesture; for a deferred attack it starts the press at DRAG_BEGIN or
+ * resolves the attack/fallback on END.
  */
 int wc3_direct_touch_tick(Wc3DirectTouch *dt, uint64_t now_ms);
 
@@ -158,8 +170,10 @@ uint64_t wc3_direct_touch_next_deadline_ms(const Wc3DirectTouch *dt);
 /* Number of active pointers. */
 int wc3_direct_touch_active_count(const Wc3DirectTouch *dt);
 
-/* True while a FIELD pointer owns the native left-button selection drag.  A
- * camera drag does not own a mouse button, so it is not included here. */
+/* True while a FIELD pointer is in the long-press selection phase.  That
+ * includes a deferred press before DRAG_BEGIN, which does not own the native
+ * button yet.  A camera drag does not own a mouse button, so it is not
+ * included here. */
 int wc3_direct_touch_field_drag_active(const Wc3DirectTouch *dt);
 
 /* Role/gesture queries for the controls adapter.  -1 means "none". */

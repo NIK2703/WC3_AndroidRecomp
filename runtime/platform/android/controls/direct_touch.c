@@ -104,6 +104,8 @@ static const char *dt_kind_name(uint32_t kind)
     case WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN: return "FIELD_SELECT_BEGIN";
     case WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE: return "FIELD_SELECT_MOVE";
     case WC3_DIRECT_TOUCH_FIELD_SELECT_END: return "FIELD_SELECT_END";
+    case WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN:
+        return "FIELD_SELECT_DRAG_BEGIN";
     case WC3_DIRECT_TOUCH_FIELD_HOVER: return "FIELD_HOVER";
     default: return "?";
     }
@@ -242,14 +244,18 @@ static void arm_hold(Wc3DirectTouch *dt, Wc3DirectTouchPointer *pointer,
     pointer->mode = WC3_DIRECT_TOUCH_FIELD_SELECT;
     pointer->role = WC3_DT_CONTACT_ACTION;
     pointer->camera_claim = 0;
+    pointer->hold_x = x;
+    pointer->hold_y = y;
+    pointer->drag_started = 0;
     /* The legacy engine plays gestureLongPressHaptic exactly when the
      * long-press timer expires, before any drag. */
     fire_haptic(dt);
-    /* The long press is the native left-button press-and-hold.  Emit the
-     * BEGIN at the deadline so the executor posts WM_LBUTTONDOWN and keeps
-     * it down; moves in between are the native selection rectangle and the
-     * release posts the matching UP.  A stationary release is therefore a
-     * native click that selects one unit. */
+    /* Emit the BEGIN at the configured deadline.  The executor normally
+     * posts WM_LBUTTONDOWN and keeps it down; for a controlled selection on
+     * terrain it may defer that press and turn a stationary release into
+     * attack-move.  The recognizer itself owns no native button: a move
+     * beyond drag_threshold_px from the hold point emits DRAG_BEGIN, which
+     * tells the executor to start the native selection rectangle. */
     DT_LOG("hold ptr=%d -> SELECT_BEGIN", pointer->pointer_id);
     TOUCH_LOG("hold ptr=%d -> SELECT_BEGIN n=%.4f,%.4f event_t=%llu",
               pointer->pointer_id,
@@ -410,8 +416,6 @@ void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
            pointer_id, dt_mode_name(pointer->mode),
            dt_role_name(pointer->role), pointer->camera_claim,
            pointer->multi, others, (unsigned long long)now_ms);
-    /* No hover on DOWN: the camera must not move the shared cursor, and the
-     * action hover is emitted immediately before its click. */
     if (route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
         /* The portrait is a tracking control, not a long-press gesture.
          * Start the native camera follow as soon as the finger lands on it;
@@ -420,6 +424,15 @@ void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
         pointer->long_fired = 1;
         emit_pointer_event(dt, WC3_DIRECT_TOUCH_FOLLOW_START, pointer,
                            x, y, now_ms);
+    } else if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD) {
+        /* Publish the contact point before the release.  A target/placement
+         * mode resolves its confirmation click against the preview it built
+         * on the previous frame; with only the release hover the first tap
+         * arrives before that preview has moved, so it is rejected and the
+         * second tap confirms.  The service gates this hover on a live
+         * target/placement mode, so select-mode and camera contacts do not
+         * move the shared cursor. */
+        emit_action_hover(dt, pointer, x, y, now_ms);
     }
 }
 
@@ -473,16 +486,25 @@ void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
     const float moved_sq =
         distance_sq(x, y, pointer->down_x, pointer->down_y);
     DT_LOG("move ptr=%d px=%.1f,%.1f mode=%s role=%s claim=%d moved_sq=%.1f "
-           "threshold_sq=%.1f route=%s",
+           "threshold_sq=%.1f drag=%d route=%s",
            pointer_id, x, y, dt_mode_name(pointer->mode),
            dt_role_name(pointer->role), pointer->camera_claim, moved_sq,
-           drag_threshold_sq(dt), dt_route_name(pointer->route));
+           drag_threshold_sq(dt), pointer->drag_started,
+           dt_route_name(pointer->route));
     switch (pointer->mode) {
     case WC3_DIRECT_TOUCH_FIELD_CAMERA:
         emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE, pointer,
                            x, y, now_ms);
         break;
     case WC3_DIRECT_TOUCH_FIELD_SELECT:
+        if (!pointer->drag_started &&
+            distance_sq(x, y, pointer->hold_x, pointer->hold_y) >
+                drag_threshold_sq(dt)) {
+            pointer->drag_started = 1;
+            emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN,
+                               pointer, pointer->hold_x, pointer->hold_y,
+                               now_ms);
+        }
         emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE, pointer,
                            x, y, now_ms);
         break;
@@ -540,8 +562,11 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
         ? (uint64_t)dt->long_press_ms : 0u;
     const int held_long = now_ms >= pointer->down_ms &&
                           now_ms - pointer->down_ms >= timeout;
-    DT_LOG("up-state ptr=%d moved_sq=%.1f threshold_sq=%.1f held_long=%d",
-           pointer_id, moved_sq, drag_threshold_sq(dt), held_long);
+    DT_LOG("up-state ptr=%d moved_sq=%.1f threshold_sq=%.1f held_long=%d "
+           "drag=%d hold_sq=%.1f",
+           pointer_id, moved_sq, drag_threshold_sq(dt), held_long,
+           pointer->drag_started,
+           distance_sq(x, y, pointer->hold_x, pointer->hold_y));
     TOUCH_LOG("up ptr=%d px=%.1f,%.1f n=%.4f,%.4f route=%s mode=%s "
               "multi=%d long_fired=%d moved_sq=%.1f threshold_sq=%.1f "
               "held_long=%d event_t=%llu",
@@ -562,6 +587,21 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
         memset(pointer, 0, sizeof(*pointer));
         return;
     case WC3_DIRECT_TOUCH_FIELD_SELECT:
+        /* A release already beyond the hold point is a drag even if no MOVE
+         * reported the crossing.  Start the native rectangle at the hold
+         * point, feed the release point, then end it.  The executor starts
+         * the native press on DRAG_BEGIN and the input barrier publishes the
+         * DOWN before the following MOVE. */
+        if (!pointer->drag_started &&
+            distance_sq(x, y, pointer->hold_x, pointer->hold_y) >
+                drag_threshold_sq(dt)) {
+            pointer->drag_started = 1;
+            emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN,
+                               pointer, pointer->hold_x, pointer->hold_y,
+                               now_ms);
+            emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE,
+                               pointer, x, y, now_ms);
+        }
         DT_LOG("up ptr=%d select end", pointer_id);
         emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_END, pointer,
                            x, y, now_ms);

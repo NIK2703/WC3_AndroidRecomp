@@ -46,6 +46,11 @@ int hle_android_mouse_flush_pending_ready(void);
 /* Read-only state queries and the release-only path. */
 int hle_android_mouse_is_down(int button);
 int hle_android_native_button_pending(void);
+/* True while a press sequence is still armed and has not been published.
+ * A caller that owns a matching release uses this to distinguish "waiting for
+ * the idle pass" from "already in the queue"; a queued press is reported by
+ * hle_android_native_button_pending()/hle_android_mouse_is_down() instead. */
+int hle_android_mouse_press_pending(void);
 void hle_android_mouse_button_up_force(int button);
 
 #ifdef __cplusplus

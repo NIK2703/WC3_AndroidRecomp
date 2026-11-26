@@ -3754,6 +3754,17 @@ def test_native_press_barrier() -> int:
             errors.append(f"gateway header lost primitive: {token}")
     if "hle_android_mouse_private.h" in dt:
         errors.append("direct touch must not include the raw mouse header")
+    # A late-deferred field release is an ordinary native UI click unless a
+    # live target mode selects the validated replay.  Both names must stay in
+    # the source: removing the deferred path reintroduces the pause-menu
+    # stale-hot-control bug, and removing the classifier makes every native
+    # release a replay again.
+    for token in ("dt_native_press_deferred",
+                  "wc3_dt_native_release_replay",
+                  "dt_pause_menu_active"):
+        if token not in dt:
+            errors.append(f"late native release bypasses the idle gateway: "
+                          f"{token} missing")
     if errors:
         for line in errors:
             print(f"native-press-barrier: {line}", file=sys.stderr)

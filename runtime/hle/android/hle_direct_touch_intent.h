@@ -147,6 +147,23 @@ static inline Wc3DtFieldRelease wc3_dt_field_release(int ready_field,
 }
 
 /*
+ * The NATIVE release outcome is a validated target/placement confirmation
+ * only while a target mode is live.  That path must replay the click in the
+ * current pump: the modal placement loop may never call GetCursorPos, so the
+ * idle gateway could not publish it.  Every other native release is an
+ * ordinary menu/HUD/loading click and enters the same universal gateway as a
+ * normal press; the gateway's idle hover pass is what keeps the first tap
+ * from being hit-tested against a stale hot control.  A LEGACY route means
+ * the game has no live semantic context (menu, loading, closed click gate),
+ * so even a stale target-mode word must not select the replay path.
+ */
+static inline int wc3_dt_native_release_replay(Wc3DirectTouchRoute route,
+                                               int target_live)
+{
+    return route != WC3_DIRECT_TOUCH_ROUTE_LEGACY && target_live;
+}
+
+/*
  * A field drag owns its native mouse button from BEGIN to END.  Pressing that
  * button can change the game's active input mode, so the route snapshot can
  * briefly become NATIVE after BEGIN.  That is the drag itself, not a reason to
@@ -205,6 +222,40 @@ static inline Wc3DtTapIntent wc3_dt_tap_intent(int pick_result,
         return selection_controlled ? WC3_DT_INTENT_ORDER_GROUND
                                     : WC3_DT_INTENT_CLEAR_SELECTION;
     return WC3_DT_INTENT_NONE;
+}
+
+/* Half-open rectangle test in surface-normalised coordinates.  Published HUD
+ * snapshots are half-open, matching the native frame hit test. */
+static inline int wc3_dt_point_in_rect(float x, float y, float left,
+                                       float top, float right, float bottom)
+{
+    return right > left && bottom > top &&
+           x >= left && x < right && y >= top && y < bottom;
+}
+
+/*
+ * Attack-move gate for a long tap without drag.  The caller has already
+ * resolved the live selection, the native pick, the field rectangle and the
+ * published HUD rectangles.  A long tap is an attack only when every
+ * condition holds; any failure falls back to the ordinary native click, so a
+ * HUD edge, a unit under the finger, a paused game or a target/placement mode
+ * can never become a world attack.
+ */
+static inline int wc3_dt_attack_candidate(int controlled,
+                                          int pick_result,
+                                          int inside_field,
+                                          int inside_hud,
+                                          int target_active,
+                                          int paused,
+                                          int native_busy)
+{
+    return controlled &&
+           pick_result == WC3_DT_PICK_TERRAIN &&
+           inside_field &&
+           !inside_hud &&
+           !target_active &&
+           !paused &&
+           !native_busy;
 }
 
 /* Beacon button (MinimapSignal) release decision.  A release on the button
@@ -362,6 +413,22 @@ static inline int wc3_dt_command_target_live(uint32_t active,
     return select_mode && active && active != select_mode;
 }
 
+/*
+ * A live non-select input mode owns the next world click as a target or
+ * placement confirmation.  The click gate is deliberately absent: target and
+ * placement modes may close it, while the active mode still owns the click.
+ * The camera mode is also non-select but never confirms a target.
+ */
+static inline int wc3_dt_target_mode_live(uint32_t active_mode,
+                                          uint32_t select_mode,
+                                          uint32_t target_mode,
+                                          uint32_t camera_mode)
+{
+    if (target_mode && active_mode == target_mode) return 1;
+    if (camera_mode && active_mode == camera_mode) return 0;
+    return wc3_dt_command_target_live(active_mode, select_mode);
+}
+
 /* CGameUI+0x21C is the dedicated camera input mode object.  Direct-touch
  * camera is mode-neutral and never sets it; the guard remains for a native
  * or legacy source.  The camera mode is not a command target, so a release
@@ -408,7 +475,9 @@ static inline int wc3_dt_event_cancels_field_click(uint32_t kind,
 {
     if (kind == WC3_DIRECT_TOUCH_POINTER_DOWN ||
         kind == WC3_DIRECT_TOUCH_TAP ||
-        kind == WC3_DIRECT_TOUCH_FIELD_HOVER)
+        kind == WC3_DIRECT_TOUCH_FIELD_HOVER ||
+        kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN ||
+        kind == WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN)
         return 1;
     return camera_started && kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN;
 }
@@ -483,6 +552,32 @@ static inline int wc3_dt_minimap_local_point(float nx, float ny,
     *out_x = local_left + fx * (local_right - local_left);
     *out_y = local_top + fy * (local_bottom - local_top);
     return 1;
+}
+
+/*
+ * Beacon placement goes through CMinimap+0x644..0x650, which AddSignal
+ * (0x6F3B0A30) reads as CRect {minY, minX, maxY, maxX}.  DDC Y grows upward,
+ * so the published surface top maps to maxY and the bottom to minY.  Passing
+ * the surface fraction straight into wc3_dt_minimap_local_point() mirrors the
+ * signal about the map's horizontal centre; mirror the fraction inside the
+ * frame first and reuse the same clamping/fraction math.
+ */
+static inline int wc3_dt_minimap_ddc_local_point(float nx, float ny,
+                                                 float frame_top,
+                                                 float frame_left,
+                                                 float frame_bottom,
+                                                 float frame_right,
+                                                 float min_y, float min_x,
+                                                 float max_y, float max_x,
+                                                 float *out_x,
+                                                 float *out_y)
+{
+    const float mirrored_y = frame_top + frame_bottom - ny;
+    return wc3_dt_minimap_local_point(nx, mirrored_y,
+                                      frame_top, frame_left,
+                                      frame_bottom, frame_right,
+                                      min_y, min_x, max_y, max_x,
+                                      out_x, out_y);
 }
 
 /*

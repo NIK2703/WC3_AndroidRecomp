@@ -7670,6 +7670,19 @@ static int pending_ready(void)
     return ready;
 }
 
+/* A release that resolved to a native UI click arms its DOWN at release
+ * time.  The direct-touch pump uses this query to know whether that DOWN is
+ * still waiting for the idle hover pass or has already been published; a
+ * camera triplet is a different owner and is not a press. */
+int hle_android_mouse_press_pending(void)
+{
+    int pending;
+    pthread_mutex_lock(&g_pending_lock);
+    pending = g_pending_action.kind == WC3_PENDING_PRESS;
+    pthread_mutex_unlock(&g_pending_lock);
+    return pending;
+}
+
 /* A move posted by this thread replaces the pending sequence position.  A move
  * from another input path (the legacy overlay) must not drag it away from the
  * direct-touch point. */

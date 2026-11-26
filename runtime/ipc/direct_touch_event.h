@@ -64,16 +64,26 @@ typedef enum {
     WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN = 9,
     WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE = 10,
     WC3_DIRECT_TOUCH_FIELD_CAMERA_END = 11,
-    /* Field selection press.  BEGIN is emitted at the long-press deadline:
-     * the executor posts WM_LBUTTONDOWN and keeps it down.  MOVE carries
-     * every later finger position and END carries the release, which posts
-     * the matching WM_LBUTTONUP.  A stationary release is therefore a native
-     * left click that selects one unit; a drag is the native selection
-     * rectangle (legacy longPressDragAction).  These events are only valid
-     * on the FIELD route. */
+    /* Field selection press.  BEGIN is emitted at the long-press deadline.
+     * Normally the executor posts WM_LBUTTONDOWN and keeps it down.  For a
+     * controlled selection on terrain it may defer that press until
+     * DRAG_BEGIN (the contact is a real drag) or END (attack-move), so a
+     * stationary release does not become a selection click.  MOVE carries
+     * every later finger position and END carries the release; a started
+     * native press posts the matching WM_LBUTTONUP.  Without a deferral, a
+     * stationary release is a native left click that selects one unit and a
+     * drag is the native selection rectangle (legacy longPressDragAction).
+     * These events are only valid on the FIELD route. */
     WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN = 12,
     WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE = 13,
     WC3_DIRECT_TOUCH_FIELD_SELECT_END = 14,
+    /* The held contact first moved farther than the configured drag threshold
+     * from the point where FIELD_SELECT_BEGIN was emitted.  Carries that hold
+     * point, not the current finger point; the following FIELD_SELECT_MOVE
+     * carries the current point.  Emitted once per contact.  The executor
+     * uses it to start the native selection rectangle only when the gesture
+     * is actually a drag, so a stationary long tap can become attack-move. */
+    WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN = 18,
     /* Field press hover.  Emitted immediately before an action click (TAP or
      * FIELD_SELECT_BEGIN), after the contact's role is known.  A camera
      * contact emits no hover.  The service posts it as a native WM_MOUSEMOVE
@@ -113,11 +123,13 @@ typedef enum {
  * FIELD:  the touch is in the battlefield and CSelectMode owns input.  Use
  *         the semantic tap recognizer, a cursor-free camera drag for a quick
  *         swipe, and the native left-button selection press at the long-press
- *         deadline.  The left button stays down until the finger is released,
- *         so a stationary hold is a native click and a drag is a native box
- *         selection.  The camera drag does not own the mouse; a second
- *         finger can remain the virtual cursor or join the camera pan with
- *         its own quick swipe.
+ *         deadline.  The left button normally stays down until the finger is
+ *         released, so a stationary hold is a native click and a drag is a
+ *         native box selection.  When a controlled selection is held over
+ *         terrain the press is deferred: DRAG_BEGIN starts the box at the
+ *         hold point, while a stationary release becomes attack-move.  The
+ *         camera drag does not own the mouse; a second finger can remain the
+ *         virtual cursor or join the camera pan with its own quick swipe.
  * NATIVE: the touch belongs to the native UI (HUD, menu, targeting or
  *         placement).  Forward raw pointer phases so the guest-side service
  *         can post native mouse messages.  The service claims a gesture that

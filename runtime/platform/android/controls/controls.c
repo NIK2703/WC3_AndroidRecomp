@@ -619,7 +619,15 @@ static int controls_build_variants(const char *profile_json,
     }
 
     wc3_profile_apply_gesture_mode(full, g_double_tap_enabled);
+    /* SIMPLE and SIMPLE_ESC are selected while paused, in a cinematic or on
+     * the game-over screen.  They must carry the same user-configured gesture
+     * timings as FULL; otherwise the long-press deadline silently falls back
+     * to the authored 120 ms whenever the overlay mode changes. */
     wc3_profile_apply_gesture_timings(full, g_double_tap_timeout_ms,
+                                      g_long_press_timeout_ms);
+    wc3_profile_apply_gesture_timings(simple, g_double_tap_timeout_ms,
+                                      g_long_press_timeout_ms);
+    wc3_profile_apply_gesture_timings(simple_esc, g_double_tap_timeout_ms,
                                       g_long_press_timeout_ms);
 
     *out_full = full;
@@ -1048,9 +1056,9 @@ static void direct_touch_configure(int width, int height,
                                    const ProfileData *profile) {
     /* The battlefield gestures mirror the authored legacy profile: one drag
      * threshold (11 px) decides tap vs. camera drag and hold vs. selection
-     * drag, the long-press timer is the profile's 120 ms, and the hold plays
-     * gestureLongPressHaptic.  A missing profile (host-only tests) keeps the
-     * same defaults. */
+     * drag, the long-press timer is the profile's configured value (the
+     * authored default is 120 ms), and the hold plays gestureLongPressHaptic.
+     * A missing profile (host-only tests) keeps the same defaults. */
     float drag_threshold = 11.0f;
     int long_press_ms = 120;
     int haptic_effect = 3;
@@ -1062,6 +1070,9 @@ static void direct_touch_configure(int width, int height,
         haptic_effect = profile->gesture_long_press_haptic;
     }
     g_direct_touch_haptic_effect = haptic_effect;
+    WC3_CTRL_LOG("dt configure size=%dx%d drag=%.1f long_press_ms=%d "
+                 "haptic=%d",
+                 width, height, drag_threshold, long_press_ms, haptic_effect);
     wc3_direct_touch_init(&g_direct_touch, (float)width, (float)height,
                           drag_threshold, long_press_ms,
                           g_direct_touch_sink, g_direct_touch_user);

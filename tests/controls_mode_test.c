@@ -40,6 +40,10 @@ static void direct_sink(const Wc3DirectTouchEvent *event, void *user)
 {
     (void)user;
     if (!event || g_direct_count >= DIRECT_RECORDED) return;
+    /* FIELD_HOVER is a native-cursor phase consumed by the service before
+     * semantic dispatch.  Count it separately so the routing assertions
+     * below keep checking the camera/selection stream only. */
+    if (event->kind == WC3_DIRECT_TOUCH_FIELD_HOVER) return;
     g_direct_kinds[g_direct_count] = (Wc3DirectTouchKind)event->kind;
     g_direct_routes[g_direct_count] = (Wc3DirectTouchRoute)event->route;
     g_direct_pointer_ids[g_direct_count] = event->pointer_id;

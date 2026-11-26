@@ -143,28 +143,30 @@ static void test_field_hover(void)
     Wc3DirectTouch dt = make_recognizer();
     events_clear();
 
-    /* A camera candidate never moves the shared cursor, so DOWN emits no
-     * hover.  The action hover is emitted immediately before its click. */
+    /* A field contact publishes its point on DOWN so a target/placement
+     * preview can move before the release click, then publishes the final
+     * point again on UP.  The service ignores both outside a live target
+     * mode, so a camera candidate does not move the shared cursor. */
     wc3_direct_touch_down(&dt, 40, 300.0f, 400.0f, 0);
-    assert(g_hover_count == 0);
+    assert(g_hover_count == 1);
     assert(g_event_count == 0);
 
     wc3_direct_touch_move(&dt, 40, 310.0f, 410.0f, 10);
-    assert(g_hover_count == 0);
+    assert(g_hover_count == 1);
 
     wc3_direct_touch_up(&dt, 40, 310.0f, 410.0f, 50);
-    assert(g_hover_count == 1);
+    assert(g_hover_count == 2);
     assert(g_event_count == 1);
     assert(g_events[0].kind == WC3_DIRECT_TOUCH_TAP);
     assert(g_events[0].owner_role == WC3_DT_OWNER_ACTION);
 
-    /* Two DOWN events emit no hover either; roles are resolved on MOVE or at
-     * the long-press deadline.  Both field contacts stay camera candidates
-     * until then, even when one of them is already a cursor. */
+    /* Each field DOWN publishes its contact point.  Roles are still resolved
+     * on MOVE or at the long-press deadline, and both contacts stay camera
+     * candidates until then, even when one of them is already a cursor. */
     events_clear();
     wc3_direct_touch_down(&dt, 41, 500.0f, 500.0f, 1000);
     wc3_direct_touch_down(&dt, 42, 600.0f, 600.0f, 1001);
-    assert(g_hover_count == 0);
+    assert(g_hover_count == 2);
     assert(wc3_direct_touch_contact_role(&dt, 41) ==
            WC3_DT_CONTACT_UNASSIGNED);
     assert(wc3_direct_touch_contact_role(&dt, 42) ==
@@ -306,14 +308,17 @@ static void test_hold_then_drag_selects(void)
     expect_near("select move1 x", g_events[1].x, 0.115f);
 
     wc3_direct_touch_move(&dt, 9, 160.0f, 120.0f, 520);
-    assert(g_event_count == 3);
-    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
-    expect_near("select move2 x", g_events[2].x, 0.16f);
+    assert(g_event_count == 4);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN);
+    expect_near("select drag begin x", g_events[2].x, 0.10f);
+    expect_near("select drag begin y", g_events[2].y, 0.10f);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
+    expect_near("select move2 x", g_events[3].x, 0.16f);
 
     wc3_direct_touch_up(&dt, 9, 180.0f, 140.0f, 600);
-    assert(g_event_count == 4);
-    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
-    expect_near("select end x", g_events[3].x, 0.18f);
+    assert(g_event_count == 5);
+    assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+    expect_near("select end x", g_events[4].x, 0.18f);
     assert(wc3_direct_touch_field_drag_active(&dt) == 0);
     assert(g_haptic_count == 1);
     assert(wc3_direct_touch_next_deadline_ms(&dt) == 0);
@@ -331,7 +336,8 @@ static void test_quick_swipe_camera(void)
     assert(g_events[0].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
     assert(g_events[0].owner_role == WC3_DT_OWNER_CAMERA);
     assert(g_events[0].gesture_id != 0u);
-    assert(g_hover_count == 0);
+    /* The DOWN published one field hover before the camera claimed it. */
+    assert(g_hover_count == 1);
 
     /* Once the camera drag owns the pointer, the hold deadline must not arm
      * a second gesture. */
@@ -374,9 +380,17 @@ static void test_late_move_starts_select(void)
     assert(g_event_count == 3);
     assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
 
+    /* The release itself crosses the threshold from the hold point, so the
+     * recognizer must emit DRAG_BEGIN + MOVE + END even without an earlier
+     * MOVE that reported the crossing. */
     wc3_direct_touch_up(&dt, 12, 150.0f, 120.0f, 200);
-    assert(g_event_count == 4);
-    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+    assert(g_event_count == 6);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN);
+    expect_near("late drag begin x", g_events[3].x, 0.125f);
+    expect_near("late drag begin y", g_events[3].y, 0.10f);
+    assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
+    expect_near("late drag move x", g_events[4].x, 0.15f);
+    assert(g_events[5].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
     assert(wc3_direct_touch_tick(&dt, 300) == 0);
     assert(g_haptic_count == 1);
 }
@@ -442,7 +456,8 @@ static void test_two_finger_camera_and_action(void)
     assert(g_events[0].owner_role == WC3_DT_OWNER_CAMERA);
     assert(wc3_direct_touch_camera_pointer(&dt) == 4);
     assert(wc3_direct_touch_action_pointer(&dt) == -1);
-    assert(g_hover_count == 0);
+    /* Both DOWN contacts published a field hover. */
+    assert(g_hover_count == 2);
 
     /* The other finger reaches its long-press deadline and owns the native
      * left button while the camera keeps panning. */
@@ -451,7 +466,8 @@ static void test_two_finger_camera_and_action(void)
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
     assert(g_events[1].owner_role == WC3_DT_OWNER_ACTION);
     assert(wc3_direct_touch_action_pointer(&dt) == 5);
-    assert(g_hover_count == 1);
+    /* Two DOWN hovers plus the long-press arm hover. */
+    assert(g_hover_count == 3);
 
     wc3_direct_touch_move(&dt, 4, 160.0f, 100.0f, 200);
     assert(g_event_count == 3);
@@ -459,12 +475,14 @@ static void test_two_finger_camera_and_action(void)
     assert(g_events[2].owner_role == WC3_DT_OWNER_CAMERA);
 
     wc3_direct_touch_up(&dt, 5, 520.0f, 520.0f, 250);
-    assert(g_event_count == 4);
-    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+    assert(g_event_count == 6);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN);
+    assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
+    assert(g_events[5].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
 
     wc3_direct_touch_up(&dt, 4, 160.0f, 100.0f, 300);
-    assert(g_event_count == 5);
-    assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(g_event_count == 7);
+    assert(g_events[6].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
     assert(wc3_direct_touch_active_count(&dt) == 0);
 }
 
@@ -491,22 +509,24 @@ static void test_action_first_second_finger_camera(void)
     assert(g_events[1].gesture_id != 0u);
     assert(wc3_direct_touch_camera_pointer(&dt) == 41);
     assert(wc3_direct_touch_action_pointer(&dt) == 40);
-    assert(g_hover_count == 1);
+    /* DOWN 40, the long-press arm, and DOWN 41 each published a hover. */
+    assert(g_hover_count == 3);
 
     /* The cursor keeps its native selection drag while the camera pans. */
     wc3_direct_touch_move(&dt, 40, 220.0f, 210.0f, 260);
-    assert(g_event_count == 3);
-    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
-    wc3_direct_touch_move(&dt, 41, 760.0f, 320.0f, 280);
     assert(g_event_count == 4);
-    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE);
-    assert(g_events[3].owner_role == WC3_DT_OWNER_CAMERA);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
+    wc3_direct_touch_move(&dt, 41, 760.0f, 320.0f, 280);
+    assert(g_event_count == 5);
+    assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE);
+    assert(g_events[4].owner_role == WC3_DT_OWNER_CAMERA);
 
     wc3_direct_touch_up(&dt, 41, 760.0f, 320.0f, 300);
     wc3_direct_touch_up(&dt, 40, 220.0f, 210.0f, 320);
-    assert(g_event_count == 6);
-    assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
-    assert(g_events[5].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+    assert(g_event_count == 7);
+    assert(g_events[5].kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_END);
+    assert(g_events[6].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
     assert(wc3_direct_touch_active_count(&dt) == 0);
 }
 
@@ -529,7 +549,8 @@ static void test_camera_first_second_finger_tap(void)
            WC3_DT_CONTACT_UNASSIGNED);
     assert(wc3_direct_touch_camera_pointer(&dt) == 60);
     assert(g_event_count == 1);
-    assert(g_hover_count == 0);
+    /* DOWN 60 and DOWN 61 each published a field hover. */
+    assert(g_hover_count == 2);
 
     /* Its first tap reaches the semantic path while the camera continues. */
     wc3_direct_touch_up(&dt, 61, 500.0f, 500.0f, 80);
@@ -537,7 +558,8 @@ static void test_camera_first_second_finger_tap(void)
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_TAP);
     assert(g_events[1].owner_role == WC3_DT_OWNER_ACTION);
     assert(g_events[1].route == WC3_DIRECT_TOUCH_ROUTE_FIELD);
-    assert(g_hover_count == 1);
+    /* The two DOWN hovers plus the release hover. */
+    assert(g_hover_count == 3);
 
     wc3_direct_touch_move(&dt, 60, 160.0f, 120.0f, 100);
     assert(g_event_count == 3);
@@ -579,7 +601,8 @@ static void test_second_finger_joins_camera(void)
     assert(wc3_direct_touch_contact_role(&dt, 71) ==
            WC3_DT_CONTACT_CAMERA);
     assert(wc3_direct_touch_camera_pointer(&dt) == 70);
-    assert(g_hover_count == 0);
+    /* DOWN 70 and DOWN 71 each published a field hover. */
+    assert(g_hover_count == 2);
 
     /* Both fingers keep their own camera stream. */
     wc3_direct_touch_move(&dt, 70, 160.0f, 120.0f, 70);
@@ -711,6 +734,80 @@ static void test_tap_intent_resolution(void)
            WC3_DT_INTENT_CLEAR_SELECTION);
     assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 1) ==
            WC3_DT_INTENT_ORDER_GROUND);
+}
+
+static void test_configured_long_press_and_threshold(void)
+{
+    Wc3DirectTouch dt;
+    events_clear();
+
+    /* The deadline and the drag threshold are configuration, not constants:
+     * 50 ms and 11 px here, 120 ms and 20 px in make_recognizer(). */
+    wc3_direct_touch_init(&dt, 1000.0f, 1000.0f, 11.0f, 50, sink, NULL);
+    wc3_direct_touch_set_haptic(&dt, haptic, NULL, 3);
+    wc3_direct_touch_down(&dt, 80, 100.0f, 100.0f, 0);
+    assert(wc3_direct_touch_tick(&dt, 49) == 0);
+    assert(g_event_count == 0);
+    assert(wc3_direct_touch_tick(&dt, 50) == 1);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
+
+    /* 10 px is inside the configured 11 px threshold: still a held click. */
+    wc3_direct_touch_move(&dt, 80, 110.0f, 100.0f, 60);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
+
+    /* 12 px from the hold point starts the selection rectangle. */
+    wc3_direct_touch_move(&dt, 80, 112.0f, 100.0f, 70);
+    assert(g_event_count == 4);
+    assert(g_events[2].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN);
+    expect_near("configured drag begin x", g_events[2].x, 0.10f);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE);
+    wc3_direct_touch_up(&dt, 80, 112.0f, 100.0f, 80);
+    assert(g_event_count == 5);
+    assert(g_events[4].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+
+    /* A 200 ms deadline must not arm at 120 ms. */
+    events_clear();
+    wc3_direct_touch_init(&dt, 1000.0f, 1000.0f, 11.0f, 200, sink, NULL);
+    wc3_direct_touch_set_haptic(&dt, haptic, NULL, 3);
+    wc3_direct_touch_down(&dt, 81, 300.0f, 300.0f, 1000);
+    assert(wc3_direct_touch_tick(&dt, 1120) == 0);
+    assert(g_event_count == 0);
+    assert(wc3_direct_touch_tick(&dt, 1200) == 1);
+    assert(g_event_count == 1);
+    assert(g_events[0].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN);
+    wc3_direct_touch_up(&dt, 81, 300.0f, 300.0f, 1210);
+    assert(g_event_count == 2);
+    assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
+}
+
+static void test_attack_candidate(void)
+{
+    /* A long tap becomes attack-move only when every gate holds: a
+     * controlled selection, a native terrain pick, the field rectangle, no
+     * HUD overlap, no live target/placement mode, not paused and no other
+     * native button owner. */
+    assert(wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 1, 0, 0, 0, 0));
+    assert(!wc3_dt_attack_candidate(0, WC3_DT_PICK_TERRAIN, 1, 0, 0, 0, 0));
+    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_OBJECT, 1, 0, 0, 0, 0));
+    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_NONE, 1, 0, 0, 0, 0));
+    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 0, 0, 0, 0, 0));
+    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 1, 1, 0, 0, 0));
+    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 1, 0, 1, 0, 0));
+    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 1, 0, 0, 1, 0));
+    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 1, 0, 0, 0, 1));
+}
+
+static void test_point_in_rect(void)
+{
+    /* Published HUD snapshots are half-open. */
+    assert(wc3_dt_point_in_rect(0.5f, 0.5f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(wc3_dt_point_in_rect(0.1f, 0.1f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(!wc3_dt_point_in_rect(0.9f, 0.5f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(!wc3_dt_point_in_rect(0.5f, 0.9f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(!wc3_dt_point_in_rect(0.5f, 0.5f, 0.9f, 0.1f, 0.1f, 0.9f));
+    assert(!wc3_dt_point_in_rect(0.5f, 0.5f, 0.1f, 0.9f, 0.9f, 0.1f));
 }
 
 static void test_route(void)
@@ -968,6 +1065,29 @@ static void test_command_target_live(void)
     assert(wc3_dt_command_target_live(0x43400088, 0x42AD0088));
 }
 
+static void test_target_mode_live(void)
+{
+    const uint32_t select_mode = 0x42AD0088u;
+    const uint32_t target_mode = 0x43420088u;
+    const uint32_t camera_mode = 0x42B10088u;
+    const uint32_t other_mode = 0x42B20088u;
+
+    /* Target/placement mode owns the next world click even when it closes the
+     * click gate.  The live mode, not the gate, is the authority. */
+    assert(wc3_dt_target_mode_live(target_mode, select_mode, target_mode,
+                                   camera_mode));
+    /* The command card can allocate a target object outside the fixed
+     * CGameUI fields; any live non-select mode is still a target. */
+    assert(wc3_dt_target_mode_live(other_mode, select_mode, target_mode,
+                                   camera_mode));
+    assert(!wc3_dt_target_mode_live(select_mode, select_mode, target_mode,
+                                    camera_mode));
+    /* Camera is also non-select but never confirms a target. */
+    assert(!wc3_dt_target_mode_live(camera_mode, select_mode, target_mode,
+                                    camera_mode));
+    assert(!wc3_dt_target_mode_live(0, select_mode, target_mode, camera_mode));
+}
+
 static void test_camera_mode_active(void)
 {
     /* Direct-touch camera is mode-neutral: it never calls SetInputMode, so
@@ -1015,6 +1135,24 @@ static void test_field_click_defer(void)
     assert(wc3_dt_field_click_defer(1, 1, 1, 1, 1, 0, 1));
 }
 
+static void test_native_release_replay(void)
+{
+    /* A live target/placement mode outside LEGACY keeps the immediate replay:
+     * the modal loop may never poll GetCursorPos. */
+    assert(wc3_dt_native_release_replay(WC3_DIRECT_TOUCH_ROUTE_NATIVE, 1));
+    /* A menu, loading screen or HUD release has no live target.  It must use
+     * the universal idle gateway, not the replay that hit-tests the stale hot
+     * control. */
+    assert(!wc3_dt_native_release_replay(WC3_DIRECT_TOUCH_ROUTE_NATIVE, 0));
+    /* A LEGACY route has no semantic context; a stale target word must not
+     * turn a menu click into a placement confirmation. */
+    assert(!wc3_dt_native_release_replay(WC3_DIRECT_TOUCH_ROUTE_LEGACY, 1));
+    assert(!wc3_dt_native_release_replay(WC3_DIRECT_TOUCH_ROUTE_LEGACY, 0));
+    /* FIELD releases are semantic and never reach the native branch. */
+    assert(wc3_dt_native_release_replay(WC3_DIRECT_TOUCH_ROUTE_FIELD, 1));
+    assert(!wc3_dt_native_release_replay(WC3_DIRECT_TOUCH_ROUTE_FIELD, 0));
+}
+
 static void test_event_cancels_field_click(void)
 {
     /* A new semantic gesture supersedes a held map-load tap.  A camera begin
@@ -1031,8 +1169,15 @@ static void test_event_cancels_field_click(void)
         WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE, 1));
     assert(!wc3_dt_event_cancels_field_click(
         WC3_DIRECT_TOUCH_FIELD_CAMERA_END, 1));
-    assert(!wc3_dt_event_cancels_field_click(
+    /* A deferred selection begin posts no native button, so it must cancel a
+     * held map-load tap explicitly.  DRAG_BEGIN is defense-in-depth for a
+     * lost BEGIN. */
+    assert(wc3_dt_event_cancels_field_click(
         WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN, 0));
+    assert(wc3_dt_event_cancels_field_click(
+        WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN, 0));
+    assert(!wc3_dt_event_cancels_field_click(
+        WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE, 0));
 }
 
 static void test_command_movement_slop(void)
@@ -1141,6 +1286,28 @@ static void test_minimap_local_point(void)
     assert(!wc3_dt_minimap_local_point(NAN, 0.4f, 0.2f, 0.1f, 0.6f, 0.5f,
                                        40.0f, 20.0f, 140.0f, 120.0f,
                                        &x, &y));
+
+    /* CMinimap+0x644 is CRect {minY,minX,maxY,maxX} in DDC space (Y up).
+     * The beacon helper must map the surface top to maxY and the bottom to
+     * minY; feeding the surface fraction straight through mirrors the signal
+     * about the map's horizontal centre. */
+    assert(wc3_dt_minimap_ddc_local_point(0.10f, 0.20f, 0.20f, 0.10f, 0.60f,
+                                          0.50f, 40.0f, 20.0f, 140.0f,
+                                          120.0f, &x, &y));
+    expect_near("minimap ddc top-left x", x, 20.0f);
+    expect_near("minimap ddc top-left y", y, 140.0f);
+
+    assert(wc3_dt_minimap_ddc_local_point(0.30f, 0.40f, 0.20f, 0.10f, 0.60f,
+                                          0.50f, 40.0f, 20.0f, 140.0f,
+                                          120.0f, &x, &y));
+    expect_near("minimap ddc centre x", x, 70.0f);
+    expect_near("minimap ddc centre y", y, 90.0f);
+
+    assert(wc3_dt_minimap_ddc_local_point(0.50f, 0.60f, 0.20f, 0.10f, 0.60f,
+                                          0.50f, 40.0f, 20.0f, 140.0f,
+                                          120.0f, &x, &y));
+    expect_near("minimap ddc bottom-right x", x, 120.0f);
+    expect_near("minimap ddc bottom-right y", y, 40.0f);
 }
 
 static void test_minimap_input_rect_and_mapping(void)
@@ -1296,6 +1463,9 @@ int main(void)
     test_pointer_snapshot();
     test_coordinate_mapping();
     test_tap_intent_resolution();
+    test_configured_long_press_and_threshold();
+    test_attack_candidate();
+    test_point_in_rect();
     test_route();
     test_physical_route();
     test_field_release_resolution();
@@ -1306,8 +1476,10 @@ int main(void)
     test_command_release_resolution();
     test_command_target_mode();
     test_command_target_live();
+    test_target_mode_live();
     test_camera_mode_active();
     test_field_click_defer();
+    test_native_release_replay();
     test_event_cancels_field_click();
     test_command_movement_slop();
     test_console_rect_scale();
