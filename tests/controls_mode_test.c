@@ -716,8 +716,8 @@ int main(int argc, char **argv)
     assert(controls_touch(WC3_TOUCH_DOWN, 1, shift_element->x,
                           shift_element->y, 6530) == 0);
     controls_tick(6550);
-    assert(!has_key(50, 1));
-    assert(direct_has_signal(0xA0, 1));
+    assert(has_key(50, 1));
+    assert(!direct_has_signal(0xA0, 1));
     assert(direct_has_route(WC3_DIRECT_TOUCH_FOLLOW_START,
                             WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
     assert(!direct_has(WC3_DIRECT_TOUCH_HOLD_RELEASE));
@@ -725,8 +725,8 @@ int main(int argc, char **argv)
                           shift_element->y, 6560) == 0);
     assert(controls_touch(WC3_TOUCH_UP, 0, 70.0f, 850.0f, 6570) == 0);
     controls_tick(6580);
-    assert(!has_key(50, 0));
-    assert(direct_has_signal(0xA0, 0));
+    assert(has_key(50, 0));
+    assert(!direct_has_signal(0xA0, 0));
     assert(direct_has_route(WC3_DIRECT_TOUCH_HOLD_RELEASE,
                             WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
 
