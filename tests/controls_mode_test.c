@@ -134,6 +134,12 @@ static Wc3DirectTouchRoute route_legacy(void *user)
     return WC3_DIRECT_TOUCH_ROUTE_LEGACY;
 }
 
+static Wc3DirectTouchRoute route_menu(void *user)
+{
+    (void)user;
+    return WC3_DIRECT_TOUCH_ROUTE_MENU;
+}
+
 static int portrait_rect(float *left, float *top, float *right,
                          float *bottom, void *user)
 {
@@ -786,6 +792,12 @@ int main(int argc, char **argv)
     const int mm_move2 = direct_nth_index(WC3_DIRECT_TOUCH_POINTER_MOVE, 1);
     const int mm_up = direct_index(WC3_DIRECT_TOUCH_POINTER_UP);
     assert(mm_down >= 0 && mm_move1 >= 0 && mm_move2 >= 0 && mm_up >= 0);
+    /* Every raw minimap phase carries the MINIMAP route, so the guest
+     * service can tell a stale minimap drag from a menu/HUD contact. */
+    assert(g_direct_routes[mm_down] == WC3_DIRECT_TOUCH_ROUTE_MINIMAP);
+    assert(g_direct_routes[mm_move1] == WC3_DIRECT_TOUCH_ROUTE_MINIMAP);
+    assert(g_direct_routes[mm_move2] == WC3_DIRECT_TOUCH_ROUTE_MINIMAP);
+    assert(g_direct_routes[mm_up] == WC3_DIRECT_TOUCH_ROUTE_MINIMAP);
     assert(fabsf(g_direct_x[mm_down] - 0.85f) < 0.0001f);
     assert(fabsf(g_direct_y[mm_down] - 0.80f) < 0.0001f);
     assert(fabsf(g_direct_x[mm_move1] - 0.80f) < 0.0001f);
@@ -897,6 +909,93 @@ int main(int argc, char **argv)
     controls_tick(7690);
     assert(has_key(113, 0));
     assert(!direct_has_signal(0x25, 0));
+
+    /* Pause menu: the guest publishes MENU.  Its gesture set is exactly the
+     * main menu's -- raw native pointer phases with no geometry gate.  Every
+     * point below belongs to a different in-game panel (field, portrait,
+     * minimap, beacon, command card); all must stay NATIVE. */
+    controls_set_direct_touch_route_gate(route_menu, NULL);
+    static const float menu_points[][2] = {
+        {500.0f, 500.0f},  /* battlefield */
+        {70.0f, 850.0f},   /* portrait */
+        {850.0f, 800.0f},  /* minimap */
+        {420.0f, 420.0f},  /* beacon button */
+        {650.0f, 800.0f},  /* command card */
+    };
+    for (size_t i = 0; i < sizeof(menu_points) / sizeof(menu_points[0]); i++) {
+        actions_clear();
+        direct_clear();
+        assert(controls_touch(WC3_TOUCH_DOWN, 0, menu_points[i][0],
+                              menu_points[i][1], 8000 + i * 10) == 0);
+        assert(controls_touch(WC3_TOUCH_UP, 0, menu_points[i][0],
+                              menu_points[i][1], 8005 + i * 10) == 0);
+        controls_tick(8009 + i * 10);
+        assert(g_action_count == 0);
+        assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_DOWN,
+                                WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+        assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_UP,
+                                WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+        assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+        assert(!direct_has(WC3_DIRECT_TOUCH_LONG_PRESS));
+        assert(!direct_has(WC3_DIRECT_TOUCH_FOLLOW_START));
+        assert(!direct_has(WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN));
+        assert(!direct_has(WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN));
+        assert(!direct_has_route(WC3_DIRECT_TOUCH_POINTER_DOWN,
+                                 WC3_DIRECT_TOUCH_ROUTE_MINIMAP));
+        assert(!direct_has_route(WC3_DIRECT_TOUCH_POINTER_DOWN,
+                                 WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
+    }
+
+    /* Opening the pause menu while a field camera drag is live: the MENU
+     * transition must end the world gesture and park the old pointer so a
+     * later move cannot keep panning the camera behind the menu. */
+    controls_set_direct_touch_route_gate(route_field, NULL);
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 500.0f, 500.0f, 8200) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, 540.0f, 500.0f, 8210) == 0);
+    assert(direct_has(WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN));
+    controls_set_direct_touch_route_gate(route_menu, NULL);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, 560.0f, 500.0f, 8220) == 0);
+    assert(direct_has(WC3_DIRECT_TOUCH_FIELD_CAMERA_END));
+    const int cancel_count = g_direct_count;
+    assert(controls_touch(WC3_TOUCH_UP, 0, 560.0f, 500.0f, 8230) == 0);
+    controls_tick(8240);
+    /* The ignored pointer stays swallowed through UP: no late camera move
+     * or semantic tap leaks from the old gesture. */
+    assert(g_direct_count == cancel_count);
+
+    /* A new contact after the transition is a menu pointer even at the same
+     * field point, so the first tap in the pause menu uses the main-menu
+     * native path. */
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 1, 500.0f, 500.0f, 8250) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 1, 500.0f, 500.0f, 8260) == 0);
+    controls_tick(8270);
+    assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_DOWN,
+                            WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+    assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_UP,
+                            WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+
+    /* A minimap drag that was live when the menu opened gets one explicit
+     * MINIMAP-routed CANCEL; the service accepts it so the native minimap
+     * button is released.  The rest of that pointer is swallowed. */
+    controls_set_direct_touch_route_gate(route_field, NULL);
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 850.0f, 800.0f, 8300) == 0);
+    assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_DOWN,
+                            WC3_DIRECT_TOUCH_ROUTE_MINIMAP));
+    controls_set_direct_touch_route_gate(route_menu, NULL);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, 860.0f, 810.0f, 8310) == 0);
+    assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_CANCEL,
+                            WC3_DIRECT_TOUCH_ROUTE_MINIMAP));
+    const int minimap_cancel_count = g_direct_count;
+    assert(controls_touch(WC3_TOUCH_UP, 0, 860.0f, 810.0f, 8320) == 0);
+    controls_tick(8330);
+    assert(g_direct_count == minimap_cancel_count);
+    assert(!direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
 
     controls_set_direct_touch_enabled(false);
     controls_set_direct_touch_sink(NULL, NULL);

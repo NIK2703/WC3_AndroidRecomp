@@ -66,14 +66,15 @@ typedef enum {
     WC3_DIRECT_TOUCH_FIELD_CAMERA_END = 11,
     /* Field selection press.  BEGIN is emitted at the long-press deadline.
      * Normally the executor posts WM_LBUTTONDOWN and keeps it down.  For a
-     * controlled selection on terrain it may defer that press until
-     * DRAG_BEGIN (the contact is a real drag) or END (attack-move), so a
-     * stationary release does not become a selection click.  MOVE carries
-     * every later finger position and END carries the release; a started
-     * native press posts the matching WM_LBUTTONUP.  Without a deferral, a
-     * stationary release is a native left click that selects one unit and a
-     * drag is the native selection rectangle (legacy longPressDragAction).
-     * These events are only valid on the FIELD route. */
+     * controlled selection in the field it may defer that press until
+     * DRAG_BEGIN (the contact is a real drag) or END (a smart order or
+     * attack-move), so a stationary release does not become a selection
+     * click.  MOVE carries every later finger position and END carries the
+     * release; a started native press posts the matching WM_LBUTTONUP.
+     * Without a deferral, a stationary release is a native left click that
+     * selects one unit and a drag is the native selection rectangle
+     * (legacy longPressDragAction).  These events are only valid on the
+     * FIELD route. */
     WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN = 12,
     WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE = 13,
     WC3_DIRECT_TOUCH_FIELD_SELECT_END = 14,
@@ -82,7 +83,8 @@ typedef enum {
      * point, not the current finger point; the following FIELD_SELECT_MOVE
      * carries the current point.  Emitted once per contact.  The executor
      * uses it to start the native selection rectangle only when the gesture
-     * is actually a drag, so a stationary long tap can become attack-move. */
+     * is actually a drag, so a stationary long tap can become a smart
+     * order. */
     WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN = 18,
     /* Field press hover.  Emitted immediately before an action click (TAP or
      * FIELD_SELECT_BEGIN), after the contact's role is known.  A camera
@@ -125,11 +127,12 @@ typedef enum {
  *         swipe, and the native left-button selection press at the long-press
  *         deadline.  The left button normally stays down until the finger is
  *         released, so a stationary hold is a native click and a drag is a
- *         native box selection.  When a controlled selection is held over
- *         terrain the press is deferred: DRAG_BEGIN starts the box at the
- *         hold point, while a stationary release becomes attack-move.  The
- *         camera drag does not own the mouse; a second finger can remain the
- *         virtual cursor or join the camera pan with its own quick swipe.
+ *         native box selection.  When a controlled selection is held in the
+ *         field the press is deferred: DRAG_BEGIN starts the box at the hold
+ *         point, while a stationary release becomes a smart order (unit or
+ *         decoration) or attack-move (terrain).  The camera drag does not
+ *         own the mouse; a second finger can remain the virtual cursor or
+ *         join the camera pan with its own quick swipe.
  * NATIVE: the touch belongs to the native UI (HUD, menu, targeting or
  *         placement).  Forward raw pointer phases so the guest-side service
  *         can post native mouse messages.  The service claims a gesture that
@@ -145,13 +148,20 @@ typedef enum {
  *         pointer phases stay owned by the minimap for the whole gesture and
  *         are clamped to its rectangle, so dragging the finger across the
  *         screen keeps moving the camera until the finger is released.
+ * MENU:   the guest has an open native menu (the pause/ESC menu).  The input
+ *         thread must use exactly the main-menu gesture set: raw pointer
+ *         phases, no battlefield, portrait, minimap, command-card or beacon
+ *         gesture, regardless of the point's geometry.  The service accepts
+ *         only key signals and native pointer phases while this route is
+ *         published; semantic world events are dropped.
  */
 typedef enum {
     WC3_DIRECT_TOUCH_ROUTE_LEGACY = 0,
     WC3_DIRECT_TOUCH_ROUTE_FIELD = 1,
     WC3_DIRECT_TOUCH_ROUTE_NATIVE = 2,
     WC3_DIRECT_TOUCH_ROUTE_PORTRAIT = 3,
-    WC3_DIRECT_TOUCH_ROUTE_MINIMAP = 4
+    WC3_DIRECT_TOUCH_ROUTE_MINIMAP = 4,
+    WC3_DIRECT_TOUCH_ROUTE_MENU = 5
 } Wc3DirectTouchRoute;
 
 /*

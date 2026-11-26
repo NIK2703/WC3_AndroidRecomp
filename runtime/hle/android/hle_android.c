@@ -7455,6 +7455,15 @@ static UMsg g_uq[UMSG_MAX];
 static int g_uq_head, g_uq_count;
 static pthread_mutex_t g_uq_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_uq_cond = PTHREAD_COND_INITIALIZER;
+/* Monotonic user-input epoch.  It advances in the same g_uq_lock critical
+ * section that queues a command-starting input, so a deferred click that
+ * checks it under the same lock has a strict order against that input.
+ * Unsigned wrap is harmless: consumers only compare for inequality. */
+static uint32_t g_input_epoch;
+/* 256-bit set of keys whose down transition was already reported.  A held
+ * key that auto-repeats must not keep cancelling a deferred click; the bit is
+ * cleared on key-up and by hle_android_release_all(). */
+static uint32_t g_key_down_bits[8];
 /* GetMessageA blocks, as it does on Windows.  The Mss32 mixer timer is pumped
  * from the same guest thread, so the wait loop calls this hook between slices;
  * the winmm module installs it. */
@@ -7508,14 +7517,23 @@ static void u_probe_queue(const char *why)
 #define U_PROBE_QUEUE(why) u_probe_queue(why)
 #endif
 
-static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
+/* Result of one queue push.  Only the debug probe distinguishes the cases;
+ * callers that post a pair of messages ignore the result. */
+enum {
+    U_MSG_PUSHED = 0,
+    U_MSG_COALESCED = 1,
+    U_MSG_DROPPED = 2
+};
+
+/* Queue body.  The caller holds g_uq_lock.  Coalescing and eviction belong to
+ * the queue itself so the epoch-checked click post below reuses exactly the
+ * same ordering as an ordinary post. */
+static int u_msg_push_locked(uint32_t hwnd, uint32_t msg, uint32_t wp,
+                             uint32_t lp)
 {
     int32_t x = (int16_t)(lp & 0xFFFF);
     int32_t y = (int16_t)((lp >> 16) & 0xFFFF);
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-    int probe_dropped = 0;
-#endif
-    pthread_mutex_lock(&g_uq_lock);
+    int dropped = 0;
     /* Coalesce only a move that is still at the tail.  Replacing an earlier
      * move could jump it over a click and make the wndproc see the button
      * press at the wrong position. */
@@ -7527,12 +7545,7 @@ static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
             tail->x = x;
             tail->y = y;
             tail->time = hle_now_ms();
-            pthread_mutex_unlock(&g_uq_lock);
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-            U_PROBE_QUEUE("post-move-coalesced");
-            wc3_hle_direct_touch_probe_mark("uq-post-move-coalesced", msg, lp);
-#endif
-            return;
+            return U_MSG_COALESCED;
         }
     }
     if (g_uq_count == UMSG_MAX) {
@@ -7548,9 +7561,7 @@ static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
                 break;
             }
         }
-#if WC3_DEBUG && WC3_DEBUG_INPUT
-        probe_dropped = 1;
-#endif
+        dropped = 1;
         u_msg_remove_locked(victim >= 0 ? victim : 0);
     }
     UMsg *m = &g_uq[(g_uq_head + g_uq_count) % UMSG_MAX];
@@ -7563,12 +7574,66 @@ static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
     m->y = y;
     g_uq_count++;
     pthread_cond_broadcast(&g_uq_cond);
-    pthread_mutex_unlock(&g_uq_lock);
+    return dropped ? U_MSG_DROPPED : U_MSG_PUSHED;
+}
+
 #if WC3_DEBUG && WC3_DEBUG_INPUT
-    U_PROBE_QUEUE(probe_dropped ? "post-dropped" : "post");
-    wc3_hle_direct_touch_probe_mark(
-        probe_dropped ? "uq-post-dropped" : "uq-post", msg, lp);
+/* Never called with g_uq_lock held. */
+static void u_msg_probe_post(int status, uint32_t msg, uint32_t lp)
+{
+    switch (status) {
+    case U_MSG_COALESCED:
+        U_PROBE_QUEUE("post-move-coalesced");
+        wc3_hle_direct_touch_probe_mark("uq-post-move-coalesced", msg, lp);
+        break;
+    case U_MSG_DROPPED:
+        U_PROBE_QUEUE("post-dropped");
+        wc3_hle_direct_touch_probe_mark("uq-post-dropped", msg, lp);
+        break;
+    default:
+        U_PROBE_QUEUE("post");
+        wc3_hle_direct_touch_probe_mark("uq-post", msg, lp);
+        break;
+    }
+}
+#define U_MSG_PROBE_POST(status, msg, lp) u_msg_probe_post(status, msg, lp)
+#else
+#define U_MSG_PROBE_POST(status, msg, lp) ((void)0)
 #endif
+
+static void u_msg_post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
+{
+    pthread_mutex_lock(&g_uq_lock);
+    const int status = u_msg_push_locked(hwnd, msg, wp, lp);
+    pthread_mutex_unlock(&g_uq_lock);
+    U_MSG_PROBE_POST(status, msg, lp);
+}
+
+/* User input post.  When new_input is set, the input epoch advances in the
+ * same critical section as the queue push.  A deferred click that checks the
+ * epoch under this lock therefore either wins before the input or loses after
+ * it; there is no gap between "epoch changed" and "message queued". */
+static void u_msg_post_input(uint32_t hwnd, uint32_t msg, uint32_t wp,
+                             uint32_t lp, int new_input)
+{
+    pthread_mutex_lock(&g_uq_lock);
+    if (new_input)
+        __atomic_add_fetch(&g_input_epoch, 1u, __ATOMIC_RELEASE);
+    const int status = u_msg_push_locked(hwnd, msg, wp, lp);
+    pthread_mutex_unlock(&g_uq_lock);
+    U_MSG_PROBE_POST(status, msg, lp);
+}
+
+uint32_t hle_android_input_epoch(void)
+{
+    return __atomic_load_n(&g_input_epoch, __ATOMIC_ACQUIRE);
+}
+
+void hle_android_input_epoch_bump(void)
+{
+    pthread_mutex_lock(&g_uq_lock);
+    __atomic_add_fetch(&g_input_epoch, 1u, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_uq_lock);
 }
 
 /* PUBLIC: post a Win32 message into the guest queue.  The DirectShow movie
@@ -8670,6 +8735,58 @@ void hle_android_mouse_press_replay(float nx, float ny, int button)
 #endif
 }
 
+/* Deferred-click confirmation.  The epoch check and both button messages
+ * share one g_uq_lock critical section, so a new input that wins the lock
+ * first cancels the click, while a click that wins is queued before that
+ * input.  The move is posted before the lock: motion is not a command and
+ * must not hold the queue.  The armed native press is cancelled first, as in
+ * the ordinary replay, so a stale DOWN cannot precede the confirmation. */
+int hle_android_mouse_click_if_epoch(float nx, float ny, int button,
+                                     uint32_t expected_epoch)
+{
+    const int bit = mouse_button_bit(button);
+    if (!bit) return 0;
+    input_activate_main();
+    int32_t x = 0, y = 0;
+    uint32_t w = 0, h = 0;
+    mouse_client_point(nx, ny, &x, &y, &w, &h);
+    const uint32_t lp = ((uint32_t)y << 16) | (uint16_t)x;
+
+    pthread_mutex_lock(&g_pending_lock);
+    (void)pending_cancel_locked(&g_pending_action);
+    pthread_mutex_unlock(&g_pending_lock);
+
+    hle_android_mouse_move(nx, ny);
+
+    pthread_mutex_lock(&g_uq_lock);
+    if (__atomic_load_n(&g_input_epoch, __ATOMIC_ACQUIRE) != expected_epoch) {
+        pthread_mutex_unlock(&g_uq_lock);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        wc3_hle_direct_touch_tracef(
+            "probe field-click-post-race button=%d at=%d,%d lp=%08X",
+            button, x, y, lp);
+#endif
+        return 0;
+    }
+    g_mouse_buttons |= (uint32_t)bit;
+    if (button == 0) g_mouse_down = 1;
+    const int down_status =
+        u_msg_push_locked(input_target(), mouse_button_down_msg(button),
+                          mouse_mk(), lp);
+    const int up_status =
+        u_msg_push_locked(input_target(), mouse_button_up_msg(button),
+                          mouse_mk() & ~(uint32_t)mouse_button_mk(button), lp);
+    pthread_mutex_unlock(&g_uq_lock);
+    U_MSG_PROBE_POST(down_status, mouse_button_down_msg(button), lp);
+    U_MSG_PROBE_POST(up_status, mouse_button_up_msg(button), lp);
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_hle_direct_touch_tracef(
+        "probe click-if-epoch button=%d at=%d,%d lp=%08X epoch=%08X",
+        button, x, y, lp, expected_epoch);
+#endif
+    return 1;
+}
+
 /* Same contract as the deferred press: arm first, post the move second, so a
  * move dispatched immediately can already mark the sequence ready.  The
  * caller must not post a second move or the old immediate release/down pair. */
@@ -8748,7 +8865,8 @@ static void mouse_button_ex(int button, int down, int force)
             g_mouse_down);
 #endif
     if (down) {
-        if ((g_mouse_buttons & bit) && !force) return;
+        const int was_down = (g_mouse_buttons & bit) != 0;
+        if (was_down && !force) return;
         /* Logical state is raised at press time so a poll between the press
          * and its dispatch still observes a held button.  The release is
          * different: it must not clear the state until the UP message is
@@ -8756,11 +8874,16 @@ static void mouse_button_ex(int button, int down, int force)
          * procedure see "button already up" while handling DOWN. */
         g_mouse_buttons |= bit;
         if (button == 0) g_mouse_down = 1;
-        u_msg_post(input_target(), mouse_button_down_msg(button), mouse_mk(), lp);
+        /* A real up->down transition starts a command; a forced re-post of an
+         * already held button does not.  Synthetic replay does not pass
+         * through here, so it never advances the epoch. */
+        u_msg_post_input(input_target(), mouse_button_down_msg(button),
+                         mouse_mk(), lp, !was_down);
     } else {
         if (!(g_mouse_buttons & bit) && !force) return;
         uint32_t wp = mouse_mk() & ~mouse_button_mk(button);
-        u_msg_post(input_target(), mouse_button_up_msg(button), wp, lp);
+        u_msg_post_input(input_target(), mouse_button_up_msg(button), wp, lp,
+                         0);
     }
 #if WC3_DEBUG
     {
@@ -8837,23 +8960,55 @@ void hle_android_mouse_wheel(int delta)
     RES_LOG("wheel %d at %d,%d", delta, g_mouse_x, g_mouse_y);
 }
 
-void hle_android_key_event(int vk, int down)
+static void key_event_post(int vk, int down, int user_input)
 {
     if (!vk) return;
     int msg_vk = hle_key_message_vk(vk);
     uint32_t msg = msg_vk == HLE_VK_MENU
         ? (down ? WM_SYSKEYDOWN : WM_SYSKEYUP)
         : (down ? WM_KEYDOWN : WM_KEYUP);
-    u_msg_post(input_target(), msg, (uint32_t)msg_vk, hle_key_lparam(vk, down));
+
+    /* A key-down transition of a non-modifier starts a command and advances
+     * the input epoch; auto-repeat and key-up do not.  The bitmap is atomic
+     * because the legacy overlay and the Android input thread can both post
+     * keys.  The epoch itself is advanced inside u_msg_post_input under
+     * g_uq_lock, in the same critical section as the message push.  A
+     * synthetic key is part of an already-started command: it posts the same
+     * messages but must not advance the epoch or the physical bitmap. */
+    int new_input = 0;
+    if (user_input && vk > 0 && vk < 256) {
+        const uint32_t mask = 1u << ((uint32_t)vk & 31u);
+        uint32_t *bits = &g_key_down_bits[(uint32_t)vk >> 5];
+        if (down) {
+            const uint32_t previous =
+                __atomic_fetch_or(bits, mask, __ATOMIC_ACQ_REL);
+            new_input = (previous & mask) == 0u && !hle_key_is_modifier(vk);
+        } else {
+            __atomic_fetch_and(bits, ~mask, __ATOMIC_ACQ_REL);
+        }
+    }
+    u_msg_post_input(input_target(), msg, (uint32_t)msg_vk,
+                     hle_key_lparam(vk, down), new_input);
 #if WC3_DEBUG
     {
         static unsigned n;
         if (n++ < 32)
-            fprintf(stderr, "[input] key vk=%02X %s\n",
-                    vk, down ? "down" : "up");
+            fprintf(stderr, "[input] key vk=%02X %s%s\n",
+                    vk, down ? "down" : "up", user_input ? "" : " synthetic");
     }
 #endif
-    RES_LOG("key vk=%02X %s", vk, down ? "down" : "up");
+    RES_LOG("key vk=%02X %s%s", vk, down ? "down" : "up",
+            user_input ? "" : " synthetic");
+}
+
+void hle_android_key_event(int vk, int down)
+{
+    key_event_post(vk, down, 1);
+}
+
+void hle_android_key_event_synthetic(int vk, int down)
+{
+    key_event_post(vk, down, 0);
 }
 
 void wc3_hle_set_modifier_state(int vk, int down)
@@ -8883,6 +9038,11 @@ void hle_android_release_all(void)
     g_mouse_buttons = 0;
     g_mouse_down = 0;
     g_mouse_dispatched_down = 0;
+    /* A key-down may have been queued without being dispatched, so the
+     * key-state loop below would not send its UP.  Clear the transition
+     * bitmap unconditionally; a later key-down must count as new input. */
+    for (int i = 0; i < 8; i++)
+        __atomic_store_n(&g_key_down_bits[i], 0u, __ATOMIC_RELEASE);
 
     static const int modifiers[] = {
         HLE_VK_LCONTROL, HLE_VK_RCONTROL,

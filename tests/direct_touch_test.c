@@ -413,6 +413,13 @@ static void test_raw_routes_never_emit_semantics(void)
     wc3_direct_touch_move(&dt, 31, 200.0f, 100.0f, 1500);
     wc3_direct_touch_up(&dt, 31, 200.0f, 100.0f, 1600);
 
+    /* The pause menu is also a native menu: a MENU contact must stay a raw
+     * phase and never become a field camera/select or a long press. */
+    wc3_direct_touch_down_route(&dt, 32, 100.0f, 100.0f, 2000,
+                                WC3_DIRECT_TOUCH_ROUTE_MENU);
+    wc3_direct_touch_move(&dt, 32, 200.0f, 100.0f, 2500);
+    wc3_direct_touch_up(&dt, 32, 200.0f, 100.0f, 2600);
+
     assert(g_event_count == 0);
     assert(g_hover_count == 0);
     assert(g_haptic_count == 0);
@@ -701,39 +708,79 @@ static void test_coordinate_mapping(void)
                 359.4f);
 }
 
+static void test_tap_unit_intent(void)
+{
+    /* A controllable target is selected even while another controlled
+     * selection is live.  An uncontrollable target is a smart order only
+     * when the live selection can receive one. */
+    assert(wc3_dt_tap_unit_intent(0, 0) == WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_tap_unit_intent(0, 1) == WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_tap_unit_intent(1, 0) == WC3_DT_INTENT_ORDER_UNIT);
+    assert(wc3_dt_tap_unit_intent(1, 1) == WC3_DT_INTENT_SELECT_UNIT);
+}
+
 static void test_tap_intent_resolution(void)
 {
     /* A miss has no action. */
     assert(wc3_dt_tap_intent(WC3_DT_PICK_NONE, 0, 0, 0) ==
            WC3_DT_INTENT_NONE);
 
-    /* Without a controlled selection every unit tap is the left-click
-     * analogue and selects that unit, including a hostile or neutral unit
-     * and an ally whose owner has not shared control.  The resolver does not
-     * take an owner/friendliness argument any more. */
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0) ==
-           WC3_DT_INTENT_SELECT_UNIT);
-
-    /* A validated non-unit sprite remains a no-op in phase 1. */
+    /* A validated non-unit sprite remains a no-op without a controlled
+     * selection; with one it becomes a right-click analogue so the native
+     * handler can resolve the decoration or the ground under it. */
     assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 0) ==
            WC3_DT_INTENT_NONE);
-
-    /* A controlled selection makes every unit tap the right-click
-     * analogue, friendly or hostile. */
-    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1) ==
+    assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 1) ==
            WC3_DT_INTENT_ORDER_UNIT);
 
-    /* An object that failed 0x6F21B730 is a terrain click.  Terrain orders
-     * only when the selection can receive an order; otherwise it clears.
-     * A non-empty but uncontrollable selection is not an order source. */
+    /* An object that no longer validates is a terrain click.  Terrain
+     * orders only when the selection can receive an order; otherwise it
+     * clears.  A non-empty but uncontrollable selection is not an order
+     * source. */
     assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 0) ==
            WC3_DT_INTENT_CLEAR_SELECTION);
     assert(wc3_dt_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 1) ==
-           WC3_DT_INTENT_ORDER_GROUND);
+           WC3_DT_INTENT_ORDER_UNIT);
     assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0) ==
            WC3_DT_INTENT_CLEAR_SELECTION);
     assert(wc3_dt_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 1) ==
            WC3_DT_INTENT_ORDER_GROUND);
+}
+
+static void test_field_tap_intent(void)
+{
+    /* Unit leg: target controllability decides before selection
+     * controllability.  T=1 selects with or without a controlled selection;
+     * T=0 orders only when the live selection can receive one. */
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 1) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 1) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 0) ==
+           WC3_DT_INTENT_ORDER_UNIT);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 0) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+
+    /* Non-unit objects: a controlled selection orders, otherwise a
+     * validated sprite is a no-op and an invalid object clears. */
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 1, 0) ==
+           WC3_DT_INTENT_ORDER_UNIT);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 0, 0) ==
+           WC3_DT_INTENT_NONE);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 1, 0) ==
+           WC3_DT_INTENT_ORDER_UNIT);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 0, 0) ==
+           WC3_DT_INTENT_CLEAR_SELECTION);
+
+    /* Terrain and miss. */
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 1, 0) ==
+           WC3_DT_INTENT_ORDER_GROUND);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0, 0) ==
+           WC3_DT_INTENT_CLEAR_SELECTION);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_NONE, 0, 0, 0, 0) ==
+           WC3_DT_INTENT_NONE);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_NONE, 0, 0, 1, 0) ==
+           WC3_DT_INTENT_NONE);
 }
 
 static void test_configured_long_press_and_threshold(void)
@@ -782,21 +829,20 @@ static void test_configured_long_press_and_threshold(void)
     assert(g_events[1].kind == WC3_DIRECT_TOUCH_FIELD_SELECT_END);
 }
 
-static void test_attack_candidate(void)
+static void test_smart_order_candidate(void)
 {
-    /* A long tap becomes attack-move only when every gate holds: a
-     * controlled selection, a native terrain pick, the field rectangle, no
-     * HUD overlap, no live target/placement mode, not paused and no other
-     * native button owner. */
-    assert(wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 1, 0, 0, 0, 0));
-    assert(!wc3_dt_attack_candidate(0, WC3_DT_PICK_TERRAIN, 1, 0, 0, 0, 0));
-    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_OBJECT, 1, 0, 0, 0, 0));
-    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_NONE, 1, 0, 0, 0, 0));
-    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 0, 0, 0, 0, 0));
-    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 1, 1, 0, 0, 0));
-    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 1, 0, 1, 0, 0));
-    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 1, 0, 0, 1, 0));
-    assert(!wc3_dt_attack_candidate(1, WC3_DT_PICK_TERRAIN, 1, 0, 0, 0, 1));
+    /* A long tap becomes a smart order only when every gate holds: a
+     * controlled selection, the field rectangle, no HUD overlap, no live
+     * target/placement mode, not paused and no other native button owner.
+     * The target itself is resolved on release, so no pick is part of the
+     * gate. */
+    assert(wc3_dt_smart_order_candidate(1, 1, 0, 0, 0, 0));
+    assert(!wc3_dt_smart_order_candidate(0, 1, 0, 0, 0, 0));
+    assert(!wc3_dt_smart_order_candidate(1, 0, 0, 0, 0, 0));
+    assert(!wc3_dt_smart_order_candidate(1, 1, 1, 0, 0, 0));
+    assert(!wc3_dt_smart_order_candidate(1, 1, 0, 1, 0, 0));
+    assert(!wc3_dt_smart_order_candidate(1, 1, 0, 0, 1, 0));
+    assert(!wc3_dt_smart_order_candidate(1, 1, 0, 0, 0, 1));
 }
 
 static void test_point_in_rect(void)
@@ -836,6 +882,65 @@ static void test_physical_route(void)
     assert(wc3_dt_physical_route(1, 0, 1) == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
     assert(wc3_dt_physical_route(1, 0, 0) == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
     assert(wc3_dt_physical_route(0, 1, 1) == WC3_DIRECT_TOUCH_ROUTE_LEGACY);
+}
+
+static void test_menu_event_policy(void)
+{
+    /* Pause menu = main menu: key signals and raw native pointer phases are
+     * the whole gesture set. */
+    assert(wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_KEY_SIGNAL,
+                                     WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+    assert(wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_KEY_SIGNAL,
+                                     WC3_DIRECT_TOUCH_ROUTE_MENU));
+    assert(wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_POINTER_DOWN,
+                                     WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+    assert(wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_POINTER_MOVE,
+                                     WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+    assert(wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_POINTER_UP,
+                                     WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+    /* Cancel is the one minimap-routed phase that must reach the native
+     * button: it releases a press that was live when the menu opened. */
+    assert(wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_POINTER_CANCEL,
+                                     WC3_DIRECT_TOUCH_ROUTE_MINIMAP));
+
+    /* A raw minimap drag is a game gesture, not a menu click. */
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_POINTER_DOWN,
+                                      WC3_DIRECT_TOUCH_ROUTE_MINIMAP));
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_POINTER_MOVE,
+                                      WC3_DIRECT_TOUCH_ROUTE_MINIMAP));
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_POINTER_UP,
+                                      WC3_DIRECT_TOUCH_ROUTE_MINIMAP));
+
+    /* Control-group chords and every semantic world/portrait gesture are
+     * game input and are dropped while the menu is open. */
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_GROUP_SIGNAL, 0));
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_TAP,
+                                      WC3_DIRECT_TOUCH_ROUTE_FIELD));
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_LONG_PRESS,
+                                      WC3_DIRECT_TOUCH_ROUTE_FIELD));
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_FIELD_HOVER,
+                                      WC3_DIRECT_TOUCH_ROUTE_FIELD));
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN,
+                                      WC3_DIRECT_TOUCH_ROUTE_FIELD));
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_FIELD_SELECT_END,
+                                      WC3_DIRECT_TOUCH_ROUTE_FIELD));
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_FOLLOW_START,
+                                      WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
+    assert(!wc3_dt_menu_event_allowed(WC3_DIRECT_TOUCH_HOLD_RELEASE,
+                                      WC3_DIRECT_TOUCH_ROUTE_PORTRAIT));
+
+    /* Pause menu pointer phases never enter the field tap deferral.  The
+     * battlefield rectangle is still live underneath, but the pause menu
+     * uses the same direct native gateway as the main menu; holding the
+     * DOWN for the field resolver would drop the release. */
+    assert(!wc3_dt_native_deferral_allowed(1));
+    assert(wc3_dt_native_deferral_allowed(0));
+
+    /* The live UI/world under CEscMenu is not a context switch.  Treating it
+     * as one cancels the native DOWN on every pause event and leaves only
+     * the hover move. */
+    assert(!wc3_dt_context_switch_relevant(1));
+    assert(wc3_dt_context_switch_relevant(0));
 }
 
 static void test_field_release_resolution(void)
@@ -891,6 +996,21 @@ static void test_pointer_phases(void)
     assert(g_events[2].route == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
     expect_near("pointer move x", g_events[1].x, 0.6f);
     expect_near("pointer move y", g_events[1].y, 0.6f);
+
+    /* A minimap-owned raw phase carries MINIMAP so the service can drop a
+     * stale minimap drag when a menu opens.  Any other requested route is
+     * clamped to NATIVE: a raw phase can never claim to be semantic. */
+    wc3_direct_touch_emit_pointer_route(&dt, WC3_DIRECT_TOUCH_POINTER_CANCEL,
+                                        8, 70.0f, 130.0f, 14,
+                                        WC3_DIRECT_TOUCH_ROUTE_MINIMAP);
+    wc3_direct_touch_emit_pointer_route(&dt, WC3_DIRECT_TOUCH_POINTER_DOWN,
+                                        9, 80.0f, 140.0f, 15,
+                                        WC3_DIRECT_TOUCH_ROUTE_MENU);
+    assert(g_event_count == 5);
+    assert(g_events[3].kind == WC3_DIRECT_TOUCH_POINTER_CANCEL);
+    assert(g_events[3].route == WC3_DIRECT_TOUCH_ROUTE_MINIMAP);
+    assert(g_events[4].kind == WC3_DIRECT_TOUCH_POINTER_DOWN);
+    assert(g_events[4].route == WC3_DIRECT_TOUCH_ROUTE_NATIVE);
 }
 
 static void test_portrait_gesture(void)
@@ -1180,6 +1300,45 @@ static void test_event_cancels_field_click(void)
         WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE, 0));
 }
 
+static void test_event_bumps_input_epoch(void)
+{
+    /* A contact start begins a new command, so it must supersede a deferred
+     * field click.  Portrait emits FOLLOW_START instead of POINTER_DOWN, and
+     * a control-group chord emits GROUP_SIGNAL; both are new commands. */
+    assert(wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_POINTER_DOWN));
+    assert(wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_TAP));
+    assert(wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_LONG_PRESS));
+    assert(wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_FIELD_HOVER));
+    assert(wc3_dt_event_bumps_input_epoch(
+        WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN));
+    assert(wc3_dt_event_bumps_input_epoch(
+        WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN));
+    assert(wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_FOLLOW_START));
+    assert(wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_GROUP_SIGNAL));
+
+    /* Motion, release and camera phases continue an existing gesture and must
+     * not cancel.  FIELD_CAMERA_BEGIN cancels only after the guest accepts the
+     * pan, through the camera_started path, not through the epoch. */
+    assert(!wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_POINTER_MOVE));
+    assert(!wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_POINTER_UP));
+    assert(!wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_POINTER_CANCEL));
+    assert(!wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_HOLD_RELEASE));
+    assert(!wc3_dt_event_bumps_input_epoch(
+        WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN));
+    assert(!wc3_dt_event_bumps_input_epoch(
+        WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE));
+    assert(!wc3_dt_event_bumps_input_epoch(
+        WC3_DIRECT_TOUCH_FIELD_CAMERA_END));
+    assert(!wc3_dt_event_bumps_input_epoch(
+        WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE));
+    assert(!wc3_dt_event_bumps_input_epoch(
+        WC3_DIRECT_TOUCH_FIELD_SELECT_END));
+    /* KEY_SIGNAL has no producer today and does not carry an unambiguous
+     * direction in its kind; a future producer must route its down transition
+     * through hle_android_key_event or extend this predicate. */
+    assert(!wc3_dt_event_bumps_input_epoch(WC3_DIRECT_TOUCH_KEY_SIGNAL));
+}
+
 static void test_command_movement_slop(void)
 {
     /* The command handler can miss a MOVE that the recognizer routes over
@@ -1462,12 +1621,15 @@ int main(void)
     test_reset_discards_pending();
     test_pointer_snapshot();
     test_coordinate_mapping();
+    test_tap_unit_intent();
     test_tap_intent_resolution();
+    test_field_tap_intent();
     test_configured_long_press_and_threshold();
-    test_attack_candidate();
+    test_smart_order_candidate();
     test_point_in_rect();
     test_route();
     test_physical_route();
+    test_menu_event_policy();
     test_field_release_resolution();
     test_field_drag_keep();
     test_pointer_phases();
@@ -1481,6 +1643,7 @@ int main(void)
     test_field_click_defer();
     test_native_release_replay();
     test_event_cancels_field_click();
+    test_event_bumps_input_epoch();
     test_command_movement_slop();
     test_console_rect_scale();
     test_minimap_local_point();

@@ -129,6 +129,17 @@ static inline int hle_key_message_vk(int vk)
     }
 }
 
+/* Modifier keys never start a game command on their own.  Their down/up must
+ * not cancel a deferred click: a player may press or release Shift while a
+ * target click is waiting for the guest update. */
+static inline int hle_key_is_modifier(int vk)
+{
+    return vk == HLE_VK_SHIFT || vk == HLE_VK_CONTROL || vk == HLE_VK_MENU ||
+           vk == HLE_VK_LSHIFT || vk == HLE_VK_RSHIFT ||
+           vk == HLE_VK_LCONTROL || vk == HLE_VK_RCONTROL ||
+           vk == HLE_VK_LMENU || vk == HLE_VK_RMENU;
+}
+
 static inline int hle_key_scan(int vk)
 {
     switch (vk) {

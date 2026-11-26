@@ -128,15 +128,15 @@ void wc3_direct_touch_set_size(Wc3DirectTouch *dt, float width, float height);
  * FIELD pointer, including a second finger while another finger already owns
  * the camera or the ACTION cursor.  At the deadline the pointer becomes
  * ACTION and emits FIELD_SELECT_BEGIN.  The executor normally turns BEGIN
- * into a native left-button DOWN; for a controlled selection on terrain it
+ * into a native left-button DOWN; for a controlled selection in the field it
  * may defer that press.  A post-deadline move beyond drag_threshold_px from
  * the hold point then emits FIELD_SELECT_DRAG_BEGIN once, carrying the hold
  * point, followed by FIELD_SELECT_MOVE; the release emits FIELD_SELECT_END.
  * The executor turns DRAG_BEGIN into the native DOWN at the hold point, each
- * MOVE into a native mouse move, and END into the matching UP, the attack
+ * MOVE into a native mouse move, and END into the matching UP, the smart
  * order, or the native fallback click.  A hover is emitted immediately before
- * an action click, never for the camera.  Raw pointer phases always carry
- * NATIVE and the ACTION role. */
+ * an action click, never for the camera.  Raw pointer phases carry the
+ * ACTION role and either NATIVE or MINIMAP as their physical owner. */
 void wc3_direct_touch_down_route(Wc3DirectTouch *dt, int pointer_id,
                                  float x, float y, uint64_t now_ms,
                                  uint32_t route);
@@ -159,8 +159,8 @@ void wc3_direct_touch_reset(Wc3DirectTouch *dt);
  * drag_threshold_px from the hold point emits FIELD_SELECT_DRAG_BEGIN once,
  * later moves emit FIELD_SELECT_MOVE, and the release emits FIELD_SELECT_END.
  * The executor normally keeps the native left button down for the whole
- * gesture; for a deferred attack it starts the press at DRAG_BEGIN or
- * resolves the attack/fallback on END.
+ * gesture; for a deferred order it starts the press at DRAG_BEGIN or
+ * resolves the smart order/attack-move/fallback on END.
  */
 int wc3_direct_touch_tick(Wc3DirectTouch *dt, uint64_t now_ms);
 
@@ -199,6 +199,14 @@ int wc3_direct_touch_pointer_at(const Wc3DirectTouch *dt, int index,
 void wc3_direct_touch_emit_pointer(Wc3DirectTouch *dt,
                                    Wc3DirectTouchKind kind, int pointer_id,
                                    float x, float y, uint64_t now_ms);
+
+/* Same raw pointer phases, but carry the physical owner in the event.  The
+ * minimap uses MINIMAP so the guest can drop a stale minimap drag when a
+ * native menu opens; every other caller uses the NATIVE wrapper above. */
+void wc3_direct_touch_emit_pointer_route(Wc3DirectTouch *dt,
+                                         Wc3DirectTouchKind kind,
+                                         int pointer_id, float x, float y,
+                                         uint64_t now_ms, uint32_t route);
 
 #ifdef __cplusplus
 }

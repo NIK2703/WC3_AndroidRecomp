@@ -121,6 +121,53 @@ static inline Wc3DirectTouchRoute wc3_dt_physical_route(int ui_ready,
     return WC3_DIRECT_TOUCH_ROUTE_NATIVE;
 }
 
+/*
+ * Event policy while the pause menu is open.  The pause menu is a native
+ * menu and must expose exactly the main-menu gesture set: key signals and
+ * raw native pointer phases.  A control-group chord, a semantic field or
+ * portrait event, and a minimap drag are game gestures and are dropped.
+ * POINTER_CANCEL is always accepted so a contact that was already a world
+ * gesture when the menu opened can release its native button.  A raw minimap
+ * DOWN/MOVE/UP is carried with the MINIMAP route precisely so it can be
+ * dropped here without confusing it with a menu click.
+ */
+static inline int wc3_dt_menu_event_allowed(uint32_t kind, uint32_t route)
+{
+    if (kind == WC3_DIRECT_TOUCH_KEY_SIGNAL) return 1;
+    if (kind == WC3_DIRECT_TOUCH_GROUP_SIGNAL) return 0;
+    if (kind == WC3_DIRECT_TOUCH_POINTER_CANCEL) return 1;
+    if (kind == WC3_DIRECT_TOUCH_POINTER_DOWN ||
+        kind == WC3_DIRECT_TOUCH_POINTER_MOVE ||
+        kind == WC3_DIRECT_TOUCH_POINTER_UP) {
+        return route != WC3_DIRECT_TOUCH_ROUTE_MINIMAP;
+    }
+    return 0;
+}
+
+/*
+ * The pause menu and the main menu share the native pointer gateway.  The
+ * battlefield rectangle is still live under the pause panel, so a pause
+ * press must not enter the field tap deferral: that resolver is skipped by
+ * the native-menu dispatch, and a held DOWN would leave its release with no
+ * click.  The check is the exact menu state, not geometry.
+ */
+static inline int wc3_dt_native_deferral_allowed(int pause_menu)
+{
+    return !pause_menu;
+}
+
+/*
+ * CEscMenu owns the contact as a native menu.  dt_ready_route() deliberately
+ * returns a zero semantic context for it, so the live UI/world under the panel
+ * must not be read as a context switch.  Treating it as one resets gestures
+ * and cancels the armed native DOWN on every pause event: the guest receives
+ * only WM_MOUSEMOVE and the cursor hovers without clicking.
+ */
+static inline int wc3_dt_context_switch_relevant(int pause_menu)
+{
+    return !pause_menu;
+}
+
 /* Total release outcome for a field contact that reached the guest. */
 typedef enum {
     WC3_DT_FIELD_RELEASE_SEMANTIC = 0,
@@ -194,34 +241,65 @@ typedef enum {
 } Wc3DtTapIntent;
 
 /*
- * Context-tap decision.  validated_object is false for pick result 1 when
- * 0x6F21B730 no longer accepts the picked object; native treats that as a
- * terrain click.  A validated non-unit sprite is a no-op in phase 1.
- *
- * The discriminator is whether the current selection can receive an order
- * from the local player, not merely whether it is non-empty.  Without a
- * controlled selection (empty, hostile/neutral units, decorations, or an
- * ally who has not shared control) a unit tap is the left-click analogue:
- * it selects that unit, whatever its owner.  With a controlled selection
- * (own units or an ally who shared control) a unit tap is the right-click
- * analogue (smart order, including a friendly unit) and a terrain tap is a
- * smart point order.  A non-empty but uncontrollable selection never turns
- * a terrain tap into a ground order; terrain clears it instead.
+ * Unit-tap decision.  `target_controllable` is the native 0x6F66EC60 result
+ * for the CUnit under the finger, not an owner/friendliness guess.  A
+ * controllable target is always selected, even while another controlled
+ * selection is live: tapping a second own unit must move the selection, not
+ * order the first one to walk onto it.  An uncontrollable target (hostile,
+ * neutral, or an ally without shared control) becomes a smart order only when
+ * the live selection can receive one; otherwise it is selected like any other
+ * unit tap.
+ */
+static inline Wc3DtTapIntent wc3_dt_tap_unit_intent(
+    int selection_controlled, int target_controllable)
+{
+    if (target_controllable) return WC3_DT_INTENT_SELECT_UNIT;
+    return selection_controlled ? WC3_DT_INTENT_ORDER_UNIT
+                                : WC3_DT_INTENT_SELECT_UNIT;
+}
+
+/*
+ * Non-unit/terrain leg.  Units are decided by wc3_dt_tap_unit_intent()
+ * through wc3_dt_field_tap_intent(); this helper must not grow a second unit
+ * rule.  `validated_object` is false for pick result 1 when the picked
+ * object no longer validates; native treats that as a terrain click.  A
+ * validated non-unit sprite is a no-op when there is no controlled selection.
+ * With a controlled selection every non-unit object and the terrain become
+ * the right-click analogue, so the executor re-picks with the right button
+ * and lets the native handler resolve the decoration or ground target.
  */
 static inline Wc3DtTapIntent wc3_dt_tap_intent(int pick_result,
                                                int validated_object,
                                                int is_unit,
                                                int selection_controlled)
 {
-    if (pick_result == WC3_DT_PICK_OBJECT && validated_object) {
-        if (!is_unit) return WC3_DT_INTENT_NONE;
-        return selection_controlled ? WC3_DT_INTENT_ORDER_UNIT
-                                    : WC3_DT_INTENT_SELECT_UNIT;
+    if (pick_result == WC3_DT_PICK_OBJECT) {
+        if (is_unit) return WC3_DT_INTENT_NONE; /* contract: not used */
+        if (selection_controlled) return WC3_DT_INTENT_ORDER_UNIT;
+        return validated_object ? WC3_DT_INTENT_NONE
+                                : WC3_DT_INTENT_CLEAR_SELECTION;
     }
-    if (pick_result == WC3_DT_PICK_OBJECT || pick_result == WC3_DT_PICK_TERRAIN)
+    if (pick_result == WC3_DT_PICK_TERRAIN) {
         return selection_controlled ? WC3_DT_INTENT_ORDER_GROUND
                                     : WC3_DT_INTENT_CLEAR_SELECTION;
+    }
     return WC3_DT_INTENT_NONE;
+}
+
+/*
+ * Single decision point for a battlefield tap.  The executor and T0 call
+ * only this helper, so a unit tap can never be resolved by the non-unit leg
+ * and the two rules cannot drift apart.
+ */
+static inline Wc3DtTapIntent wc3_dt_field_tap_intent(
+    int pick_result, int validated_object, int is_unit,
+    int selection_controlled, int target_controllable)
+{
+    if (pick_result == WC3_DT_PICK_OBJECT && validated_object && is_unit)
+        return wc3_dt_tap_unit_intent(selection_controlled,
+                                      target_controllable);
+    return wc3_dt_tap_intent(pick_result, validated_object, is_unit,
+                             selection_controlled);
 }
 
 /* Half-open rectangle test in surface-normalised coordinates.  Published HUD
@@ -234,28 +312,22 @@ static inline int wc3_dt_point_in_rect(float x, float y, float left,
 }
 
 /*
- * Attack-move gate for a long tap without drag.  The caller has already
- * resolved the live selection, the native pick, the field rectangle and the
- * published HUD rectangles.  A long tap is an attack only when every
- * condition holds; any failure falls back to the ordinary native click, so a
- * HUD edge, a unit under the finger, a paused game or a target/placement mode
- * can never become a world attack.
+ * Smart-order gate for a long tap without drag.  The caller has already
+ * resolved the live selection, the field rectangle and the published HUD
+ * rectangles; the target itself is resolved on release, so no pick is part of
+ * the gate.  A long tap is an order only when every condition holds; any
+ * failure falls back to the ordinary native press/click, so a HUD edge, a
+ * paused game or a target/placement mode can never become a world order.
  */
-static inline int wc3_dt_attack_candidate(int controlled,
-                                          int pick_result,
-                                          int inside_field,
-                                          int inside_hud,
-                                          int target_active,
-                                          int paused,
-                                          int native_busy)
+static inline int wc3_dt_smart_order_candidate(int controlled,
+                                               int inside_field,
+                                               int inside_hud,
+                                               int target_active,
+                                               int paused,
+                                               int native_busy)
 {
-    return controlled &&
-           pick_result == WC3_DT_PICK_TERRAIN &&
-           inside_field &&
-           !inside_hud &&
-           !target_active &&
-           !paused &&
-           !native_busy;
+    return controlled && inside_field && !inside_hud &&
+           !target_active && !paused && !native_busy;
 }
 
 /* Beacon button (MinimapSignal) release decision.  A release on the button
@@ -480,6 +552,39 @@ static inline int wc3_dt_event_cancels_field_click(uint32_t kind,
         kind == WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN)
         return 1;
     return camera_started && kind == WC3_DIRECT_TOUCH_FIELD_CAMERA_BEGIN;
+}
+
+/*
+ * Contact-start events advance the input epoch.  The epoch is the
+ * deterministic cancellation signal for a deferred field click: it changes in
+ * the same g_uq_lock critical section that queues the new input, so the click
+ * either wins the lock before the input or is cancelled after it.  Motion,
+ * release, hold-release and camera phases continue an existing gesture and
+ * must not cancel.  FIELD_CAMERA_BEGIN is excluded because a rejected begin
+ * starts no pan; an accepted one cancels on the guest thread through
+ * wc3_dt_event_cancels_field_click(..., camera_started=1).
+ *
+ * A portrait contact emits FOLLOW_START instead of POINTER_DOWN, and a
+ * control-group chord emits GROUP_SIGNAL; both start a new command and are
+ * included.  KEY_SIGNAL is not produced by the current controls layer; if it
+ * returns, its down transition must be routed through hle_android_key_event
+ * or carry its direction explicitly.
+ */
+static inline int wc3_dt_event_bumps_input_epoch(uint32_t kind)
+{
+    switch (kind) {
+    case WC3_DIRECT_TOUCH_POINTER_DOWN:
+    case WC3_DIRECT_TOUCH_TAP:
+    case WC3_DIRECT_TOUCH_FIELD_HOVER:
+    case WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN:
+    case WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN:
+    case WC3_DIRECT_TOUCH_LONG_PRESS:
+    case WC3_DIRECT_TOUCH_FOLLOW_START:
+    case WC3_DIRECT_TOUCH_GROUP_SIGNAL:
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 /*

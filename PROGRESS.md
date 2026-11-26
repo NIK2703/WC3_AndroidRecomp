@@ -593,3 +593,568 @@ Command: `bash tools/android/build_apk.sh --variant debug --install --serial emu
 
 Device T2 confirmation still pending: pause-menu first tap, tap-tap building
 placement, drag-from-icon placement, beacon vertical mirror.
+
+## Pause menu = main menu route (source, 2026-11-26)
+
+The pause menu now has its own physical route `MENU` and exactly the
+main-menu gesture set.  Source only at that step; built and installed as
+`rev65` below.
+
+- Exact identity: `[CGameUI+0x228] -> CEscMenu`,
+  `[CEscMenu+0x18] -> panel`, `[panel+0x170] != 0`; no paused-flag or
+  geometric fallback.
+- `WC3_DIRECT_TOUCH_ROUTE_MENU = 5`.  `dt_route_snapshot()` publishes it;
+  `direct_touch_route_for()` resolves it to `NATIVE` (`menu-native`)
+  before beacon/portrait/minimap/command/field geometry.
+- Pause entry resets field/camera/selection/target/grid/inventory/command/
+  command-target/beacon and defers the portrait release through
+  `g_portrait_release_pending`.  The native press that opened the menu is
+  not cancelled.
+- `wc3_dt_menu_event_allowed()` accepts key signals, `POINTER_CANCEL` and
+  raw native phases except `MINIMAP`; group signals and semantic
+  field/portrait events are dropped.
+- Controls transition cancel marks FIELD/PORTRAIT/MINIMAP owners
+  `IGNORED` (their later phases are swallowed until UP), sends the
+  minimap one `POINTER_CANCEL` with route `MINIMAP`, resets the
+  recognizer, and leaves an active NATIVE press to finish.
+- Minimap raw phases now carry `MINIMAP` via
+  `wc3_direct_touch_emit_pointer_route()`; any other route is clamped to
+  `NATIVE`.
+- `dt_dispatch()` in pause bypasses beacon, command, inventory, grid and
+  minimap and calls `dt_native_pointer()` directly.
+
+T0: `direct_touch`, `controls_mode`, `native_press_barrier`,
+`controls_idle`, `gesture_lifetime` pass.  Host `-fsyntax-only` with
+`-Wall -Wextra -Werror` is clean for `hle_direct_touch.c` in release and
+debug define sets.  `git diff --check` clean.
+
+T2 still pending.  An explicit user command built and installed this change
+as `rev65` below.
+
+## rev65 build/install (explicit user command, 2026-11-26 20:08)
+
+Command: `bash tools/android/build_apk.sh --variant debug --install --serial emulator-5554`
+(log: `/data/user/0/com.termux/files/usr/tmp/opencode/build_debug_pause_menu_20261126_200847.log`).
+distcc was left at its default auto-worker mode.
+
+- Build exit `0`, Gradle `BUILD SUCCESSFUL in 1m 31s`, streamed install
+  `Success`.
+- Native SO: `libwc3gameactivity.so` 160461368 bytes, built 20:14:20;
+  contains the new `pause-menu` and `menu-native` strings.
+- APK: `build/android_app/wc3-debug.apk`, 178864969 bytes, SHA-256
+  `e6816728c471e6d88dde25a2ec0d04f520a5ae57d34d05afdc092268f807b793`.
+- Installed `wc3.recomp.debug`, versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-26 20:15:55`.  Pulled installed `base.apk` —
+  SHA-256 and size match the local APK byte-for-byte.
+- T0 before build: `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `gesture_lifetime`, `controls_idle` pass; `git diff --check` clean.
+
+T2 found a pause-menu click regression in this build: see the next section.
+rev65 must not be treated as the pause-menu result.
+
+## Pause-menu click regression, root cause and source fix (2026-11-26)
+
+rev65 reproduced the report: no pause-menu button responds to touch.
+Logs pulled from the installed debug package
+(`/data/user/0/com.termux/files/usr/tmp/opencode/pause_fail_logs_202430/`)
+show the exact chain:
+
+- `dt_trace.txt`: `snapshot route=MENU reason=pause-menu` is published, so
+  the pause identity itself is correct.
+- Each touch arrives as `gate => NATIVE (menu-native)` and
+  `emit kind=POINTER_DOWN ... route=NATIVE`; the service logs
+  `dispatch kind=POINTER_DOWN ... route=NATIVE` and
+  `consumed=native-menu ptr=0`.
+- `dt_native_pointer()` then logs
+  `native-ptr kind=POINTER_DOWN ... down=0 up_pending=1 hw_down=0` and
+  `[direct] field-late-defer`: the press is held by the field tap
+  resolver even though the pause menu is open.
+- On release the pause bypass calls `dt_native_pointer()` directly.  The
+  deferred state has no posted DOWN and no movement, so the UP is dropped:
+  the trace shows only `probe native-q[0] msg=0200` (a `WM_MOUSEMOVE`) and
+  no `WM_LBUTTONDOWN`/`WM_LBUTTONUP`.
+
+Root cause: rev26 kept a pause-specific exception inside
+`dt_native_defer_pointer()`:
+
+```c
+const int inside_field = !on_minimap &&
+                         (dt_field_contains(ev->x, ev->y) ||
+                          dt_pause_menu_active());
+```
+
+The battlefield rectangle is still live under `CEscMenu`.  The new pause
+bypass in `dt_dispatch()` skips the field resolver that was supposed to
+turn the deferred UP into a click, so the two pause-specific paths
+cancel each other.  The route and subgesture layers were unified, but the
+native gateway was not: the main menu never enters this deferral, while
+the pause menu did for every point.
+
+Fix:
+
+- `hle_direct_touch_intent.h`: new pure
+  `wc3_dt_native_deferral_allowed(pause_menu)`, false while `CEscMenu` is
+  open.
+- `hle_direct_touch.c`: `dt_native_defer_pointer()` returns early when
+  that policy rejects the menu, before the phase switch; `inside_field`
+  is geometry-only again.
+- Pause DOWN/MOVE/UP now take the same `dt_native_pointer()` gateway as
+  the main menu; no field tap, target or late-defer resolver is involved.
+- Pause entry also releases a field drag that already published a native
+  DOWN (`dt_native_abort()` before `dt_field_click_reset()`), so the
+  guest cannot keep the left button held while the menu is open.
+
+Verification: T0 `direct_touch` (policy table +
+`wc3_dt_native_deferral_allowed`), `controls_mode`,
+`native_press_barrier`, `controls_idle`, `gesture_lifetime` pass.
+NDK `clang -fsyntax-only` with `-Wall -Wextra -Werror` passes for
+`hle_direct_touch.c` in release and debug define sets.
+`git diff --check` clean.
+
+Build/install evidence for rev66 is below.  T2 is still pending: pause
+buttons must emit `WM_LBUTTONDOWN/UP` and activate on the first tap.
+
+## rev66 build/install (explicit user command, 2026-11-26 20:40)
+
+Command: `bash tools/android/build_apk.sh --variant debug --install --serial emulator-5554`
+(log: `/data/user/0/com.termux/files/usr/tmp/opencode/build_debug_pause_fix_20261126_204027.log`).
+distcc was left at its default auto-worker mode.
+
+- Build exit `0`, Gradle `BUILD SUCCESSFUL in 1m 1s`, streamed install
+  `Success`.
+- Native SO: `libwc3gameactivity.so` 160461920 bytes (552 bytes larger than
+  the rev65 SO, so the HLE change was recompiled).
+- APK: `build/android_app/wc3-debug.apk`, 178865521 bytes, SHA-256
+  `71a2c307827aeb1d3522625bdda4e7e0389bb2cbb218f3eb8745d0fbe7824f17`.
+- Installed `wc3.recomp.debug`, versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-26 20:46:22`.  Installed `base.apk` SHA-256 and
+  size match the local APK byte-for-byte.
+- T0 before build: `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `gesture_lifetime`, `controls_idle` pass; NDK `clang -fsyntax-only`
+  release/debug `hle_direct_touch.c` = 0/0; `git diff --check` clean.
+
+Device T2 found a second failure: the cursor still only hovers, no pause
+button clicks.  See the next section.  rev66 must not be treated as the
+pause-menu result.
+
+## rev66 T2 failure: pause press canceled by batch context switch
+
+Logs pulled from the installed rev66 debug package
+(`/data/user/0/com.termux/files/usr/tmp/opencode/pause_fail_rev66_205544/`)
+show the press is now armed, then immediately canceled:
+
+```
+event kind=POINTER_DOWN(3) ... event_route=NATIVE service_route=NATIVE
+native-ptr kind=POINTER_DOWN ... down=0 up_pending=0 hw_down=0
+probe barrier-defer msg=0201 at=1414,359 lp=01670586
+[direct] native-down ...
+consumed=native-menu ptr=0
+[direct] batch-context-change a=00000000 b=00000000
+probe native-down-cancel
+```
+
+The armed `WM_LBUTTONDOWN` (`0201`) is canceled before the guest can
+dispatch it.  The same sequence repeats for every pause tap; the release
+posts only `probe native-q[0] msg=0200` (`WM_MOUSEMOVE`), which is exactly
+the reported cursor hover with no click.
+
+Root cause: in pause `dt_ready_route()` returns `NATIVE` with a **zeroed
+semantic context**.  The batch loop still probes the live UI/world under
+the panel:
+
+```c
+(void)dt_context(&probe);
+const int context_switch =
+    probe.ui != ctx.ui || probe.world != ctx.world;
+```
+
+`probe` has the live `ui=411C0088`, `world=411F0088`, while `ctx` is zero,
+so `context_switch` is true on **every** pause event.  The
+`batch-context-change` block calls `dt_native_release()`, which cancels the
+just-armed native DOWN.  The XOR printed in the trace is `0/0` because
+`next_ctx` is also zeroed by `dt_ready_route()`, which made the log look
+like a no-op change.
+
+Fix:
+
+- `hle_direct_touch_intent.h`: new pure
+  `wc3_dt_context_switch_relevant(pause_menu)`, false while `CEscMenu` is
+  open.
+- `hle_direct_touch.c`: `context_switch` is suppressed in pause; the live
+  world under the panel is not a new context.  When the menu closes, the
+  next normal route/context comparison runs again.
+- `tests/direct_touch_test.c`: T0 asserts for the new policy.
+
+Verification: T0 `direct_touch`, `controls_mode`, `native_press_barrier`,
+`gesture_lifetime`, `controls_idle` pass; NDK `clang -fsyntax-only`
+release/debug `hle_direct_touch.c` = 0/0; `git diff --check` clean.
+
+Build/install evidence for rev67 is below.
+
+## rev67 build/install (explicit user command, 2026-11-26 21:18)
+
+Command: `bash tools/android/build_apk.sh --variant debug --install --serial emulator-5554`
+(log: `/data/user/0/com.termux/files/usr/tmp/opencode/build_debug_pause_fix2_20261126_211831.log`).
+distcc was left at its default auto-worker mode.
+
+- Build exit `0`, Gradle `BUILD SUCCESSFUL in 1m 3s`, streamed install
+  `Success`.
+- Build log line 599 recompiled
+  `CMakeFiles/wc3_hle_android.dir/runtime/hle/android/hle_direct_touch.c.o`;
+  the linked SO is `libwc3gameactivity.so` 160466920 bytes.
+- APK: `build/android_app/wc3-debug.apk`, 178870621 bytes, SHA-256
+  `6eb27d479bb90cc47ecf8f272b8a199c516a42a7fddcb2a3d2feb2b7d91f4f2f`.
+- Installed `wc3.recomp.debug`, versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-26 21:24:49`.  Installed `base.apk` SHA-256 and
+  size match the local APK byte-for-byte.
+- T0 before build: `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `gesture_lifetime`, `controls_idle` pass; NDK `clang -fsyntax-only`
+  release/debug `hle_direct_touch.c` = 0/0; `git diff --check` clean.
+
+Device T2 pending: pause taps must show `probe barrier-defer msg=0201`,
+then `0202` on release, with **no** `batch-context-change`/`native-down-cancel`
+in the pause path.  Also check first-tap activation, entering pause with a
+live field drag, and the earlier first-tap/placement regressions.
+
+## rev68 build/install (explicit user command, 2026-11-26 21:52)
+
+Command: `bash tools/android/build_apk.sh --variant debug --install --serial emulator-5554`
+(log: `/data/user/0/com.termux/files/usr/tmp/opencode/build_debug_all_20261126_214520.log`).
+distcc stayed at its default auto-worker mode.
+
+- Build exit `0`, Gradle `BUILD SUCCESSFUL in 2m 9s`, streamed install
+  `Success`.
+- Build log lines 420-428/599-603 recompiled `direct_touch_event.c`,
+  `direct_touch.c`, `controls.c`, `hle_direct_touch.c`; linked SO
+  `libwc3gameactivity.so` 160467992 bytes.
+- APK: `build/android_app/wc3-debug.apk`, 178871925 bytes, SHA-256
+  `7c107a3722bec8195eb4446089f98467c3442dd9171483fb9cfcde15cfb7b93d`.
+- Installed `wc3.recomp.debug`, versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-26 21:52:51`; installed `base.apk` matches the
+  local APK byte-for-byte.
+- T0 before build: `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `gesture_lifetime`, `controls_idle` pass; NDK `clang -fsyntax-only`
+  release/debug `hle_direct_touch.c` = 0/0; `git diff --check` clean.
+- T2 traces at 21:53 are in
+  `/data/user/0/com.termux/files/usr/tmp/opencode/first_tap_world_rev68/`.
+  They expose the two first-tap gaps recorded below; rev68 predates both
+  source fixes.
+
+## 2026-11-26: smart-order long-tap plan (documentation only)
+
+- New design doc: `docs/research/SMART_ORDER_LONG_TAP_PLAN_2026-11-26.md`
+  (rev 1, `design`, not normative). It records the corrected tap matrix
+  (target controllability via `0x6F66EC60`, not selection ownership), the
+  long-tap smart order without drag, the native selection rectangle on drag,
+  the single `dt_smart_order_at()` path, and the T0/T2 plan.
+- `ATTACK_MOVE_LONG_TAP_PLAN_2026-11-26.md` is marked superseded for the
+  long-tap action; its `FIELD_SELECT_DRAG_BEGIN` machinery and long-press
+  timing remain.
+- `docs/README.md` indexes the new plan.
+- No code was changed, no T0/T2 was run, and no build/install was performed.
+
+## 2026-11-26: smart-order long-tap implementation (source only)
+
+- `hle_direct_touch_intent.h`: `wc3_dt_tap_unit_intent()` decides a unit tap
+  by target controllability (`0x6F66EC60`), not by the live selection;
+  `wc3_dt_field_tap_intent()` is the single decision point;
+  `wc3_dt_tap_intent()` is narrowed to the non-unit/terrain leg;
+  `wc3_dt_smart_order_candidate()` replaces `wc3_dt_attack_candidate()`.
+- `hle_direct_touch.c`: `dt_tap()` always left-picks, validates a `CUnit`,
+  tests the target with `0x6F66EC60`, and routes `ORDER_UNIT`/`ORDER_GROUND`
+  through the shared `dt_smart_order_at()`. A controlled target is selected
+  by the native left click; a hostile/neutral/decoration target and terrain
+  are smart-ordered. The native right-click fallback is guarded by
+  `dt_world_click_allowed()`.
+- Long tap: `dt_field_attack_ready()` is replaced by
+  `dt_smart_order_ready()`; `dt_field_select_begin()` no longer picks at the
+  deadline. A controlled selection in the field defers the native LMB;
+  `FIELD_SELECT_DRAG_BEGIN` starts the native selection rectangle, and a
+  stationary release calls the same `dt_smart_order_at(attack_move=1)`:
+  a unit/decoration gets a smart order, terrain gets the restored
+  attack-move (`A`+left click). `S=0`, HUD, target/placement and paused keep
+  press-at-BEGIN.
+- Comments in `runtime/ipc/direct_touch_event.h`,
+  `runtime/platform/android/controls/direct_touch.h/.c` and the EN/RU
+  direct-touch hints now describe smart order and the selection box.
+- T0 `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `gesture_lifetime`, `controls_idle` pass; NDK `clang -fsyntax-only`
+  release/debug `hle_direct_touch.c` = 0/0; `git diff --check` clean.
+- No build/install was run for this source step. The device runs rev68
+  (installed 21:52); this smart-order change is in that build, but the T2
+  matrix in `docs/research/SMART_ORDER_LONG_TAP_PLAN_2026-11-26.md` §6.4 is
+  still pending.
+
+## 2026-11-26: long-tap attack-move restored (source only)
+
+- The rev 2 smart-order change made long tap on terrain a right-click smart
+  move and removed the legacy attack-move. The user reported that
+  attack-move on terrain with controlled units was broken.
+- `dt_smart_order_at()` now takes an `attack_move` flag. Tap passes 0:
+  terrain is still a right-click smart move. Long tap passes 1: a unit or
+  decoration is a smart order, terrain sends `A` down/up plus the native
+  left click (the previous attack-move). The `dt_smart_order_ready()` gate
+  and the native right-click fallback for smart orders are unchanged.
+- EN/RU hints now distinguish long press on a unit/decoration (smart order)
+  from long press on the ground (attack-move).
+- T0 `direct_touch`, release/debug `-fsyntax-only`, and `git diff --check`
+  pass. No build/install was run; T2 still needs an explicit command.
+
+## 2026-11-26: stable first-tap attack-move confirmation (source only)
+
+- Last-run trace root cause: the long tap on terrain emitted
+  `field-attack-move` at t=283857490, then `A` down/up and the native left
+  click in the same guest pump. The guest processed `msg=0100/0101` and
+  `msg=0201/0202`, but the attack target mode is built on the next update,
+  so that click was not a target confirmation. The next contact at
+  t=283858446 was handled by the live target path
+  (`field-target-hover` -> `field-target-click-deferred`), which is why the
+  second tap confirmed the order.
+- `dt_smart_order_at(attack_move=1)` now sends `A` down/up and queues the
+  confirming left click through the existing field-click slot
+  (`dt_field_attack_move_click_queue`). `dt_field_click_tick` waits for
+  `DT_FIELD_TARGET_CLICK_DELAY_MS=33`, revalidates
+  `dt_field_target_tap_ready()` on every pump, retries until
+  `DT_FIELD_CLICK_TIMEOUT_MS`, and cancels on a new gesture or pause menu.
+  No new IPC events, timers, ABI fields or constants.
+- T0 `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `gesture_lifetime`, `controls_idle` pass; NDK release/debug
+  `-fsyntax-only -Wall -Wextra -Werror` for `hle_direct_touch.c` = 0/0;
+  `git diff --check` clean. No build/install was run; T2 needs the explicit
+  command and should check `field-attack-move` followed by
+  `field-attack-move-click` on the first long tap.
+
+## 2026-11-26: first world tap — unit-selection gateway fix (source only)
+
+- The same last-run trace exposes a second first-tap gap before the
+  attack-move contact.  The first field contact at t=283852395 picked unit
+  `6387DF14` (`intent=1`, `tap-select-unit-native`), but the map audit
+  sampled `primary=00000000 has=0`; the second contact at t=283853403
+  selected it (`primary=6387DF14 has=1`).  The first native click was
+  dispatched in the same pump as `0200/0201/0202` through
+  `hle_android_mouse_press_replay()`.
+- Root cause: `dt_tap()`'s select-unit path used the synchronous modal
+  replay helper.  The guest refreshes its hot control only in the idle
+  `GetCursorPos` pass after the move, so the replay's `DOWN` was hit-tested
+  against the previous hot control and swallowed.  The HLE pick was
+  correct; the native selection click was stale.  This is the documented
+  first-world-tap class, not a map-load or pick failure.
+- Fix: the select-unit intent and the deferred field-select fallback now
+  call `dt_native_press_deferred()`; `dt_native_left_click()` is reserved
+  for a target/placement confirmation in a modal loop, where the guest may
+  never call `GetCursorPos`.  The T0 `native_press_barrier` gate checks the
+  select-unit case.
+- T0 `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `gesture_lifetime`, `controls_idle` pass; NDK release/debug
+  `-fsyntax-only -Wall -Wextra -Werror` for `hle_direct_touch.c` = 0/0;
+  `git diff --check` clean.  The attack-move queue fix in the previous
+  section was also source-only at that point; rev68 contains neither fix.
+  Both fixes are now in the rev69 build/install below.
+
+## rev69 build/install (explicit user command, 2026-11-26 22:27)
+
+Command: `bash tools/android/build_apk.sh --variant debug --install --serial emulator-5554`
+(log: `/data/user/0/com.termux/files/usr/tmp/opencode/build_debug_all_20261126_2218.log`).
+distcc stayed at its default auto-worker mode.
+
+- Build exit `0`, Gradle `BUILD SUCCESSFUL in 1m 13s`, streamed install
+  `Success`.
+- Build log line 592 recompiled
+  `CMakeFiles/wc3_hle_android.dir/runtime/hle/android/hle_direct_touch.c.o`;
+  the linked SO is `libwc3gameactivity.so` 160468640 bytes.
+- APK: `build/android_app/wc3-debug.apk`, 178872573 bytes, SHA-256
+  `f8c3cf3e820f3921e7575175f1fc4d14f32a53f04e568fda0f3578857bd91287`.
+  It contains the `field-attack-move-click` and
+  `field-attack-move-click-timeout` trace strings, so the attack-move
+  queue fix is compiled in; the unit-selection path uses
+  `dt_native_press_deferred()`.
+- Installed `wc3.recomp.debug`, versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-26 22:27:37`; installed `base.apk` size
+  `178872573` and SHA-256 match the local APK byte-for-byte.
+- T0 before build: `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `gesture_lifetime`, `controls_idle` pass; NDK release/debug
+  `clang -fsyntax-only -Wall -Wextra -Werror` for `hle_direct_touch.c` =
+  0/0; `git diff --check` clean.
+
+Device T2 pending.  Expected on the first field tap: `tap-select-unit-native`
+followed by `probe barrier-defer`/`barrier-flush` and `map-audit ... has=1`
+without a second tap.  Expected on the first terrain long tap:
+`field-attack-move` followed by `field-attack-move-click` after the target
+mode is live.  Pause taps must still show `barrier-defer msg=0201` then
+`0202`, with no `batch-context-change`/`native-down-cancel`.
+
+## 2026-11-26: rev69 T2 — first world tap still idle; fallback bypassed idle pass
+
+- rev69 device log (`/data/user/0/com.termux/files/usr/tmp/opencode/first_tap_world_rev69/`):
+  the first field tap at `t=286622251` picked unit `63F9E224`
+  (`tap-select-unit-native`), but `map-audit#1` at `t=286624582/286624628`
+  still reported `primary=00000000 has=0`.  The second tap at
+  `t=286624628` selected the same unit; `map-audit#2` at `t=286625125`
+  reported `primary=63F9E224 has=1 q=3/3`.
+- The first tap's trace armed `0201` (`barrier-defer`), dispatched `0200`
+  (`native-down-move`), then forced `0201` from
+  `native-up-fallback a=2` and posted `0202` from `native-up-deferred` at
+  the same `t=286622251`.  The idle
+  `GetCursorPos` pass that refreshes hot control arrived later, at
+  `t=286622260`; the fallback had already hit-tested the stale hot control.
+  The second tap worked because the first tap's move/idle pass had left the
+  hot control on the unit.
+- Root cause: the select-unit path entered `dt_native_press_deferred()`, but
+  that state was designed for a late-resolved native UI release and its
+  message-pump fallback (`g_native_up_wait++ > 0`) forced the DOWN on the
+  second service call in the same pump, bypassing `move_ready`.
+- Fix: `dt_native_press_deferred(ev, modal_fallback)`.  Field selection and
+  the field deferred click pass `0` and wait for the normal idle
+  `GetCursorPos` flush; only the two native-UI release paths (paused field
+  release and late native UI release) pass `1` and keep the modal fallback.
+  Pause-menu entry now clears an armed field press before it can be forced
+  into the menu or block the next tap; the service detects the pause edge
+  before the deferred-press branch, otherwise that branch would return first
+  and the clear would never run.
+- T0 `native_press_barrier` now checks the select-unit call uses
+  `dt_native_press_deferred(ev, 0)`, the late native release keeps `ev, 1`,
+  and the fallback is gated by `g_native_up_modal`.  `direct_touch`,
+  `controls_mode`, `gesture_lifetime`, `controls_idle` pass; NDK
+  release/debug `clang -fsyntax-only -Wall -Wextra -Werror` for
+  `hle_direct_touch.c` = 0/0; `git diff --check` clean.  No build/install was
+  run; rev70 must show `barrier-flush` after the idle pass and no
+  `native-up-fallback` for the first field tap, with `map-audit ... has=1`
+  on that first contact.
+
+## rev70 debug build/install (explicit user command, 2026-11-26 23:44)
+
+- `tools/android/build_apk.sh --variant debug --install --serial emulator-5554`
+  used the live adb device and distcc (`ideapad` + `pc`, 24 jobs).
+  Native build and Gradle finished with `BUILD SUCCESSFUL in 1m 7s`;
+  streamed install returned `Success`.  This is a rebuild of the same
+  working tree; the first rev70 attempt at 23:32 was superseded by this
+  artifact.
+- APK: `build/android_app/wc3-debug.apk`, `178875509` bytes,
+  SHA-256 `ce53d7276d1b0c520d478b3478f4edbbc88c43d26f126d4c5fb7b91cf7398d4e`.
+  Installed `base.apk` reports the same size and SHA-256, so the device
+  package matches the built artifact.
+- Package `wc3.recomp.debug`: versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-26 23:44:37`.  This build contains the deferred
+  field-press modal split and the pause-entry ordering fix.
+- Device T2 remains manual.  First field tap must show `barrier-defer` then
+  `barrier-flush` after the idle pass, no `native-up-fallback`, and
+  `map-audit ... has=1` on that first contact.  Pause-menu first tap and the
+  smart-order long-tap matrix still need manual confirmation.
+
+## 2026-11-26: attack-move подтверждается по живому target mode без 33 мс
+
+- T2 предыдущей debug-сборки (fix rev 4, APK `lastUpdateTime=2026-11-26
+  22:27:37`) подтвердил механизм: 52 `field-attack-move`, 52
+  `field-attack-move-click`, 0 `field-attack-move-click-timeout`,
+  release→click 32–45 мс (среднее 36.1 мс). Все 52 клика пришлись на уже
+  живой target mode, но каждый ждал `DT_FIELD_TARGET_CLICK_DELAY_MS=33`.
+- `dt_field_attack_move_click_queue()` теперь ставит
+  `g_field_click_ready_ms=0`. `dt_field_click_tick()` по-прежнему
+  проверяет `dt_field_target_tap_ready()` (живой не-select target mode,
+  точка в поле, нет pause), поэтому клик уходит на первом service pass
+  после guest update, создавшего режим, без слепой задержки. Release
+  pump уже содержит `A` down/up и hover, так что режим создаётся с
+  курсором в точке.
+- Target/placement сохраняет 33 мс: его режим был живым до жеста и
+  должен перестроить preview из hover. Таймаут 1000 мс, отмена новым
+  жестом/pause и повторная проверка режима не менялись. Новых состояний,
+  IPC, таймеров, ABI и констант нет; verify/retry-петля не добавлялась.
+- T0 `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `gesture_lifetime`, `controls_idle` — зелёные; NDK
+  `clang -fsyntax-only -Wall -Wextra -Werror` для
+  `hle_direct_touch.c` release/debug = 0/0; `git diff --check` чистый.
+  APK не собирался и не устанавливался.
+- T2 после явной команды: ожидается `field-attack-move` →
+  `field-attack-move-click` без timeout, задержка release→click около
+  одного guest update (цель — меньше 36.1 мс), второй tap не нужен;
+  `field-target-click-deferred` для target/placement остаётся с 33 мс.
+
+## 2026-11-26: проверка оптимальности и неизбыточности
+
+- Убран повторный `dt_pause_menu_sync()` из `dt_sync_idle_context()`.
+  Верхняя проверка `wc3_hle_direct_touch_service()` уже синхронизирует
+  pause-entry до deferred-ветки; idle-путь теперь только публикует route.
+  На каждом idle service pass стало на одно чтение `CGameUI/CEscMenu`
+  меньше; новых guest-вызовов, dispatch, состояний и таймеров нет.
+- Удалён устаревший комментарий в service, оставшийся после переноса
+  pause-sync наверх. Обновлён контракт raw pointer phases: они несут
+  `NATIVE` или `MINIMAP`, а не всегда `NATIVE`; T0-комментарий уточняет,
+  что idle-gate относится к обычному press, а modal fallback — отдельная
+  политика.
+- Два abort-блока в `dt_pause_menu_enter_state()` не дублируются:
+  первый снимает armed deferred press (`g_native_up_pending`), второй
+  отпускает уже опубликованный field drag (`g_field_defer_down_posted`).
+  Это взаимоисключающие состояния; объединение скрыло бы разную очистку.
+  `g_native_up_modal` оставлен отдельным битом: инвариант `modal => pending`
+  проверяется сбросом только вместе с pending, а смешивание с `wait`
+  связало бы таймаут и политику fallback.
+- T0 `native_press_barrier`, `direct_touch`, `controls_mode`,
+  `gesture_lifetime`, `controls_idle` — зелёные; `git diff --check`
+  чистый.  Установленный rev70 APK (`ce53d727...`) собран до этой
+  уборки и отличается только удалённым повторным чтением; для переноса
+  уборки в устройство нужна отдельная явная команда сборки.
+
+## 2026-11-27: событийная отмена отложенного field-клика
+
+- Удалены `DT_FIELD_CLICK_TIMEOUT_MS=1000`,
+  `DT_FIELD_NATIVE_CLICK_TIMEOUT_MS=200` и `g_field_click_ms`. Число
+  миллисекунд не выводилось из состояния игры и оставляло клик
+  заряженным на чужой target mode; оба предела убраны из слота
+  `g_field_click_*`.
+- Введён монотонный `g_input_epoch` (`hle_android_input_epoch()` /
+  `hle_android_input_epoch_bump()`). Слот хранит
+  `g_field_click_input_epoch` и отменяется на любом новом
+  пользовательском вводе. Bump и push нового ввода
+  (`u_msg_post_input`) и проверка epoch с постановкой DOWN/UP
+  (`hle_android_mouse_click_if_epoch`) идут под одним `g_uq_lock`,
+  поэтому клик либо уходит раньше нового ввода, либо не уходит вовсе.
+- Bump-точки: контакт (`POINTER_DOWN`, `TAP`, `FIELD_HOVER`,
+  `FIELD_SELECT_BEGIN`, `FIELD_SELECT_DRAG_BEGIN`, `LONG_PRESS`,
+  `FOLLOW_START`, `GROUP_SIGNAL`), key-down не-модификатора только при
+  переходе up→down (битовая карта против auto-repeat) и реальный
+  button-down. Auto-repeat, key-up, move, wheel, camera begin и
+  synthetic replay epoch не меняют. `KEY_SIGNAL` не bump-ит: у него
+  нет producer'а и один kind покрывает press/release; при возврате
+  пути направление нужно передать явно.
+- `A` в `dt_smart_order_at()` переведён на
+  `hle_android_key_event_synthetic()`; epoch снимается в начале
+  функции, до pick и `A`, поэтому собственный `A` не отменяет свой
+  клик, а новый ввод после снимка — отменяет. Подтверждающий клик
+  ставится через `hle_android_mouse_click_if_epoch()`.
+- Native tick ждёт пустую direct-touch очередь
+  (`field-target-click-wait-queue`), чтобы уже стоящий в ней контакт
+  разрешился раньше клика. Map-load tap эту проверку не использует: он
+  replay-ится раньше нового жеста.
+- Map-load/fade-in tap отменяется по `dt_pause_menu_active()` и
+  `dt_field_load_context_alive()` (живые UI/world/select-mode), а не по
+  несуществующей ветке `MENU` в `dt_ready_route()`; медленная загрузка
+  больше не теряет первый tap и не replay-ит его после выхода в меню.
+- `DT_FIELD_TARGET_CLICK_DELAY_MS=33` остаётся только у
+  target/placement как один кадр на перестройку preview; это не
+  retry-окно и не предел жизни. Отмена по epoch работает и в эти 33 мс.
+- T0 `direct_touch`, `native_press_barrier`, `controls_mode`,
+  `gesture_lifetime`, `controls_idle`, `hle_abi`, `input_adapter` —
+  зелёные; NDK `-fsyntax-only` для `hle_direct_touch.c`
+  (release/debug, `-Wall -Wextra -Werror`) и `hle_android.c`
+  (release/debug, флаги сборки) = 0/0; `git diff --check` чистый.
+  APK не собирался и не устанавливался; T2 ждёт явной команды.
+  Известные несвязанные падения: `release_hygiene` на
+  `guest_window_android.c`, `platform_contract` на `dxvk_trace.cpp`,
+  `thread_audit` — `unavailable`.
+
+## 2026-11-27: rev71 debug build/install (явная команда)
+
+- `tools/android/build_apk.sh --variant debug --install --serial emulator-5554`.
+  `ideapad` не разрешился по MAC и был пропущен; использованы `pc` и
+  локальные 8 воркеров (12 jobs).  distcc не отключался.
+- Native `libwc3gameactivity.so` — `160491456` байт; Gradle
+  `BUILD SUCCESSFUL in 1m 20s`; streamed install — `Success`.
+- APK: `build/android_app/wc3-debug.apk`, `178895389` байт,
+  SHA-256 `a9b96264db120d2660164139cadff74491d0f0fd9d779402f876f7319efa62d2`.
+  Установленный `base.apk` совпадает по размеру и SHA-256.
+- Пакет `wc3.recomp.debug`: versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-27 00:30:42`.
+- Сборка включает текущие изменения `hle_android.c`, `hle_direct_touch.c`,
+  `native_input_gateway.h`, `hle_input_state.h`, controls и T0, а также
+  удалённый повторный pause-sync из idle-пути.  T2 остаётся ручным;
+  коммит не делался.

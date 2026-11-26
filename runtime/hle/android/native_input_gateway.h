@@ -11,6 +11,8 @@
 #ifndef WC3_NATIVE_INPUT_GATEWAY_H
 #define WC3_NATIVE_INPUT_GATEWAY_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -28,6 +30,17 @@ int hle_android_mouse_cancel_pending_press(void);
  * the placement loop may never call GetCursorPos, so the idle gateway slot
  * cannot publish it.  Touch-originated presses still use the deferred API. */
 void hle_android_mouse_press_replay(float nx, float ny, int button);
+
+/* Guest-thread click that posts only while no newer user input has advanced
+ * the input epoch past `expected_epoch`.  The epoch check and both button
+ * messages share one g_uq_lock critical section: a new input that wins the
+ * lock first cancels the click, while a click that wins is queued before that
+ * input.  Returns 1 when the click was posted, 0 when a newer input won.  The
+ * move is posted before the lock because motion is not a command.  This is
+ * the deferred field-click confirmation path, not a replacement for the
+ * synthetic replay above. */
+int hle_android_mouse_click_if_epoch(float nx, float ny, int button,
+                                     uint32_t expected_epoch);
 
 /* Camera sequence: LEFT UP, MIDDLE UP, MIDDLE DOWN behind the same idle pass. */
 void hle_android_mouse_move_defer_camera_begin(float nx, float ny);

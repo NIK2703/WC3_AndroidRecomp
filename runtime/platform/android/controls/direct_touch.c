@@ -82,6 +82,7 @@ static const char *dt_route_name(uint32_t route)
     case WC3_DIRECT_TOUCH_ROUTE_NATIVE: return "NATIVE";
     case WC3_DIRECT_TOUCH_ROUTE_PORTRAIT: return "PORTRAIT";
     case WC3_DIRECT_TOUCH_ROUTE_MINIMAP: return "MINIMAP";
+    case WC3_DIRECT_TOUCH_ROUTE_MENU: return "MENU";
     default: return "?";
     }
 }
@@ -251,11 +252,12 @@ static void arm_hold(Wc3DirectTouch *dt, Wc3DirectTouchPointer *pointer,
      * long-press timer expires, before any drag. */
     fire_haptic(dt);
     /* Emit the BEGIN at the configured deadline.  The executor normally
-     * posts WM_LBUTTONDOWN and keeps it down; for a controlled selection on
-     * terrain it may defer that press and turn a stationary release into
-     * attack-move.  The recognizer itself owns no native button: a move
-     * beyond drag_threshold_px from the hold point emits DRAG_BEGIN, which
-     * tells the executor to start the native selection rectangle. */
+     * posts WM_LBUTTONDOWN and keeps it down; for a controlled selection in
+     * the field it may defer that press and turn a stationary release into a
+     * smart order or attack-move.  The recognizer itself owns no native
+     * button: a move beyond drag_threshold_px from the hold point emits
+     * DRAG_BEGIN, which tells the executor to start the native selection
+     * rectangle. */
     DT_LOG("hold ptr=%d -> SELECT_BEGIN", pointer->pointer_id);
     TOUCH_LOG("hold ptr=%d -> SELECT_BEGIN n=%.4f,%.4f event_t=%llu",
               pointer->pointer_id,
@@ -731,22 +733,37 @@ int wc3_direct_touch_pointer_at(const Wc3DirectTouch *dt, int index,
     return 0;
 }
 
-void wc3_direct_touch_emit_pointer(Wc3DirectTouch *dt,
-                                   Wc3DirectTouchKind kind, int pointer_id,
-                                   float x, float y, uint64_t now_ms)
+void wc3_direct_touch_emit_pointer_route(Wc3DirectTouch *dt,
+                                         Wc3DirectTouchKind kind,
+                                         int pointer_id, float x, float y,
+                                         uint64_t now_ms, uint32_t route)
 {
     if (!dt) return;
+    /* Raw phases are either menu/HUD native input or a minimap-owned drag.
+     * Never let a stale or misused route turn a raw phase into a semantic
+     * field/portrait event. */
+    if (route != WC3_DIRECT_TOUCH_ROUTE_MINIMAP) {
+        route = WC3_DIRECT_TOUCH_ROUTE_NATIVE;
+    }
     switch (kind) {
     case WC3_DIRECT_TOUCH_POINTER_DOWN:
     case WC3_DIRECT_TOUCH_POINTER_MOVE:
     case WC3_DIRECT_TOUCH_POINTER_UP:
     case WC3_DIRECT_TOUCH_POINTER_CANCEL:
-        emit_event(dt, kind, pointer_id, x, y, now_ms,
-                   WC3_DIRECT_TOUCH_ROUTE_NATIVE, WC3_DT_OWNER_ACTION, 0u);
+        emit_event(dt, kind, pointer_id, x, y, now_ms, route,
+                   WC3_DT_OWNER_ACTION, 0u);
         break;
     default:
         break;
     }
+}
+
+void wc3_direct_touch_emit_pointer(Wc3DirectTouch *dt,
+                                   Wc3DirectTouchKind kind, int pointer_id,
+                                   float x, float y, uint64_t now_ms)
+{
+    wc3_direct_touch_emit_pointer_route(dt, kind, pointer_id, x, y, now_ms,
+                                       WC3_DIRECT_TOUCH_ROUTE_NATIVE);
 }
 
 int wc3_direct_touch_camera_pointer(const Wc3DirectTouch *dt)

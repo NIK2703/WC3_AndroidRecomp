@@ -127,6 +127,10 @@ static Wc3DirectTouchSink g_direct_touch_sink;
 static void *g_direct_touch_user;
 static Wc3DirectTouchRouteGate g_direct_touch_route_gate;
 static void *g_direct_touch_route_gate_user;
+/* Last gate value observed by the input thread.  A transition to MENU tears
+ * down every in-flight game gesture before the new menu touch is handled. */
+static Wc3DirectTouchRoute g_direct_touch_gate_route =
+    WC3_DIRECT_TOUCH_ROUTE_LEGACY;
 static Wc3DirectTouchPortraitRectGate g_direct_touch_portrait_gate;
 static void *g_direct_touch_portrait_gate_user;
 static Wc3DirectTouchMinimapRectGate g_direct_touch_minimap_gate;
@@ -151,6 +155,7 @@ static const char *direct_route_name(Wc3DirectTouchRoute route) {
     case WC3_DIRECT_TOUCH_ROUTE_NATIVE: return "NATIVE";
     case WC3_DIRECT_TOUCH_ROUTE_PORTRAIT: return "PORTRAIT";
     case WC3_DIRECT_TOUCH_ROUTE_MINIMAP: return "MINIMAP";
+    case WC3_DIRECT_TOUCH_ROUTE_MENU: return "MENU";
     default: return "?";
     }
 }
@@ -951,6 +956,14 @@ static int direct_touch_command_contains(float x, float y) {
                                       x, y);
 }
 
+/* Snapshot the guest route once per input event.  A NULL gate is the
+ * unit-test/host-only mode and keeps the phase-1 semantic field behavior. */
+static Wc3DirectTouchRoute direct_touch_gate_route(void) {
+    return g_direct_touch_route_gate
+        ? g_direct_touch_route_gate(g_direct_touch_route_gate_user)
+        : WC3_DIRECT_TOUCH_ROUTE_FIELD;
+}
+
 /*
  * Decide who owns a non-overlay touch.  Direct mode never hands a game touch
  * to the legacy overlay engine: a battlefield touch in CSelectMode uses the
@@ -962,7 +975,8 @@ static int direct_touch_command_contains(float x, float y) {
  * not a field hint: it means the guest has no live CGameUI, so the touch is
  * native (the HLE resolves the map-load race on release).
  */
-static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
+static Wc3DirectTouchRoute direct_touch_route_for(
+    float x, float y, Wc3DirectTouchRoute route) {
     if (!g_direct_touch_enabled) {
         DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_LEGACY, "disabled");
     }
@@ -975,11 +989,6 @@ static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
     if (!g_initialized || !g_direct_touch.sink) {
         DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "direct-not-ready");
     }
-    /* A NULL gate is the unit-test/host-only mode: preserve the phase-1
-     * semantic field behavior. */
-    const Wc3DirectTouchRoute route = g_direct_touch_route_gate
-        ? g_direct_touch_route_gate(g_direct_touch_route_gate_user)
-        : WC3_DIRECT_TOUCH_ROUTE_FIELD;
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     {
         const float nx = g_width > 0 ? x / (float)g_width : 0.0f;
@@ -1005,6 +1014,15 @@ static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
                                 g_direct_touch_command_gate_user);
     }
 #endif
+    if (route == WC3_DIRECT_TOUCH_ROUTE_MENU) {
+        /* The pause menu is a native menu, exactly like the main menu.  It
+         * must bypass every world/HUD geometry gate: a point that normally
+         * belongs to the minimap, portrait, command card or beacon button is
+         * still a raw menu pointer while CEscMenu is open.  The guest service
+         * also drops semantic world events on this route, so no field,
+         * camera, selection, portrait or minimap gesture can start here. */
+        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "menu-native");
+    }
     if (route == WC3_DIRECT_TOUCH_ROUTE_LEGACY) {
         /* LEGACY from the guest means it has no live CGameUI: startup, a
          * loading screen or the main menu.  The main menu uses the same
@@ -1050,6 +1068,35 @@ static Wc3DirectTouchRoute direct_touch_route_for(float x, float y) {
      * example, the frame is not published yet).  The guest still owns the
      * click; native phases are the only non-legacy route. */
     DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "gate-native");
+}
+
+/*
+ * A native menu owns exactly the main-menu gesture set.  When the guest
+ * publishes MENU, a contact that was already a game gesture must stop
+ * driving the world: FIELD/PORTRAIT pointers are reset, MINIMAP gets a raw
+ * cancel so its native button is released, and the input owner is parked as
+ * IGNORED until the finger lifts.  Native menu/HUD pointers are left alone
+ * so the click that opened the menu can finish through the universal
+ * gateway.
+ */
+static void direct_touch_cancel_for_menu(void) {
+    for (int i = 0; i < DIRECT_OWNER_SLOTS; i++) {
+        DirectOwner *owner = &g_direct_owners[i];
+        if (owner->owner == DIRECT_OWNER_FIELD ||
+            owner->owner == DIRECT_OWNER_PORTRAIT) {
+            owner->owner = DIRECT_OWNER_IGNORED;
+        } else if (owner->owner == DIRECT_OWNER_MINIMAP) {
+            wc3_direct_touch_emit_pointer_route(
+                &g_direct_touch, WC3_DIRECT_TOUCH_POINTER_CANCEL,
+                owner->pointer_id, owner->last_x, owner->last_y, 0,
+                WC3_DIRECT_TOUCH_ROUTE_MINIMAP);
+            owner->owner = DIRECT_OWNER_IGNORED;
+        }
+    }
+    /* PORTRAIT emits HOLD_RELEASE, FIELD camera emits CAMERA_END and FIELD
+     * selection emits SELECT_END.  The service drops these while the menu is
+     * open but uses the release paths to clear any native button. */
+    wc3_direct_touch_reset(&g_direct_touch);
 }
 
 static void direct_touch_configure(int width, int height,
@@ -1104,6 +1151,7 @@ void controls_set_direct_touch_sink(Wc3DirectTouchSink sink, void *user) {
         /* No sink means no direct owner; do not keep a stale guest gate. */
         g_direct_touch_route_gate = NULL;
         g_direct_touch_route_gate_user = NULL;
+        g_direct_touch_gate_route = WC3_DIRECT_TOUCH_ROUTE_LEGACY;
         g_direct_touch_portrait_gate = NULL;
         g_direct_touch_portrait_gate_user = NULL;
         g_direct_touch_minimap_gate = NULL;
@@ -1122,6 +1170,9 @@ void controls_set_direct_touch_route_gate(Wc3DirectTouchRouteGate gate,
                                            void *user) {
     g_direct_touch_route_gate = gate;
     g_direct_touch_route_gate_user = user;
+    /* Force the next observed route to be treated as a transition, so a
+     * newly attached MENU gate cancels any gesture owned by the old one. */
+    g_direct_touch_gate_route = WC3_DIRECT_TOUCH_ROUTE_LEGACY;
 }
 
 void controls_set_direct_touch_portrait_gate(
@@ -1157,11 +1208,13 @@ void controls_set_direct_touch_command_gate(
  * was down turned a held D-pad button into a one-finger lock.
  */
 static int direct_touch_begin(int pointer_id, float x, float y,
-                              uint64_t event_time_ms) {
+                              uint64_t event_time_ms,
+                              Wc3DirectTouchRoute gate_route) {
     /* Resolve the route before swallowing a second native pointer: an
      * overlay element pressed while a HUD gesture is active must still reach
      * the legacy engine, not become an ignored direct pointer. */
-    const Wc3DirectTouchRoute route = direct_touch_route_for(x, y);
+    const Wc3DirectTouchRoute route =
+        direct_touch_route_for(x, y, gate_route);
 
     WC3_CTRL_LOG("dt begin ptr=%d px=%.1f,%.1f route=%s native=%d "
                  "portrait=%d field_drag=%d active=%d",
@@ -1218,9 +1271,9 @@ static int direct_touch_begin(int pointer_id, float x, float y,
         if (!direct_owner_add(pointer_id, DIRECT_OWNER_MINIMAP, x, y)) {
             return 0;
         }
-        wc3_direct_touch_emit_pointer(&g_direct_touch,
-                                      WC3_DIRECT_TOUCH_POINTER_DOWN,
-                                      pointer_id, x, y, event_time_ms);
+        wc3_direct_touch_emit_pointer_route(
+            &g_direct_touch, WC3_DIRECT_TOUCH_POINTER_DOWN, pointer_id, x, y,
+            event_time_ms, WC3_DIRECT_TOUCH_ROUTE_MINIMAP);
         return 1;
     }
     if (route == WC3_DIRECT_TOUCH_ROUTE_PORTRAIT) {
@@ -1307,8 +1360,20 @@ int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
         return -1;
     }
 
+    /* Read the guest route once for this phase.  The transition to MENU is
+     * the architectural cut: old world gestures are torn down before the
+     * first menu touch is classified, so they cannot leak into the pause
+     * menu.  New contacts then resolve as raw native phases below. */
+    const Wc3DirectTouchRoute gate_route = direct_touch_gate_route();
+    if (gate_route == WC3_DIRECT_TOUCH_ROUTE_MENU &&
+        g_direct_touch_gate_route != WC3_DIRECT_TOUCH_ROUTE_MENU) {
+        direct_touch_cancel_for_menu();
+    }
+    g_direct_touch_gate_route = gate_route;
+
     if (phase == WC3_TOUCH_DOWN) {
-        if (direct_touch_begin(pointer_id, x, y, event_time_ms)) return 0;
+        if (direct_touch_begin(pointer_id, x, y, event_time_ms, gate_route))
+            return 0;
         WC3_CTRL_LOG("dt down ptr=%d px=%.1f,%.1f -> vendor", pointer_id, x, y);
         direct_owner_add(pointer_id, DIRECT_OWNER_VENDOR, x, y);
     } else {
@@ -1340,13 +1405,15 @@ int controls_touch(Wc3TouchPhase phase, int pointer_id, float x, float y,
                 owner->last_x = cx;
                 owner->last_y = cy;
                 if (phase == WC3_TOUCH_MOVE) {
-                    wc3_direct_touch_emit_pointer(
+                    wc3_direct_touch_emit_pointer_route(
                         &g_direct_touch, WC3_DIRECT_TOUCH_POINTER_MOVE,
-                        pointer_id, cx, cy, event_time_ms);
+                        pointer_id, cx, cy, event_time_ms,
+                        WC3_DIRECT_TOUCH_ROUTE_MINIMAP);
                 } else if (phase == WC3_TOUCH_UP) {
-                    wc3_direct_touch_emit_pointer(
+                    wc3_direct_touch_emit_pointer_route(
                         &g_direct_touch, WC3_DIRECT_TOUCH_POINTER_UP,
-                        pointer_id, cx, cy, event_time_ms);
+                        pointer_id, cx, cy, event_time_ms,
+                        WC3_DIRECT_TOUCH_ROUTE_MINIMAP);
                     direct_owner_remove(pointer_id);
                 }
                 return 0;
@@ -1505,6 +1572,7 @@ static void direct_touch_native_cancel(void) {
 void controls_cancel_all(void) {
     if (!g_initialized) return;
 
+    g_direct_touch_gate_route = WC3_DIRECT_TOUCH_ROUTE_LEGACY;
     /* Release a native mouse button before the pointer table disappears.
      * The guest-side service turns this into WM_LBUTTONUP; without it a
      * cancelled minimap drag or command-card press could leave the button

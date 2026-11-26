@@ -199,6 +199,22 @@ uint32_t hle_mss_hook_trace(const char *name, uint32_t real);
  * WM_KEYDOWN/WM_SYSKEYDOWN wParam and keeps GetKeyState coherent. */
 void hle_android_key_event(int vk, int down);
 
+/* A key the game itself must see as part of an already-started command, not a
+ * new user input (the A of attack-move).  It posts the same key messages but
+ * does not advance the input epoch and does not touch the physical key
+ * bitmap, so it cannot cancel the deferred click that it belongs to. */
+void hle_android_key_event_synthetic(int vk, int down);
+
+/* Monotonic user-input epoch.  It advances once per new command-starting
+ * input (touch contact, non-modifier key-down transition, mouse button-down
+ * transition) in the same g_uq_lock critical section that queues the input.
+ * A deferred synthetic click records the epoch when it is armed and may post
+ * only while the epoch is unchanged; a newer input therefore cancels it
+ * deterministically, without a timeout.  Reads are lock-free; the counter is
+ * never reset and unsigned wrap is safe because callers compare !=. */
+uint32_t hle_android_input_epoch(void);
+void hle_android_input_epoch_bump(void);
+
 /* Direct overlay key signals need the same modifier state GetKeyState() would
  * see after a real key message, but must not post that message.  This updates
  * only the HLE key state (including the generic SHIFT/CONTROL/MENU bits). */

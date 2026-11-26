@@ -3676,13 +3676,15 @@ def test_overlay() -> int:
 def test_native_press_barrier() -> int:
     """T0: Native Input Gateway is the only way touch code can press a button.
 
-    The gateway has no synchronous press path and no per-gesture defer flag:
-    every press is published from the idle GetCursorPos pass, behind the
-    dispatched move.  The camera triplet keeps its own LEFT UP cleanup; a
-    normal press does not.  Direct touch has no raw button-posting API at
-    all.  A future
-    fast path or menu-only special case would reintroduce the whole "first tap
-    after the panel is idle" class, so that shape is part of the contract.
+    The gateway has no synchronous press path and no per-call-site DOWN
+    defer: a normal press is published from the idle GetCursorPos pass, behind
+    the dispatched move.  The one policy bit is the modal fallback for a
+    late-resolved native UI release; a field selection must keep it off and
+    wait for the idle pass.  The camera triplet keeps its own LEFT UP
+    cleanup; a normal press does not.  Direct touch has no raw button-posting
+    API at all.  A future fast path or menu-only special case would
+    reintroduce the whole "first tap after the panel is idle" class, so that
+    shape is part of the contract.
     """
     def strip_comments(text: str) -> str:
         text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
@@ -3765,6 +3767,121 @@ def test_native_press_barrier() -> int:
         if token not in dt:
             errors.append(f"late native release bypasses the idle gateway: "
                           f"{token} missing")
+    # A touch-originated world selection is not a modal replay.  The
+    # select-unit intent must arm the idle gateway; the synchronous replay is
+    # reserved for target/placement confirmation.
+    select_case = dt.split("case WC3_DT_INTENT_SELECT_UNIT:", 1)
+    if len(select_case) != 2:
+        errors.append("select-unit intent case missing")
+    else:
+        block = select_case[1].split("case ", 1)[0]
+        if "dt_native_press_deferred(ev, 0)" not in block:
+            errors.append("select-unit tap bypasses the idle gateway")
+        if "dt_native_left_click" in block:
+            errors.append("select-unit tap uses the modal replay")
+    # The message-pump fallback is only for a late native UI release whose
+    # modal loop may stop polling GetCursorPos.  A field release must not use
+    # it: the first world tap would be hit-tested against stale hot control.
+    native_case = dt.split("case WC3_DT_FIELD_RELEASE_NATIVE:", 1)
+    if len(native_case) != 2:
+        errors.append("native field release case missing")
+    else:
+        block = native_case[1].split("case ", 1)[0]
+        if "dt_native_press_deferred(ev, 1)" not in block:
+            errors.append("late native release lost its modal fallback")
+    if "g_native_up_modal &&" not in dt:
+        errors.append("native-up fallback is not gated by the modal policy")
+    if dt.count("dt_native_press_deferred(ev, 0)") < 2:
+        errors.append("field deferred press lost its idle-only policy")
+    if dt.count("dt_native_press_deferred(ev, 1)") != 2:
+        errors.append("modal fallback used outside the two native UI releases")
+    # Pause entry must be detected before the deferred-press branch returns;
+    # otherwise an armed field DOWN keeps the service in that branch and the
+    # menu entry edge is never observed.
+    service = dt.split("void wc3_hle_direct_touch_service", 1)
+    if len(service) != 2:
+        errors.append("direct-touch service entry missing")
+    else:
+        body = service[1]
+        sync_pos = body.find("dt_pause_menu_sync()")
+        pending_pos = body.find("if (g_native_up_pending)")
+        if (sync_pos < 0 or pending_pos < 0 or sync_pos > pending_pos):
+            errors.append("pause entry is detected after the deferred-press return")
+    enter = dt.split("static void dt_pause_menu_enter_state", 1)
+    if len(enter) != 2:
+        errors.append("pause entry teardown missing")
+    else:
+        block = enter[1].split("static int dt_pause_menu_sync", 1)[0]
+        if "g_native_up_pending" not in block:
+            errors.append("pause entry does not clear an armed field press")
+    # Deferred field clicks are cancelled by a monotonic input epoch, not by a
+    # timeout.  The timeout constants were the crutch: a slow load or a paused
+    # guest could expire the click, and a long timeout could confirm a stale
+    # target.  The epoch advances in the same queue lock as the new input.
+    for token in ("DT_FIELD_CLICK_TIMEOUT_MS", "DT_FIELD_NATIVE_CLICK_TIMEOUT_MS",
+                  "g_field_click_ms"):
+        if token in dt:
+            errors.append(f"field click still uses a timeout: {token}")
+    for token in ("g_field_click_input_epoch", "hle_android_input_epoch()",
+                  "hle_android_mouse_click_if_epoch("):
+        if token not in dt:
+            errors.append(f"field click lost its epoch cancellation: {token}")
+    if "hle_android_mouse_click_if_epoch" not in gateway_hdr:
+        errors.append("gateway header lost the epoch-checked click")
+    click_fn = ha.split("int hle_android_mouse_click_if_epoch", 1)
+    if len(click_fn) != 2:
+        errors.append("hle_android.c lost hle_android_mouse_click_if_epoch")
+    else:
+        block = click_fn[1].split("\n}\n", 1)[0]
+        lock = block.find("pthread_mutex_lock(&g_uq_lock)")
+        check = block.find("g_input_epoch")
+        down = block.find("u_msg_push_locked(")
+        unlock = block.rfind("pthread_mutex_unlock(&g_uq_lock)")
+        if min(lock, check, down, unlock) < 0 or not (lock < check < down < unlock):
+            errors.append(
+                "epoch check and click are not in one queue critical section")
+    # A key or button input advances the epoch in the same critical section as
+    # its queue push.  A plain u_msg_post here would leave the click race open.
+    if "u_msg_post_input(" not in ha:
+        errors.append("hle_android.c lost the epoch-advancing input post")
+    key_fn = ha.split("static void key_event_post", 1)
+    if (len(key_fn) != 2 or
+            "u_msg_post_input(" not in key_fn[1].split("\n}\n", 1)[0]):
+        errors.append(
+            "key events do not advance the input epoch under the queue lock")
+    user_key_fn = ha.split("void hle_android_key_event(int vk, int down)", 1)
+    if (len(user_key_fn) != 2 or
+            "key_event_post(vk, down, 1)" not in
+            user_key_fn[1].split("\n}\n", 1)[0]):
+        errors.append("user key events bypass the epoch-advancing path")
+    btn_fn = ha.split("static void mouse_button_ex", 1)
+    if (len(btn_fn) != 2 or
+            "u_msg_post_input(" not in btn_fn[1].split("\n}\n", 1)[0]):
+        errors.append(
+            "mouse buttons do not advance the input epoch under the queue lock")
+    if "hle_android_input_epoch_bump" not in dt:
+        errors.append("direct-touch enqueue does not advance the input epoch")
+    # The A of attack-move belongs to the command that the release started.
+    # It must be posted synthetically so it does not advance the epoch past
+    # the click's snapshot, and the snapshot must be taken before both.
+    for text, name in ((dt, "direct touch"), (ha, "HLE"),
+                       (hdr, "header")):
+        if "hle_android_key_event_synthetic" not in text:
+            errors.append(f"{name} lost the synthetic key path")
+    if "hle_android_key_event(0x41" in dt:
+        errors.append("attack-move A key still advances the input epoch")
+    order_fn = dt.split("static DtOrderResult dt_smart_order_at", 1)
+    if len(order_fn) != 2:
+        errors.append("smart-order executor missing")
+    else:
+        block = order_fn[1].split("\n}\n", 1)[0]
+        snap = block.find("hle_android_input_epoch()")
+        a_down = block.find("hle_android_key_event_synthetic(0x41, 1)")
+        queue = block.find(
+            "dt_field_attack_move_click_queue_at(ev, input_epoch)")
+        if min(snap, a_down, queue) < 0 or not (snap < a_down < queue):
+            errors.append("attack-move epoch snapshot does not precede the "
+                          "synthetic A and click")
     if errors:
         for line in errors:
             print(f"native-press-barrier: {line}", file=sys.stderr)
