@@ -66,7 +66,15 @@
 #define DT_UI_PORTRAIT     0x000003F4u
 #define DT_UI_MINIMAP      0x000003C0u
 #define DT_UI_COMMAND_BAR  0x000003C8u
-
+/* CGameUI+0x41C is the full minimap panel frame: it has the map image at
+ * +0xB4 and the Minimap* buttons as children.  Its rect is the authoritative
+ * input area, including the button row above the map image. */
+#define DT_UI_MINIMAP_CONTAINER 0x0000041Cu
+/* MinimapSignal is stored as a frame ID, not a pointer.  CFrame's child list
+ * is [frame+0x40], each child has next at +0x8 and ID at +0xC. */
+#define DT_FRAME_CHILD_LIST 0x00000040u
+#define DT_FRAME_ID         0x0000000Cu
+#define DT_FRAME_NEXT       0x00000008u
 #define DT_PORTRAIT_UNIT   0x00000238u
 #define DT_PORTRAIT_FRAME  0x000000B4u
 #define DT_PORTRAIT_OFF    0x00000260u
@@ -251,27 +259,37 @@
  * result in the 16-entry signal ring.  ret 0x18. */
 #define DT_FN_ADD_SIGNAL       0x6F3B0A30u
 #define DT_BEACON_TAP_SLOP     0.02f
-/* Native key-signal dispatcher.  ecx = pointer to a one-byte key code,
- * edx = pointer to a 12-byte event payload, two stack dwords = 0.  It looks
- * the code up in the game's own key-binding table and fires whatever action
- * is bound to it, so an arrow key can drive a camera scroll, an ability or
- * any other bound action without going through a keyboard message. */
-#define DT_FN_KEY_SIGNAL       0x6F358940u
-/* The game's own direct key-state signal (JASS SetKeyState).  ecx is a
- * one-bit mask from the special-key table: 0x08 LEFT, 0x10 UP, 0x20 RIGHT,
- * 0x40 DOWN.  edx is the press flag and one stack dword is the force flag.
- * The guest writes 0x6FCE5518 itself and runs its own arrow signal path. */
-#define DT_FN_SET_KEY_STATE    0x6F35A9F0u
-/* CGameUI control-group action handler.  The native event arrives as command
- * 0x40060064 with ecx = CGameUI and one stack argument: a command packet
- * whose +0x10 is the internal action id.  Lifted C shows three encodings:
- *   0x300 + (group-1) -> L_6F394135 -> 0x6F36B880(ui, slot), i.e. recall;
- *   (group + 2)       -> the 0x6F3943B0 slot table -> store via
- *                        L_6F393D31 / 0x6F6BCD30;
- *   0x112 / 0x113     -> the special branch at L_6F3940CF.
- * This is the one guest call a chord binding resolves to: no WM_KEY* message
- * and no separate modifier state is published by the overlay. */
-#define DT_FN_GROUP_ACTION     0x6F393AF0u
+/* CGameUI control-group action handlers.  These are the exact calls the
+ * native digit hotkey handler makes in build/corpus-full/game/closed.c:
+ *   plain digit: 0x6F3972D0([ui+0x24C], slot).  It rebuilds the group set
+ *                from +0xDC+slot*0x14 and applies it to the selection via
+ *                0x6F39738E -> 0x6F28FFA0 -> 0x6F3968B0 (0x6F36B880 is a
+ *                different seven-slot manager and never recalls a group);
+ *   Ctrl digit:  0x6F293B30(selection, &set) exports the current selection,
+ *                0x6F293050(selection, slot, &set) assigns it to the slot,
+ *                and 0x6F6BCD30(slot, &set) posts the 0x17 command;
+ *   Shift digit: 0x6F28FF80(selection, slot, &set) exports the group, its
+ *                units are merged into the exported selection, and the
+ *                union is assigned through the same two calls as Ctrl.
+ * No keyboard message, key state or modifier state is involved. */
+#define DT_FN_GROUP_RECALL   0x6F3972D0u
+#define DT_UI_GROUP_MANAGER  0x0000024Cu
+#define DT_FN_EXPORT_SELECT  0x6F293B30u
+#define DT_FN_EXPORT_GROUP   0x6F28FF80u
+#define DT_FN_ASSIGN_GROUP   0x6F293050u
+#define DT_FN_STORE_GROUP    0x6F6BCD30u
+#define DT_FN_SET_ADD        0x6F268150u
+#define DT_FN_SET_RETAIN     0x6F1DBB50u
+/* DT_PLAYER_MANAGER (+0x28 local player id) -> 0x6F1E0EA0 -> player +0x34
+ * is the live selection manager, the same chain the native handler uses. */
+#define DT_FN_PLAYER_BY_ID   0x6F1E0EA0u
+/* Non-group overlay bindings keep the original key-signal path. */
+#define DT_FN_KEY_SIGNAL     0x6F358940u
+#define DT_FN_SET_KEY_STATE  0x6F35A9F0u
+/* set layout used by 0x6F2939F0/0x6F293050: +4 count, +8 unit array. */
+#define DT_GROUP_SET_COUNT   0x00000004u
+#define DT_GROUP_SET_ARRAY   0x00000008u
+#define DT_GROUP_SET_MAX     12u
 
 #define DT_SELECTION_ACTIVE_GROUP 0x0000020Cu
 /* The native 0x50065 handler derives the selection holder from the unit:
@@ -365,6 +383,7 @@ typedef struct {
     uint8_t active;
     uint8_t pointer;
     uint8_t moved;
+    uint8_t from_button;
     float down_x;
     float down_y;
 } DtBeaconGesture;
@@ -425,6 +444,10 @@ typedef struct {
 
 static DtRectSnapshot g_portrait_snapshot;
 static DtRectSnapshot g_minimap_snapshot;
+/* Full minimap panel (CGameUI+0x41C), including the Minimap* button row.
+ * Published on the guest thread so the controls layer can claim the whole
+ * panel before the field recognizer turns a button press into a long press. */
+static DtRectSnapshot g_minimap_panel_snapshot;
 /* The beacon button (MinimapSignal) is a separate frame.  Publishing its
  * rectangle lets the controls layer force a press on the button to the raw
  * NATIVE route even if the button overlaps the field rectangle; the guest
@@ -701,6 +724,7 @@ static void dt_beacon_reset(void)
     g_beacon.active = 0;
     g_beacon.pointer = 0;
     g_beacon.moved = 0;
+    g_beacon.from_button = 0;
 }
 
 static void dt_beacon_cancel(void)
@@ -1170,6 +1194,12 @@ static void dt_minimap_publish(float left, float top, float right,
     dt_rect_publish(&g_minimap_snapshot, left, top, right, bottom);
 }
 
+static void dt_minimap_panel_publish(float left, float top, float right,
+                                     float bottom)
+{
+    dt_rect_publish(&g_minimap_panel_snapshot, left, top, right, bottom);
+}
+
 static void dt_beacon_publish(float left, float top, float right,
                               float bottom)
 {
@@ -1203,14 +1233,44 @@ int wc3_hle_direct_touch_minimap_input_rect(float *left, float *top,
     float mb = 0.0f;
     if (!dt_rect_read(&g_minimap_snapshot, &ml, &mt, &mr, &mb)) return 0;
 
+    /* The published panel frame is authoritative: it includes the button row
+     * above the map image, which the console-derived rect missed. */
+    float pl = 0.0f;
+    float pt = 0.0f;
+    float pr = 0.0f;
+    float pb = 0.0f;
+    if (dt_rect_read(&g_minimap_panel_snapshot, &pl, &pt, &pr, &pb) &&
+        wc3_dt_minimap_panel_plausible(pl, pt, pr, pb, ml, mt, mr, mb)) {
+        *left = pl;
+        *top = pt;
+        *right = pr;
+        *bottom = pb;
+        return 1;
+    }
+
     float cl = 0.0f;
     float ct = 0.0f;
     float cr = 0.0f;
     float cb = 0.0f;
     const int console_valid =
         dt_rect_read(&g_command_snapshot, &cl, &ct, &cr, &cb);
-    return wc3_dt_minimap_input_rect(ml, mt, mr, mb, console_valid, ct,
-                                     left, top, right, bottom);
+    if (!wc3_dt_minimap_input_rect(ml, mt, mr, mb, console_valid, ct,
+                                   left, top, right, bottom))
+        return 0;
+
+    /* Extend the gate to the MinimapSignal button.  Its frame is resolved by
+     * native ID, so this is exact geometry rather than a margin guess; the
+     * adjacency check rejects a stray frame with the same ID. */
+    float bl = 0.0f;
+    float bt = 0.0f;
+    float br = 0.0f;
+    float bb = 0.0f;
+    if (dt_rect_read(&g_beacon_snapshot, &bl, &bt, &br, &bb) &&
+        wc3_dt_minimap_beacon_plausible(bl, bt, br, bb, ml, mt, mr, mb)) {
+        wc3_dt_minimap_input_union(left, top, right, bottom,
+                                   bl, bt, br, bb);
+    }
+    return 1;
 }
 
 int wc3_hle_direct_touch_beacon_rect(float *left, float *top,
@@ -1389,6 +1449,44 @@ static void dt_minimap_snapshot(uint32_t ui, uint32_t width, uint32_t height)
     dt_minimap_publish(l, t, r, b);
 }
 
+/*
+ * The native camera handler maps CGameUI+0x41C (the full panel), not the
+ * +0xB4 map image.  The panel also hosts the MinimapSignal/Terrain/Colors/
+ * Creeps buttons above the image; those presses must be claimed before the
+ * field recognizer can turn them into a long press.  Read the panel rect from
+ * the frame itself instead of deriving it from the command bar top.
+ */
+static void dt_minimap_panel_snapshot(uint32_t ui, uint32_t width,
+                                      uint32_t height)
+{
+    if (!ui || !dt_guest_readable(ui + DT_UI_MINIMAP_CONTAINER, 4u)) {
+        dt_minimap_panel_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    const uint32_t panel = wc3_rd32g(ui + DT_UI_MINIMAP_CONTAINER);
+    float l = 0.0f;
+    float t = 0.0f;
+    float r = 0.0f;
+    float b = 0.0f;
+    /* CGameUI+0x41C points at the panel object, not at a CFrame: like the
+     * CMinimap object it embeds its frame at +0xB4.  Reading the object as a
+     * frame is why rev 52 got panel=63280A98 and an unreadable rect. */
+    if (panel &&
+        dt_frame_rect_snapshot(panel + DT_MINIMAP_FRAME, width, height,
+                               &l, &t, &r, &b) &&
+        r > l && b > t) {
+        dt_minimap_panel_publish(l, t, r, b);
+        return;
+    }
+    if (panel &&
+        dt_frame_rect_snapshot(panel, width, height, &l, &t, &r, &b) &&
+        r > l && b > t) {
+        dt_minimap_panel_publish(l, t, r, b);
+        return;
+    }
+    dt_minimap_panel_publish(0.0f, 0.0f, 0.0f, 0.0f);
+}
+
 /* CGameUI+0x3C0 is the live CMinimap.  The world->screen matrix used by
  * AddSignal is at +0x750.  Require the whole matrix window so a half-built
  * object is not mistaken for a usable minimap. */
@@ -1404,6 +1502,29 @@ static uint32_t dt_minimap_object(void)
         return 0;
     }
     return minimap;
+}
+
+/* Depth-first search of the native CFrame tree.  The signal button is not a
+ * direct child of the minimap object; it sits somewhere below the panel
+ * frame, so a direct child-list walk misses it. */
+static uint32_t dt_frame_find_id(uint32_t frame, uint32_t id, int depth)
+{
+    if (!frame || depth > 8 || !dt_guest_readable(frame + DT_FRAME_ID, 4u))
+        return 0;
+    if (wc3_rd32g(frame + DT_FRAME_ID) == id &&
+        dt_guest_readable(frame, DT_FRAME_RECT + 20u) &&
+        wc3_rd32g(frame + DT_FRAME_VISIBLE) != 0) {
+        return frame;
+    }
+    if (!dt_guest_readable(frame + DT_FRAME_CHILD_LIST, 4u)) return 0;
+    uint32_t child = wc3_rd32g(frame + DT_FRAME_CHILD_LIST);
+    for (int i = 0; child && i < 128; i++) {
+        const uint32_t found = dt_frame_find_id(child, id, depth + 1);
+        if (found) return found;
+        child = dt_guest_readable(child + DT_FRAME_NEXT, 4u)
+            ? wc3_rd32g(child + DT_FRAME_NEXT) : 0u;
+    }
+    return 0;
 }
 
 static int dt_beacon_signal_rect(uint32_t width, uint32_t height,
@@ -1427,14 +1548,60 @@ static int dt_beacon_signal_rect(uint32_t width, uint32_t height,
     float mb = 0.0f;
     if (!dt_minimap_native_rect(&ml, &mt, &mr, &mb)) return 0;
 
-    const uint32_t frame = wc3_rd32g(ui + DT_UI_MINIMAP_SIGNAL);
+    /* [CGameUI+0x440] is the MinimapSignal frame ID, not a pointer: the
+     * constructor stores the result of the name lookup there (0x47 at
+     * runtime), while the click event carries the same ID in +0x10. */
+    const uint32_t signal_id = wc3_rd32g(ui + DT_UI_MINIMAP_SIGNAL);
+    if (!signal_id) return 0;
+    uint32_t panel = 0;
+    if (dt_guest_readable(ui + DT_UI_MINIMAP_CONTAINER, 4u))
+        panel = wc3_rd32g(ui + DT_UI_MINIMAP_CONTAINER);
+    /* The panel and CMinimap objects embed their CFrame at +0xB4.  Search
+     * that tree; the direct +0x41C child list was the rev 52 miss.  Do not
+     * scan the global CFrame registry: a stale registry entry can point into
+     * a reserved-but-unmapped arena page, and dereferencing it killed the
+     * map-start run (rev 54). */
+    uint32_t frame = panel ? dt_frame_find_id(panel + DT_MINIMAP_FRAME,
+                                              signal_id, 0) : 0;
+    if (!frame)
+        frame = dt_frame_find_id(minimap + DT_MINIMAP_FRAME, signal_id, 0);
+    /* Older as-built notes treated the slot as a pointer.  Keep that path as
+     * a fallback, but only when the value is actually a readable frame. */
+    if (!frame && dt_guest_readable(signal_id, DT_FRAME_RECT + 20u))
+        frame = signal_id;
     if (!frame) {
 #if WC3_DEBUG && WC3_DEBUG_INPUT
-        static uint32_t last_ui = 0;
-        if (ui != last_ui) {
-            last_ui = ui;
-            dt_log("beacon-frame ui=%08X minimap=%08X frame=00000000",
-                   ui, minimap);
+        static uint32_t last_id = 0;
+        if (signal_id != last_id) {
+            last_id = signal_id;
+            dt_log("beacon-frame id=%08X ui=%08X panel=%08X minimap=%08X "
+                   "frame=none", signal_id, ui, panel, minimap);
+            /* Dump direct children of both candidate roots once, so the next
+             * trace shows the real IDs and rects instead of another guess. */
+            const uint32_t roots[2] = {
+                panel ? panel + DT_MINIMAP_FRAME : 0u,
+                minimap + DT_MINIMAP_FRAME
+            };
+            for (uint32_t ri = 0; ri < 2; ri++) {
+                const uint32_t root = roots[ri];
+                if (!root ||
+                    !dt_guest_readable(root + DT_FRAME_CHILD_LIST, 4u))
+                    continue;
+                uint32_t child = wc3_rd32g(root + DT_FRAME_CHILD_LIST);
+                for (int i = 0; child && i < 12; i++) {
+                    const uint32_t cid =
+                        dt_guest_readable(child + DT_FRAME_ID, 4u)
+                            ? wc3_rd32g(child + DT_FRAME_ID) : 0u;
+                    float l = 0.0f, t = 0.0f, r = 0.0f, b = 0.0f;
+                    const int ok = dt_frame_rect_snapshot(
+                        child, width, height, &l, &t, &r, &b);
+                    dt_log("beacon-child root=%08X i=%d frame=%08X id=%08X "
+                           "rect=%d(%.4f,%.4f..%.4f,%.4f)",
+                           root, i, child, cid, ok, l, t, r, b);
+                    child = dt_guest_readable(child + DT_FRAME_NEXT, 4u)
+                        ? wc3_rd32g(child + DT_FRAME_NEXT) : 0u;
+                }
+            }
         }
 #endif
         return 0;
@@ -1442,29 +1609,15 @@ static int dt_beacon_signal_rect(uint32_t width, uint32_t height,
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     {
         static uint32_t last_frame = 0;
-        static uint32_t last_visible = 0xFFFFFFFFu;
-        static uint32_t last_raw[4];
-        uint32_t raw[4] = { 0u, 0u, 0u, 0u };
-        const int readable = dt_guest_readable(frame, DT_FRAME_RECT + 20u);
-        const uint32_t visible =
-            readable ? wc3_rd32g(frame + DT_FRAME_VISIBLE) : 0u;
-        if (readable) {
-            raw[0] = wc3_rd32g(frame + DT_FRAME_RECT + 0u);
-            raw[1] = wc3_rd32g(frame + DT_FRAME_RECT + 4u);
-            raw[2] = wc3_rd32g(frame + DT_FRAME_RECT + 8u);
-            raw[3] = wc3_rd32g(frame + DT_FRAME_RECT + 12u);
-        }
-        if (frame != last_frame || visible != last_visible ||
-            memcmp(raw, last_raw, sizeof(raw)) != 0) {
+        if (frame != last_frame) {
             last_frame = frame;
-            last_visible = visible;
-            memcpy(last_raw, raw, sizeof(raw));
-            dt_log("beacon-frame ui=%08X minimap=%08X frame=%08X "
-                   "readable=%d visible=%u raw_t=%08X raw_l=%08X "
-                   "raw_b=%08X raw_r=%08X float=%.4f,%.4f,%.4f,%.4f",
-                   ui, minimap, frame, readable, visible, raw[0], raw[1],
-                   raw[2], raw[3], dt_float(raw[0]), dt_float(raw[1]),
-                   dt_float(raw[2]), dt_float(raw[3]));
+            const int readable =
+                dt_guest_readable(frame, DT_FRAME_RECT + 20u);
+            const uint32_t visible =
+                readable ? wc3_rd32g(frame + DT_FRAME_VISIBLE) : 0u;
+            dt_log("beacon-frame id=%08X ui=%08X panel=%08X minimap=%08X "
+                   "frame=%08X readable=%d visible=%u",
+                   signal_id, ui, panel, minimap, frame, readable, visible);
         }
     }
 #endif
@@ -1756,14 +1909,16 @@ static uint32_t dt_call_thiscall(CPU *c, uint32_t this_va, uint32_t fn,
 
 /* Fire the action the player bound to a key.
  *
- * Arrows have a dedicated direct signal in the game (SetKeyState): its bit
- * mask is what the guest's own arrow/scroll handlers read from 0x6FCE5518.
- * Using it avoids both the keyboard message layer and the generic binding
- * lookup, so a rebound arrow fires exactly the same path as the real key.
- * Every other key uses the generic signal dispatcher with the byte key code.
+ * Control-group digits arrive as GROUP_SIGNAL and resolve through the game's
+ * own action handler.  No other overlay key has a verified direct guest
+ * action: arrows, Enter, Escape and the standalone Shift button stay on the
+ * keyboard path in controls.c and are deliberately ignored here.  The old
+ * fallback called 0x6F358940 (the named sound-event dispatcher) and the
+ * arrow candidate 0x6F35A9F0 is a global game-flag setter, not key state.
  */
 static void dt_key_signal(CPU *c, uint32_t key_code, uint32_t down)
 {
+    (void)c;
     /* Modifier bindings are not guest actions: the game matches a chord by
      * calling GetKeyState(VK_CONTROL/VK_SHIFT/VK_MENU) inside its hotkey
      * matcher (0x6F08B2E0 -> 0x6F08B2FC/F5/EE).  Feed the HLE key state that
@@ -1784,8 +1939,6 @@ static void dt_key_signal(CPU *c, uint32_t key_code, uint32_t down)
     default: break;
     }
     if (arrow_bit) {
-        /* edx carries the press flag; the single stack dword is the force
-         * flag and stays 0, matching the game's published wrapper. */
         const uint32_t args[1] = { 0u };
         c->ecx = arrow_bit;
         c->edx = down;
@@ -1794,9 +1947,6 @@ static void dt_key_signal(CPU *c, uint32_t key_code, uint32_t down)
         return;
     }
 
-    /* The generic binding signal fires on key-down.  The arrow path above
-     * also needs key-up to clear the guest's key-state bit, but a digit or
-     * letter binding has no separate release action. */
     if (!down) return;
 
     const uint32_t key_byte = dt_scratch_alloc();
@@ -1815,40 +1965,145 @@ static void dt_key_signal(CPU *c, uint32_t key_code, uint32_t down)
     dt_trace("key-signal", key_code, 0);
 }
 
-/* Resolve one control-group chord through the game's own action handler.
- * group is 1..8, action is 0 recall / 1 store / 2 add-to-selection.  The
- * overlay publishes exactly one event for the chord, so nothing here needs
- * the HLE modifier state or a keyboard message. */
+/* Resolve the live CSelectionManager the same way the native control-group
+ * handler does: player manager -> local player -> selection. */
+static uint32_t dt_group_selection(CPU *c)
+{
+    if (!dt_guest_readable(DT_PLAYER_MANAGER, 4u)) return 0;
+    const uint32_t manager = wc3_rd32g(DT_PLAYER_MANAGER);
+    if (!manager || !dt_guest_readable(manager, 0x30u)) return 0;
+    const uint32_t args[1] = { wc3_rd16g(manager + 0x28u) };
+    c->ecx = manager;
+    const uint32_t player = wc3_hle_call_guest(c, DT_FN_PLAYER_BY_ID, 1, args);
+    if (!player || !dt_guest_readable(player, 0x38u)) return 0;
+    return wc3_rd32g(player + 0x34u);
+}
+
+/* The native group hotkey handler assigns the set to the slot in the live
+ * selection and then posts the group command.  Both halves are required:
+ * posting the command alone leaves the local selection group untouched. */
+static void dt_group_assign(CPU *c, uint32_t sel, uint32_t slot,
+                            uint32_t set)
+{
+    const uint32_t args[2] = { slot, set };
+    c->ecx = sel;
+    (void)wc3_hle_call_guest(c, DT_FN_ASSIGN_GROUP, 2, args);
+    c->ecx = slot;
+    c->edx = set;
+    (void)wc3_hle_call_guest(c, DT_FN_STORE_GROUP, 0, NULL);
+}
+
+/* Shift+digit in the native handler merges the stored group into the
+ * exported selection set, then stores the union back into the same slot.
+ * 0x6F268150 appends a unit and returns the new element; 0x6F1DBB50 takes
+ * that element in ecx and the unit as its stack argument. */
+static void dt_group_merge_set(CPU *c, uint32_t dst, uint32_t src)
+{
+    if (!dt_guest_readable(src, DT_GROUP_SET_ARRAY + 4u) ||
+        !dt_guest_readable(dst, DT_GROUP_SET_ARRAY + 4u)) return;
+    const uint32_t src_count = wc3_rd32g(src + DT_GROUP_SET_COUNT);
+    const uint32_t src_array = wc3_rd32g(src + DT_GROUP_SET_ARRAY);
+    const uint32_t dst_array = wc3_rd32g(dst + DT_GROUP_SET_ARRAY);
+    const uint32_t dst_count = wc3_rd32g(dst + DT_GROUP_SET_COUNT);
+    if (src_count > DT_GROUP_SET_MAX || dst_count > DT_GROUP_SET_MAX ||
+        !src_array || !dst_array ||
+        !dt_guest_readable(src_array, src_count * 4u) ||
+        !dt_guest_readable(dst_array, dst_count * 4u)) return;
+
+    for (uint32_t i = 0; i < src_count; i++) {
+        const uint32_t unit = wc3_rd32g(src_array + i * 4u);
+        if (!unit || !dt_guest_readable(unit, 4u)) continue;
+        const uint32_t live_count = wc3_rd32g(dst + DT_GROUP_SET_COUNT);
+        if (live_count > DT_GROUP_SET_MAX ||
+            !dt_guest_readable(dst_array, live_count * 4u)) break;
+        int present = 0;
+        for (uint32_t j = 0; j < live_count; j++) {
+            if (wc3_rd32g(dst_array + j * 4u) == unit) {
+                present = 1;
+                break;
+            }
+        }
+        if (present) continue;
+        const uint32_t add_arg[1] = { unit };
+        c->ecx = dst;
+        const uint32_t element =
+            wc3_hle_call_guest(c, DT_FN_SET_ADD, 1, add_arg);
+        if (!element || !dt_guest_readable(element, 4u)) continue;
+        const uint32_t retain_arg[1] = { unit };
+        c->ecx = element;
+        (void)wc3_hle_call_guest(c, DT_FN_SET_RETAIN, 1, retain_arg);
+    }
+}
+
+/* Resolve one control-group chord.  group is 1..8, action is 0 recall /
+ * 1 store / 2 add-to-selection.  The overlay publishes exactly one event for
+ * the chord, so nothing here needs the HLE modifier state or a keyboard
+ * message. */
 static void dt_group_signal(CPU *c, uint32_t group, uint32_t action)
 {
+    dt_trace("group-signal-enter", group, action);
     if (!group || group > 8u) return;
-    uint32_t ui = 0;
-    if (!dt_ui_present(&ui)) return;
+    const uint32_t slot = group - 1u;
 
-    const uint32_t packet = dt_scratch_alloc();
-    if (!packet) return;
-    uint8_t *p = (uint8_t *)(uintptr_t)guest_host_ptr(packet);
-    memset(p, 0, 0x20u);
-
-    uint32_t id;
-    switch (action) {
-    case 1u: /* MOD_CTRL: assign the current selection to the group. */
-        id = group + 2u;
-        break;
-    case 2u: /* MOD_SHIFT: add the group to the current selection. */
-        id = 0x112u;
-        break;
-    default: /* plain key: recall the group. */
-        id = 0x300u + group - 1u;
-        break;
+    if (action == 0u) { /* plain digit: recall the group */
+        uint32_t ui = 0;
+        if (!dt_ui_present(&ui)) {
+            dt_trace("group-recall-no-ui", slot, 0);
+            return;
+        }
+        if (!dt_guest_readable(ui + DT_UI_GROUP_MANAGER, 4u)) {
+            dt_trace("group-recall-bad-manager-slot", slot, ui);
+            return;
+        }
+        const uint32_t manager = wc3_rd32g(ui + DT_UI_GROUP_MANAGER);
+        if (!manager || !dt_guest_readable(manager, 4u)) {
+            dt_trace("group-recall-bad-manager", slot, manager);
+            return;
+        }
+        const uint32_t args[1] = { slot };
+        c->ecx = manager;
+        (void)wc3_hle_call_guest(c, DT_FN_GROUP_RECALL, 1, args);
+        dt_trace("group-recall", slot, manager);
+        return;
     }
-    wr32(p + 0x10u, id);
 
-    const uint32_t args[1] = { packet };
-    c->ecx = ui;
-    (void)wc3_hle_call_guest(c, DT_FN_GROUP_ACTION, 1, args);
-    dt_scratch_free(packet);
-    dt_trace("group-action", group, action);
+    const uint32_t sel = dt_group_selection(c);
+    if (!sel) {
+        dt_trace("group-no-selection", slot, action);
+        return;
+    }
+    const uint32_t set = dt_scratch_alloc();
+    if (!set) {
+        dt_trace("group-no-scratch", slot, action);
+        return;
+    }
+
+    if (action == 1u) { /* Ctrl: assign the current selection to the group */
+        const uint32_t args[1] = { set };
+        c->ecx = sel;
+        (void)wc3_hle_call_guest(c, DT_FN_EXPORT_SELECT, 1, args);
+        dt_trace("group-store", slot, wc3_rd32g(set + DT_GROUP_SET_COUNT));
+        dt_group_assign(c, sel, slot, set);
+    } else if (action == 2u) { /* Shift: merge the group into the selection */
+        const uint32_t group_set = dt_scratch_alloc();
+        if (!group_set) {
+            dt_scratch_free(set);
+            return;
+        }
+        const uint32_t export_args[1] = { set };
+        const uint32_t group_args[2] = { slot, group_set };
+        c->ecx = sel;
+        (void)wc3_hle_call_guest(c, DT_FN_EXPORT_SELECT, 1, export_args);
+        c->ecx = sel;
+        (void)wc3_hle_call_guest(c, DT_FN_EXPORT_GROUP, 2, group_args);
+        dt_trace("group-add-merge", wc3_rd32g(set + DT_GROUP_SET_COUNT),
+                 wc3_rd32g(group_set + DT_GROUP_SET_COUNT));
+        dt_group_merge_set(c, set, group_set);
+        dt_scratch_free(group_set);
+        dt_group_assign(c, sel, slot, set);
+        dt_trace("group-add", slot, wc3_rd32g(set + DT_GROUP_SET_COUNT));
+    }
+    dt_scratch_free(set);
 }
 
 /*
@@ -2057,6 +2312,7 @@ static void dt_sync_idle_context(uint32_t width, uint32_t height)
      * must not hit a stale frame. */
     dt_portrait_snapshot(ui, width, height);
     dt_minimap_snapshot(ui, width, height);
+    dt_minimap_panel_snapshot(ui, width, height);
     dt_beacon_snapshot(width, height);
     dt_command_snapshot(ui, width, height);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
@@ -2672,6 +2928,36 @@ static int dt_unit_position(CPU *c, uint32_t unit, float *x, float *y)
     if (!isfinite(px) || !isfinite(py)) return 0;
     *x = px;
     *y = py;
+    return 1;
+}
+
+/*
+ * Place a beacon on the unit shown by the portrait.  A button-origin drag
+ * that ends over the portrait targets the displayed/primary-selected unit,
+ * not the terrain under the portrait frame.  The unit position and AddSignal
+ * are the same native paths the portrait pan and minimap beacon use.
+ */
+static int dt_beacon_place_portrait(CPU *c, const DtContext *ctx)
+{
+    const uint32_t minimap = dt_minimap_object();
+    if (!minimap || !ctx || !ctx->ui) return 0;
+    if (dt_paused(c)) {
+        dt_trace("beacon-portrait-paused", 0, 0);
+        return 0;
+    }
+    const uint32_t unit = dt_portrait_unit(c, ctx);
+    if (!unit) {
+        dt_trace("beacon-portrait-no-unit", 0, 0);
+        return 0;
+    }
+    float x = 0.0f;
+    float y = 0.0f;
+    if (!dt_unit_position(c, unit, &x, &y)) {
+        dt_trace("beacon-portrait-no-position", unit, 0);
+        return 0;
+    }
+    if (!dt_add_beacon(c, minimap, x, y, 0.0f)) return 0;
+    dt_trace("beacon-portrait", unit, 0);
     return 1;
 }
 
@@ -3636,10 +3922,12 @@ static int dt_minimap_native_rect(float *left, float *top,
 
 /*
  * Convert a point claimed by the full minimap input area into the smaller
- * native map frame.  The native frame manager only delivers mouse moves
- * while the cursor is over that frame, so posting the raw finger position
- * would stop the camera at the frame's top edge.  The affine mapping keeps
- * the whole visible minimap driveable: the panel top maps to the map top.
+ * native map frame.  This is used only for beacon signal placement, whose
+ * AddSignal matrix is defined in the child frame's local space.  It must NOT
+ * be used for pointer phases: the native camera handler maps the whole
+ * container at CGameUI+0x41C to the map, so compressing a DOWN/MOVE into the
+ * child frame makes the camera jump to its top edge (~65% of the panel)
+ * before the real point.  Native phases use dt_minimap_input_clamp.
  */
 static void dt_minimap_input_point(float x, float y,
                                    float *out_x, float *out_y)
@@ -3656,6 +3944,10 @@ static void dt_minimap_input_point(float x, float y,
     float mb = 0.0f;
     if (!wc3_hle_direct_touch_minimap_input_rect(&il, &it, &ir, &ib) ||
         !dt_minimap_native_rect(&ml, &mt, &mr, &mb)) return;
+    /* A release on the map image is already in the frame's surface space.
+     * The input gate also covers the button row, so compressing that whole
+     * gate into the smaller image would move a valid map release. */
+    if (wc3_dt_minimap_input_contains(x, y, ml, mt, mr, mb)) return;
     (void)wc3_dt_minimap_local_point(x, y,
                                      it, il, ib, ir,
                                      mt, ml, mb, mr,
@@ -3699,6 +3991,45 @@ static void dt_minimap_native_clamp(float *x, float *y,
     if (*x > inner_right) *x = inner_right;
     if (*y < inner_top) *y = inner_top;
     if (*y > inner_bottom) *y = inner_bottom;
+    g_minimap.x = *x;
+    g_minimap.y = *y;
+}
+
+/*
+ * Clamp a minimap drag point to the full visible panel (the container frame),
+ * not to the smaller +0xB4 map image.  The native camera handler maps the
+ * container to the whole map; once the DOWN has started a drag, the guest
+ * keeps receiving moves even when the point leaves the child frame.  Keeping
+ * the raw finger coordinate in container space therefore lets an upward drag
+ * reach the north edge instead of stopping at the child frame's top edge.
+ */
+static void dt_minimap_input_clamp(float *x, float *y,
+                                   uint32_t width, uint32_t height)
+{
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+    if (!wc3_hle_direct_touch_minimap_input_rect(&left, &top,
+                                                 &right, &bottom)) {
+        /* No live container: fall back to the published native frame. */
+        dt_minimap_native_clamp(x, y, width, height);
+        return;
+    }
+    const float inset_x = width > 1u ? 1.0f / (float)width : 0.001f;
+    const float inset_y = height > 1u ? 1.0f / (float)height : 0.001f;
+    float inner_left = left + inset_x;
+    float inner_top = top + inset_y;
+    float inner_right = right - inset_x;
+    float inner_bottom = bottom - inset_y;
+    if (inner_left > inner_right) {
+        inner_left = inner_right = (left + right) * 0.5f;
+    }
+    if (inner_top > inner_bottom) {
+        inner_top = inner_bottom = (top + bottom) * 0.5f;
+    }
+    wc3_dt_minimap_pointer_point(*x, *y, inner_left, inner_top,
+                                 inner_right, inner_bottom, x, y);
     g_minimap.x = *x;
     g_minimap.y = *y;
 }
@@ -3831,9 +4162,14 @@ static int dt_native_defer_pointer(const Wc3DirectTouchEvent *ev)
         float mt = 0.0f;
         float mr = 0.0f;
         float mb = 0.0f;
+        /* The minimap owns the whole visible panel, including the strip that
+         * overlaps the bottom of the field rectangle.  Using the +0xB4 map
+         * frame here let that strip become a deferred field tap as well as a
+         * minimap drag.  The published input rect is the authoritative gate:
+         * if it claims the point, no field defer may start. */
         const int on_minimap =
-            dt_minimap_native_rect(&ml, &mt, &mr, &mb) &&
-            ev->x >= ml && ev->x <= mr && ev->y >= mt && ev->y <= mb;
+            wc3_hle_direct_touch_minimap_input_rect(&ml, &mt, &mr, &mb) &&
+            wc3_dt_minimap_input_contains(ev->x, ev->y, ml, mt, mr, mb);
         const int inside_field = !on_minimap &&
                                  dt_field_contains(ev->x, ev->y);
         const int load_defer =
@@ -4027,13 +4363,18 @@ static void dt_native_pointer(const Wc3DirectTouchEvent *ev)
  * claimed here before any native mouse button is posted, so pressing the
  * button or placing the beacon never starts a camera drag or a native click.
  *
- *   DOWN on the signal button          -> start a gesture;
+ *   DOWN on the signal button          -> start a button-origin drag;
  *   DOWN on the minimap while armed    -> start an armed placement;
  *   MOVE                               -> consume, remember whether it moved;
  *   UP on the minimap                  -> place at the release point;
+ *   UP on the portrait                 -> place on the displayed unit;
  *   UP in the field                    -> pick and place at the release point;
  *   UP on the button without movement  -> arm the next minimap press;
  *   UP anywhere else after movement    -> cancel.
+ *
+ * A button-origin drag is resolved from its DOWN and UP points, not only from
+ * the MOVE phases that happened to reach the service: a hold dragged onto the
+ * minimap or into the world always drops the beacon where the finger lifted.
  *
  * A press anywhere else disarms the one-shot mode and is handled normally.
  */
@@ -4072,7 +4413,8 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
             g_beacon.down_x = ev->x;
             g_beacon.down_y = ev->y;
             g_beacon.moved = 0;
-            dt_trace("beacon-down", dt_bits(ev->x), dt_bits(ev->y));
+            g_beacon.from_button = 1;
+            dt_trace("beacon-button-down", dt_bits(ev->x), dt_bits(ev->y));
             return 1;
         }
 
@@ -4097,6 +4439,7 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
                 g_beacon.down_x = ev->x;
                 g_beacon.down_y = ev->y;
                 g_beacon.moved = 0;
+                g_beacon.from_button = 0;
                 dt_trace("beacon-armed-down", dt_bits(ev->x),
                          dt_bits(ev->y));
                 return 1;
@@ -4149,20 +4492,34 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
         dt_beacon_signal_rect(width, height, &bl, &bt, &br, &bb) &&
         ev->x >= bl && ev->x <= br &&
         ev->y >= bt && ev->y <= bb;
+    float pl = 0.0f;
+    float pt = 0.0f;
+    float pr = 0.0f;
+    float pb = 0.0f;
+    const int have_portrait =
+        wc3_hle_direct_touch_portrait_rect(&pl, &pt, &pr, &pb);
+    const int inside_portrait =
+        have_portrait &&
+        ev->x >= pl && ev->x <= pr && ev->y >= pt && ev->y <= pb;
     const int inside_field = dt_field_contains(ev->x, ev->y);
-    const Wc3DtBeaconRelease release =
-        wc3_dt_beacon_release(inside_button, inside_minimap, inside_field,
-                              g_beacon.moved);
-    dt_log("beacon-up ptr=%u n=%.4f,%.4f moved=%d button=%d"
+    /* Resolve from the press/release endpoints.  The service may defer or
+     * coalesce MOVE phases, so `g_beacon.moved` alone cannot prove that a
+     * hold on the button was dragged onto the map. */
+    const Wc3DtBeaconRelease release = wc3_dt_beacon_release_from_points(
+        inside_button, inside_minimap, inside_portrait, inside_field,
+        g_beacon.down_x, g_beacon.down_y, ev->x, ev->y, DT_BEACON_TAP_SLOP);
+    dt_log("beacon-up ptr=%u n=%.4f,%.4f moved=%d from_button=%d button=%d"
            "(%.4f,%.4f..%.4f,%.4f) minimap=%d(%.4f,%.4f..%.4f,%.4f) "
-           "field=%d release=%d",
-           ev->pointer_id, ev->x, ev->y, g_beacon.moved, inside_button,
-           bl, bt, br, bb, inside_minimap, ml, mt, mr, mb, inside_field,
-           (int)release);
+           "portrait=%d(%.4f,%.4f..%.4f,%.4f) field=%d release=%d",
+           ev->pointer_id, ev->x, ev->y, g_beacon.moved, g_beacon.from_button,
+           inside_button,
+           bl, bt, br, bb, inside_minimap, ml, mt, mr, mb,
+           inside_portrait, pl, pt, pr, pb, inside_field, (int)release);
 
     g_beacon.active = 0;
     g_beacon.pointer = 0;
     g_beacon.moved = 0;
+    g_beacon.from_button = 0;
 
     switch (release) {
     case WC3_DT_BEACON_MINIMAP: {
@@ -4175,6 +4532,12 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
         }
         return 1;
     }
+    case WC3_DT_BEACON_PORTRAIT:
+        g_beacon.armed = 0;
+        if (dt_beacon_place_portrait(c, ctx)) {
+            dt_trace("beacon-place-portrait", dt_bits(ev->x), dt_bits(ev->y));
+        }
+        return 1;
     case WC3_DT_BEACON_FIELD:
         g_beacon.armed = 0;
         if (dt_beacon_place_field(c, ctx, ev->x, ev->y, width, height)) {
@@ -4201,7 +4564,7 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
  * Native minimap backstop.  The controls layer clamps a pointer it owns as
  * MINIMAP, but the service sees only raw NATIVE phases: the route is not
  * carried in the event.  A DOWN inside the published rectangle starts a
- * minimap-owned native drag here too, so the release stays inside the frame
+ * minimap-owned native drag here too, so the release stays inside the panel
  * even if the controls gate missed (stale/empty snapshot at DOWN) and the
  * finger came up far outside.  The UP is forced because the logical left bit
  * may already be clear by the time the raw phase arrives.
@@ -4228,7 +4591,7 @@ static void dt_native_minimap_pointer(const Wc3DirectTouchEvent *ev,
             !g_native_down && !g_field_drag.select_active &&
             (!hle_android_mouse_is_down(0) || g_native_release.left) &&
             input_present && native_present &&
-            ev->x >= il && ev->x <= ir && ev->y >= it && ev->y <= ib;
+            wc3_dt_minimap_input_contains(ev->x, ev->y, il, it, ir, ib);
         dt_log("minimap-native-down ptr=%u n=%.4f,%.4f inside=%d "
                "native_down=%d field_select=%d "
                "up_pending=%d hw_down=%d rect=%.4f,%.4f..%.4f,%.4f "
@@ -4244,11 +4607,11 @@ static void dt_native_minimap_pointer(const Wc3DirectTouchEvent *ev,
         Wc3DirectTouchEvent clamped = *ev;
         g_minimap.active = 1;
         g_minimap.pointer = ev->pointer_id;
-        dt_minimap_input_point(clamped.x, clamped.y,
-                               &clamped.x, &clamped.y);
-        g_minimap.x = clamped.x;
-        g_minimap.y = clamped.y;
-        dt_minimap_native_clamp(&clamped.x, &clamped.y, width, height);
+        /* Post the DOWN at the actual finger point in panel space.  Mapping
+         * it into the +0xB4 child frame first made the camera jump to the
+         * ~60% barrier on the tap, then to the tap point on the first MOVE.
+         * The whole visible panel is the native minimap's input area. */
+        dt_minimap_input_clamp(&clamped.x, &clamped.y, width, height);
         dt_native_pointer(&clamped);
         g_minimap.pressed = g_native_down;
         dt_trace("minimap-native-down", dt_bits(clamped.x),
@@ -4266,8 +4629,9 @@ static void dt_native_minimap_pointer(const Wc3DirectTouchEvent *ev,
     }
 
     Wc3DirectTouchEvent clamped = *ev;
-    dt_minimap_input_point(clamped.x, clamped.y, &clamped.x, &clamped.y);
-    dt_minimap_native_clamp(&clamped.x, &clamped.y, width, height);
+    /* Keep every phase of the drag in panel space so the native camera
+     * handler reaches the full map without an intermediate frame-top jump. */
+    dt_minimap_input_clamp(&clamped.x, &clamped.y, width, height);
 
     if (ev->kind == WC3_DIRECT_TOUCH_POINTER_MOVE) {
         dt_native_pointer(&clamped);
@@ -4276,7 +4640,7 @@ static void dt_native_minimap_pointer(const Wc3DirectTouchEvent *ev,
         return;
     }
 
-    /* UP or CANCEL.  Post the final in-rect move first, then the release.
+    /* UP or CANCEL.  Post the final panel-space move first, then the release.
      * dt_native_pointer() would skip the release when g_native_down is
      * already clear, which is exactly the latched-drag case this backstop
      * exists for. */
@@ -5724,7 +6088,7 @@ static void dt_command_tick(CPU *c, uint32_t width, uint32_t height)
  * so a tap release is a no-op.  A drag into the field posts one native left
  * click at the release point to confirm the target.  Any other drag
  * cancels. */
-static void dt_command_finish(const Wc3DirectTouchEvent *ev,
+static void dt_command_finish(CPU *c, const Wc3DirectTouchEvent *ev,
                               uint32_t width, uint32_t height)
 {
 #if !(WC3_DEBUG && WC3_DEBUG_INPUT)
@@ -5797,6 +6161,65 @@ static void dt_command_finish(const Wc3DirectTouchEvent *ev,
         return;
     }
 
+    /* A targeted command dragged onto the portrait targets the unit shown
+     * there (or the primary selection).  The portrait is below the field
+     * rectangle, so the generic field branch would otherwise cancel it. */
+    {
+        float pl = 0.0f;
+        float pt = 0.0f;
+        float pr = 0.0f;
+        float pb = 0.0f;
+        DtContext portrait_ctx;
+        memset(&portrait_ctx, 0, sizeof portrait_ctx);
+        if (wc3_hle_direct_touch_portrait_rect(&pl, &pt, &pr, &pb) &&
+            dt_context(&portrait_ctx)) {
+            const int portrait_hit =
+                ev->x >= pl && ev->x <= pr && ev->y >= pt && ev->y <= pb;
+            const int target_mode_live =
+                dt_grid_targeting(portrait_ctx.ui);
+            if (wc3_dt_command_portrait_target(target_mode_live,
+                                               portrait_hit, moved)) {
+                const uint32_t unit = dt_portrait_unit(c, &portrait_ctx);
+                if (unit) {
+                    const uint32_t target =
+                        wc3_rd32g(portrait_ctx.ui + DT_UI_TARGET_MODE);
+                    dt_grid_target(c, target, unit);
+                    dt_command_target_reset();
+                    dt_command_reset();
+                    dt_trace("cmd-portrait-target", unit, target);
+                    return;
+                }
+                dt_trace("cmd-portrait-no-unit", 0, 0);
+            }
+        }
+    }
+
+    /* A targeted command dragged onto a selected-unit grid button targets
+     * that unit.  The grid is below the field rectangle, so the generic
+     * field branch would otherwise cancel the command on release.  This uses
+     * the same native target-mode event a grid press sends while targeting. */
+    {
+        uint32_t grid_ui = 0;
+        uint32_t grid_selection = 0;
+        if (dt_grid_context(c, &grid_ui, &grid_selection)) {
+            const uint32_t grid_unit = dt_grid_button_at(c, grid_ui, ev->x,
+                                                          ev->y, width, height);
+            /* The live target mode is authoritative: the command data word
+             * cannot reliably identify a targeted button. */
+            const int target_mode_live = dt_grid_targeting(grid_ui);
+            if (wc3_dt_command_grid_target(target_mode_live,
+                                           grid_unit != 0, moved)) {
+                const uint32_t target =
+                    wc3_rd32g(grid_ui + DT_UI_TARGET_MODE);
+                dt_grid_target(c, target, grid_unit);
+                dt_command_target_reset();
+                dt_command_reset();
+                dt_trace("cmd-grid-target", grid_unit, target);
+                return;
+            }
+        }
+    }
+
     if (dt_field_contains(ev->x, ev->y)) {
         const int targeted = dt_command_targeting(type);
         if (wc3_dt_command_release(moved, targeted, 1) ==
@@ -5832,7 +6255,7 @@ static void dt_command_finish(const Wc3DirectTouchEvent *ev,
     dt_command_reset();
 }
 
-static int dt_command_pointer(const Wc3DirectTouchEvent *ev,
+static int dt_command_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
                               uint32_t width, uint32_t height)
 {
     if (!ev || ev->route != WC3_DIRECT_TOUCH_ROUTE_NATIVE) return 0;
@@ -5924,7 +6347,7 @@ static int dt_command_pointer(const Wc3DirectTouchEvent *ev,
         return 1;
     case WC3_DIRECT_TOUCH_POINTER_UP:
         if (!g_cmd_active || ev->pointer_id != g_cmd_pointer) return 0;
-        dt_command_finish(ev, width, height);
+        dt_command_finish(c, ev, width, height);
         return 1;
     case WC3_DIRECT_TOUCH_POINTER_CANCEL:
         if (!g_cmd_active || ev->pointer_id != g_cmd_pointer) return 0;
@@ -6135,7 +6558,7 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
             break;
         }
         if (ev->route == WC3_DIRECT_TOUCH_ROUTE_NATIVE &&
-            dt_command_pointer(ev, width, height)) {
+            dt_command_pointer(c, ev, width, height)) {
             dt_log("consumed=command ptr=%u", ev->pointer_id);
             break;
         }
@@ -6184,6 +6607,7 @@ void wc3_hle_direct_touch_start(void)
     dt_native_release();
     dt_portrait_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_minimap_publish(0.0f, 0.0f, 0.0f, 0.0f);
+    dt_minimap_panel_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_beacon_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_publish_route(WC3_DIRECT_TOUCH_ROUTE_LEGACY);
@@ -6224,6 +6648,7 @@ void wc3_hle_direct_touch_reset(void)
     dt_native_release();
     dt_portrait_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_minimap_publish(0.0f, 0.0f, 0.0f, 0.0f);
+    dt_minimap_panel_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_beacon_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_publish_route(WC3_DIRECT_TOUCH_ROUTE_LEGACY);
@@ -6353,6 +6778,7 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
      * batch so the next touch sees the new UI. */
     dt_portrait_snapshot(cur_ui, width, height);
     dt_minimap_snapshot(cur_ui, width, height);
+    dt_minimap_panel_snapshot(cur_ui, width, height);
     dt_beacon_snapshot(width, height);
     dt_command_snapshot(cur_ui, width, height);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
@@ -6672,6 +7098,7 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
     }
     dt_portrait_snapshot(final_ui, width, height);
     dt_minimap_snapshot(final_ui, width, height);
+    dt_minimap_panel_snapshot(final_ui, width, height);
     dt_beacon_snapshot(width, height);
     dt_command_snapshot(final_ui, width, height);
 #if WC3_DEBUG && WC3_DEBUG_INPUT

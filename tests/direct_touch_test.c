@@ -792,17 +792,40 @@ static void test_portrait_gesture(void)
 static void test_beacon_release_resolution(void)
 {
     /* Release on the button arms the next minimap tap, even after jitter.
-     * A release over the minimap places there and wins over the field; a
-     * field release places at the world point; any other drag cancels. */
-    assert(wc3_dt_beacon_release(1, 0, 0, 0) == WC3_DT_BEACON_ARM);
-    assert(wc3_dt_beacon_release(1, 0, 0, 1) == WC3_DT_BEACON_ARM);
-    assert(wc3_dt_beacon_release(0, 1, 0, 0) == WC3_DT_BEACON_MINIMAP);
-    assert(wc3_dt_beacon_release(0, 1, 1, 1) == WC3_DT_BEACON_MINIMAP);
-    assert(wc3_dt_beacon_release(0, 0, 1, 1) == WC3_DT_BEACON_FIELD);
-    assert(wc3_dt_beacon_release(0, 0, 0, 1) == WC3_DT_BEACON_NONE);
-    assert(wc3_dt_beacon_release(0, 0, 0, 0) == WC3_DT_BEACON_ARM);
+     * A release over the minimap places there; over the portrait places on
+     * the displayed unit; over the field places at the world point.  Any
+     * other drag cancels.  Portrait wins over field because it overlaps it. */
+    assert(wc3_dt_beacon_release(1, 0, 0, 0, 0) == WC3_DT_BEACON_ARM);
+    assert(wc3_dt_beacon_release(1, 0, 0, 0, 1) == WC3_DT_BEACON_ARM);
+    assert(wc3_dt_beacon_release(0, 1, 0, 0, 0) == WC3_DT_BEACON_MINIMAP);
+    assert(wc3_dt_beacon_release(0, 1, 1, 1, 1) == WC3_DT_BEACON_MINIMAP);
+    assert(wc3_dt_beacon_release(0, 0, 1, 0, 0) == WC3_DT_BEACON_PORTRAIT);
+    assert(wc3_dt_beacon_release(0, 0, 1, 1, 1) == WC3_DT_BEACON_PORTRAIT);
+    assert(wc3_dt_beacon_release(0, 0, 0, 1, 1) == WC3_DT_BEACON_FIELD);
+    assert(wc3_dt_beacon_release(0, 0, 0, 0, 1) == WC3_DT_BEACON_NONE);
+    assert(wc3_dt_beacon_release(0, 0, 0, 0, 0) == WC3_DT_BEACON_ARM);
     /* A HUD button must win over the field if the rectangles overlap. */
-    assert(wc3_dt_beacon_release(1, 1, 1, 1) == WC3_DT_BEACON_ARM);
+    assert(wc3_dt_beacon_release(1, 1, 1, 1, 1) == WC3_DT_BEACON_ARM);
+
+    /* Hold on the button, drag onto the minimap/portrait/world, release.
+     * Movement comes from the endpoints, so a deferred/coalesced MOVE cannot
+     * turn the drag into a button tap or cancel it. */
+    assert(wc3_dt_beacon_release_from_points(0, 1, 0, 0,
+                                             0.160f, 0.900f,
+                                             0.080f, 0.830f, 0.02f) ==
+           WC3_DT_BEACON_MINIMAP);
+    assert(wc3_dt_beacon_release_from_points(0, 0, 1, 0,
+                                             0.160f, 0.900f,
+                                             0.250f, 0.900f, 0.02f) ==
+           WC3_DT_BEACON_PORTRAIT);
+    assert(wc3_dt_beacon_release_from_points(0, 0, 0, 1,
+                                             0.160f, 0.900f,
+                                             0.500f, 0.400f, 0.02f) ==
+           WC3_DT_BEACON_FIELD);
+    assert(wc3_dt_beacon_release_from_points(1, 0, 0, 0,
+                                             0.160f, 0.900f,
+                                             0.165f, 0.902f, 0.02f) ==
+           WC3_DT_BEACON_ARM);
 }
 
 static void test_command_release_resolution(void)
@@ -814,6 +837,21 @@ static void test_command_release_resolution(void)
     assert(wc3_dt_command_release(1, 0, 1) == WC3_DT_COMMAND_NONE);
     assert(wc3_dt_command_release(1, 1, 0) == WC3_DT_COMMAND_NONE);
     assert(wc3_dt_command_release(1, 1, 1) == WC3_DT_COMMAND_TARGET);
+
+    /* A drag that ends on a selected-unit grid button targets that unit when
+     * a target mode is live; a tap or an instant command does not. */
+    assert(wc3_dt_command_grid_target(1, 1, 1));
+    assert(!wc3_dt_command_grid_target(0, 1, 1));
+    assert(!wc3_dt_command_grid_target(1, 0, 1));
+    assert(!wc3_dt_command_grid_target(1, 1, 0));
+
+    /* Portrait is the same kind of HUD target: the displayed/selected unit
+     * is resolved by the HLE, so the pure rule only gates live target mode,
+     * portrait hit and movement. */
+    assert(wc3_dt_command_portrait_target(1, 1, 1));
+    assert(!wc3_dt_command_portrait_target(0, 1, 1));
+    assert(!wc3_dt_command_portrait_target(1, 0, 1));
+    assert(!wc3_dt_command_portrait_target(1, 1, 0));
 }
 
 static void test_command_target_mode(void)
@@ -1049,6 +1087,71 @@ static void test_minimap_input_rect_and_mapping(void)
     expect_near("minimap input right", right, 0.1488f);
     expect_near("minimap input bottom", bottom, 0.9931f);
 
+    /* The strip 0.7817..0.85 belongs to the minimap even though it overlaps
+     * the field rectangle's bottom.  The native +0xB4 frame does not cover
+     * it, so using that frame as the ownership gate would start both a field
+     * tap and a minimap drag. */
+    assert(wc3_dt_minimap_input_contains(0.08f, 0.80f,
+                                         left, top, right, bottom));
+    assert(!wc3_dt_minimap_input_contains(0.08f, 0.80f,
+                                          0.0094f, 0.8550f,
+                                          0.1488f, 0.9931f));
+
+    /* The live CGameUI+0x41C panel wins when it contains the map image; it
+     * also has to cover the button row above/right of that image. */
+    assert(wc3_dt_minimap_panel_prefers(0.0094f, 0.7750f, 0.1700f, 0.9931f,
+                                        0.0094f, 0.8550f,
+                                        0.1488f, 0.9931f));
+    assert(wc3_dt_minimap_panel_prefers(0.0094f, 0.8550f, 0.1488f, 0.9931f,
+                                        0.0094f, 0.8550f,
+                                        0.1488f, 0.9931f));
+    assert(!wc3_dt_minimap_panel_prefers(0.0094f, 0.7800f, 0.1000f, 0.9900f,
+                                         0.0094f, 0.8550f,
+                                         0.1488f, 0.9931f));
+    assert(!wc3_dt_minimap_panel_prefers(0.0094f, 0.7750f, 0.0100f, 0.9931f,
+                                         0.0094f, 0.8550f,
+                                         0.1488f, 0.9931f));
+
+    /* A whole-screen frame contains the minimap but must not become the
+     * minimap gate; the button row above/right of the image is plausible. */
+    assert(wc3_dt_minimap_panel_plausible(0.0094f, 0.7700f,
+                                          0.1750f, 0.9931f,
+                                          0.0094f, 0.8550f,
+                                          0.1488f, 0.9931f));
+    assert(!wc3_dt_minimap_panel_plausible(0.0000f, 0.0000f,
+                                           1.0000f, 1.0000f,
+                                           0.0094f, 0.8550f,
+                                           0.1488f, 0.9931f));
+    assert(!wc3_dt_minimap_panel_plausible(0.0094f, 0.6500f,
+                                           0.1750f, 0.9931f,
+                                           0.0094f, 0.8550f,
+                                           0.1488f, 0.9931f));
+    assert(wc3_dt_minimap_beacon_plausible(0.1500f, 0.7700f,
+                                           0.1750f, 0.8200f,
+                                           0.0094f, 0.8550f,
+                                           0.1488f, 0.9931f));
+    assert(wc3_dt_minimap_beacon_plausible(0.1500f, 0.8500f,
+                                           0.1750f, 0.9000f,
+                                           0.0094f, 0.8550f,
+                                           0.1488f, 0.9931f));
+    assert(!wc3_dt_minimap_beacon_plausible(0.5000f, 0.5000f,
+                                            0.6000f, 0.6000f,
+                                            0.0094f, 0.8550f,
+                                            0.1488f, 0.9931f));
+
+    float ul = 0.0094f;
+    float ut = 0.7817f;
+    float ur = 0.1488f;
+    float ub = 0.9931f;
+    wc3_dt_minimap_input_union(&ul, &ut, &ur, &ub,
+                               0.1500f, 0.7700f, 0.1750f, 0.8200f);
+    expect_near("minimap union left", ul, 0.0094f);
+    expect_near("minimap union top", ut, 0.7700f);
+    expect_near("minimap union right", ur, 0.1750f);
+    expect_near("minimap union bottom", ub, 0.9931f);
+    wc3_dt_minimap_input_union(&ul, &ut, &ur, &ub, 0.0f, 0.0f, 0.0f, 0.0f);
+    expect_near("minimap union degenerate top", ut, 0.7700f);
+
     /* No console snapshot: fall back to the native frame, never to a
      * hardcoded guess. */
     assert(wc3_dt_minimap_input_rect(0.0094f, 0.8550f, 0.1488f, 0.9931f,
@@ -1063,7 +1166,8 @@ static void test_minimap_input_rect_and_mapping(void)
     expect_near("minimap input rejected console top", top, 0.8550f);
 
     /* Full-panel top maps to the native map top; panel bottom to map bottom.
-     * This is what removes the invisible barrier during an upward drag. */
+     * This mapping is for beacon signals only; pointer phases stay in panel
+     * space so the camera does not stop at the frame top first. */
     float mx = 0.0f;
     float my = 0.0f;
     assert(wc3_dt_minimap_local_point(0.0094f, 0.7817f,
@@ -1079,6 +1183,22 @@ static void test_minimap_input_rect_and_mapping(void)
                                       &mx, &my));
     expect_near("minimap panel bottom to map bottom x", mx, 0.0791f);
     expect_near("minimap panel bottom to map bottom y", my, 0.9931f);
+
+    /* A drag keeps its finger coordinate in container space.  Compressing
+     * MOVEs into the +0xB4 child frame is what caused the ~65% barrier:
+     * the panel top would become the child top (0.8550), not the map top. */
+    wc3_dt_minimap_pointer_point(0.1171f, 0.8011f,
+                                 0.0094f, 0.7817f, 0.1488f, 0.9931f,
+                                 &mx, &my);
+    expect_near("minimap drag keeps upper-panel y", my, 0.8011f);
+    wc3_dt_minimap_pointer_point(0.1171f, 0.7100f,
+                                 0.0094f, 0.7817f, 0.1488f, 0.9931f,
+                                 &mx, &my);
+    expect_near("minimap drag clamps to panel top", my, 0.7817f);
+    wc3_dt_minimap_pointer_point(0.1171f, 1.2000f,
+                                 0.0094f, 0.7817f, 0.1488f, 0.9931f,
+                                 &mx, &my);
+    expect_near("minimap drag clamps to panel bottom", my, 0.9931f);
 }
 
 int main(void)

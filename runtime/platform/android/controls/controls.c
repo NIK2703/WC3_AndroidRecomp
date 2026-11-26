@@ -259,28 +259,6 @@ int controls_opacity_percent(void) {
 /* A move delivered by the engine, but not yet followed by an LMB press. */
 static bool g_pointer_move_pending;
 
-/* Publish a key signal to the guest instead of letting it reach the keyboard
- * HLE.  The event queue is the same one used by direct touch, so the guest
- * service stays the only thread that calls into the body. */
-static bool emit_key_signal(int vk, int down, uint64_t time_ms)
-{
-    if (!g_direct_touch_enabled || !g_direct_touch.sink || !vk) return false;
-    Wc3DirectTouchEvent event;
-    memset(&event, 0, sizeof(event));
-    event.kind = WC3_DIRECT_TOUCH_KEY_SIGNAL;
-    event.pointer_id = (uint32_t)vk;
-    event.route = down ? 1u : 0u;
-    event.time_ms = time_ms;
-    g_direct_touch.sink(&event, g_direct_touch.user);
-    return true;
-}
-
-static bool signal_is_modifier(int vk)
-{
-    return vk == 0x10 || vk == 0x11 || vk == 0x12 ||
-           (vk >= 0xA0 && vk <= 0xA5);
-}
-
 /* The overlay profile binds long presses and gestures as KEY_N + MOD_CTRL /
  * MOD_SHIFT.  Those are not three independent inputs: they name one game
  * action (assign / add to control group N).  KEY_1..KEY_8 are keycodes
@@ -307,6 +285,11 @@ static bool emit_group_signal(int group, int action, uint64_t time_ms)
     /* route = 0 recall, 1 store (Ctrl), 2 add-to-selection (Shift). */
     event.route = (uint32_t)action;
     event.time_ms = time_ms;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+    wc3_direct_touch_debug_log("group-signal-send group=%u action=%u t=%llu",
+                               (unsigned)group, (unsigned)action,
+                               (unsigned long long)time_ms);
+#endif
     g_direct_touch.sink(&event, g_direct_touch.user);
     return true;
 }
@@ -321,20 +304,14 @@ static bool emit_group_signal(int group, int action, uint64_t time_ms)
 static void emit_actions(const TouchActionResult *result) {
     if (!g_sink || !result || result->count <= 0) return;
 
-    /* In direct mode every key action produced by the vendored engine is a
-     * binding signal.  Field contacts never reach that engine, so this covers
-     * both the overlay buttons and the gestures bound on them. */
+    /* Only the control-group chords are direct signals.  Every other key
+     * binding (arrows, Escape, Enter, standalone Shift/Ctrl) has no verified
+     * direct guest action and stays on the game's keyboard path. */
     const bool overlay_keys =
-        g_direct_touch_enabled && g_key_vk_map && g_direct_touch.sink;
+        g_direct_touch_enabled && g_direct_touch.sink;
 
     TouchAction filtered[MAX_TOUCH_RESULT_ACTIONS];
     int filtered_count = 0;
-    /* Key actions are collected first so a chord can be collapsed into one
-     * group signal.  The modifier half of a chord is never published as a
-     * separate key signal. */
-    int sig_vk[MAX_TOUCH_RESULT_ACTIONS];
-    uint8_t sig_down[MAX_TOUCH_RESULT_ACTIONS];
-    int sig_count = 0;
 
     /* A digit press and its modifier arrive in the same result batch.  Find
      * the modifier once so the digit can be bound directly to the action the
@@ -363,7 +340,13 @@ static void emit_actions(const TouchActionResult *result) {
         switch (action->type) {
             case ACT_KEY_PRESS: {
                 int keycode = action->key.keycode;
-                int vk = overlay_keys ? g_key_vk_map(keycode, g_key_vk_user) : 0;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+                wc3_direct_touch_debug_log(
+                    "key-action press keycode=%d vk=%d group=%d overlay=%d",
+                    keycode,
+                    g_key_vk_map ? g_key_vk_map(keycode, g_key_vk_user) : 0,
+                    group_of_keycode(keycode), overlay_keys);
+#endif
                 bool chord = false;
                 if (overlay_keys) {
                     int group = group_of_keycode(keycode);
@@ -375,12 +358,6 @@ static void emit_actions(const TouchActionResult *result) {
                                chord_action) {
                         chord = true; /* modifier half of the chord */
                     }
-                }
-                if (vk && !chord && sig_count < MAX_TOUCH_RESULT_ACTIONS) {
-                    sig_vk[sig_count] = vk;
-                    sig_down[sig_count] = 1;
-                    sig_count++;
-                    keep = false;
                 }
                 if (keycode >= 0 && keycode < (int)(sizeof(g_key_down) /
                                                     sizeof(g_key_down[0]))) {
@@ -395,19 +372,17 @@ static void emit_actions(const TouchActionResult *result) {
             }
             case ACT_KEY_RELEASE: {
                 int keycode = action->key.keycode;
-                int vk = overlay_keys ? g_key_vk_map(keycode, g_key_vk_user) : 0;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+                wc3_direct_touch_debug_log(
+                    "key-action release keycode=%d group=%d overlay=%d",
+                    keycode, group_of_keycode(keycode), overlay_keys);
+#endif
                 bool chord = false;
                 if (overlay_keys) {
                     int group = group_of_keycode(keycode);
                     if (group) chord = true;
                     else if (modifier_action_of_keycode(keycode) && chord_action)
                         chord = true;
-                }
-                if (vk && !chord && sig_count < MAX_TOUCH_RESULT_ACTIONS) {
-                    sig_vk[sig_count] = vk;
-                    sig_down[sig_count] = 0;
-                    sig_count++;
-                    keep = false;
                 }
                 if (keycode >= 0 && keycode < (int)(sizeof(g_key_down) /
                                                     sizeof(g_key_down[0]))) {
@@ -450,16 +425,6 @@ static void emit_actions(const TouchActionResult *result) {
 
         if (keep && filtered_count < MAX_TOUCH_RESULT_ACTIONS) {
             filtered[filtered_count++] = *action;
-        }
-    }
-
-    /* Publish modifier signals first: the guest resolves a chord by reading
-     * GetKeyState() when the key action is dispatched. */
-    for (int pass = 0; pass < 2; pass++) {
-        for (int i = 0; i < sig_count; i++) {
-            if (signal_is_modifier(sig_vk[i]) != (pass == 0)) continue;
-            (void)emit_key_signal(sig_vk[i], sig_down[i] ? 1 : 0,
-                                  g_last_event_ms);
         }
     }
 
@@ -882,13 +847,6 @@ static void direct_owner_remove(int pointer_id) {
     }
 }
 
-static int direct_owner_any_vendor(void) {
-    for (int i = 0; i < DIRECT_OWNER_SLOTS; i++) {
-        if (g_direct_owners[i].owner == DIRECT_OWNER_VENDOR) return 1;
-    }
-    return 0;
-}
-
 /* A native HUD gesture and any extra pointers swallowed while it was active
  * form one unit: a new gesture must not start until every one of them is up.
  * A minimap drag is a native gesture too. */
@@ -1180,24 +1138,15 @@ void controls_set_direct_touch_command_gate(
 }
 
 /*
- * A second finger no longer hijacks the first field contact.  The recognizer
- * assigns roles: one contact may claim the cursor-free camera, the other owns
- * the virtual mouse.  A camera drag holds no native button, so there is no
- * handoff and no swallow here.  Native HUD/portrait gestures still swallow
- * extra pointers because they really own the cursor/follow.
+ * A second finger must stay usable while another finger holds an overlay
+ * control.  In direct mode the vendor engine owns only authored overlay
+ * elements, so an overlay hold and a battlefield or native-HUD contact are
+ * independent: the overlay finger keeps its button, the other finger keeps
+ * the game action.  Swallowing every later pointer while a vendor pointer
+ * was down turned a held D-pad button into a one-finger lock.
  */
 static int direct_touch_begin(int pointer_id, float x, float y,
                               uint64_t event_time_ms) {
-    /* Once any pointer belongs to the vendor engine, the gesture is a
-     * camera/pinch or an overlay interaction.  Keep later pointers on that
-     * path until every pointer is up; starting a fresh direct gesture in the
-     * middle of a two-finger gesture would mix an order into a pan. */
-    if (direct_owner_any_vendor()) {
-        WC3_CTRL_LOG("dt begin ptr=%d px=%.1f,%.1f -> vendor-active",
-                     pointer_id, x, y);
-        return 0;
-    }
-
     /* Resolve the route before swallowing a second native pointer: an
      * overlay element pressed while a HUD gesture is active must still reach
      * the legacy engine, not become an ignored direct pointer. */

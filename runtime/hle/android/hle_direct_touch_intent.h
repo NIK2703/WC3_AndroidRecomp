@@ -209,16 +209,20 @@ static inline Wc3DtTapIntent wc3_dt_tap_intent(int pick_result,
 
 /* Beacon button (MinimapSignal) release decision.  A release on the button
  * arms the next minimap tap; a release over the minimap places there; a
- * release over the field places at the world point; any other drag cancels. */
+ * release over the portrait places on the displayed unit; a release over
+ * the field places at the world point; any other drag cancels.  Portrait is
+ * checked before field because the portrait sits inside the field rectangle. */
 typedef enum {
     WC3_DT_BEACON_NONE = 0,
     WC3_DT_BEACON_ARM,
     WC3_DT_BEACON_MINIMAP,
+    WC3_DT_BEACON_PORTRAIT,
     WC3_DT_BEACON_FIELD
 } Wc3DtBeaconRelease;
 
 static inline Wc3DtBeaconRelease wc3_dt_beacon_release(int inside_button,
                                                        int inside_minimap,
+                                                       int inside_portrait,
                                                        int inside_field,
                                                        int moved)
 {
@@ -228,12 +232,30 @@ static inline Wc3DtBeaconRelease wc3_dt_beacon_release(int inside_button,
      * control must not turn into a world order when rectangles overlap. */
     if (inside_button) return WC3_DT_BEACON_ARM;
     if (inside_minimap) return WC3_DT_BEACON_MINIMAP;
+    if (inside_portrait) return WC3_DT_BEACON_PORTRAIT;
     if (inside_field) return WC3_DT_BEACON_FIELD;
     /* The button rectangle can be unavailable for a frame (for example the
      * minimap was rebuilt between press and release).  A release without
      * movement still means the press was a tap on the button. */
     if (!moved) return WC3_DT_BEACON_ARM;
     return WC3_DT_BEACON_NONE;
+}
+
+/*
+ * Resolve a beacon release from the DOWN and UP points of one continuous
+ * press.  The raw MOVE phases can be deferred behind the input barrier or
+ * coalesced away, so a hold on the signal button that ends over the minimap
+ * or the world must still be classified as a drag.  Recomputing movement from
+ * the two endpoints is the same rule the command-card release uses.
+ */
+static inline Wc3DtBeaconRelease wc3_dt_beacon_release_from_points(
+    int inside_button, int inside_minimap, int inside_portrait,
+    int inside_field,
+    float down_x, float down_y, float up_x, float up_y, float slop)
+{
+    const int moved = wc3_dt_past_slop(down_x, down_y, up_x, up_y, slop);
+    return wc3_dt_beacon_release(inside_button, inside_minimap,
+                                 inside_portrait, inside_field, moved);
 }
 
 /*
@@ -267,6 +289,31 @@ static inline Wc3DtCommandRelease wc3_dt_command_release(int moved,
 {
     if (moved && targeted && inside_field) return WC3_DT_COMMAND_TARGET;
     return WC3_DT_COMMAND_NONE;
+}
+
+/*
+ * A command-card drag can end on a unit in the selected-unit grid instead of
+ * the battlefield.  The grid sits below the field rectangle, so the generic
+ * field branch would cancel the command.  A targeted command whose finger
+ * moved onto a grid unit must resolve there exactly like a grid press during
+ * target mode; a tap or an instant command must not steal the grid press.
+ */
+static inline int wc3_dt_command_grid_target(int targeted, int grid_hit,
+                                             int moved)
+{
+    return targeted && grid_hit && moved;
+}
+
+/*
+ * The portrait is the other HUD target for a command-card drag.  Like the
+ * grid it sits below the field rectangle, so the generic field branch would
+ * cancel the command.  A targeted command that ends on the displayed unit's
+ * portrait resolves to that unit, never to the terrain under the portrait.
+ */
+static inline int wc3_dt_command_portrait_target(int targeted,
+                                                 int portrait_hit, int moved)
+{
+    return targeted && portrait_hit && moved;
 }
 
 /*
@@ -436,6 +483,93 @@ static inline int wc3_dt_minimap_local_point(float nx, float ny,
     *out_x = local_left + fx * (local_right - local_left);
     *out_y = local_top + fy * (local_bottom - local_top);
     return 1;
+}
+
+/*
+ * Clamp a native minimap drag point to the full visible panel.  The panel is
+ * the container frame at CGameUI+0x41C; its +0xB4 child only covers the
+ * lower map image.  The native camera handler maps the whole container to
+ * the map, so a drag must keep its finger coordinate in the container space
+ * instead of being compressed into the child frame.  This helper only
+ * clamps; the caller applies the one-pixel Win32 RECT inset.
+ */
+static inline void wc3_dt_minimap_pointer_point(float x, float y,
+                                                float left, float top,
+                                                float right, float bottom,
+                                                float *out_x, float *out_y)
+{
+    if (!out_x || !out_y) return;
+    *out_x = x < left ? left : (x > right ? right : x);
+    *out_y = y < top ? top : (y > bottom ? bottom : y);
+}
+
+/* The input rect is the whole visible panel.  Its top is above the field
+ * rectangle's bottom, so an overlap strip must be claimed by MINIMAP before
+ * any FIELD defer/tap is considered.  The +0xB4 map frame is smaller and
+ * must never be used as the ownership gate for that strip. */
+static inline int wc3_dt_minimap_input_contains(float x, float y,
+                                                float left, float top,
+                                                float right, float bottom)
+{
+    return x >= left && x <= right && y >= top && y <= bottom;
+}
+
+/* Prefer the live CGameUI+0x41C panel rect over the console-derived guess.
+ * It must be non-degenerate and contain the +0xB4 map image; otherwise the
+ * fallback keeps the panel usable on a partially built HUD. */
+static inline int wc3_dt_minimap_panel_prefers(float pl, float pt,
+                                               float pr, float pb,
+                                               float ml, float mt,
+                                               float mr, float mb)
+{
+    return pr > pl && pb > pt &&
+           pl <= ml && pt <= mt && pr >= mr && pb >= mb;
+}
+
+/* A panel rect is usable only when it contains the map image and stays near
+ * it.  A whole-HUD or whole-screen frame also contains the minimap, but
+ * claiming it as the minimap gate would swallow every other touch.  The
+ * margins cover the Minimap* button row above/right of the image. */
+static inline int wc3_dt_minimap_panel_plausible(float pl, float pt,
+                                                 float pr, float pb,
+                                                 float ml, float mt,
+                                                 float mr, float mb)
+{
+    return pr > pl && pb > pt &&
+           pl >= ml - 0.05f && pt >= mt - 0.15f &&
+           pr <= mr + 0.15f && pb <= mb + 0.02f &&
+           pl <= ml && pt <= mt && pr >= mr && pb >= mb;
+}
+
+/* A beacon button is smaller than the map and may sit fully above or right
+ * of it, so it only has to touch the expanded map bounds; a stray frame far
+ * from the minimap is rejected. */
+static inline int wc3_dt_minimap_beacon_plausible(float bl, float bt,
+                                                  float br, float bb,
+                                                  float ml, float mt,
+                                                  float mr, float mb)
+{
+    return br > bl && bb > bt &&
+           bl >= ml - 0.05f && bt >= mt - 0.15f &&
+           br <= mr + 0.15f && bb <= mb + 0.02f &&
+           bl < mr + 0.05f && br > ml - 0.05f &&
+           bt < mb + 0.02f && bb > mt - 0.15f;
+}
+
+/* The Minimap* button row sits above/right of the map image.  Once its rect
+ * is resolved by frame ID, the minimap input area is the union of the panel
+ * and that button; both gestures share one ownership gate. */
+static inline void wc3_dt_minimap_input_union(float *left, float *top,
+                                              float *right, float *bottom,
+                                              float bl, float bt,
+                                              float br, float bb)
+{
+    if (!left || !top || !right || !bottom || !(br > bl) || !(bb > bt))
+        return;
+    if (bl < *left) *left = bl;
+    if (bt < *top) *top = bt;
+    if (br > *right) *right = br;
+    if (bb > *bottom) *bottom = bb;
 }
 
 /*

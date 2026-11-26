@@ -96,9 +96,8 @@ typedef enum {
      * chord as a modifier state plus a key action, controls publishes one of
      * these events: pointer_id carries the group number (1..8) and route
      * carries the action (0 = recall, 1 = store, 2 = add to selection).  The
-     * guest service resolves it in one call to the game's own control-group
-     * action handler; no keyboard message and no separate modifier signal is
-     * involved. */
+     * guest service resolves it with the game's own control-group senders;
+     * no keyboard message and no separate modifier signal is involved. */
     WC3_DIRECT_TOUCH_GROUP_SIGNAL = 17
 } Wc3DirectTouchKind;
 

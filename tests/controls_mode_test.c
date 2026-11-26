@@ -502,14 +502,15 @@ int main(int argc, char **argv)
     assert(controls_touch(WC3_TOUCH_UP, 0, shift_element->x,
                           shift_element->y, 5050) == 0);
     controls_tick(5100);
-    assert(!has_key(50, 1));
-    assert(!has_key(50, 0));
-    assert(direct_has_signal(0xA0, 1)); /* VK_LSHIFT press */
-    assert(direct_has_signal(0xA0, 0)); /* VK_LSHIFT release */
+    /* Standalone SHIFT has no direct guest action: it stays on the normal
+     * keyboard path. */
+    assert(has_key(50, 1));
+    assert(has_key(50, 0));
+    assert(!direct_has_signal(0xA0, 1));
+    assert(!direct_has_signal(0xA0, 0));
 
-    /* A D-pad arrow is a direct binding signal in direct mode.  It must leave
-     * the keyboard action stream and arrive on the direct-touch queue with
-     * the arrow's VK and the press/release phase. */
+    /* Arrows have no verified direct guest action either; they stay on the
+     * keyboard path, which is the game's own camera/arrow signal. */
     const TouchElement *dpad = NULL;
     for (int i = 0; i < g_state.element_count; i++) {
         if (g_state.elements[i].type == D_PAD) {
@@ -524,14 +525,14 @@ int main(int argc, char **argv)
     direct_clear();
     assert(controls_touch(WC3_TOUCH_DOWN, 0, dpad_x, dpad_y, 5400) == 0);
     controls_tick(5410);
-    assert(!has_key(111, 1)); /* X11 KEY_LEFT never reaches the HLE */
-    assert(direct_has_signal(0x25, 1)); /* VK_LEFT press */
+    assert(has_key(113, 1)); /* KEY_LEFT reaches the game keyboard path */
+    assert(!direct_has_signal(0x25, 1));
     actions_clear();
     direct_clear();
     assert(controls_touch(WC3_TOUCH_UP, 0, dpad_x, dpad_y, 5420) == 0);
     controls_tick(5430);
-    assert(!has_key(111, 0));
-    assert(direct_has_signal(0x25, 0)); /* VK_LEFT release */
+    assert(has_key(113, 0));
+    assert(!direct_has_signal(0x25, 0));
 
     /* The command-card buttons are key signals too: button 1 is bound to
      * KEY_1 in the authored profile and must not stay on the keyboard path. */
@@ -542,30 +543,30 @@ int main(int argc, char **argv)
     assert(controls_touch(WC3_TOUCH_DOWN, 0, one->x, one->y, 5440) == 0);
     assert(controls_touch(WC3_TOUCH_UP, 0, one->x, one->y, 5450) == 0);
     controls_tick(5460);
+    /* A digit is one direct group action, never a key plus a modifier.  Tap
+     * is route 0 (recall); the release is swallowed by the chord filter. */
     assert(!has_key(10, 1));
     assert(!has_key(10, 0));
-    assert(direct_has_signal('1', 1));
-    assert(direct_has_signal('1', 0));
+    int tap_group = direct_index(WC3_DIRECT_TOUCH_GROUP_SIGNAL);
+    assert(tap_group >= 0);
+    assert(g_direct_pointer_ids[tap_group] == 1);
+    assert(g_direct_routes[tap_group] == 0);
+    assert(!direct_has_signal('1', 1));
 
-    /* Long press on that same button fires its alternate binding
-     * KEY_1 + MOD_CTRL.  Both are key bindings, so both must arrive as
-     * direct key signals and neither may reappear in the keyboard stream. */
+    /* Long press on the same button fires the authored KEY_1 + MOD_CTRL
+     * chord as a single store action (route 1), with no modifier key signal. */
     actions_clear();
     direct_clear();
     assert(controls_touch(WC3_TOUCH_DOWN, 0, one->x, one->y, 5500) == 0);
     controls_tick(5700);
     assert(!has_key(10, 1));
     assert(!has_key(37, 1));
-    assert(direct_has_signal(0x31, 1));
-    assert(direct_has_signal(0xA2, 1));
-    int mod_idx = -1;
-    int key_idx = -1;
-    for (int i = 0; i < g_direct_count; i++) {
-        if (g_direct_kinds[i] != WC3_DIRECT_TOUCH_KEY_SIGNAL) continue;
-        if (g_direct_pointer_ids[i] == 0xA2 && mod_idx < 0) mod_idx = i;
-        if (g_direct_pointer_ids[i] == 0x31 && key_idx < 0) key_idx = i;
-    }
-    assert(mod_idx >= 0 && key_idx >= 0 && mod_idx < key_idx);
+    int store_group = direct_index(WC3_DIRECT_TOUCH_GROUP_SIGNAL);
+    assert(store_group >= 0);
+    assert(g_direct_pointer_ids[store_group] == 1);
+    assert(g_direct_routes[store_group] == 1);
+    assert(!direct_has_signal(0x31, 1));
+    assert(!direct_has_signal(0xA2, 1));
     assert(controls_touch(WC3_TOUCH_UP, 0, one->x, one->y, 5750) == 0);
     controls_tick(5800);
 
@@ -813,6 +814,54 @@ int main(int argc, char **argv)
     assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
     assert(direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
     assert(direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
+
+    /* Swipe on a digit folds its authored KEY_N + MOD_SHIFT chord into one
+     * direct group action: group 1, route 2 (add to the control group). */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, one->x, one->y, 7510) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, one->x - 80.0f, one->y, 7520) == 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, one->x - 120.0f, one->y, 7530) == 0);
+    controls_tick(7540);
+    assert(!has_key(10, 1));
+    assert(!has_key(50, 1));
+    int group_index = direct_index(WC3_DIRECT_TOUCH_GROUP_SIGNAL);
+    assert(group_index >= 0);
+    assert(g_direct_pointer_ids[group_index] == 1);
+    assert(g_direct_routes[group_index] == 2);
+    assert(controls_touch(WC3_TOUCH_UP, 0, one->x - 120.0f, one->y, 7550) == 0);
+    controls_tick(7560);
+
+    /* Holding an overlay control must not lock out the second finger.  The
+     * D-pad finger owns only the vendor overlay path; a battlefield contact
+     * with another finger stays a direct game action, and a native HUD
+     * contact still reaches the raw pointer route. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, dpad_x, dpad_y, 7600) == 0);
+    controls_tick(7610);
+    assert(has_key(113, 1));
+    assert(!direct_has_signal(0x25, 1));
+    actions_clear(); /* the held arrow action is not a second-finger action */
+    assert(controls_touch(WC3_TOUCH_DOWN, 1, 500.0f, 500.0f, 7620) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 1, 500.0f, 500.0f, 7630) == 0);
+    controls_tick(7640);
+    const int held_tap = direct_index(WC3_DIRECT_TOUCH_TAP);
+    assert(held_tap >= 0);
+    assert(g_direct_pointer_ids[held_tap] == 1);
+    assert(g_direct_routes[held_tap] == WC3_DIRECT_TOUCH_ROUTE_FIELD);
+    assert(g_action_count == 0);
+    assert(controls_touch(WC3_TOUCH_DOWN, 2, 650.0f, 800.0f, 7650) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 2, 650.0f, 800.0f, 7660) == 0);
+    controls_tick(7670);
+    assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_DOWN,
+                            WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+    assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_UP,
+                            WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+    assert(controls_touch(WC3_TOUCH_UP, 0, dpad_x, dpad_y, 7680) == 0);
+    controls_tick(7690);
+    assert(has_key(113, 0));
+    assert(!direct_has_signal(0x25, 0));
 
     controls_set_direct_touch_enabled(false);
     controls_set_direct_touch_sink(NULL, NULL);
