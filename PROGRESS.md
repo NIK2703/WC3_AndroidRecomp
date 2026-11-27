@@ -1723,3 +1723,100 @@ Storm `L_3502A21B` зарезервировал `0x46590000`, но следую�
   запуске ждать `portrait-follow holder=<h> unit=<u>`; если снова
   `portrait-follow-no-holder` — значит у портрета нет holder и сработал
   selection fallback.
+
+## rev67 build/install (explicit user command, 2026-11-27 16:17)
+
+Command: `bash tools/android/build_apk.sh --variant debug --install --serial
+emulator-5554` (log:
+`/data/user/0/com.termux/files/usr/tmp/opencode/build_debug_direct_touch_20261127.log`).
+distcc auto: `workers=pc local=7 remote=4 jobs=11`; the unavailable
+`ideapad` worker warning did not disable distcc.
+
+- Build exit `0`, Gradle `BUILD SUCCESSFUL in 1m 12s`, streamed install
+  `Success`.
+- Rebuilt `hle_direct_touch.c`, `controls.c` and `direct_touch.c`; native
+  `libwc3gameactivity.so` 160550288 bytes, built 16:13:32.
+- APK `build/android_app/wc3-debug.apk`, 178954221 bytes, SHA-256
+  `fd27fe878c43bd27206a73cf00feab5427a0b884abcb62a8df7cc3e0af0291eb`.
+- Installed `wc3.recomp.debug`, versionCode `2`, versionName
+  `0.1.1-debug`, `lastUpdateTime=2026-11-27 16:17:39`.  Installed
+  `base.apk` SHA-256 and size match the local APK byte-for-byte.
+- T0 before build: `direct_touch`, `direct_touch_wiring`, `controls_mode`,
+  `controls_idle`, `native_press_barrier`, `inventory_gesture` pass;
+  `git diff --check` clean apart from the pre-existing `controls.c`
+  line-ending warning.
+- The app was not launched; T2 for grid, target mode, long tap, camera pan
+  and portrait follow is still pending.
+
+## 2026-11-27: единая tap/long-tap политика для целей-юнитов (source-only)
+
+- Дефект: при выделенном подконтрольном юните long tap без drag по другому
+  обычному подконтрольному юниту (например, лучнику) не отдавал smart
+  order: `wc3_dt_long_tap_unit_intent` возвращал `SELECT_UNIT` для любой
+  controllable цели.  Tap по той же цели выбирал её — это правильно.  Для
+  рудника/транспорта пара обратная: tap order, long select — это тоже
+  правильно.
+- Второй дефект: для неподконтрольной цели обе ветки возвращали
+  `ORDER_UNIT`, поэтому при подконтрольном выделении такую цель нельзя
+  было выбрать ни tap'ом, ни long tap'ом.  Исправление: tap остаётся
+  smart order, long tap выбирает цель.  Без подконтрольного выделения
+  источника приказа нет, поэтому `{select, select}` — это правильно.
+- Причина: tap и long tap имели две независимые if-цепочки; long tap не
+  знал про `target_tap_order`, поэтому обычный юнит и исключение
+  обрабатывались одинаково.
+- Решение: `Wc3DtUnitGesturePolicy { tap, long_tap }` и
+  `wc3_dt_unit_gesture_policy()` — единственная матрица:
+  - нет подконтрольного выделения → `{select, select}`;
+  - обычная подконтрольная цель → `{select, order}`;
+  - подконтрольное исключение → `{order, select}`;
+  - неподконтрольная цель → `{order, select}`.
+  При подконтрольном выделении пара всегда содержит ровно один `select`
+  и один `order`; меняется только их порядок.  Обе обёртки
+  `wc3_dt_tap_unit_intent`/`wc3_dt_long_tap_unit_intent` читают только
+  поля политики; статический wiring-тест это фиксирует, а T0 проверяет
+  инвариант «ровно один select + один order» для всех комбинаций.
+- `dt_unit_controlled()` теперь применяет тот же owner-гейт, что и
+  `dt_selection_controlled()`: нативный `0x6F66EC60` плюс owner `0..11`.
+  Нейтральная цель (`owner 12..15`) не попадает в «обычную
+  подконтрольную» пару, даже если нативный предикат вернул 1; для неё
+  tap — smart order, long tap — select.
+- `dt_long_tap_at()` теперь читает `target_type` и `target_tap_order` в
+  release (раньше чтение типа было debug-only), передаёт признак в
+  3-аргументный long intent и логирует `target_tap_order` + `intent`.
+  Для обычного `CUnit` приказ идёт через существующий
+  `dt_smart_order_at()` (route `NATIVE`/right-click), для
+  `egol`/`ugol`/транспорта и неподконтрольного юнита — deferred native
+  left click.  Не-юнит объект/декорация не проходит unit-политику и
+  остаётся на smart-order.
+- Для long tap = select добавлен `dt_long_tap_select_ready()`: на
+  `FIELD_SELECT_BEGIN` (момент распознавания) он делает read-only pick,
+  проверяет `CUnit` и `wc3_dt_long_tap_unit_intent(...) == SELECT_UNIT`,
+  после чего `dt_field_select_begin()` сразу вызывает `dt_native_begin()`.
+  Обычный long tap и long-tap drag сливаются в одно native-выделение:
+  stationary release выбирает цель, движение сразу расширяет selection
+  rectangle, без ожидания drag-threshold квадрата.  Для long tap = order
+  отложенный путь сохранён: stationary release — smart order, drag после
+  порога — selection rectangle.
+- T0: `direct_touch` (матрица политики, инвариант пары и long intent),
+  `direct_touch_wiring` (обе обёртки читают только политику),
+  `native_press_barrier` (long path классифицирует тип до intent;
+  immediate-путь стартует с `dt_long_tap_select_ready`/`dt_native_begin`
+  до deferral; unit-политика не применяется к non-unit), `controls_mode`,
+  `gesture_lifetime`, `inventory_gesture` — проходят.
+  `clang -fsyntax-only -Wall -Wextra -Werror` debug/release = 0/0;
+  `git diff --check` чистый, кроме прежних LF/CRLF предупреждений.
+- Полный `python3 tools/run_tests.py --unit` после immediate/owner-gate
+  правок (лог
+  `/data/user/0/com.termux/files/usr/tmp/opencode/t0_unit_after_immediate_20261127.log`)
+  завершился exit 1 из-за того же набора прежних/environment-гейтов
+  (`docs`, `release_hygiene`, `gesture_mode`, corpus/layout/upstream и
+  т.п.), что и предыдущий лог; `direct_touch`, `direct_touch_wiring`,
+  `native_press_barrier`, `controls_mode`, `gesture_lifetime`,
+  `inventory_gesture` в нём зелёные, новых падений нет.
+- APK не пересобирался; установленный debug build содержит старую
+  rev11-семантику long tap.  T2 после этой правки не запускался.  При
+  следующей сборке проверить: long tap по лучнику → smart order, long tap
+  по `egol` → select, tap по лучнику → select, tap по `egol` → order,
+  long tap по врагу/нейтралу → select, tap по врагу/нейтралу → smart
+  order; long tap + drag по `egol`/врагу → selection rectangle сразу с
+  BEGIN, без ожидания drag-квадрата.

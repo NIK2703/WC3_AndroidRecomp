@@ -65,16 +65,16 @@ typedef enum {
     WC3_DIRECT_TOUCH_FIELD_CAMERA_MOVE = 10,
     WC3_DIRECT_TOUCH_FIELD_CAMERA_END = 11,
     /* Field selection press.  BEGIN is emitted at the long-press deadline.
-     * Normally the executor posts WM_LBUTTONDOWN and keeps it down.  For a
-     * controlled selection in the field it may defer that press until
+     * Normally the executor posts WM_LBUTTONDOWN and keeps it down.  When the
+     * target's long-tap leg is selection, the press starts at BEGIN, so a
+     * stationary release selects the target and a drag extends the native
+     * selection rectangle immediately (no drag-threshold wait).  For the
+     * deferred order path the executor may withhold the press until
      * DRAG_BEGIN (the contact is a real drag) or END (a smart order or
      * attack-move), so a stationary release does not become a selection
      * click.  MOVE carries every later finger position and END carries the
      * release; a started native press posts the matching WM_LBUTTONUP.
-     * Without a deferral, a stationary release is a native left click that
-     * selects one unit and a drag is the native selection rectangle
-     * (legacy longPressDragAction).  These events are only valid on the
-     * FIELD route. */
+     * These events are only valid on the FIELD route. */
     WC3_DIRECT_TOUCH_FIELD_SELECT_BEGIN = 12,
     WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE = 13,
     WC3_DIRECT_TOUCH_FIELD_SELECT_END = 14,

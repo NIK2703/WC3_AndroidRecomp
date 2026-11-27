@@ -764,25 +764,84 @@ static void test_tap_unit_intent(void)
     assert(wc3_dt_tap_unit_intent(0, 0, 1) == WC3_DT_INTENT_SELECT_UNIT);
 }
 
+static void test_unit_gesture_policy(void)
+{
+    Wc3DtUnitGesturePolicy policy;
+
+    /* Without a controlled selection both gestures are selection/clear;
+     * the executor does not defer the native press in this case. */
+    policy = wc3_dt_unit_gesture_policy(0, 0, 0);
+    assert(policy.tap == WC3_DT_INTENT_SELECT_UNIT);
+    assert(policy.long_tap == WC3_DT_INTENT_SELECT_UNIT);
+    policy = wc3_dt_unit_gesture_policy(0, 1, 0);
+    assert(policy.tap == WC3_DT_INTENT_SELECT_UNIT);
+    assert(policy.long_tap == WC3_DT_INTENT_SELECT_UNIT);
+    policy = wc3_dt_unit_gesture_policy(0, 1, 1);
+    assert(policy.tap == WC3_DT_INTENT_SELECT_UNIT);
+    assert(policy.long_tap == WC3_DT_INTENT_SELECT_UNIT);
+
+    /* Direct pair: an ordinary controllable unit selects on tap and orders
+     * on a stationary long tap. */
+    policy = wc3_dt_unit_gesture_policy(1, 1, 0);
+    assert(policy.tap == WC3_DT_INTENT_SELECT_UNIT);
+    assert(policy.long_tap == WC3_DT_INTENT_ORDER_UNIT);
+
+    /* Swapped pair: the gold-mine/transport exception orders on tap and
+     * selects on a stationary long tap. */
+    policy = wc3_dt_unit_gesture_policy(1, 1, 1);
+    assert(policy.tap == WC3_DT_INTENT_ORDER_UNIT);
+    assert(policy.long_tap == WC3_DT_INTENT_SELECT_UNIT);
+
+    /* Uncontrollable target: tap orders, long tap selects.  The exception
+     * flag is irrelevant here.  This keeps both actions in the pair. */
+    policy = wc3_dt_unit_gesture_policy(1, 0, 0);
+    assert(policy.tap == WC3_DT_INTENT_ORDER_UNIT);
+    assert(policy.long_tap == WC3_DT_INTENT_SELECT_UNIT);
+    policy = wc3_dt_unit_gesture_policy(1, 0, 1);
+    assert(policy.tap == WC3_DT_INTENT_ORDER_UNIT);
+    assert(policy.long_tap == WC3_DT_INTENT_SELECT_UNIT);
+
+    /* Architecture invariant: with a controlled selection every unit target
+     * has exactly one select and one order gesture.  A future condition may
+     * choose the direct or swapped pair, but it may not collapse both legs
+     * into the same intent. */
+    for (int controllable = 0; controllable <= 1; ++controllable) {
+        for (int tap_order = 0; tap_order <= 1; ++tap_order) {
+            policy = wc3_dt_unit_gesture_policy(1, controllable, tap_order);
+            assert((policy.tap == WC3_DT_INTENT_SELECT_UNIT &&
+                    policy.long_tap == WC3_DT_INTENT_ORDER_UNIT) ||
+                   (policy.tap == WC3_DT_INTENT_ORDER_UNIT &&
+                    policy.long_tap == WC3_DT_INTENT_SELECT_UNIT));
+        }
+    }
+}
+
 static void test_long_tap_unit_intent(void)
 {
-    /* A long tap is a selection gesture: any controllable target is
-     * selected, including an own entangled gold mine whose tap is the
-     * exception smart order, and an ordinary own unit/building.  This is
-     * the gesture that must select the mine while a controlled worker is
-     * selected. */
-    assert(wc3_dt_long_tap_unit_intent(1, 1) ==
+    /* Ordinary controllable unit: tap selects, long tap orders. */
+    assert(wc3_dt_long_tap_unit_intent(1, 1, 0) ==
+           WC3_DT_INTENT_ORDER_UNIT);
+
+    /* Controllable exception: tap orders, long tap selects. */
+    assert(wc3_dt_long_tap_unit_intent(1, 1, 1) ==
            WC3_DT_INTENT_SELECT_UNIT);
 
-    /* An uncontrollable unit/decoration keeps the long-tap smart order. */
-    assert(wc3_dt_long_tap_unit_intent(1, 0) ==
-           WC3_DT_INTENT_ORDER_UNIT);
+    /* Uncontrollable target: tap orders, long tap selects.  This is the
+     * second leg of the pair, not a smart order. */
+    assert(wc3_dt_long_tap_unit_intent(1, 0, 0) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_long_tap_unit_intent(1, 0, 1) ==
+           WC3_DT_INTENT_SELECT_UNIT);
 
     /* Without a controlled selection the executor never defers; the native
      * press selects.  The helper stays consistent for that case. */
-    assert(wc3_dt_long_tap_unit_intent(0, 1) ==
+    assert(wc3_dt_long_tap_unit_intent(0, 1, 0) ==
            WC3_DT_INTENT_SELECT_UNIT);
-    assert(wc3_dt_long_tap_unit_intent(0, 0) ==
+    assert(wc3_dt_long_tap_unit_intent(0, 1, 1) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_long_tap_unit_intent(0, 0, 0) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_long_tap_unit_intent(0, 0, 1) ==
            WC3_DT_INTENT_SELECT_UNIT);
 }
 
@@ -890,6 +949,7 @@ static void test_configured_long_press_and_threshold(void)
     wc3_direct_touch_init(&dt, 1000.0f, 1000.0f, 11.0f, 50, sink, NULL);
     wc3_direct_touch_set_haptic(&dt, haptic, NULL, 3);
     wc3_direct_touch_down(&dt, 80, 100.0f, 100.0f, 0);
+    assert(wc3_direct_touch_next_deadline_ms(&dt) == 50);
     assert(wc3_direct_touch_tick(&dt, 49) == 0);
     assert(g_event_count == 0);
     assert(wc3_direct_touch_tick(&dt, 50) == 1);
@@ -916,6 +976,7 @@ static void test_configured_long_press_and_threshold(void)
     wc3_direct_touch_init(&dt, 1000.0f, 1000.0f, 11.0f, 200, sink, NULL);
     wc3_direct_touch_set_haptic(&dt, haptic, NULL, 3);
     wc3_direct_touch_down(&dt, 81, 300.0f, 300.0f, 1000);
+    assert(wc3_direct_touch_next_deadline_ms(&dt) == 1200);
     assert(wc3_direct_touch_tick(&dt, 1120) == 0);
     assert(g_event_count == 0);
     assert(wc3_direct_touch_tick(&dt, 1200) == 1);
@@ -977,6 +1038,91 @@ static void test_point_in_rect(void)
     assert(!wc3_dt_point_in_rect(0.5f, 0.9f, 0.1f, 0.1f, 0.9f, 0.9f));
     assert(!wc3_dt_point_in_rect(0.5f, 0.5f, 0.9f, 0.1f, 0.1f, 0.9f));
     assert(!wc3_dt_point_in_rect(0.5f, 0.5f, 0.1f, 0.9f, 0.9f, 0.1f));
+
+    /* Button frames are half-open too: left/top belong to the cell, while
+     * right/bottom belong to the next one. */
+    assert(wc3_dt_button_rect_hit(0.1f, 0.5f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(wc3_dt_button_rect_hit(0.5f, 0.1f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(!wc3_dt_button_rect_hit(0.9f, 0.5f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(!wc3_dt_button_rect_hit(0.5f, 0.9f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(!wc3_dt_button_rect_hit(0.5f, 0.5f, 0.9f, 0.1f, 0.1f, 0.9f));
+    assert(!wc3_dt_button_rect_hit(0.5f, 0.5f, 0.1f, 0.9f, 0.9f, 0.1f));
+    assert(!wc3_dt_button_rect_hit(-0.1f, 0.5f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(!wc3_dt_button_rect_hit(0.5f, -0.1f, 0.1f, 0.1f, 0.9f, 0.9f));
+
+    /* The field rectangle is inclusive: all four boundary points belong to
+     * it, while a point outside any edge does not. */
+    assert(wc3_dt_rect_contains_inclusive(0.1f, 0.5f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(wc3_dt_rect_contains_inclusive(0.5f, 0.1f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(wc3_dt_rect_contains_inclusive(0.9f, 0.5f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(wc3_dt_rect_contains_inclusive(0.5f, 0.9f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(!wc3_dt_rect_contains_inclusive(0.09f, 0.5f, 0.1f, 0.1f, 0.9f, 0.9f));
+    assert(!wc3_dt_rect_contains_inclusive(0.5f, 0.91f, 0.1f, 0.1f, 0.9f, 0.9f));
+}
+
+static void test_rect_union(void)
+{
+    Wc3DtRect dst = {0.0f, 0.0f, 0.0f, 0.0f};
+    const Wc3DtRect first = {0.1f, 0.2f, 0.3f, 0.4f};
+    wc3_dt_rect_union(&dst, &first);
+    assert(dst.left == 0.1f && dst.top == 0.2f);
+    assert(dst.right == 0.3f && dst.bottom == 0.4f);
+
+    const Wc3DtRect second = {0.0f, 0.25f, 0.5f, 0.3f};
+    wc3_dt_rect_union(&dst, &second);
+    assert(dst.left == 0.0f && dst.top == 0.2f);
+    assert(dst.right == 0.5f && dst.bottom == 0.4f);
+
+    /* Touching edges extend the union; no gap is introduced. */
+    const Wc3DtRect touching = {0.5f, 0.4f, 0.6f, 0.5f};
+    wc3_dt_rect_union(&dst, &touching);
+    assert(dst.left == 0.0f && dst.top == 0.2f);
+    assert(dst.right == 0.6f && dst.bottom == 0.5f);
+
+    /* An empty or inverted source is ignored. */
+    const Wc3DtRect empty = {0.7f, 0.7f, 0.7f, 0.8f};
+    wc3_dt_rect_union(&dst, &empty);
+    assert(dst.right == 0.6f && dst.bottom == 0.5f);
+
+    const Wc3DtRect inverted = {0.8f, 0.8f, 0.7f, 0.9f};
+    wc3_dt_rect_union(&dst, &inverted);
+    assert(dst.right == 0.6f && dst.bottom == 0.5f);
+
+    /* Null is a no-op. */
+    wc3_dt_rect_union(NULL, &first);
+    wc3_dt_rect_union(&dst, NULL);
+    assert(dst.right == 0.6f && dst.bottom == 0.5f);
+
+    /* An empty destination adopts the first valid source. */
+    Wc3DtRect empty_dst = {0.0f, 0.0f, 0.0f, 0.0f};
+    wc3_dt_rect_union(&empty_dst, &first);
+    assert(empty_dst.left == 0.1f && empty_dst.top == 0.2f);
+    assert(empty_dst.right == 0.3f && empty_dst.bottom == 0.4f);
+}
+
+static void test_native_left_busy(void)
+{
+    /* FULL: any owner blocks; a queued release with no hardware press does
+     * not. */
+    assert(wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_FULL, 1, 0, 0, 0));
+    assert(wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_FULL, 0, 1, 0, 0));
+    assert(wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_FULL, 0, 0, 0, 1));
+    assert(!wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_FULL, 0, 0, 1, 1));
+    assert(!wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_FULL, 0, 0, 0, 0));
+
+    /* DOWN_OR_UP ignores the hardware state and the queued-release flag. */
+    assert(wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_DOWN_OR_UP, 0, 1, 1, 0));
+    assert(!wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_DOWN_OR_UP, 0, 0, 0, 1));
+
+    /* DOWN_ONLY ignores up_pending and the hardware state. */
+    assert(wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_DOWN_ONLY, 1, 0, 0, 0));
+    assert(!wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_DOWN_ONLY, 0, 1, 0, 0));
+
+    /* HARDWARE: down or a hardware press, but no up_pending. */
+    assert(wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_HARDWARE, 1, 0, 0, 0));
+    assert(wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_HARDWARE, 0, 0, 0, 1));
+    assert(!wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_HARDWARE, 0, 1, 0, 0));
+    assert(!wc3_dt_native_left_busy(WC3_DT_NATIVE_BUSY_HARDWARE, 0, 0, 1, 1));
 }
 
 static void test_route(void)
@@ -1793,6 +1939,7 @@ int main(void)
     test_coordinate_mapping();
     test_unit_type_tap_order();
     test_tap_unit_intent();
+    test_unit_gesture_policy();
     test_long_tap_unit_intent();
     test_selection_can_order();
     test_tap_intent_resolution();
@@ -1801,6 +1948,8 @@ int main(void)
     test_smart_order_candidate();
     test_order_route();
     test_point_in_rect();
+    test_rect_union();
+    test_native_left_busy();
     test_route();
     test_physical_route();
     test_menu_event_policy();

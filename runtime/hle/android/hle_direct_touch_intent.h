@@ -291,13 +291,16 @@ static inline int wc3_dt_selection_can_order(uint32_t owner,
 
 /*
  * Target types whose tap must use the native right-click smart order even
- * when the target itself is controllable.  These are the base-game rawcodes
- * from Units\UnitData.slk and Units\UnitAbilities.slk:
+ * when the target itself is controllable.  This is also the exception class
+ * whose tap/long pair is swapped: tap orders, long tap selects.  The pair
+ * itself is built by wc3_dt_unit_gesture_policy().  These are the base-game
+ * rawcodes from Units\UnitData.slk and Units\UnitAbilities.slk:
  *   egol Entangled Gold Mine, ugol Haunted Gold Mine,
  *   hbot/obot/ubot/nbot/etrs transport ships,
  *   nzep Goblin Zeppelin, uarb Undead air barge.
  * The neutral gold mine ngol is intentionally absent: it is not
- * controllable, so the ordinary uncontrollable-target leg already orders.
+ * controllable, so tap already orders through the uncontrollable-target leg
+ * and long tap selects.
  * A custom map can clone these units under new rawcodes; an ability-based
  * check (Aegm/Abgm/Acar) is possible but not proven yet.  Keep this decision
  * pure so T0 can lock the list without a guest image.
@@ -321,45 +324,80 @@ static inline int wc3_dt_unit_type_tap_order(uint32_t type_id)
 }
 
 /*
- * Unit-tap decision.  `target_controllable` is the native 0x6F66EC60 result
- * for the CUnit under the finger, not an owner/friendliness guess.
- * `target_tap_order` is true for the gold-mine/transport rawcodes above.
+ * Tap/long-tap policy for a unit target.  This pair is the only place that
+ * decides whether the two gestures are direct or swapped:
  *
- * A controllable target is normally selected, even while another controlled
- * selection is live: tapping a second ordinary own unit must move the
- * selection, not order the first one to walk onto it.  The two exception
- * classes are the only controllable targets that take the native right-click
- * order path.  An uncontrollable target (hostile, neutral, or an ally without
- * shared control) becomes a smart order only when the live selection can
- * receive one; otherwise it is selected like any other unit tap.
+ *   controlled selection? | target kind                | tap    | long tap
+ *   no                    | any                        | select | select
+ *   yes                   | controllable exception     | order  | select
+ *   yes                   | controllable ordinary      | select | order
+ *   yes                   | uncontrollable             | order  | select
+ *
+ * With a controlled selection every unit target therefore has exactly one
+ * selection and one order gesture.  Only the ordinary controllable class is
+ * the direct pair; the exception and uncontrollable classes are swapped.
+ * Without a controlled selection there is no order source, so both gestures
+ * select/clear.  Rev 12 changed the ordinary long tap from select to order;
+ * rev 13 changed the uncontrollable long tap from order to select so the
+ * pair never loses either action.
+ *
+ * `target_tap_order` marks the controllable exception class (gold mine,
+ * transport, zeppelin, air barge).  Their tap is the native right-click
+ * order, so the long tap is the selection gesture.  An ordinary own unit is
+ * the direct pair: tap selects, long tap orders.  Callers consume exactly
+ * one field; no second condition is allowed in the executor.
+ *
+ * `target_controllable` is the owner-gated native 0x6F66EC60 result for the
+ * CUnit under the finger: the native predicate plus playable owner 0..11.
+ * `selection_controlled` uses the same gate for the primary.  An
+ * uncontrollable target (hostile, neutral, or an ally without shared
+ * control) keeps the smart order on tap and uses long tap to select it.
  */
+typedef struct {
+    Wc3DtTapIntent tap;
+    Wc3DtTapIntent long_tap;
+} Wc3DtUnitGesturePolicy;
+
+static inline Wc3DtUnitGesturePolicy wc3_dt_unit_gesture_policy(
+    int selection_controlled, int target_controllable, int target_tap_order)
+{
+    Wc3DtUnitGesturePolicy policy;
+    if (!selection_controlled) {
+        /* No order source: both gestures are selection/clear. */
+        policy.tap = WC3_DT_INTENT_SELECT_UNIT;
+        policy.long_tap = WC3_DT_INTENT_SELECT_UNIT;
+    } else if (target_controllable && !target_tap_order) {
+        /* Ordinary controllable target: direct pair. */
+        policy.tap = WC3_DT_INTENT_SELECT_UNIT;
+        policy.long_tap = WC3_DT_INTENT_ORDER_UNIT;
+    } else {
+        /* Exception or uncontrollable target: swapped pair.  Long tap is
+         * the selection gesture, so both actions stay available. */
+        policy.tap = WC3_DT_INTENT_ORDER_UNIT;
+        policy.long_tap = WC3_DT_INTENT_SELECT_UNIT;
+    }
+    return policy;
+}
+
+/* Tap leg.  Kept as the named entry point for wc3_dt_field_tap_intent(). */
 static inline Wc3DtTapIntent wc3_dt_tap_unit_intent(
     int selection_controlled, int target_controllable,
     int target_tap_order)
 {
-    if (selection_controlled && target_tap_order)
-        return WC3_DT_INTENT_ORDER_UNIT;
-    if (target_controllable) return WC3_DT_INTENT_SELECT_UNIT;
-    return selection_controlled ? WC3_DT_INTENT_ORDER_UNIT
-                                : WC3_DT_INTENT_SELECT_UNIT;
+    return wc3_dt_unit_gesture_policy(selection_controlled,
+                                      target_controllable,
+                                      target_tap_order).tap;
 }
 
-/*
- * Long-tap unit decision.  A long tap is a selection gesture: with a live
- * controlled selection, a controllable target is selected with the native
- * left click instead of receiving a smart order.  This covers the
- * controllable exception targets whose tap orders (gold mines, transports,
- * zeppelins, air barges) and ordinary own units/buildings alike.  An
- * uncontrollable target (enemy, neutral, no shared control) still takes the
- * smart order.  With no controlled selection the executor never defers the
- * native press, so the SELECT return is only the consistency case.
- */
+/* Long-tap leg.  The policy, not a second controllable test, decides
+ * whether a stationary hold selects or orders. */
 static inline Wc3DtTapIntent wc3_dt_long_tap_unit_intent(
-    int selection_controlled, int target_controllable)
+    int selection_controlled, int target_controllable,
+    int target_tap_order)
 {
-    if (!selection_controlled) return WC3_DT_INTENT_SELECT_UNIT;
-    return target_controllable ? WC3_DT_INTENT_SELECT_UNIT
-                               : WC3_DT_INTENT_ORDER_UNIT;
+    return wc3_dt_unit_gesture_policy(selection_controlled,
+                                      target_controllable,
+                                      target_tap_order).long_tap;
 }
 
 /*
@@ -415,6 +453,74 @@ static inline int wc3_dt_point_in_rect(float x, float y, float left,
 {
     return right > left && bottom > top &&
            x >= left && x < right && y >= top && y < bottom;
+}
+
+/* Native command-card, inventory and selected-unit grid frames are half-open.
+ * The name keeps a button hit test from being confused with the inclusive
+ * field/HUD rectangles.  The arithmetic stays in wc3_dt_point_in_rect(). */
+static inline int wc3_dt_button_rect_hit(float x, float y, float left,
+                                         float top, float right, float bottom)
+{
+    return wc3_dt_point_in_rect(x, y, left, top, right, bottom);
+}
+
+/* Inclusive rectangle test for the battlefield field rectangle.  Boundary
+ * points belong to it; this is intentionally not used for native buttons. */
+static inline int wc3_dt_rect_contains_inclusive(float x, float y, float left,
+                                                 float top, float right,
+                                                 float bottom)
+{
+    return x >= left && x <= right && y >= top && y <= bottom;
+}
+
+/* Surface-normalised rectangle used by the snapshot union.  The union helper
+ * only extends the bounds; it does not change the half-open policy of the
+ * hit tests. */
+typedef struct {
+    float left;
+    float top;
+    float right;
+    float bottom;
+} Wc3DtRect;
+
+static inline void wc3_dt_rect_union(Wc3DtRect *dst, const Wc3DtRect *src)
+{
+    if (!dst || !src) return;
+    if (!(src->right > src->left) || !(src->bottom > src->top)) return;
+    if (!(dst->right > dst->left) || !(dst->bottom > dst->top)) {
+        *dst = *src;
+        return;
+    }
+    if (src->left < dst->left) dst->left = src->left;
+    if (src->top < dst->top) dst->top = src->top;
+    if (src->right > dst->right) dst->right = src->right;
+    if (src->bottom > dst->bottom) dst->bottom = src->bottom;
+}
+
+/* Left-button ownership policies.  The call sites must choose explicitly:
+ * a shortened check must not silently become the full one, or the reverse. */
+typedef enum {
+    WC3_DT_NATIVE_BUSY_FULL,
+    WC3_DT_NATIVE_BUSY_DOWN_OR_UP,
+    WC3_DT_NATIVE_BUSY_DOWN_ONLY,
+    WC3_DT_NATIVE_BUSY_HARDWARE,
+} Wc3DtNativeBusyMode;
+
+static inline int wc3_dt_native_left_busy(Wc3DtNativeBusyMode mode,
+                                          int down, int up_pending,
+                                          int release_left, int hw_down)
+{
+    switch (mode) {
+    case WC3_DT_NATIVE_BUSY_FULL:
+        return down || up_pending || (!release_left && hw_down);
+    case WC3_DT_NATIVE_BUSY_DOWN_OR_UP:
+        return down || up_pending;
+    case WC3_DT_NATIVE_BUSY_DOWN_ONLY:
+        return down;
+    case WC3_DT_NATIVE_BUSY_HARDWARE:
+        return down || (!release_left && hw_down);
+    }
+    return 0;
 }
 
 /*

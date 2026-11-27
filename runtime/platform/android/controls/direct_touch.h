@@ -128,12 +128,14 @@ void wc3_direct_touch_set_size(Wc3DirectTouch *dt, float width, float height);
  * FIELD pointer, including a second finger while another finger already owns
  * the camera or the ACTION cursor.  At the deadline the pointer becomes
  * ACTION and emits FIELD_SELECT_BEGIN.  The executor normally turns BEGIN
- * into a native left-button DOWN; for a controlled selection in the field it
- * may defer that press.  A post-deadline move beyond drag_threshold_px from
- * the hold point then emits FIELD_SELECT_DRAG_BEGIN once, carrying the hold
- * point, followed by FIELD_SELECT_MOVE; the release emits FIELD_SELECT_END.
- * The executor turns DRAG_BEGIN into the native DOWN at the hold point, each
- * MOVE into a native mouse move, and END into the matching UP, the smart
+ * into a native left-button DOWN.  When long tap is the selection gesture it
+ * starts that DOWN at BEGIN, so stationary long tap and long-tap drag are one
+ * native selection; otherwise a controlled selection may defer the press.  A
+ * post-deadline move beyond drag_threshold_px from the hold point then emits
+ * FIELD_SELECT_DRAG_BEGIN once, carrying the hold point, followed by
+ * FIELD_SELECT_MOVE; the release emits FIELD_SELECT_END.  The executor turns
+ * DRAG_BEGIN into the native DOWN at the hold point for the deferred path,
+ * each MOVE into a native mouse move, and END into the matching UP, the smart
  * order, or the native fallback click.  A hover is emitted immediately before
  * an action click, never for the camera.  Raw pointer phases carry the
  * ACTION role and either NATIVE or MINIMAP as their physical owner. */
@@ -158,9 +160,10 @@ void wc3_direct_touch_reset(Wc3DirectTouch *dt);
  * of holds armed.  The pointer then stays in FIELD_SELECT: a move beyond
  * drag_threshold_px from the hold point emits FIELD_SELECT_DRAG_BEGIN once,
  * later moves emit FIELD_SELECT_MOVE, and the release emits FIELD_SELECT_END.
- * The executor normally keeps the native left button down for the whole
- * gesture; for a deferred order it starts the press at DRAG_BEGIN or
- * resolves the smart order/attack-move/fallback on END.
+ * The executor keeps the native left button down for the whole gesture when
+ * long tap is selection, starting it at BEGIN.  For a deferred order it
+ * starts the press at DRAG_BEGIN or resolves the smart
+ * order/attack-move/fallback on END.
  */
 int wc3_direct_touch_tick(Wc3DirectTouch *dt, uint64_t now_ms);
 

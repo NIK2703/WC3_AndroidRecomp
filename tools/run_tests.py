@@ -3812,7 +3812,16 @@ def test_native_press_barrier() -> int:
         errors.append("pause entry teardown missing")
     else:
         block = enter[1].split("static int dt_pause_menu_sync", 1)[0]
-        if "g_native_up_pending" not in block:
+        # Phase 1 moved the teardown into the named DT_RESET_PAUSE policy.
+        # Accept either the direct clear or the policy call, but require the
+        # policy itself to own the armed-press clear.
+        reset_owns_press = False
+        pause = dt.split("case DT_RESET_PAUSE:", 1)
+        if len(pause) == 2:
+            pause_block = pause[1].split("case DT_RESET_STALE:", 1)[0]
+            reset_owns_press = ("dt_state_reset(DT_RESET_PAUSE" in block and
+                                "g_native_up_pending" in pause_block)
+        if "g_native_up_pending" not in block and not reset_owns_press:
             errors.append("pause entry does not clear an armed field press")
     # Deferred field clicks are cancelled by a monotonic input epoch, not by a
     # timeout.  The timeout constants were the crutch: a slow load or a paused
@@ -3909,12 +3918,11 @@ def test_native_press_barrier() -> int:
     if dt.find("wc3_rd32g(unit + 0x30u)") < 0:
         errors.append("unit-type rawcode is not read from CUnit+0x30")
 
-    # A long tap on any controllable target (gold mine, transport, zeppelin,
-    # air barge, ordinary own unit/building) selects it.  The tap exception
-    # already orders the gold-mine/transport class, so the long tap is the
-    # selection gesture there; ordinary own units also select.  An
-    # uncontrollable target keeps the rev 10 long-tap order/attack-move.  The
-    # target must be resolved at the hold point, not at the release point.
+    # Long tap consumes the same tap/long policy as tap.  Ordinary
+    # controllable units order; the gold-mine/transport exception and an
+    # uncontrollable CUnit select.  A non-unit object is not a selectable
+    # CUnit target and stays on the smart-order leg.  The target type must be
+    # classified at the hold point before the policy call.
     long_fn = dt.split("static DtOrderResult dt_long_tap_at", 1)
     if len(long_fn) != 2:
         errors.append("long-tap executor missing")
@@ -3923,16 +3931,53 @@ def test_native_press_barrier() -> int:
         validate = block.find("dt_validate_unit(c, object, unit_out)")
         controlled = block.find("dt_unit_controlled(c, unit)")
         type_read = block.find("dt_unit_type_id(unit)")
+        type_rule = block.find("wc3_dt_unit_type_tap_order(target_type)")
         intent = block.find("wc3_dt_long_tap_unit_intent(")
+        intent_args = block.find("target_controllable, target_tap_order",
+                                 max(intent, 0))
         select = block.find("dt_native_press_deferred(ev, 0)",
                             max(intent, 0))
         order = block.find(
             "dt_smart_order_at(c, ctx, ev, width, height, 1)")
-        if (min(validate, controlled, type_read, intent, select, order) < 0
-                or not (validate < controlled < type_read < intent < select
-                        < order)):
-            errors.append(
-                "long-tap executor bypasses the controllable select rule")
+        if (min(validate, controlled, type_read, type_rule, intent,
+                intent_args, select, order) < 0
+                or not (validate < controlled < type_read < type_rule
+                        < intent < intent_args < select < order)):
+            errors.append("long-tap executor bypasses the tap/long policy")
+        # The unit policy is only valid for a validated CUnit.  A non-unit
+        # decoration must fall through to the smart-order leg; an `is_unit`
+        # style policy call would turn it into a selection.
+        if "is_unit = unit != 0" in block or "if (unit)" not in block:
+            errors.append("long-tap policy is not gated on a CUnit")
+    # When long tap is the selection gesture, BEGIN must start the native
+    # selection immediately instead of deferring until the drag-threshold
+    # square.  The probe is restricted to a validated CUnit target whose
+    # long-tap policy is SELECT_UNIT; non-unit decorations stay on order.
+    begin_fn = dt.split("static void dt_field_select_begin(", 1)
+    if len(begin_fn) != 2:
+        errors.append("field-select-begin executor missing")
+    else:
+        block = begin_fn[1].split("\n}\n", 1)[0]
+        probe = block.find("dt_long_tap_select_ready(")
+        native = block.find("dt_native_begin(ev->x, ev->y)",
+                            max(probe, 0))
+        deferred = block.find("g_field_drag.select_deferred = 1",
+                              max(probe, 0))
+        if (min(probe, native, deferred) < 0 or
+                not (probe < native < deferred)):
+            errors.append("long-tap selection does not start at recognition")
+    probe_fn = dt.split("static int dt_long_tap_select_ready(", 1)
+    if len(probe_fn) != 2:
+        errors.append("long-tap select probe missing")
+    else:
+        block = probe_fn[1].split("\n}\n", 1)[0]
+        validate = block.find("dt_validate_unit(c, at.object, unit_out)")
+        intent = block.find("wc3_dt_long_tap_unit_intent(")
+        select = block.find("WC3_DT_INTENT_SELECT_UNIT", max(intent, 0))
+        if (min(validate, intent, select) < 0 or
+                not (validate < intent < select)):
+            errors.append("long-tap select probe bypasses the CUnit policy")
+
     end_fn = dt.split("static void dt_field_select_end", 1)
     if len(end_fn) != 2:
         errors.append("field-select-end executor missing")
@@ -3959,6 +4004,18 @@ def test_native_press_barrier() -> int:
         gate = block.find("wc3_dt_selection_can_order(")
         if owner < 0 or gate < 0 or owner > gate:
             errors.append("selection controllability ignores neutral owner")
+    # A target uses the same owner gate: native 0x6F66EC60 alone accepted a
+    # selected neutral ngad, so a neutral target must not fall into the
+    # ordinary controllable pair.
+    unit_fn = dt.split("static int dt_unit_controlled(", 1)
+    if len(unit_fn) != 2:
+        errors.append("target controllability gate missing")
+    else:
+        block = unit_fn[1].split("\n}\n", 1)[0]
+        owner = block.find("wc3_rd16g(unit + 0x58u)")
+        gate = block.find("wc3_dt_selection_can_order(")
+        if owner < 0 or gate < 0 or owner > gate:
+            errors.append("target controllability ignores neutral owner")
     # The selected-unit grid's buttons use the +0x90 visible flag, not the
     # CFrame +0x54 flag that dt_console_rect_snapshot() checks.  Reading the
     # rect through the snapshot helper silently rejected every cell, so keep
@@ -3985,6 +4042,237 @@ def test_native_press_barrier() -> int:
     return 0
 
 
+def test_direct_touch_wiring() -> int:
+    """T0: guest-executor wiring for reset, grid, long tap and portrait.
+
+    The pure rules are covered by direct_touch_test.  This gate keeps the
+    guest call order that the pure tests cannot see: reset policies must keep
+    their exact composition/order, a grid gesture must keep DOWN/MOVE/UP
+    ownership, a long tap must convert the point once and then use the left
+    pick before the right-pick smart order, and portrait follow must take the
+    holder published at [portrait+0x238] rather than rebuilding it.
+    """
+    def strip_comments(text: str) -> str:
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        return re.sub(r"//[^\n]*", "", text)
+
+    dt = strip_comments(
+        (ROOT / "runtime" / "hle" / "android" / "hle_direct_touch.c")
+        .read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n"))
+    host = strip_comments(
+        (ROOT / "runtime" / "platform" / "android" / "controls"
+         / "direct_touch.c").read_text(encoding="utf-8", errors="replace")
+        .replace("\r\n", "\n"))
+    controls = strip_comments(
+        (ROOT / "runtime" / "platform" / "android" / "controls"
+         / "controls.c").read_text(encoding="utf-8", errors="replace")
+        .replace("\r\n", "\n"))
+    intent = strip_comments(
+        (ROOT / "runtime" / "hle" / "android" / "hle_direct_touch_intent.h")
+        .read_text(encoding="utf-8", errors="replace")
+        .replace("\r\n", "\n"))
+    errors: list[str] = []
+
+    def function_body(marker: str) -> str:
+        start = dt.rfind(marker)
+        if start < 0:
+            return ""
+        end = dt.find("\n}\n", start)
+        return dt[start:end] if end >= 0 else ""
+
+    def require_order(block: str, tokens: tuple[str, ...], label: str) -> None:
+        pos = -1
+        for token in tokens:
+            found = block.find(token, pos + 1)
+            if found < 0:
+                errors.append(f"{label}: missing {token}")
+            else:
+                pos = found
+
+    # Phase 1 reset policies.  FULL drops every game-owned gesture, PAUSE
+    # keeps the context but cancels an armed press/follow, STALE touches only
+    # native owners.  The order is part of the behavior.
+    reset = function_body("static void dt_state_reset(")
+    if not reset:
+        errors.append("dt_state_reset definition missing")
+    else:
+        full = reset.split("case DT_RESET_FULL:", 1)
+        pause = reset.split("case DT_RESET_PAUSE:", 1)
+        stale = reset.split("case DT_RESET_STALE:", 1)
+        if len(full) != 2 or len(pause) != 2 or len(stale) != 2:
+            errors.append("reset policy case missing")
+        else:
+            require_order(
+                full[1].split("case DT_RESET_PAUSE:", 1)[0],
+                ("dt_scratch_invalidate", "dt_grid_reset",
+                 "dt_inventory_reset", "dt_command_reset",
+                 "dt_command_target_reset", "dt_field_reset",
+                 "dt_camera_pan_reset", "dt_field_click_reset",
+                 "dt_native_release", "dt_portrait_release",
+                 "wc3_direct_touch_clear"),
+                "reset FULL")
+            require_order(
+                pause[1].split("case DT_RESET_STALE:", 1)[0],
+                ("dt_grid_reset", "dt_inventory_reset", "dt_command_reset",
+                 "dt_command_target_reset", "dt_field_reset",
+                 "dt_camera_pan_reset", "g_native_up_pending",
+                 "dt_native_abort", "g_field_defer_active",
+                 "dt_field_click_reset", "dt_beacon_cancel",
+                 "g_portrait_follow_active", "g_portrait_release_pending"),
+                "reset PAUSE")
+            require_order(
+                stale[1],
+                ("dt_grid_reset", "dt_inventory_reset", "dt_command_reset",
+                 "dt_command_target_reset", "dt_field_click_reset",
+                 "dt_native_release"),
+                "reset STALE")
+
+    # Phase 1 snapshot: the three pump boundaries must publish the same
+    # frames in the same order.
+    snapshot = function_body("static void dt_snapshot_all(")
+    if not snapshot:
+        errors.append("dt_snapshot_all definition missing")
+    else:
+        require_order(
+            snapshot,
+            ("dt_portrait_snapshot", "dt_minimap_snapshot",
+             "dt_minimap_panel_snapshot", "dt_beacon_snapshot",
+             "dt_command_snapshot", "dt_grid_snapshot",
+             "dt_inventory_snapshot"),
+            "snapshot all")
+
+    # Phase 2 grid ownership.  DOWN arms one pointer and resolves target or
+    # subgroup once; MOVE switches only after crossing a cell; UP re-tests
+    # only a possible tap and always releases the grid state.
+    grid = function_body("static int dt_grid_pointer(")
+    if not grid:
+        errors.append("dt_grid_pointer definition missing")
+    else:
+        down = grid.split("case WC3_DIRECT_TOUCH_POINTER_DOWN:", 1)
+        move = grid.split("case WC3_DIRECT_TOUCH_POINTER_MOVE:", 1)
+        up = grid.split("case WC3_DIRECT_TOUCH_POINTER_UP:", 1)
+        if len(down) != 2 or len(move) != 2 or len(up) != 2:
+            errors.append("grid pointer phase case missing")
+        else:
+            require_order(
+                down[1].split("case WC3_DIRECT_TOUCH_POINTER_MOVE:", 1)[0],
+                ("g_grid.active = 1", "g_grid.pointer = ev->pointer_id",
+                 "g_grid.moved = 0", "g_grid.target = 0", "if (target)",
+                 "dt_grid_target", "g_grid.target = 1", "dt_grid_switch"),
+                "grid DOWN")
+            require_order(
+                move[1].split("case WC3_DIRECT_TOUCH_POINTER_UP:", 1)[0],
+                ("if (g_grid.target)", "dt_grid_button_at",
+                 "g_grid.moved = 1", "dt_grid_switch"),
+                "grid MOVE")
+            require_order(
+                up[1].split("default:", 1)[0],
+                ("tap_possible = !g_grid.target && !g_grid.moved",
+                 "dt_grid_button_at", "wc3_dt_grid_release_select",
+                 "dt_grid_select_unit", "dt_grid_reset"),
+                "grid UP")
+
+    # Phase 2 long tap: one coordinate conversion, one left pick, then the
+    # native smart order (right pick) or the deferred native press.
+    long_tap = function_body("static DtOrderResult dt_long_tap_at(")
+    if not long_tap:
+        errors.append("dt_long_tap_at definition missing")
+    else:
+        if long_tap.count("dt_pick_at_prepare(") != 1:
+            errors.append("long tap converts/picks the point more than once")
+        if "dt_event_point(" in long_tap:
+            errors.append("long tap repeats coordinate conversion")
+        require_order(
+            long_tap,
+            ("dt_pick_at_prepare(", "dt_pick_at_execute(c, ctx, 1u, &at)",
+             "wc3_dt_unit_type_tap_order(target_type)",
+             "wc3_dt_long_tap_unit_intent",
+             "dt_smart_order_at(c, ctx, ev, width, height, 1)"),
+            "long tap")
+
+    # Tap and long tap must consume the same policy pair.  A second
+    # condition in either wrapper would reintroduce the drift this policy
+    # exists to remove.
+    for marker, field in (
+        ("static inline Wc3DtTapIntent wc3_dt_tap_unit_intent(", ".tap"),
+        ("static inline Wc3DtTapIntent wc3_dt_long_tap_unit_intent(",
+         ".long_tap"),
+    ):
+        start = intent.rfind(marker)
+        end = intent.find("\n}\n", start) if start >= 0 else -1
+        body = intent[start:end] if start >= 0 and end >= 0 else ""
+        if not body:
+            errors.append(f"gesture policy wrapper missing: {field}")
+        elif ("wc3_dt_unit_gesture_policy(" not in body or
+              field not in body):
+            errors.append(f"gesture policy wrapper bypassed: {field}")
+
+    # Phase 2/3 portrait: the published holder is used for follow; the CUnit
+    # is resolved separately for position/target mode.
+    portrait = function_body("static int dt_portrait_lookup(")
+    follow = function_body("static void dt_portrait_follow_start(")
+    if not portrait or not follow:
+        errors.append("portrait lookup/follow missing")
+    else:
+        for token in ("DT_UI_PORTRAIT", "DT_PORTRAIT_UNIT",
+                      "dt_handle_unit"):
+            if token not in portrait:
+                errors.append(f"portrait lookup lost {token}")
+        require_order(
+            follow,
+            ("dt_portrait_lookup(c, ctx, &holder, &unit)",
+             "dt_unit_holder", "DT_FN_CAMERA_FOLLOW",
+             "g_portrait_follow_active = 1"),
+            "portrait follow")
+
+    # Phase 3: both decisions share the UI probe, but only the semantic
+    # context may require manager+0x60.  The physical route must not.
+    route = function_body("static Wc3DirectTouchRoute dt_route_snapshot(")
+    context = function_body("static int dt_context_impl(")
+    if not route or not context:
+        errors.append("route/context definition missing")
+    else:
+        if "dt_ui_probe(&probe)" not in route:
+            errors.append("physical route does not use dt_ui_probe")
+        if "dt_ui_probe(&probe)" not in context:
+            errors.append("semantic context does not use dt_ui_probe")
+        if "probe.manager_ok" in route:
+            errors.append("physical route requires manager+0x60")
+        if "probe.manager_ok" not in context:
+            errors.append("semantic context lost the manager+0x60 gate")
+
+    # Boundary semantics stay explicit: the field is inclusive, the HUD
+    # rectangles are half-open.
+    field = function_body("static int dt_field_contains(")
+    hud = function_body("static int dt_field_hud_contains(")
+    if "wc3_dt_rect_contains_inclusive" not in field:
+        errors.append("field rectangle does not use the inclusive helper")
+    if "wc3_dt_point_in_rect" not in hud:
+        errors.append("HUD rectangle does not use the half-open helper")
+
+    # D16: host gates keep the explicit inclusive helper.  D17/D18: pointer
+    # activity and surface normalisation have one named host helper.
+    if "direct_touch_rect_contains_inclusive" not in controls:
+        errors.append("host inclusive rect helper missing")
+    if "direct_touch_gate_contains_inclusive" not in controls:
+        errors.append("host rect gate helper missing")
+    if "direct_touch_rect_contains(" in controls:
+        errors.append("host rect gate still uses an unnamed contains helper")
+    if "static int dt_pointer_active(" not in host:
+        errors.append("host pointer-active helper missing")
+    if "event.x = normalized_x(dt, x)" not in host:
+        errors.append("host event x is not normalised through the helper")
+    if "event.y = normalized_y(dt, y)" not in host:
+        errors.append("host event y is not normalised through the helper")
+
+    if errors:
+        for line in errors:
+            print(f"direct-touch-wiring: {line}", file=sys.stderr)
+        return 1
+    print("direct-touch-wiring: reset, grid, long tap and portrait order kept")
+    return 0
+
+
 def test_inventory_gesture() -> int:
     """T0: inventory gate and release stay on the exact native click path."""
     errors: list[str] = []
@@ -3997,8 +4285,16 @@ def test_inventory_gesture() -> int:
     host = (ROOT / "apps/android_gameactivity/src/main/cpp/host_shell.c").read_text(
         encoding="utf-8", errors="replace").replace("\r\n", "\n")
 
-    if hle.count("dt_inventory_snapshot(") < 4:
+    # Phase 1 routes all three pump boundaries through dt_snapshot_all(),
+    # which owns the inventory snapshot call.  Keep the three call sites plus
+    # the definition and verify the inventory snapshot remains inside it.
+    if hle.count("dt_snapshot_all(") < 4:
         errors.append("inventory snapshot is not published from idle/service/final")
+    else:
+        snapshot = hle.split("static void dt_snapshot_all(", 1)
+        snapshot_body = snapshot[1].split("\n}\n", 1)[0] if len(snapshot) == 2 else ""
+        if "dt_inventory_snapshot(" not in snapshot_body:
+            errors.append("snapshot_all does not publish the inventory rect")
     if "int wc3_hle_direct_touch_inventory_rect(" not in hle:
         errors.append("inventory rect read function missing")
     if "int wc3_hle_direct_touch_inventory_rect(" not in hle_h:
@@ -4237,6 +4533,7 @@ TESTS = {
     "controls_idle": test_controls_idle,
     "controls_mode": test_controls_mode,
     "direct_touch": test_direct_touch,
+    "direct_touch_wiring": test_direct_touch_wiring,
     "gesture_lifetime": test_gesture_lifetime,
     "gesture_button_swipe": test_gesture_button_swipe,
     "gesture_mode": test_gesture_mode,

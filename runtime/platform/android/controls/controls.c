@@ -895,6 +895,15 @@ static int direct_owner_portrait_active(void) {
     return 0;
 }
 
+/* Inclusive rectangle test.  The field rectangle and the published HUD
+ * gates keep their original inclusive boundaries; the half-open button hit
+ * tests live in the guest executor. */
+static int direct_touch_rect_contains_inclusive(float x, float y, float left,
+                                                float top, float right,
+                                                float bottom) {
+    return x >= left && x <= right && y >= top && y <= bottom;
+}
+
 /*
  * The field rectangle is a product boundary, not a native hit test.  It is
  * the battlefield region down to the console's top edge; everything below
@@ -912,7 +921,8 @@ static int direct_touch_field_contains(float x, float y) {
     const float right = (float)g_width * 0.97f;
     const float top = (float)g_height * 0.10f;
     const float bottom = (float)g_height * 0.85f;
-    return x >= left && x <= right && y >= top && y <= bottom;
+    return direct_touch_rect_contains_inclusive(x, y, left, top, right,
+                                                bottom);
 }
 
 static int direct_touch_ui_contains(float x, float y) {
@@ -929,8 +939,8 @@ static int direct_touch_ui_contains(float x, float y) {
  * pointer phases.  A missing or empty rectangle means the frame is not on
  * screen; the touch keeps its normal FIELD/NATIVE route.
  */
-static int direct_touch_rect_contains(Wc3DirectTouchRectGate gate, void *user,
-                                      float x, float y) {
+static int direct_touch_gate_contains_inclusive(
+    Wc3DirectTouchRectGate gate, void *user, float x, float y) {
     if (!gate || g_width <= 0 || g_height <= 0) return 0;
     float left = 0.0f;
     float top = 0.0f;
@@ -940,43 +950,44 @@ static int direct_touch_rect_contains(Wc3DirectTouchRectGate gate, void *user,
     if (!(right > left) || !(bottom > top)) return 0;
     const float nx = x / (float)g_width;
     const float ny = y / (float)g_height;
-    return nx >= left && nx <= right && ny >= top && ny <= bottom;
+    return direct_touch_rect_contains_inclusive(nx, ny, left, top, right,
+                                                bottom);
 }
 
 static int direct_touch_portrait_contains(float x, float y) {
-    return direct_touch_rect_contains(g_direct_touch_portrait_gate,
-                                      g_direct_touch_portrait_gate_user,
-                                      x, y);
+    return direct_touch_gate_contains_inclusive(
+        g_direct_touch_portrait_gate, g_direct_touch_portrait_gate_user,
+        x, y);
 }
 
 static int direct_touch_minimap_contains(float x, float y) {
-    return direct_touch_rect_contains(g_direct_touch_minimap_gate,
-                                      g_direct_touch_minimap_gate_user,
-                                      x, y);
+    return direct_touch_gate_contains_inclusive(
+        g_direct_touch_minimap_gate, g_direct_touch_minimap_gate_user,
+        x, y);
 }
 
 static int direct_touch_beacon_contains(float x, float y) {
-    return direct_touch_rect_contains(g_direct_touch_beacon_gate,
-                                      g_direct_touch_beacon_gate_user,
-                                      x, y);
+    return direct_touch_gate_contains_inclusive(
+        g_direct_touch_beacon_gate, g_direct_touch_beacon_gate_user,
+        x, y);
 }
 
 static int direct_touch_command_contains(float x, float y) {
-    return direct_touch_rect_contains(g_direct_touch_command_gate,
-                                      g_direct_touch_command_gate_user,
-                                      x, y);
+    return direct_touch_gate_contains_inclusive(
+        g_direct_touch_command_gate, g_direct_touch_command_gate_user,
+        x, y);
 }
 
 static int direct_touch_grid_contains(float x, float y) {
-    return direct_touch_rect_contains(g_direct_touch_grid_gate,
-                                      g_direct_touch_grid_gate_user,
-                                      x, y);
+    return direct_touch_gate_contains_inclusive(
+        g_direct_touch_grid_gate, g_direct_touch_grid_gate_user,
+        x, y);
 }
 
 static int direct_touch_inventory_contains(float x, float y) {
-    return direct_touch_rect_contains(g_direct_touch_inventory_gate,
-                                      g_direct_touch_inventory_gate_user,
-                                      x, y);
+    return direct_touch_gate_contains_inclusive(
+        g_direct_touch_inventory_gate, g_direct_touch_inventory_gate_user,
+        x, y);
 }
 
 /* Snapshot the guest route once per input event.  A NULL gate is the
