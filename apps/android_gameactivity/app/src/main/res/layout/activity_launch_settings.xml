@@ -1,20 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/bg_launch"
     android:orientation="vertical"
-    android:paddingStart="24dp"
     android:paddingTop="20dp"
-    android:paddingEnd="24dp"
     android:paddingBottom="16dp">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp">
 
         <TextView
             style="@style/Wc3Title"
@@ -40,7 +39,9 @@
         android:id="@+id/error_banner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_marginStart="24dp"
         android:layout_marginTop="12dp"
+        android:layout_marginEnd="24dp"
         android:background="@drawable/bg_error_banner"
         android:gravity="center_vertical"
         android:orientation="horizontal"
@@ -68,715 +69,89 @@
             android:textSize="11sp" />
     </LinearLayout>
 
-    <ScrollView
+    <LinearLayout
+        android:id="@+id/settings_tabs"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_marginTop="12dp"
-        android:layout_weight="1"
-        android:clipToPadding="false"
-        android:overScrollMode="never">
+        android:layout_height="48dp"
+        android:layout_marginStart="24dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginEnd="24dp"
+        android:orientation="horizontal">
 
         <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:paddingBottom="8dp">
+            android:id="@+id/tab_game"
+            style="@style/Wc3Tab"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:contentDescription="@string/launch_tab_game">
 
             <TextView
-                style="@style/Wc3RowLabel"
+                style="@style/Wc3TabText"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/launch_folder_label" />
+                android:duplicateParentState="true"
+                android:text="@string/launch_tab_game" />
 
-            <LinearLayout
+            <View
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:baselineAligned="false"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <EditText
-                    android:id="@+id/folder_input"
-                    style="@style/Wc3Field"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:importantForAutofill="no"
-                    android:inputType="textNoSuggestions"
-                    android:maxLength="1000"
-                    android:saveEnabled="false" />
-
-                <Button
-                    android:id="@+id/choose_folder_button"
-                    style="@style/Wc3ButtonGhost"
-                    android:layout_width="wrap_content"
-                    android:layout_height="48dp"
-                    android:layout_marginStart="8dp"
-                    android:minWidth="0dp"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:text="@string/launch_folder_choose" />
-
-                <Button
-                    android:id="@+id/find_folder_button"
-                    style="@style/Wc3ButtonGhost"
-                    android:layout_width="wrap_content"
-                    android:layout_height="48dp"
-                    android:layout_marginStart="8dp"
-                    android:minWidth="0dp"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:text="@string/launch_folder_find" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/folder_status"
-                style="@style/Wc3Helper"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="2dp"
                 android:layout_marginTop="6dp"
-                android:accessibilityLiveRegion="polite" />
-
-            <TextView
-                style="@style/Wc3RowLabel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:text="@string/launch_resolution_label" />
-
-            <FrameLayout
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="8dp">
-
-                <Spinner
-                    android:id="@+id/resolution_spinner"
-                    style="@style/Wc3Spinner"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:saveEnabled="false" />
-
-                <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:layout_gravity="end|center_vertical"
-                    android:layout_marginEnd="12dp"
-                    android:clickable="false"
-                    android:focusable="false"
-                    android:importantForAccessibility="no"
-                    android:src="@drawable/ic_expand_more"
-                    android:tint="@color/launch_gold_light" />
-            </FrameLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/Wc3RowLabel"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/launch_sound_label" />
-
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/sound_switch"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:contentDescription="@string/launch_sound_label"
-                    android:saveEnabled="false"
-                    app:thumbTint="@color/switch_thumb"
-                    app:trackTint="@color/switch_track" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/selection_cap_row"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:orientation="vertical">
-
-                <TextView
-                    style="@style/Wc3RowLabel"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/launch_selection_label" />
-
-                <FrameLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp">
-
-                    <Spinner
-                        android:id="@+id/selection_cap_spinner"
-                        style="@style/Wc3Spinner"
-                        android:layout_width="match_parent"
-                        android:layout_height="match_parent"
-                        android:contentDescription="@string/launch_selection_label"
-                        android:saveEnabled="false" />
-
-                    <ImageView
-                        android:layout_width="24dp"
-                        android:layout_height="24dp"
-                        android:layout_gravity="end|center_vertical"
-                        android:layout_marginEnd="12dp"
-                        android:clickable="false"
-                        android:focusable="false"
-                        android:importantForAccessibility="no"
-                        android:src="@drawable/ic_expand_more"
-                        android:tint="@color/launch_gold_light" />
-                </FrameLayout>
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/Wc3RowLabel"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/launch_hide_cursor_label" />
-
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/hide_cursor_switch"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:contentDescription="@string/launch_hide_cursor_label"
-                    android:saveEnabled="false"
-                    app:thumbTint="@color/switch_thumb"
-                    app:trackTint="@color/switch_track" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/grid_options_group"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:orientation="vertical"
-                android:visibility="gone">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        style="@style/Wc3RowLabel"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/launch_grid_darken_label" />
-
-                    <TextView
-                        android:id="@+id/grid_darken_value"
-                        style="@style/Wc3RowLabel"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
-                        android:gravity="end"
-                        android:minWidth="72dp"
-                        android:textColor="@color/launch_gold_light" />
-                </LinearLayout>
-
-                <SeekBar
-                    android:id="@+id/grid_darken_slider"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:contentDescription="@string/launch_grid_darken_label"
-                    android:max="100"
-                    android:saveEnabled="false"
-                    android:progressBackgroundTint="@color/launch_muted"
-                    android:progressTint="@color/launch_gold"
-                    android:thumbTint="@color/launch_gold_light" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        style="@style/Wc3RowLabel"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/launch_grid_cycle_label" />
-
-                    <TextView
-                        android:id="@+id/grid_cycle_value"
-                        style="@style/Wc3RowLabel"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
-                        android:gravity="end"
-                        android:minWidth="72dp"
-                        android:textColor="@color/launch_gold_light" />
-                </LinearLayout>
-
-                <SeekBar
-                    android:id="@+id/grid_cycle_slider"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:contentDescription="@string/launch_grid_cycle_label"
-                    android:max="60"
-                    android:saveEnabled="false"
-                    android:progressBackgroundTint="@color/launch_muted"
-                    android:progressTint="@color/launch_gold"
-                    android:thumbTint="@color/launch_gold_light" />
-            </LinearLayout>
-
-            <TextView
-                style="@style/Wc3RowLabel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:text="@string/launch_presentation_label" />
-
-            <TextView
-                style="@style/Wc3RowLabel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="@string/launch_present_mode_label" />
-
-            <FrameLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:minHeight="48dp">
-
-                <Spinner
-                    android:id="@+id/present_mode_spinner"
-                    style="@style/Wc3Spinner"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:contentDescription="@string/launch_present_mode_label"
-                    android:minHeight="48dp"
-                    android:saveEnabled="false" />
-
-                <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:layout_gravity="end|center_vertical"
-                    android:layout_marginEnd="12dp"
-                    android:clickable="false"
-                    android:focusable="false"
-                    android:importantForAccessibility="no"
-                    android:src="@drawable/ic_expand_more"
-                    android:tint="@color/launch_gold_light" />
-            </FrameLayout>
-
-            <TextView
-                style="@style/Wc3RowLabel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="@string/launch_present_buffers_label" />
-
-            <FrameLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:minHeight="48dp">
-
-                <Spinner
-                    android:id="@+id/present_buffers_spinner"
-                    style="@style/Wc3Spinner"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:contentDescription="@string/launch_present_buffers_label"
-                    android:minHeight="48dp"
-                    android:saveEnabled="false" />
-
-                <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:layout_gravity="end|center_vertical"
-                    android:layout_marginEnd="12dp"
-                    android:clickable="false"
-                    android:focusable="false"
-                    android:importantForAccessibility="no"
-                    android:src="@drawable/ic_expand_more"
-                    android:tint="@color/launch_gold_light" />
-            </FrameLayout>
-
-            <LinearLayout
-                android:id="@+id/parallel_cpu_group"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:orientation="vertical">
-
-                <TextView
-                    style="@style/Wc3RowLabel"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textSize="16sp"
-                    android:text="@string/launch_cpu_cores_label" />
-
-                <TextView
-                    android:id="@+id/parallel_cpu_hint"
-                    style="@style/Wc3Helper"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:accessibilityLiveRegion="polite" />
-
-                <GridLayout
-                    android:id="@+id/parallel_cpu_grid"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:useDefaultMargins="false" />
-            </LinearLayout>
-
-            <TextView
-                style="@style/Wc3RowLabel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:text="@string/launch_gesture_mode_label" />
-
-            <FrameLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:minHeight="48dp">
-
-                <Spinner
-                    android:id="@+id/gesture_mode_spinner"
-                    style="@style/Wc3Spinner"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:contentDescription="@string/launch_gesture_mode_label"
-                    android:minHeight="48dp"
-                    android:saveEnabled="false" />
-
-                <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:layout_gravity="end|center_vertical"
-                    android:layout_marginEnd="12dp"
-                    android:clickable="false"
-                    android:focusable="false"
-                    android:importantForAccessibility="no"
-                    android:src="@drawable/ic_expand_more"
-                    android:tint="@color/launch_gold_light" />
-            </FrameLayout>
-
-            <TextView
-                android:id="@+id/gesture_mode_hint"
-                style="@style/Wc3Helper"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:accessibilityLiveRegion="polite" />
-
-            <LinearLayout
-                android:id="@+id/double_tap_delay_group"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:orientation="vertical">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        style="@style/Wc3RowLabel"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/launch_double_tap_delay_label" />
-
-                    <TextView
-                        android:id="@+id/double_tap_delay_value"
-                        style="@style/Wc3RowLabel"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
-                        android:gravity="end"
-                        android:minWidth="72dp"
-                        android:textColor="@color/launch_gold_light" />
-                </LinearLayout>
-
-                <SeekBar
-                    android:id="@+id/double_tap_delay_slider"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:contentDescription="@string/launch_double_tap_delay_label"
-                    android:max="15"
-                    android:saveEnabled="false"
-                    android:progressBackgroundTint="@color/launch_muted"
-                    android:progressTint="@color/launch_gold"
-                    android:thumbTint="@color/launch_gold_light" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/Wc3RowLabel"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/launch_long_press_delay_label" />
-
-                <TextView
-                    android:id="@+id/long_press_delay_value"
-                    style="@style/Wc3RowLabel"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:gravity="end"
-                    android:minWidth="72dp"
-                    android:textColor="@color/launch_gold_light" />
-            </LinearLayout>
-
-            <SeekBar
-                android:id="@+id/long_press_delay_slider"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:contentDescription="@string/launch_long_press_delay_label"
-                android:max="15"
-                android:saveEnabled="false"
-                android:progressBackgroundTint="@color/launch_muted"
-                android:progressTint="@color/launch_gold"
-                android:thumbTint="@color/launch_gold_light" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:orientation="vertical">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        style="@style/Wc3RowLabel"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/launch_overlay_opacity_label" />
-
-                    <TextView
-                        android:id="@+id/overlay_opacity_value"
-                        style="@style/Wc3RowLabel"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
-                        android:gravity="end"
-                        android:minWidth="72dp"
-                        android:textColor="@color/launch_gold_light" />
-                </LinearLayout>
-
-                <SeekBar
-                    android:id="@+id/overlay_opacity_slider"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:contentDescription="@string/launch_overlay_opacity_label"
-                    android:max="40"
-                    android:saveEnabled="false"
-                    android:progressBackgroundTint="@color/launch_muted"
-                    android:progressTint="@color/launch_gold"
-                    android:thumbTint="@color/launch_gold_light" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/driver_label"
-                style="@style/Wc3RowLabel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:text="@string/launch_driver_label" />
-
-            <FrameLayout
-                android:id="@+id/driver_picker_frame"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="8dp">
-
-                <Spinner
-                    android:id="@+id/driver_spinner"
-                    style="@style/Wc3Spinner"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:saveEnabled="false" />
-
-                <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:layout_gravity="end|center_vertical"
-                    android:layout_marginEnd="12dp"
-                    android:clickable="false"
-                    android:focusable="false"
-                    android:importantForAccessibility="no"
-                    android:src="@drawable/ic_expand_more"
-                    android:tint="@color/launch_gold_light" />
-            </FrameLayout>
-
-            <LinearLayout
-                android:id="@+id/driver_buttons"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:orientation="horizontal">
-
-                <Button
-                    android:id="@+id/driver_import_button"
-                    style="@style/Wc3ButtonGhost"
-                    android:layout_width="0dp"
-                    android:layout_height="48dp"
-                    android:layout_weight="1"
-                    android:minWidth="0dp"
-                    android:text="@string/launch_driver_import" />
-
-                <Button
-                    android:id="@+id/driver_remove_button"
-                    style="@style/Wc3ButtonGhost"
-                    android:layout_width="0dp"
-                    android:layout_height="48dp"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1"
-                    android:minWidth="0dp"
-                    android:text="@string/launch_driver_remove" />
-            </LinearLayout>
-
-            <TextView
-                style="@style/Wc3RowLabel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:text="@string/launch_dxvk_label" />
-
-            <FrameLayout
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="8dp">
-
-                <Spinner
-                    android:id="@+id/dxvk_spinner"
-                    style="@style/Wc3Spinner"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:saveEnabled="false" />
-
-                <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:layout_gravity="end|center_vertical"
-                    android:layout_marginEnd="12dp"
-                    android:clickable="false"
-                    android:focusable="false"
-                    android:importantForAccessibility="no"
-                    android:src="@drawable/ic_expand_more"
-                    android:tint="@color/launch_gold_light" />
-            </FrameLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/Wc3RowLabel"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/launch_dxvk_config_label" />
-
-                <Button
-                    android:id="@+id/dxvk_config_import"
-                    style="@style/Wc3ButtonGhost"
-                    android:layout_width="wrap_content"
-                    android:layout_height="44dp"
-                    android:layout_marginStart="8dp"
-                    android:contentDescription="@string/launch_dxvk_config_import_description"
-                    android:minHeight="44dp"
-                    android:minWidth="0dp"
-                    android:paddingStart="10dp"
-                    android:paddingEnd="10dp"
-                    android:text="@string/launch_dxvk_config_import" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/Wc3Helper"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="4dp"
-                    android:text="@string/launch_dxvk_config_key" />
-
-                <TextView
-                    style="@style/Wc3Helper"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="4dp"
-                    android:text="@string/launch_dxvk_config_value" />
-
-                <View
-                    android:layout_width="44dp"
-                    android:layout_height="1dp"
-                    android:layout_marginStart="8dp" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/dxvk_config_rows"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:orientation="vertical" />
-
-            <Button
-                android:id="@+id/dxvk_config_add"
-                style="@style/Wc3ButtonGhost"
-                android:layout_width="wrap_content"
-                android:layout_height="44dp"
-                android:layout_marginTop="4dp"
-                android:minHeight="44dp"
-                android:minWidth="0dp"
-                android:text="@string/launch_dxvk_config_add" />
+                android:background="@drawable/tab_indicator"
+                android:duplicateParentState="true" />
         </LinearLayout>
-    </ScrollView>
+
+        <LinearLayout
+            android:id="@+id/tab_video"
+            style="@style/Wc3Tab"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:contentDescription="@string/launch_tab_video">
+
+            <TextView
+                style="@style/Wc3TabText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:duplicateParentState="true"
+                android:text="@string/launch_tab_video" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="2dp"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/tab_indicator"
+                android:duplicateParentState="true" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/tab_controls"
+            style="@style/Wc3Tab"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:contentDescription="@string/launch_tab_controls">
+
+            <TextView
+                style="@style/Wc3TabText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:duplicateParentState="true"
+                android:text="@string/launch_tab_controls" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="2dp"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/tab_indicator"
+                android:duplicateParentState="true" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <androidx.viewpager.widget.ViewPager
+        android:id="@+id/settings_pager"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="8dp"
+        android:layout_weight="1" />
 </LinearLayout>

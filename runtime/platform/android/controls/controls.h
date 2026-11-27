@@ -164,6 +164,18 @@ typedef Wc3DirectTouchRectGate Wc3DirectTouchInventoryRectGate;
 void controls_set_direct_touch_inventory_gate(
     Wc3DirectTouchInventoryRectGate gate, void *user);
 
+/*
+ * Lock-free hero-bar slot union supplied by the host, same contract as the
+ * command gate.  The bar is anchored in the upper-left and its lower slots
+ * can overlap the battlefield rectangle, so a touch that starts inside the
+ * union is forced to the raw NATIVE route; the guest hero handler applies a
+ * unit target when a target mode is live and otherwise leaves the tap to the
+ * native hero-bar selection.
+ */
+typedef Wc3DirectTouchRectGate Wc3DirectTouchHeroRectGate;
+void controls_set_direct_touch_hero_gate(
+    Wc3DirectTouchHeroRectGate gate, void *user);
+
 /* Profile JSON must stay valid only for the duration of this call. */
 int controls_init(const char *profile_json, int width, int height);
 

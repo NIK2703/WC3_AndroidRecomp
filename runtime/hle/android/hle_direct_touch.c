@@ -48,6 +48,12 @@
  * synthetic first click must establish before its button messages. */
 #define DT_APP_ACTIVE_GLOBAL 0x6FCD5E74u
 #define DT_PLAYER_MANAGER  0x6FD687A8u
+/* Game state bitmask.  Bit 0x100 is the network-game flag used by the native
+ * network flush guard at 0x6F359350 (test byte [0x6FCE5518], 8 and test
+ * dword [0x6FCE5518], 0x100).  Outside a network game there is no command
+ * echo, so AddSignal remains the local display. */
+#define DT_GAME_FLAGS         0x6FCE5518u
+#define DT_GAME_FLAG_NETWORK  0x00000100u
 
 #define DT_UI_WORLD_FRAME  0x000003BCu
 #define DT_UI_CLICK_GATE   0x000001ACu
@@ -149,17 +155,13 @@
 #define DT_INV_BUTTON_DATA   0x00000190u
 #define DT_INV_DATA_ITEM     0x000005C0u
 #define DT_INV_MAX_SLOTS     6u
-/* Mirror of controls.c direct_touch_field_contains().  A release inside this
- * rectangle is a battlefield point; everything outside it is native HUD and
- * must not turn an inventory drag into a drop.  Keep the two in sync.
- * The bottom is the console's top edge: the live minimap frame starts at
- * 0.8550 and the command card at 0.8690, so the world extends well below
- * 0.72.  The minimap, portrait and beacon have their own rect gates that run
- * before this rectangle, so the overlap is safe. */
-#define DT_INV_FIELD_LEFT    0.03f
-#define DT_INV_FIELD_RIGHT   0.97f
-#define DT_INV_FIELD_TOP     0.10f
-#define DT_INV_FIELD_BOTTOM  0.85f
+/* The battlefield rectangle is shared with the host route gate through
+ * WC3_DT_FIELD_* in runtime/ipc/direct_touch_event.h.  A release inside it is
+ * a battlefield point; everything outside it is native HUD and must not turn
+ * an inventory drag into a drop.  The bottom is the console's top edge: the
+ * live minimap frame starts at 0.8550 and the command card at 0.8690, so the
+ * world extends well below 0.72.  The minimap, portrait and beacon have their
+ * own rect gates that run before this rectangle, so the overlap is safe. */
 /* A tap that drifts out of its slot still uses the item; a real drag to the
  * field drops it.  The slop matches the command/field tap slop. */
 #define DT_INV_TAP_SLOP      0.02f
@@ -191,6 +193,25 @@
 #define DT_CMD_MAX_COLS      4u
 #define DT_CMD_LONG_PRESS_MS 450u
 #define DT_CMD_TAP_SLOP      0.02f
+
+/* Hero bar: CGameUI+0x3DC -> CHeroBar, a CGridPanel like the command bar.
+ * +0x154 is the row array; each row is 0x10 bytes and row+8 points at the
+ * slot frames.  The bar has seven rows and one slot column.  A slot's +0x90
+ * visibility flag is set by the hero-bar rebuild at 0x6F3C6E90; the slot's
+ * health stat bar (+0x1CC) stores the CUnit at +0x154, with the mana bar
+ * (+0x1D0) as fallback.  CFrame+0x44 is in the game's fixed 0.8x0.6 DDC
+ * space, so the slot rects use dt_console_rect_read like the portrait,
+ * minimap, beacon and command card. */
+#define DT_UI_HERO_BAR       0x000003DCu
+#define DT_HERO_ROWS         7u
+#define DT_HERO_ROW_ARRAY    0x00000154u
+#define DT_HERO_ROW_STRIDE   0x00000010u
+#define DT_HERO_ROW_BUTTONS  0x00000008u
+#define DT_HERO_ROW_SLOTS    1u
+#define DT_HERO_SLOT_VISIBLE 0x00000090u
+#define DT_HERO_SLOT_HEALTH  0x000001CCu
+#define DT_HERO_SLOT_MANA    0x000001D0u
+#define DT_HERO_STAT_UNIT    0x00000154u
 /* A drag release queues the confirming field click.  The game switches modes
  * on its own update, so the click is posted from a later pump tick.  Drop it
  * if the mode never becomes live. */
@@ -283,13 +304,34 @@
 #define DT_FN_COMMAND_BAR_POP  0x6F3C4E40u
 #define DT_FN_COMMAND_BAR_HIDE 0x6F3ACA80u
 #define DT_FN_UI_DIRTY         0x6F377190u
+/* Native 0x50065 handler for the target-mode frame.  Kept as the documented
+ * entry point; direct touch calls DT_FN_APPLY_TARGET below instead, because
+ * the handler derives the holder from a frame that the grid does not have. */
 #define DT_FN_TARGET_UNIT      0x6F3BF010u
+/* The unit-target application reached by the native 0x50065 handler at
+ * 0x6F3BF0B1.  this = the live target-mode frame, stack args =
+ * (holder, mode, flags).  Mode 1 applies a unit target, 2 a point target,
+ * 4 cancels and 0 is a no-op: the native handler forwards event+0x10 as
+ * mode, so a synthetic event that leaves +0x10 zero never issues an order.
+ * Calling this directly with the live holder also avoids the
+ * [[unit+0x6C]+0x124] chain, which is invalid for grid icons whose CUnit has
+ * no UI subobject (observed [unit+0x6C] == 8). */
+#define DT_FN_APPLY_TARGET     0x6F3C39B0u
+#define DT_TARGET_MODE_UNIT    1u
 #define DT_FN_HOLDER_ALIVE     0x6F0549F0u
 /* CMinimap::AddSignal.  Called with ecx = [CGameUI+0x3C0] and six dwords:
  * {world_x, world_y, 0, world_z, 0, 0}.  The callee overwrites the third
  * dword with 1.0f, applies the world->screen matrix at +0x750 and stores the
- * result in the 16-entry signal ring.  ret 0x18. */
+ * result in the 16-entry signal ring.  ret 0x18.  This only draws the local
+ * ring; the network path below is what makes the ping visible to allies. */
 #define DT_FN_ADD_SIGNAL       0x6F3B0A30u
+/* Native ally-ping sender.  cdecl, one argument: a pointer to a two-float
+ * world point.  It builds CNetCommandAllyPing (id 0xA0068, payload type 0x68)
+ * and hands it to the network command serializer.  The native minimap and
+ * world-frame click handlers call this function and do not call AddSignal;
+ * the local ring is added by the command receive path when the command is
+ * processed. */
+#define DT_FN_SEND_ALLY_PING   0x6F3C4DE0u
 #define DT_BEACON_TAP_SLOP     0.02f
 /* CGameUI control-group action handlers.  These are the exact calls the
  * native digit hotkey handler makes in build/corpus-full/game/closed.c:
@@ -339,6 +381,8 @@
 
 #define DT_EVENT_ID_TERRAIN_GATE 0x1A0068u
 #define DT_EVENT_ID_GHOST        0x1A0065u
+/* Native grid/panel command id.  The direct target path no longer posts a
+ * synthetic event; the id is kept only to document the native route. */
 #define DT_EVENT_ID_GRID_TARGET  0x00050065u
 
 #define DT_CLASS_UNIT 0x2B61676Cu
@@ -553,6 +597,12 @@ static DtRectSnapshot g_grid_snapshot;
  * HUD exclusion for an item-drag release: a point over the bar is never a
  * battlefield drop. */
 static DtRectSnapshot g_inventory_snapshot;
+/* The union of the visible hero-bar slot rectangles.  The bar is anchored in
+ * the upper-left and its bottom slots overlap the field rectangle on short
+ * surfaces; the controls layer claims the union for NATIVE before the field
+ * recognizer.  The guest hero handler then applies a target order when a
+ * target mode is live. */
+static DtRectSnapshot g_hero_snapshot;
 /* Set by wc3_hle_direct_touch_reset() (any thread) when the game leaves the
  * in-game UI.  The service, on the main guest thread, clears the camera
  * follow before it drops the queue. */
@@ -583,6 +633,17 @@ typedef struct {
 } DtGridGesture;
 
 static DtGridGesture g_grid;
+/* Hero-bar target gesture.  Only a press that lands on a visible hero icon
+ * while a target mode is live starts it; the order is applied on DOWN and
+ * the rest of that pointer is consumed so the native hero bar cannot also
+ * process the tap.  Main guest thread only. */
+typedef struct {
+    uint8_t active;
+    uint8_t pointer;
+    uint32_t unit;
+} DtHeroGesture;
+
+static DtHeroGesture g_hero;
 /* Set when the grid touch selected a target instead of activating a group.
  * The rest of the gesture is consumed so a drag cannot retarget or reach the
  * native world handler. */
@@ -1459,6 +1520,12 @@ static void dt_inventory_publish(float left, float top, float right,
     dt_rect_publish(&g_inventory_snapshot, left, top, right, bottom);
 }
 
+static void dt_hero_publish(float left, float top, float right,
+                            float bottom)
+{
+    dt_rect_publish(&g_hero_snapshot, left, top, right, bottom);
+}
+
 int wc3_hle_direct_touch_portrait_rect(float *left, float *top,
                                        float *right, float *bottom)
 {
@@ -1542,6 +1609,12 @@ int wc3_hle_direct_touch_inventory_rect(float *left, float *top,
                                         float *right, float *bottom)
 {
     return dt_rect_read(&g_inventory_snapshot, left, top, right, bottom);
+}
+
+int wc3_hle_direct_touch_hero_rect(float *left, float *top,
+                                   float *right, float *bottom)
+{
+    return dt_rect_read(&g_hero_snapshot, left, top, right, bottom);
 }
 
 /*
@@ -2006,6 +2079,61 @@ static void dt_inventory_snapshot(uint32_t ui, uint32_t width,
                          union_rect.bottom);
 }
 
+/*
+ * Publish the union of the visible hero-bar slot rectangles.  The bar is a
+ * HUD frame in the fixed 0.8x0.6 DDC space, so the slot's own +0x44 rect is
+ * scaled to surface fractions like the portrait and minimap.  A slot with
+ * +0x90 clear is empty or hidden and contributes no area; the guest handler
+ * separately resolves the unit when a target mode is live.
+ */
+static void dt_hero_snapshot(uint32_t ui, uint32_t width, uint32_t height)
+{
+    if (!ui || !dt_guest_readable(ui + DT_UI_HERO_BAR, 4u)) {
+        dt_hero_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    const uint32_t bar = wc3_rd32g(ui + DT_UI_HERO_BAR);
+    if (!bar || !dt_guest_readable(bar, DT_HERO_ROW_ARRAY + 4u)) {
+        dt_hero_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    const uint32_t row_array = wc3_rd32g(bar + DT_HERO_ROW_ARRAY);
+    if (!row_array ||
+        !dt_guest_readable(row_array, DT_HERO_ROWS * DT_HERO_ROW_STRIDE)) {
+        dt_hero_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    Wc3DtRect union_rect = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint32_t row_index = 0; row_index < DT_HERO_ROWS; row_index++) {
+        const uint32_t row = row_array + row_index * DT_HERO_ROW_STRIDE;
+        const uint32_t buttons = wc3_rd32g(row + DT_HERO_ROW_BUTTONS);
+        if (!buttons ||
+            !dt_guest_readable(buttons, DT_HERO_ROW_SLOTS * 4u)) {
+            continue;
+        }
+        const uint32_t slot = wc3_rd32g(buttons);
+        if (!slot ||
+            !dt_guest_readable(slot, DT_HERO_SLOT_VISIBLE + 4u) ||
+            !wc3_rd32g(slot + DT_HERO_SLOT_VISIBLE)) {
+            continue;
+        }
+        Wc3DtRect cell = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (!dt_console_rect_read(slot, width, height, &cell.left, &cell.top,
+                                  &cell.right, &cell.bottom)) {
+            continue;
+        }
+        wc3_dt_rect_union(&union_rect, &cell);
+    }
+    if (!(union_rect.right > union_rect.left) ||
+        !(union_rect.bottom > union_rect.top)) {
+        dt_hero_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    dt_hero_publish(union_rect.left, union_rect.top, union_rect.right,
+                    union_rect.bottom);
+}
+
 /* Publish every surface snapshot the controls layer consumes.  The guest
  * thread is the only writer; call this at the idle, service and final pump
  * boundaries so the three sequences cannot drift apart. */
@@ -2018,6 +2146,7 @@ static void dt_snapshot_all(uint32_t ui, uint32_t width, uint32_t height)
     dt_command_snapshot(ui, width, height);
     dt_grid_snapshot(ui, width, height);
     dt_inventory_snapshot(ui, width, height);
+    dt_hero_snapshot(ui, width, height);
 }
 
 #if WC3_DEBUG && WC3_DEBUG_INPUT
@@ -2542,11 +2671,16 @@ static void dt_group_signal(CPU *c, uint32_t group, uint32_t action)
 }
 
 /*
- * Add a beacon through the native CMinimap::AddSignal.  AddSignal itself
- * applies the world->screen matrix and writes the signal ring, so the caller
- * passes a world point (the same value PingMinimap accepts).  The six dwords
- * mirror the native PingMinimap stack layout: {x, y, 0, z, 0, 0}; AddSignal
- * overwrites the third dword with 1.0f.
+ * Place a beacon through the native ally-ping sender.  The native signal
+ * button and the minimap/world click handlers all call 0x6F3C4DE0 with a
+ * world point; they do not call AddSignal.  The local ring appears when the
+ * command is processed by the receive path (0x6F26EE28), with the sender's
+ * name and the native ping type.  Calling only AddSignal leaves the command
+ * unsent, so allies never see the ping and the local ring uses the generic
+ * fallback fields.
+ *
+ * AddSignal remains as the local fallback outside a network game, where the
+ * command has no echo to display.
  */
 static int dt_add_beacon(CPU *c, uint32_t minimap, float world_x,
                          float world_y, float world_z)
@@ -2556,10 +2690,27 @@ static int dt_add_beacon(CPU *c, uint32_t minimap, float world_x,
                            DT_MINIMAP_MATRIX + DT_MINIMAP_MATRIX_SIZE)) {
         return 0;
     }
-    const uint32_t args[6] = {
-        dt_bits(world_x), dt_bits(world_y), 0u, dt_bits(world_z), 0u, 0u
-    };
-    (void)dt_call_thiscall(c, minimap, DT_FN_ADD_SIGNAL, 6, args);
+
+    const uint32_t flags = wc3_rd32g(DT_GAME_FLAGS);
+    const uint32_t point = dt_scratch_alloc();
+    if (point) {
+        wc3_wr32g(point, dt_bits(world_x));
+        wc3_wr32g(point + 4u, dt_bits(world_y));
+        const uint32_t send_args[1] = { point };
+        (void)wc3_hle_call_guest(c, DT_FN_SEND_ALLY_PING, 1, send_args);
+        dt_scratch_free(point);
+        dt_trace("beacon-send", flags, point);
+    } else {
+        dt_trace("beacon-no-scratch", flags, 0);
+    }
+
+    if (!point || (flags & DT_GAME_FLAG_NETWORK) == 0u) {
+        const uint32_t args[6] = {
+            dt_bits(world_x), dt_bits(world_y), 0u, dt_bits(world_z), 0u, 0u
+        };
+        (void)dt_call_thiscall(c, minimap, DT_FN_ADD_SIGNAL, 6, args);
+        dt_trace("beacon-local", flags, 0);
+    }
     return 1;
 }
 
@@ -4065,9 +4216,9 @@ static void dt_clear_selection(CPU *c, const DtContext *ctx)
  * Selected-unit grid helpers.  The native panel only reacts to a completed
  * button click (command 0x50065) and that click arrives on release.  Direct
  * touch activates the subgroup as soon as the finger lands and follows the
- * finger across the grid; in targeting mode the same down is delivered to the
- * target-mode 0x50065 handler, which validates the unit and applies the
- * target.  No synthetic button event is posted.
+ * finger across the grid; in targeting mode the same down applies the native
+ * unit-target call with the button's live holder.  No synthetic button event
+ * is posted.
  */
 static void dt_grid_reset(void)
 {
@@ -4079,6 +4230,13 @@ static void dt_grid_reset(void)
     g_grid.selection = 0;
     g_grid.unit = 0;
     g_grid.down_unit = 0;
+}
+
+static void dt_hero_reset(void)
+{
+    g_hero.active = 0;
+    g_hero.pointer = 0;
+    g_hero.unit = 0;
 }
 
 /*
@@ -4349,22 +4507,30 @@ static void dt_grid_switch(CPU *c, uint32_t ui, uint32_t selection,
              wc3_rd32g(selection + DT_SELECTION_ACTIVE_GROUP));
 }
 
-/* Target-mode 0x50065: event+0xC is the CUnit, event+0x10 is an optional
- * world-position pointer (null lets the handler use the unit position). */
-static void dt_grid_target(CPU *c, uint32_t target_mode, uint32_t unit)
+/* Apply a unit target to the live target mode.
+ *
+ * The native 0x50065 target handler (0x6F3BF055) reaches 0x6F3C39B0 with
+ * (holder, [event+0x10], 0) after deriving the holder from the event frame.
+ * Two independent reasons made the old synthetic-event path ineffective:
+ *   - it put the CUnit at event+0xC, so the handler dereferenced
+ *     [[unit+0x6C]+0x124]; a grid icon can have [unit+0x6C] == 8 and fault;
+ *   - it left event+0x10 zero, which is the no-op mode of 0x6F3C39B0.
+ * The grid button, portrait and inventory-derived holders are already live,
+ * so pass the holder straight to the application function with mode 1.  The
+ * 0x6F0549F0 check preserves the native holder validation that the old guard
+ * provided. */
+static void dt_grid_target(CPU *c, uint32_t target_mode, uint32_t holder,
+                           uint32_t unit)
 {
-    if (!c || !target_mode || !unit) return;
+    if (!c || !target_mode || !holder) return;
+    if (!dt_guest_readable(holder, 0x60u)) return;
+    if (!dt_call_thiscall(c, holder, DT_FN_HOLDER_ALIVE, 0, NULL)) {
+        dt_trace("grid-target-skip", unit, holder);
+        return;
+    }
 
-    const uint32_t scratch = dt_scratch_alloc();
-    if (!scratch) return;
-    const uint32_t event = scratch + DT_EVENT_OFFSET;
-    memset(guest_host_ptr(event), 0, 0x14u);
-    wc3_wr32g(event + 0x08u, DT_EVENT_ID_GRID_TARGET);
-    wc3_wr32g(event + 0x0Cu, unit);
-    wc3_wr32g(event + 0x10u, 0u);
-    const uint32_t args[1] = { event };
-    (void)dt_call_thiscall(c, target_mode, DT_FN_TARGET_UNIT, 1, args);
-    dt_scratch_free(scratch);
+    const uint32_t args[3] = { holder, DT_TARGET_MODE_UNIT, 0u };
+    (void)dt_call_thiscall(c, target_mode, DT_FN_APPLY_TARGET, 3, args);
     dt_trace("grid-target", unit, target_mode);
 }
 
@@ -4425,7 +4591,7 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
 #endif
 
         if (target) {
-            dt_grid_target(c, target, unit);
+            dt_grid_target(c, target, holder, unit);
             g_grid.target = 1;
         } else {
             /* The subgroup under the finger becomes current immediately.
@@ -4488,6 +4654,145 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
         }
         dt_trace("grid-up", g_grid.unit, g_grid.target);
         dt_grid_reset();
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/*
+ * Resolve the CUnit shown by one hero-bar slot.  The hero-bar rebuild
+ * 0x6F3C6E90 calls 0x6F3CE5E0(slot, unit), which stores the unit in each
+ * stat bar through 0x6F3DABA0; CStatBar+0x154 is the live CUnit.  A hero
+ * always has health, so the health bar is primary; the mana bar covers a
+ * slot whose health bar has not been populated yet.  A dead or non-CUnit
+ * pointer is rejected so the caller can leave the tap to the native path.
+ */
+static uint32_t dt_hero_slot_unit(uint32_t slot)
+{
+    if (!slot || !dt_guest_readable(slot, DT_HERO_SLOT_MANA + 4u)) return 0;
+
+    uint32_t unit = 0;
+    const uint32_t health = wc3_rd32g(slot + DT_HERO_SLOT_HEALTH);
+    if (health && dt_guest_readable(health, DT_HERO_STAT_UNIT + 4u)) {
+        unit = wc3_rd32g(health + DT_HERO_STAT_UNIT);
+    }
+    if (!unit) {
+        const uint32_t mana = wc3_rd32g(slot + DT_HERO_SLOT_MANA);
+        if (mana && dt_guest_readable(mana, DT_HERO_STAT_UNIT + 4u)) {
+            unit = wc3_rd32g(mana + DT_HERO_STAT_UNIT);
+        }
+    }
+    if (!unit || !dt_guest_readable(unit, 0x24u)) return 0;
+    if (wc3_rd32g(unit + 0x0Cu) != DT_CLASS_UNIT) return 0;
+    if (wc3_rd32g(unit + 0x20u) != 0) return 0;
+    return unit;
+}
+
+/*
+ * Return the CUnit shown by the visible hero-bar slot under the point, or 0.
+ * The bar is a HUD frame in the fixed 0.8x0.6 DDC space; use the same
+ * console scale as the portrait, minimap and beacon so the hit test compares
+ * surface fractions.
+ */
+static uint32_t dt_hero_unit_at(float nx, float ny, uint32_t width,
+                                uint32_t height, uint32_t *ui_out)
+{
+    if (ui_out) *ui_out = 0;
+
+    uint32_t ui = 0;
+    if (!dt_grid_ui(&ui)) return 0;
+    if (!dt_guest_readable(ui + DT_UI_HERO_BAR, 4u)) return 0;
+    const uint32_t bar = wc3_rd32g(ui + DT_UI_HERO_BAR);
+    if (!bar || !dt_guest_readable(bar, DT_HERO_ROW_ARRAY + 4u)) return 0;
+    const uint32_t row_array = wc3_rd32g(bar + DT_HERO_ROW_ARRAY);
+    if (!row_array ||
+        !dt_guest_readable(row_array, DT_HERO_ROWS * DT_HERO_ROW_STRIDE)) {
+        return 0;
+    }
+
+    for (uint32_t row_index = 0; row_index < DT_HERO_ROWS; row_index++) {
+        const uint32_t row = row_array + row_index * DT_HERO_ROW_STRIDE;
+        const uint32_t buttons = wc3_rd32g(row + DT_HERO_ROW_BUTTONS);
+        if (!buttons ||
+            !dt_guest_readable(buttons, DT_HERO_ROW_SLOTS * 4u)) {
+            continue;
+        }
+        const uint32_t slot = wc3_rd32g(buttons);
+        if (!slot ||
+            !dt_guest_readable(slot, DT_HERO_SLOT_VISIBLE + 4u) ||
+            !wc3_rd32g(slot + DT_HERO_SLOT_VISIBLE)) {
+            continue;
+        }
+
+        float left = 0.0f;
+        float top = 0.0f;
+        float right = 0.0f;
+        float bottom = 0.0f;
+        if (!dt_console_rect_read(slot, width, height, &left, &top, &right,
+                                  &bottom)) {
+            continue;
+        }
+        if (!wc3_dt_button_rect_hit(nx, ny, left, top, right, bottom)) {
+            continue;
+        }
+
+        const uint32_t unit = dt_hero_slot_unit(slot);
+        if (!unit) continue;
+        if (ui_out) *ui_out = ui;
+        return unit;
+    }
+    return 0;
+}
+
+/*
+ * Consume a native-route press on a hero-bar icon while a target mode is
+ * live.  A normal tap stays native: the hero bar's own click selects the
+ * hero.  In target mode the native HUD path does not turn the icon into a
+ * unit target, so apply the same 0x50065 target event the selected-unit grid
+ * uses.  The rest of that pointer is consumed so the native bar cannot also
+ * process the tap.
+ */
+static int dt_hero_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
+                           uint32_t width, uint32_t height)
+{
+    if (!c || !ev || ev->route != WC3_DIRECT_TOUCH_ROUTE_NATIVE) return 0;
+
+    switch (ev->kind) {
+    case WC3_DIRECT_TOUCH_POINTER_DOWN: {
+        if (g_hero.active) return 1;
+
+        uint32_t ui = 0;
+        const uint32_t unit =
+            dt_hero_unit_at(ev->x, ev->y, width, height, &ui);
+        if (!unit) return 0;
+
+        const uint32_t target = dt_grid_target_mode(ui);
+        if (!target) return 0;
+
+        /* The hero bar stores a CUnit, not a handle holder.  Heroes keep the
+         * UI subobject the native validation walks, so recover the holder
+         * from it; if that fails the unit cannot be a native target. */
+        const uint32_t holder = dt_unit_holder(c, unit);
+        if (!holder) {
+            dt_trace("hero-target-skip", unit, 0);
+            return 0;
+        }
+        dt_grid_target(c, target, holder, unit);
+        g_hero.active = 1;
+        g_hero.pointer = ev->pointer_id;
+        g_hero.unit = unit;
+        dt_trace("hero-target", unit, target);
+        return 1;
+    }
+    case WC3_DIRECT_TOUCH_POINTER_MOVE:
+        if (!g_hero.active || ev->pointer_id != g_hero.pointer) return 0;
+        return 1;
+    case WC3_DIRECT_TOUCH_POINTER_UP:
+    case WC3_DIRECT_TOUCH_POINTER_CANCEL:
+        if (!g_hero.active || ev->pointer_id != g_hero.pointer) return 0;
+        dt_trace("hero-up", g_hero.unit, ev->kind);
+        dt_hero_reset();
         return 1;
     default:
         return 0;
@@ -5276,10 +5581,8 @@ static int dt_native_defer_pointer(CPU *c, const Wc3DirectTouchEvent *ev)
             hle_android_mouse_move(ev->x, ev->y);
         }
         if (!g_field_defer_moved) {
-            const float dx = ev->x - g_field_defer_x;
-            const float dy = ev->y - g_field_defer_y;
-            if (dx * dx + dy * dy >
-                DT_FIELD_TAP_SLOP * DT_FIELD_TAP_SLOP) {
+            if (wc3_dt_past_slop(g_field_defer_x, g_field_defer_y, ev->x,
+                                 ev->y, DT_FIELD_TAP_SLOP)) {
                 g_field_defer_moved = 1;
                 if (g_field_defer_kind == WC3_DT_FIELD_DEFER_TARGET) {
                     /* Target/placement owns the release, not the press.
@@ -5470,8 +5773,8 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
                                   &bottom);
         const int on_button =
             have_button &&
-            ev->x >= left && ev->x <= right &&
-            ev->y >= top && ev->y <= bottom;
+            wc3_dt_rect_contains_inclusive(ev->x, ev->y, left, top, right,
+                                           bottom);
         dt_log("beacon-down ptr=%u n=%.4f,%.4f active=%d armed=%d "
                "have_button=%d button=%.4f,%.4f..%.4f,%.4f on_button=%d",
                ev->pointer_id, ev->x, ev->y, g_beacon.active, g_beacon.armed,
@@ -5497,8 +5800,8 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
                 wc3_hle_direct_touch_minimap_input_rect(&ml, &mt, &mr, &mb);
             const int on_minimap =
                 have_minimap &&
-                ev->x >= ml && ev->x <= mr &&
-                ev->y >= mt && ev->y <= mb;
+                wc3_dt_rect_contains_inclusive(ev->x, ev->y, ml, mt, mr,
+                                               mb);
             dt_log("beacon-armed-down ptr=%u n=%.4f,%.4f have_minimap=%d "
                    "input=%.4f,%.4f..%.4f,%.4f on_minimap=%d",
                    ev->pointer_id, ev->x, ev->y, have_minimap,
@@ -5533,13 +5836,10 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
     if (!g_beacon.active || ev->pointer_id != g_beacon.pointer) return 0;
 
     if (ev->kind == WC3_DIRECT_TOUCH_POINTER_MOVE) {
-        if (!g_beacon.moved) {
-            const float dx = ev->x - g_beacon.down_x;
-            const float dy = ev->y - g_beacon.down_y;
-            if (dx * dx + dy * dy >
-                DT_BEACON_TAP_SLOP * DT_BEACON_TAP_SLOP) {
-                g_beacon.moved = 1;
-            }
+        if (!g_beacon.moved &&
+            wc3_dt_past_slop(g_beacon.down_x, g_beacon.down_y, ev->x, ev->y,
+                             DT_BEACON_TAP_SLOP)) {
+            g_beacon.moved = 1;
         }
         return 1;
     }
@@ -5552,16 +5852,14 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
     float mb = 0.0f;
     const int inside_minimap =
         wc3_hle_direct_touch_minimap_input_rect(&ml, &mt, &mr, &mb) &&
-        ev->x >= ml && ev->x <= mr &&
-        ev->y >= mt && ev->y <= mb;
+        wc3_dt_rect_contains_inclusive(ev->x, ev->y, ml, mt, mr, mb);
     float bl = 0.0f;
     float bt = 0.0f;
     float br = 0.0f;
     float bb = 0.0f;
     const int inside_button =
         dt_beacon_signal_rect(width, height, &bl, &bt, &br, &bb) &&
-        ev->x >= bl && ev->x <= br &&
-        ev->y >= bt && ev->y <= bb;
+        wc3_dt_rect_contains_inclusive(ev->x, ev->y, bl, bt, br, bb);
     float pl = 0.0f;
     float pt = 0.0f;
     float pr = 0.0f;
@@ -5570,7 +5868,7 @@ static int dt_beacon_pointer(CPU *c, const DtContext *ctx,
         wc3_hle_direct_touch_portrait_rect(&pl, &pt, &pr, &pb);
     const int inside_portrait =
         have_portrait &&
-        ev->x >= pl && ev->x <= pr && ev->y >= pt && ev->y <= pb;
+        wc3_dt_rect_contains_inclusive(ev->x, ev->y, pl, pt, pr, pb);
     const int inside_field = dt_field_contains(ev->x, ev->y);
     /* Resolve from the press/release endpoints.  The service may defer or
      * coalesce MOVE phases, so `g_beacon.moved` alone cannot prove that a
@@ -7085,10 +7383,10 @@ static int dt_inventory_slot_at(uint32_t bar, float nx, float ny,
 
 static int dt_field_contains(float nx, float ny)
 {
-    return wc3_dt_rect_contains_inclusive(nx, ny, DT_INV_FIELD_LEFT,
-                                          DT_INV_FIELD_TOP,
-                                          DT_INV_FIELD_RIGHT,
-                                          DT_INV_FIELD_BOTTOM);
+    return wc3_dt_rect_contains_inclusive(nx, ny, WC3_DT_FIELD_LEFT,
+                                          WC3_DT_FIELD_TOP,
+                                          WC3_DT_FIELD_RIGHT,
+                                          WC3_DT_FIELD_BOTTOM);
 }
 
 /* A release over a live HUD panel is never a battlefield point.  The command
@@ -7476,6 +7774,7 @@ static void dt_state_reset(DtResetPolicy policy, CPU *c)
     case DT_RESET_FULL:
         dt_scratch_invalidate();
         dt_grid_reset();
+        dt_hero_reset();
         dt_inventory_reset();
         dt_command_reset();
         dt_command_target_reset();
@@ -7488,6 +7787,7 @@ static void dt_state_reset(DtResetPolicy policy, CPU *c)
         break;
     case DT_RESET_PAUSE:
         dt_grid_reset();
+        dt_hero_reset();
         dt_inventory_reset();
         dt_command_reset();
         dt_command_target_reset();
@@ -7518,6 +7818,7 @@ static void dt_state_reset(DtResetPolicy policy, CPU *c)
         break;
     case DT_RESET_STALE:
         dt_grid_reset();
+        dt_hero_reset();
         dt_inventory_reset();
         dt_command_reset();
         dt_command_target_reset();
@@ -7591,9 +7892,8 @@ static int dt_command_context(uint32_t *bar_out, int allow_targeting,
  * returns to it.  The select-mode object is also the only mode a field drag
  * can set, so a non-select mode during a command gesture is the target mode;
  * the dedicated camera mode is the one exception and is never confirmed. */
-static int dt_command_targeting(uint32_t type)
+static int dt_command_targeting(void)
 {
-    (void)type;
     if (!dt_guest_readable(DT_UI_GLOBAL, 4u)) return 0;
     const uint32_t ui = wc3_rd32g(DT_UI_GLOBAL);
     if (!ui) return 0;
@@ -7864,7 +8164,7 @@ static void dt_command_tick(CPU *c, uint32_t width, uint32_t height)
      * re-checked here.  A new gesture in the event queue wins: let the service
      * process it first, then the event loop cancels this confirmation. */
     if (g_cmd_target.pending && wc3_direct_touch_pending() == 0) {
-        const int targeted = dt_command_targeting(g_cmd_target.type);
+        const int targeted = dt_command_targeting();
         uint32_t live_bar = 0;
         const int context_ok = dt_command_context(&live_bar, 1, 0);
         const uint64_t now = dt_now_ms();
@@ -7991,13 +8291,22 @@ static void dt_command_finish(CPU *c, const Wc3DirectTouchEvent *ev,
         if (wc3_hle_direct_touch_portrait_rect(&pl, &pt, &pr, &pb) &&
             dt_context(&portrait_ctx)) {
             const int portrait_hit =
-                ev->x >= pl && ev->x <= pr && ev->y >= pt && ev->y <= pb;
+                wc3_dt_rect_contains_inclusive(ev->x, ev->y, pl, pt, pr,
+                                               pb);
             const uint32_t target = dt_grid_target_mode(portrait_ctx.ui);
             if (wc3_dt_command_portrait_target(target != 0, portrait_hit,
                                                moved)) {
-                const uint32_t unit = dt_portrait_unit(c, &portrait_ctx);
-                if (unit) {
-                    dt_grid_target(c, target, unit);
+                uint32_t portrait_holder = 0;
+                uint32_t unit = 0;
+                const int portrait_state =
+                    dt_portrait_lookup(c, &portrait_ctx, &portrait_holder,
+                                       &unit);
+                if (portrait_state != DT_PORTRAIT_READY) {
+                    unit = dt_portrait_unit(c, &portrait_ctx);
+                    if (unit) portrait_holder = dt_unit_holder(c, unit);
+                }
+                if (unit && portrait_holder) {
+                    dt_grid_target(c, target, portrait_holder, unit);
                     dt_command_target_reset();
                     dt_command_reset();
                     dt_trace("cmd-portrait-target", unit, target);
@@ -8024,7 +8333,7 @@ static void dt_command_finish(CPU *c, const Wc3DirectTouchEvent *ev,
             const uint32_t target = dt_grid_target_mode(grid_ui);
             if (wc3_dt_command_grid_target(target != 0, grid_unit != 0,
                                            moved)) {
-                dt_grid_target(c, target, grid_unit);
+                dt_grid_target(c, target, grid.holder, grid_unit);
                 dt_command_target_reset();
                 dt_command_reset();
                 dt_trace("cmd-grid-target", grid_unit, target);
@@ -8034,7 +8343,7 @@ static void dt_command_finish(CPU *c, const Wc3DirectTouchEvent *ev,
     }
 
     if (dt_field_contains(ev->x, ev->y)) {
-        const int targeted = dt_command_targeting(type);
+        const int targeted = dt_command_targeting();
         if (wc3_dt_command_release(moved, targeted, 1) ==
             WC3_DT_COMMAND_TARGET) {
             /* Target mode is already live; confirm now. */
@@ -8149,13 +8458,11 @@ static int dt_command_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
          * click already selected/armed the command, so no extra click is
          * posted here. */
         hle_android_mouse_move(ev->x, ev->y);
-        if (!g_cmd_moved) {
-            const float dx = ev->x - g_cmd_down_x;
-            const float dy = ev->y - g_cmd_down_y;
-            if (dx * dx + dy * dy > DT_CMD_TAP_SLOP * DT_CMD_TAP_SLOP) {
-                g_cmd_moved = 1;
-                g_cmd_long_pending = 0;
-            }
+        if (!g_cmd_moved &&
+            wc3_dt_command_moved(g_cmd_down_x, g_cmd_down_y, ev->x, ev->y,
+                                 DT_CMD_TAP_SLOP)) {
+            g_cmd_moved = 1;
+            g_cmd_long_pending = 0;
         }
         return 1;
     case WC3_DIRECT_TOUCH_POINTER_UP:
@@ -8237,8 +8544,7 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
         float bb = 0.0f;
         const int on_button =
             dt_beacon_signal_rect(width, height, &bl, &bt, &br, &bb) &&
-            ev->x >= bl && ev->x <= br &&
-            ev->y >= bt && ev->y <= bb;
+            wc3_dt_rect_contains_inclusive(ev->x, ev->y, bl, bt, br, bb);
         if (on_button) {
             g_beacon.armed = 1;
 #if WC3_DEBUG && WC3_DEBUG_INPUT
@@ -8262,8 +8568,8 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
             float mb = 0.0f;
             const int on_minimap =
                 dt_minimap_native_rect(&ml, &mt, &mr, &mb) &&
-                ev->x >= ml && ev->x <= mr &&
-                ev->y >= mt && ev->y <= mb;
+                wc3_dt_rect_contains_inclusive(ev->x, ev->y, ml, mt, mr,
+                                               mb);
             const int on_field = dt_field_contains(ev->x, ev->y);
             int placed = 0;
             if (on_minimap) {
@@ -8401,6 +8707,11 @@ static void dt_dispatch(CPU *c, const DtContext *ctx,
             dt_log("consumed=grid ptr=%u", ev->pointer_id);
             break;
         }
+        if (ev->route == WC3_DIRECT_TOUCH_ROUTE_NATIVE &&
+            dt_hero_pointer(c, ev, width, height)) {
+            dt_log("consumed=hero ptr=%u", ev->pointer_id);
+            break;
+        }
         /* A native press outside the battlefield is HUD/menu input; the
          * minimap backstop handles its own rectangle and everything else is
          * posted as a normal native click. */
@@ -8427,6 +8738,7 @@ void wc3_hle_direct_touch_start(void)
     __atomic_store_n(&g_busy, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_portrait_release_pending, 0, __ATOMIC_RELEASE);
     dt_grid_reset();
+    dt_hero_reset();
     dt_inventory_reset();
     dt_command_reset();
     dt_command_target_reset();
@@ -8441,6 +8753,7 @@ void wc3_hle_direct_touch_start(void)
     dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_grid_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_inventory_publish(0.0f, 0.0f, 0.0f, 0.0f);
+    dt_hero_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_publish_route(WC3_DIRECT_TOUCH_ROUTE_LEGACY);
     g_portrait_follow_active = 0;
     g_last_ui = 0;
@@ -8490,6 +8803,7 @@ void wc3_hle_direct_touch_reset(void)
     dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_grid_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_inventory_publish(0.0f, 0.0f, 0.0f, 0.0f);
+    dt_hero_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_publish_route(WC3_DIRECT_TOUCH_ROUTE_LEGACY);
     g_portrait_follow_active = 0;
     g_pause_menu_active = 0;

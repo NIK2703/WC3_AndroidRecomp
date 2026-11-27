@@ -481,6 +481,24 @@ void wc3_direct_touch_down(Wc3DirectTouch *dt, int pointer_id,
                                 WC3_DIRECT_TOUCH_ROUTE_FIELD);
 }
 
+/* Emit FIELD_SELECT_DRAG_BEGIN once when a SELECT pointer crosses the drag
+ * threshold.  MOVE always follows with FIELD_SELECT_MOVE; UP feeds the
+ * release point and always ends the selection. */
+static int select_drag_begin_if_needed(Wc3DirectTouch *dt,
+                                       Wc3DirectTouchPointer *pointer,
+                                       float x, float y, uint64_t now_ms)
+{
+    if (!pointer->drag_started &&
+        drag_exceeded(dt, x, y, pointer->hold_x, pointer->hold_y)) {
+        pointer->drag_started = 1;
+        emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN,
+                           pointer, pointer->hold_x, pointer->hold_y,
+                           now_ms);
+        return 1;
+    }
+    return 0;
+}
+
 void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
                            float x, float y, uint64_t now_ms)
 {
@@ -534,13 +552,7 @@ void wc3_direct_touch_move(Wc3DirectTouch *dt, int pointer_id,
                            x, y, now_ms);
         break;
     case WC3_DIRECT_TOUCH_FIELD_SELECT:
-        if (!pointer->drag_started &&
-            drag_exceeded(dt, x, y, pointer->hold_x, pointer->hold_y)) {
-            pointer->drag_started = 1;
-            emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN,
-                               pointer, pointer->hold_x, pointer->hold_y,
-                               now_ms);
-        }
+        (void)select_drag_begin_if_needed(dt, pointer, x, y, now_ms);
         emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE, pointer,
                            x, y, now_ms);
         break;
@@ -625,12 +637,7 @@ void wc3_direct_touch_up(Wc3DirectTouch *dt, int pointer_id,
          * point, feed the release point, then end it.  The executor starts
          * the native press on DRAG_BEGIN and the input barrier publishes the
          * DOWN before the following MOVE. */
-        if (!pointer->drag_started &&
-            drag_exceeded(dt, x, y, pointer->hold_x, pointer->hold_y)) {
-            pointer->drag_started = 1;
-            emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_DRAG_BEGIN,
-                               pointer, pointer->hold_x, pointer->hold_y,
-                               now_ms);
+        if (select_drag_begin_if_needed(dt, pointer, x, y, now_ms)) {
             emit_pointer_event(dt, WC3_DIRECT_TOUCH_FIELD_SELECT_MOVE,
                                pointer, x, y, now_ms);
         }
@@ -790,26 +797,24 @@ void wc3_direct_touch_emit_pointer(Wc3DirectTouch *dt,
                                        WC3_DIRECT_TOUCH_ROUTE_NATIVE);
 }
 
-int wc3_direct_touch_camera_pointer(const Wc3DirectTouch *dt)
+static int find_role_pointer_id(const Wc3DirectTouch *dt, uint32_t role)
 {
     if (!dt) return -1;
     for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
         const Wc3DirectTouchPointer *p = &dt->pointers[i];
-        if (dt_pointer_active(p) && p->role == WC3_DT_CONTACT_CAMERA)
-            return p->pointer_id;
+        if (dt_pointer_active(p) && p->role == role) return p->pointer_id;
     }
     return -1;
 }
 
+int wc3_direct_touch_camera_pointer(const Wc3DirectTouch *dt)
+{
+    return find_role_pointer_id(dt, WC3_DT_CONTACT_CAMERA);
+}
+
 int wc3_direct_touch_action_pointer(const Wc3DirectTouch *dt)
 {
-    if (!dt) return -1;
-    for (int i = 0; i < WC3_DIRECT_TOUCH_MAX_POINTERS; i++) {
-        const Wc3DirectTouchPointer *p = &dt->pointers[i];
-        if (dt_pointer_active(p) && p->role == WC3_DT_CONTACT_ACTION)
-            return p->pointer_id;
-    }
-    return -1;
+    return find_role_pointer_id(dt, WC3_DT_CONTACT_ACTION);
 }
 
 uint32_t wc3_direct_touch_contact_role(const Wc3DirectTouch *dt, int pointer_id)

@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipToPadding="false"
+    android:overScrollMode="never">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingBottom="8dp">
+
+        <TextView
+            style="@style/Wc3RowLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/launch_folder_label" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:baselineAligned="false"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <EditText
+                android:id="@+id/folder_input"
+                style="@style/Wc3Field"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:importantForAutofill="no"
+                android:inputType="textNoSuggestions"
+                android:maxLength="1000"
+                android:saveEnabled="false" />
+
+            <Button
+                android:id="@+id/choose_folder_button"
+                style="@style/Wc3ButtonGhost"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:minWidth="0dp"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="@string/launch_folder_choose" />
+
+            <Button
+                android:id="@+id/find_folder_button"
+                style="@style/Wc3ButtonGhost"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:minWidth="0dp"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="@string/launch_folder_find" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/folder_status"
+            style="@style/Wc3Helper"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:accessibilityLiveRegion="polite" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                style="@style/Wc3RowLabel"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/launch_sound_label" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/sound_switch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="@string/launch_sound_label"
+                android:saveEnabled="false"
+                app:thumbTint="@color/switch_thumb"
+                app:trackTint="@color/switch_track" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                style="@style/Wc3RowLabel"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/launch_hide_cursor_label" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/hide_cursor_switch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:contentDescription="@string/launch_hide_cursor_label"
+                android:saveEnabled="false"
+                app:thumbTint="@color/switch_thumb"
+                app:trackTint="@color/switch_track" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/selection_cap_row"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/Wc3RowLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/launch_selection_label" />
+
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="8dp">
+
+                <Spinner
+                    android:id="@+id/selection_cap_spinner"
+                    style="@style/Wc3Spinner"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:contentDescription="@string/launch_selection_label"
+                    android:saveEnabled="false" />
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:layout_gravity="end|center_vertical"
+                    android:layout_marginEnd="12dp"
+                    android:clickable="false"
+                    android:focusable="false"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_expand_more"
+                    android:tint="@color/launch_gold_light" />
+            </FrameLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/parallel_cpu_group"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/Wc3RowLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/launch_cpu_cores_label" />
+
+            <GridLayout
+                android:id="@+id/parallel_cpu_grid"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:useDefaultMargins="false" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

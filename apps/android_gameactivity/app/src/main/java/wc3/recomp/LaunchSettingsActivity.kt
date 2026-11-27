@@ -12,8 +12,10 @@ import android.text.InputFilter
 import android.text.TextWatcher
 import android.util.DisplayMetrics
 import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
@@ -31,6 +33,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.viewpager.widget.PagerAdapter
+import androidx.viewpager.widget.ViewPager
 import wc3.recomp.launch.CpuCore
 import wc3.recomp.launch.CpuTopology
 import wc3.recomp.launch.DxvkConfigOptions
@@ -53,6 +57,12 @@ import wc3.recomp.launch.VulkanDriverStore
 class LaunchSettingsActivity : AppCompatActivity() {
     private lateinit var mode: GameMode
     private lateinit var store: LaunchSettingsStore
+
+    private lateinit var pager: ViewPager
+    private lateinit var tabs: List<View>
+    private lateinit var gamePage: View
+    private lateinit var videoPage: View
+    private lateinit var controlsPage: View
 
     private lateinit var folderInput: EditText
     private lateinit var folderStatus: TextView
@@ -83,7 +93,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
     )
     private lateinit var hideCursorSwitch: SwitchCompat
     private lateinit var parallelCpuGrid: GridLayout
-    private lateinit var parallelCpuHint: TextView
     private var availableCpuCores: List<CpuCore> = emptyList()
     private val cpuCoreCells = mutableListOf<TextView>()
     private lateinit var gridOptionsGroup: LinearLayout
@@ -255,37 +264,62 @@ class LaunchSettingsActivity : AppCompatActivity() {
     }
 
     private fun bindViews() {
-        folderInput = findViewById(R.id.folder_input)
-        folderStatus = findViewById(R.id.folder_status)
-        resolutionSpinner = findViewById(R.id.resolution_spinner)
-        soundSwitch = findViewById(R.id.sound_switch)
-        gestureModeSpinner = findViewById(R.id.gesture_mode_spinner)
-        gestureModeHint = findViewById(R.id.gesture_mode_hint)
-        doubleTapDelayGroup = findViewById(R.id.double_tap_delay_group)
-        doubleTapDelaySlider = findViewById(R.id.double_tap_delay_slider)
-        doubleTapDelayValue = findViewById(R.id.double_tap_delay_value)
-        longPressDelaySlider = findViewById(R.id.long_press_delay_slider)
-        longPressDelayValue = findViewById(R.id.long_press_delay_value)
-        overlayOpacitySlider = findViewById(R.id.overlay_opacity_slider)
-        overlayOpacityValue = findViewById(R.id.overlay_opacity_value)
-        driverSpinner = findViewById(R.id.driver_spinner)
-        driverRemoveButton = findViewById(R.id.driver_remove_button)
-        driverImportButton = findViewById(R.id.driver_import_button)
-        dxvkSpinner = findViewById(R.id.dxvk_spinner)
-        dxvkConfigRows = findViewById(R.id.dxvk_config_rows)
-        dxvkConfigAddButton = findViewById(R.id.dxvk_config_add)
-        dxvkConfigImportButton = findViewById(R.id.dxvk_config_import)
-        selectionCapSpinner = findViewById(R.id.selection_cap_spinner)
-        hideCursorSwitch = findViewById(R.id.hide_cursor_switch)
-        parallelCpuGrid = findViewById(R.id.parallel_cpu_grid)
-        parallelCpuHint = findViewById(R.id.parallel_cpu_hint)
-        gridOptionsGroup = findViewById(R.id.grid_options_group)
-        gridDarkenSlider = findViewById(R.id.grid_darken_slider)
-        gridDarkenValue = findViewById(R.id.grid_darken_value)
-        gridCycleSlider = findViewById(R.id.grid_cycle_slider)
-        gridCycleValue = findViewById(R.id.grid_cycle_value)
-        presentModeSpinner = findViewById(R.id.present_mode_spinner)
-        presentBuffersSpinner = findViewById(R.id.present_buffers_spinner)
+        val pageAdapter = SettingsPagerAdapter(layoutInflater, PAGE_LAYOUTS)
+        pager = findViewById(R.id.settings_pager)
+        pager.adapter = pageAdapter
+        pager.offscreenPageLimit = PAGE_LAYOUTS.size - 1
+
+        gamePage = pageAdapter.page(GAME_PAGE)
+        videoPage = pageAdapter.page(VIDEO_PAGE)
+        controlsPage = pageAdapter.page(CONTROLS_PAGE)
+
+        tabs = listOf(
+            findViewById(R.id.tab_game),
+            findViewById(R.id.tab_video),
+            findViewById(R.id.tab_controls)
+        )
+        tabs.forEachIndexed { index, tab ->
+            tab.setOnClickListener { pager.setCurrentItem(index, true) }
+        }
+        pager.addOnPageChangeListener(object : ViewPager.SimpleOnPageChangeListener() {
+            override fun onPageSelected(position: Int) {
+                updateTabs(position)
+            }
+        })
+        updateTabs(pager.currentItem)
+
+        folderInput = gamePage.findViewById(R.id.folder_input)
+        folderStatus = gamePage.findViewById(R.id.folder_status)
+        soundSwitch = gamePage.findViewById(R.id.sound_switch)
+        selectionCapSpinner = gamePage.findViewById(R.id.selection_cap_spinner)
+        parallelCpuGrid = gamePage.findViewById(R.id.parallel_cpu_grid)
+
+        resolutionSpinner = videoPage.findViewById(R.id.resolution_spinner)
+        hideCursorSwitch = gamePage.findViewById(R.id.hide_cursor_switch)
+        gridOptionsGroup = videoPage.findViewById(R.id.grid_options_group)
+        gridDarkenSlider = videoPage.findViewById(R.id.grid_darken_slider)
+        gridDarkenValue = videoPage.findViewById(R.id.grid_darken_value)
+        gridCycleSlider = videoPage.findViewById(R.id.grid_cycle_slider)
+        gridCycleValue = videoPage.findViewById(R.id.grid_cycle_value)
+        presentModeSpinner = videoPage.findViewById(R.id.present_mode_spinner)
+        presentBuffersSpinner = videoPage.findViewById(R.id.present_buffers_spinner)
+        driverSpinner = videoPage.findViewById(R.id.driver_spinner)
+        driverRemoveButton = videoPage.findViewById(R.id.driver_remove_button)
+        driverImportButton = videoPage.findViewById(R.id.driver_import_button)
+        dxvkSpinner = videoPage.findViewById(R.id.dxvk_spinner)
+        dxvkConfigRows = videoPage.findViewById(R.id.dxvk_config_rows)
+        dxvkConfigAddButton = videoPage.findViewById(R.id.dxvk_config_add)
+        dxvkConfigImportButton = videoPage.findViewById(R.id.dxvk_config_import)
+
+        gestureModeSpinner = controlsPage.findViewById(R.id.gesture_mode_spinner)
+        gestureModeHint = controlsPage.findViewById(R.id.gesture_mode_hint)
+        doubleTapDelayGroup = controlsPage.findViewById(R.id.double_tap_delay_group)
+        doubleTapDelaySlider = controlsPage.findViewById(R.id.double_tap_delay_slider)
+        doubleTapDelayValue = controlsPage.findViewById(R.id.double_tap_delay_value)
+        longPressDelaySlider = controlsPage.findViewById(R.id.long_press_delay_slider)
+        longPressDelayValue = controlsPage.findViewById(R.id.long_press_delay_value)
+        overlayOpacitySlider = controlsPage.findViewById(R.id.overlay_opacity_slider)
+        overlayOpacityValue = controlsPage.findViewById(R.id.overlay_opacity_value)
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             // libadrenotools needs Android 9; keep the system-only path and
@@ -294,7 +328,7 @@ class LaunchSettingsActivity : AppCompatActivity() {
                 R.id.driver_label,
                 R.id.driver_picker_frame,
                 R.id.driver_buttons
-            )) findViewById<View>(id).visibility = View.GONE
+            )) videoPage.findViewById<View>(id).visibility = View.GONE
         }
 
         errorBanner = findViewById(R.id.error_banner)
@@ -360,6 +394,27 @@ class LaunchSettingsActivity : AppCompatActivity() {
             )
         ).apply {
             setDropDownViewResource(R.layout.item_resolution_dropdown)
+        }
+    }
+
+    private fun updateTabs(position: Int) {
+        tabs.forEachIndexed { index, tab ->
+            tab.isSelected = index == position
+        }
+    }
+
+    /* A horizontal drag on a slider or a text field belongs to that control,
+     * not to the page swipe. The ScrollView parent still handles vertical
+     * scrolling. */
+    private fun guardFromPager(view: View) {
+        view.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN ->
+                    pager.requestDisallowInterceptTouchEvent(true)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    pager.requestDisallowInterceptTouchEvent(false)
+            }
+            false
         }
     }
 
@@ -512,7 +567,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
             parallelCpuGrid.addView(cell, params)
             cpuCoreCells.add(cell)
         }
-        updateParallelCpuHint()
     }
 
     private fun toggleCpuCore(cell: TextView) {
@@ -521,7 +575,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
         for (other in cpuCoreCells) {
             other.isSelected = other === cell
         }
-        updateParallelCpuHint()
         refreshValidation()
         saveIfValid()
     }
@@ -531,23 +584,6 @@ class LaunchSettingsActivity : AppCompatActivity() {
             .filter { it.isSelected }
             .mapNotNull { it.tag as? Int }
             .sorted()
-
-    private fun updateParallelCpuHint() {
-        if (availableCpuCores.isEmpty()) {
-            parallelCpuHint.text = getString(R.string.launch_cpu_cores_unavailable)
-            return
-        }
-        val selected = selectedCpuCores()
-        if (selected.isEmpty()) {
-            parallelCpuHint.text = getString(R.string.launch_cpu_cores_required)
-            return
-        }
-        val mainCpu = selected.first()
-        parallelCpuHint.text = getString(
-            R.string.launch_cpu_cores_single,
-            mainCpu
-        )
-    }
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density).toInt()
@@ -613,6 +649,14 @@ class LaunchSettingsActivity : AppCompatActivity() {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
 
+        listOf<View>(
+            folderInput,
+            gridDarkenSlider,
+            gridCycleSlider,
+            doubleTapDelaySlider,
+            longPressDelaySlider,
+            overlayOpacitySlider
+        ).forEach(::guardFromPager)
         wireDelaySlider(doubleTapDelaySlider, doubleTapDelayValue)
         wireDelaySlider(longPressDelaySlider, longPressDelayValue)
         wireOverlayOpacitySlider()
@@ -678,8 +722,10 @@ class LaunchSettingsActivity : AppCompatActivity() {
         }
         dxvkConfigImportButton.setOnClickListener { pickDxvkConfig() }
 
-        findViewById<Button>(R.id.choose_folder_button).setOnClickListener { pickFolder() }
-        findViewById<Button>(R.id.find_folder_button).setOnClickListener { findFolder() }
+        gamePage.findViewById<Button>(R.id.choose_folder_button)
+            .setOnClickListener { pickFolder() }
+        gamePage.findViewById<Button>(R.id.find_folder_button)
+            .setOnClickListener { findFolder() }
         grantButton.setOnClickListener { requestStoragePermission() }
         playButton.setOnClickListener { play() }
     }
@@ -1176,13 +1222,19 @@ class LaunchSettingsActivity : AppCompatActivity() {
          * paths showed the list twice on the same tap. */
         var focusedAtTouchDown = false
         val showSuggestions = View.OnTouchListener { view, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    pager.requestDisallowInterceptTouchEvent(true)
                     focusedAtTouchDown = view.hasFocus()
-                MotionEvent.ACTION_UP ->
+                }
+                MotionEvent.ACTION_UP -> {
+                    pager.requestDisallowInterceptTouchEvent(false)
                     if (focusedAtTouchDown) {
                         (view as AutoCompleteTextView).performCompletion()
                     }
+                }
+                MotionEvent.ACTION_CANCEL ->
+                    pager.requestDisallowInterceptTouchEvent(false)
                 else -> Unit
             }
             false
@@ -1803,7 +1855,45 @@ class LaunchSettingsActivity : AppCompatActivity() {
         val label: String
     )
 
+    /* The three pages are inflated once and reused by the pager, so every
+     * control exists before the first layout pass and each page keeps its
+     * scroll position while the user swipes. */
+    private class SettingsPagerAdapter(
+        inflater: LayoutInflater,
+        pageLayouts: IntArray
+    ) : PagerAdapter() {
+        private val pages: List<View> = pageLayouts.map {
+            inflater.inflate(it, null, false)
+        }
+
+        fun page(index: Int): View = pages[index]
+
+        override fun getCount(): Int = pages.size
+
+        override fun isViewFromObject(view: View, obj: Any): Boolean = view === obj
+
+        override fun instantiateItem(container: ViewGroup, position: Int): Any {
+            val page = pages[position]
+            (page.parent as? ViewGroup)?.removeView(page)
+            container.addView(page)
+            return page
+        }
+
+        override fun destroyItem(container: ViewGroup, position: Int, obj: Any) {
+            container.removeView(obj as View)
+        }
+    }
+
     private companion object {
+        const val GAME_PAGE = 0
+        const val VIDEO_PAGE = 1
+        const val CONTROLS_PAGE = 2
+        val PAGE_LAYOUTS = intArrayOf(
+            R.layout.page_launch_game,
+            R.layout.page_launch_video,
+            R.layout.page_launch_controls
+        )
+
         const val REQUEST_STORAGE = 4101
         const val MIN_RESOLUTION_HEIGHT = 360
         const val RESOLUTION_HEIGHT_STEP = 180

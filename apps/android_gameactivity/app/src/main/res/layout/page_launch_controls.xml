@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipToPadding="false"
+    android:overScrollMode="never">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingBottom="8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/Wc3RowLabel"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/launch_overlay_opacity_label" />
+
+                <TextView
+                    android:id="@+id/overlay_opacity_value"
+                    style="@style/Wc3RowLabel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:gravity="end"
+                    android:minWidth="72dp"
+                    android:textColor="@color/launch_gold_light" />
+            </LinearLayout>
+
+            <SeekBar
+                android:id="@+id/overlay_opacity_slider"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:contentDescription="@string/launch_overlay_opacity_label"
+                android:max="40"
+                android:saveEnabled="false"
+                android:progressBackgroundTint="@color/launch_muted"
+                android:progressTint="@color/launch_gold"
+                android:thumbTint="@color/launch_gold_light" />
+        </LinearLayout>
+
+        <TextView
+            style="@style/Wc3RowLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/launch_gesture_mode_label" />
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:minHeight="48dp">
+
+            <Spinner
+                android:id="@+id/gesture_mode_spinner"
+                style="@style/Wc3Spinner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:contentDescription="@string/launch_gesture_mode_label"
+                android:minHeight="48dp"
+                android:saveEnabled="false" />
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_gravity="end|center_vertical"
+                android:layout_marginEnd="12dp"
+                android:clickable="false"
+                android:focusable="false"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_expand_more"
+                android:tint="@color/launch_gold_light" />
+        </FrameLayout>
+
+        <TextView
+            android:id="@+id/gesture_mode_hint"
+            style="@style/Wc3Helper"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:accessibilityLiveRegion="polite" />
+
+        <LinearLayout
+            android:id="@+id/double_tap_delay_group"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/Wc3RowLabel"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/launch_double_tap_delay_label" />
+
+                <TextView
+                    android:id="@+id/double_tap_delay_value"
+                    style="@style/Wc3RowLabel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:gravity="end"
+                    android:minWidth="72dp"
+                    android:textColor="@color/launch_gold_light" />
+            </LinearLayout>
+
+            <SeekBar
+                android:id="@+id/double_tap_delay_slider"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:contentDescription="@string/launch_double_tap_delay_label"
+                android:max="15"
+                android:saveEnabled="false"
+                android:progressBackgroundTint="@color/launch_muted"
+                android:progressTint="@color/launch_gold"
+                android:thumbTint="@color/launch_gold_light" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                style="@style/Wc3RowLabel"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/launch_long_press_delay_label" />
+
+            <TextView
+                android:id="@+id/long_press_delay_value"
+                style="@style/Wc3RowLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:gravity="end"
+                android:minWidth="72dp"
+                android:textColor="@color/launch_gold_light" />
+        </LinearLayout>
+
+        <SeekBar
+            android:id="@+id/long_press_delay_slider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:contentDescription="@string/launch_long_press_delay_label"
+            android:max="15"
+            android:saveEnabled="false"
+            android:progressBackgroundTint="@color/launch_muted"
+            android:progressTint="@color/launch_gold"
+            android:thumbTint="@color/launch_gold_light" />
+
+    </LinearLayout>
+</ScrollView>

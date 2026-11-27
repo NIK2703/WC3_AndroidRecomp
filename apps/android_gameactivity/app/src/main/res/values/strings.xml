@@ -12,6 +12,9 @@
          Russian translation.  Protocol and package values are non-translatable
          in LaunchContract and the manifest. -->
     <string name="launch_title">Launch settings</string>
+    <string name="launch_tab_game">Game</string>
+    <string name="launch_tab_video">Video</string>
+    <string name="launch_tab_controls">Controls</string>
 
     <string name="launch_folder_label">Game folder</string>
     <string name="launch_folder_choose">Choose</string>
@@ -27,16 +30,12 @@
     <string name="launch_selection_24">24 units</string>
     <string name="launch_selection_40">40 units</string>
     <string name="launch_hide_cursor_label">Hide game cursor</string>
-    <string name="launch_cpu_cores_label">Main thread CPU core</string>
-    <string name="launch_cpu_cores_hint">%1$d of %2$d cores selected · main thread: CPU %3$d · parallel execution is on, workers: %1$d · applied on next launch</string>
-    <string name="launch_cpu_cores_single">Main thread runs on CPU %1$d · parallel execution is off · applied on next launch</string>
-    <string name="launch_cpu_cores_unavailable">Could not detect the allowed CPU cores · parallel execution is off</string>
-    <string name="launch_cpu_cores_required">Select the main-thread core.</string>
+    <string name="launch_cpu_cores_label">CPU core for the main game thread</string>
     <string name="launch_cpu_core_description">CPU core %1$d</string>
     <string name="launch_gesture_mode_label">Touchscreen control gestures</string>
     <string name="launch_gesture_mode_double">Double tap, single tap with delay</string>
     <string name="launch_gesture_mode_single">No double tap, single tap without delay</string>
-    <string name="launch_gesture_mode_direct">Direct touch (tap / long press)</string>
+    <string name="launch_gesture_mode_direct">Adaptive (game conditions)</string>
     <!-- Mirrors the authored Warcraft 3.icp touchscreenGestures and
          wc3_profile_apply_gesture_mode(): the no-double-tap mode clears every
          double-tap package and maps the long press to the right button.  The
@@ -44,7 +43,7 @@
          bound to the Sd2 camera scroll keys. -->
     <string name="launch_gesture_hint_double">• Single tap — LMB (with delay)\n• Double tap — RMB\n• Long press — A + LMB\n• Single-finger drag — MMB\n• Long-press drag — LMB\n• Double-tap drag — LMB\n• Two-finger swipe up/down — camera tilt\n• Two-finger swipe left/right — camera rotation</string>
     <string name="launch_gesture_hint_single">• Single tap — LMB (immediately)\n• Long press — RMB\n• Single-finger drag — MMB\n• Long-press drag — LMB\n• Two-finger swipe up/down — camera tilt\n• Two-finger swipe left/right — camera rotation</string>
-    <string name="launch_gesture_hint_direct">• Tap a selectable unit with no controlled selection — select\n• Tap a controlled unit while a controlled unit is selected — select it\n• Tap any other target while a controlled unit is selected — smart order\n• Long press a unit or decoration with controlled units — smart order\n• Long press the ground with controlled units — attack-move\n• Long press and drag — selection box\n• Long press without a controlled selection — native click\n• Two-finger gestures — camera\n• Native HUD panels (command card, minimap, portrait, resource bar, menus) receive native clicks\n• Overlay buttons (D-pad, 1–8, Shift, Enter, Esc) keep the existing overlay path</string>
+    <string name="launch_gesture_hint_direct">• If no units are selected or a non-controlled unit is selected: tap/long-press — select the unit\n• If controlled units are selected:\n– tap the ground — order, long-press the ground — attack-move\n– if the target is a controlled unit (except mine/transport): tap — select, long-press — order\n– if the target is a non-controlled unit or mine/transport: tap — order, long-press — select\n• Long-press and drag — select units\n• Drag a command-card order and release over a target/ground — execute the order for that target/point\n• Drag an inventory item and release over ground/target — drop/give the item</string>
     <string name="launch_double_tap_delay_label">Double-tap delay</string>
     <string name="launch_long_press_delay_label">Long-press delay</string>
     <string name="launch_gesture_delay_value">%1$d ms</string>
@@ -55,7 +54,6 @@
     <string name="launch_grid_cycle_label">Grid cycle interval (OLED)</string>
     <string name="launch_grid_cycle_value">%1$d s</string>
     <string name="launch_grid_cycle_off">Off</string>
-    <string name="launch_presentation_label">Presentation</string>
     <string name="launch_present_mode_label">Present mode</string>
     <string name="launch_present_mode_fifo">FIFO</string>
     <string name="launch_present_mode_fifo_relaxed">FIFO relaxed</string>

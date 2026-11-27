@@ -71,6 +71,8 @@ int wc3_hle_direct_touch_grid_rect(float *left, float *top,
                                    float *right, float *bottom);
 int wc3_hle_direct_touch_inventory_rect(float *left, float *top,
                                         float *right, float *bottom);
+int wc3_hle_direct_touch_hero_rect(float *left, float *top,
+                                   float *right, float *bottom);
 
 static Wc3DirectTouchRoute host_direct_touch_route_gate(void *user)
 {
@@ -125,6 +127,14 @@ static int host_direct_touch_inventory_gate(float *left, float *top,
 {
     (void)user;
     return wc3_hle_direct_touch_inventory_rect(left, top, right, bottom);
+}
+
+static int host_direct_touch_hero_gate(float *left, float *top,
+                                       float *right, float *bottom,
+                                       void *user)
+{
+    (void)user;
+    return wc3_hle_direct_touch_hero_rect(left, top, right, bottom);
 }
 #endif
 #include "window_settle.h"
@@ -2480,6 +2490,7 @@ static int overlay_input_start(int width, int height)
     controls_set_direct_touch_grid_gate(host_direct_touch_grid_gate, NULL);
     controls_set_direct_touch_inventory_gate(
         host_direct_touch_inventory_gate, NULL);
+    controls_set_direct_touch_hero_gate(host_direct_touch_hero_gate, NULL);
     controls_set_direct_touch_haptic_sink(host_haptic_sink, NULL);
 #else
     controls_set_action_sink(NULL, NULL);
@@ -2493,6 +2504,7 @@ static int overlay_input_start(int width, int height)
     controls_set_direct_touch_command_gate(NULL, NULL);
     controls_set_direct_touch_grid_gate(NULL, NULL);
     controls_set_direct_touch_inventory_gate(NULL, NULL);
+    controls_set_direct_touch_hero_gate(NULL, NULL);
 #endif
 
     /* A surface resize must not throw away the current FULL/SIMPLE/SIMPLE_ESC

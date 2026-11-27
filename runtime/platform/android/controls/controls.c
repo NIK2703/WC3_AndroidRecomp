@@ -143,6 +143,8 @@ static Wc3DirectTouchGridRectGate g_direct_touch_grid_gate;
 static void *g_direct_touch_grid_gate_user;
 static Wc3DirectTouchInventoryRectGate g_direct_touch_inventory_gate;
 static void *g_direct_touch_inventory_gate_user;
+static Wc3DirectTouchHeroRectGate g_direct_touch_hero_gate;
+static void *g_direct_touch_hero_gate_user;
 static Wc3DirectTouchHapticSink g_direct_touch_haptic_sink;
 static void *g_direct_touch_haptic_user;
 /* Legacy profile default; direct_touch_configure() replaces it with the
@@ -917,10 +919,10 @@ static int direct_touch_rect_contains_inclusive(float x, float y, float left,
  */
 static int direct_touch_field_contains(float x, float y) {
     if (g_width <= 0 || g_height <= 0) return 0;
-    const float left = (float)g_width * 0.03f;
-    const float right = (float)g_width * 0.97f;
-    const float top = (float)g_height * 0.10f;
-    const float bottom = (float)g_height * 0.85f;
+    const float left = (float)g_width * WC3_DT_FIELD_LEFT;
+    const float right = (float)g_width * WC3_DT_FIELD_RIGHT;
+    const float top = (float)g_height * WC3_DT_FIELD_TOP;
+    const float bottom = (float)g_height * WC3_DT_FIELD_BOTTOM;
     return direct_touch_rect_contains_inclusive(x, y, left, top, right,
                                                 bottom);
 }
@@ -990,6 +992,11 @@ static int direct_touch_inventory_contains(float x, float y) {
         x, y);
 }
 
+static int direct_touch_hero_contains(float x, float y) {
+    return direct_touch_gate_contains_inclusive(
+        g_direct_touch_hero_gate, g_direct_touch_hero_gate_user, x, y);
+}
+
 /* Snapshot the guest route once per input event.  A NULL gate is the
  * unit-test/host-only mode and keeps the phase-1 semantic field behavior. */
 static Wc3DirectTouchRoute direct_touch_gate_route(void) {
@@ -1027,10 +1034,10 @@ static Wc3DirectTouchRoute direct_touch_route_for(
     {
         const float nx = g_width > 0 ? x / (float)g_width : 0.0f;
         const float ny = g_height > 0 ? y / (float)g_height : 0.0f;
-        const float fl = (float)g_width * 0.03f;
-        const float fr = (float)g_width * 0.97f;
-        const float ft = (float)g_height * 0.10f;
-        const float fb = (float)g_height * 0.85f;
+        const float fl = (float)g_width * WC3_DT_FIELD_LEFT;
+        const float fr = (float)g_width * WC3_DT_FIELD_RIGHT;
+        const float ft = (float)g_height * WC3_DT_FIELD_TOP;
+        const float fb = (float)g_height * WC3_DT_FIELD_BOTTOM;
         WC3_CTRL_LOG("dt route-in px=%.1f,%.1f n=%.4f,%.4f "
                      "size=%dx%d overlay=%d enabled=%d sink=%d "
                      "gate=%s field=%d field_rect=%.1f,%.1f..%.1f,%.1f",
@@ -1050,6 +1057,8 @@ static Wc3DirectTouchRoute direct_touch_route_for(
                                 g_direct_touch_grid_gate_user);
         direct_touch_trace_gate("inventory", g_direct_touch_inventory_gate,
                                 g_direct_touch_inventory_gate_user);
+        direct_touch_trace_gate("hero", g_direct_touch_hero_gate,
+                                g_direct_touch_hero_gate_user);
     }
 #endif
     if (route == WC3_DIRECT_TOUCH_ROUTE_MENU) {
@@ -1106,6 +1115,14 @@ static Wc3DirectTouchRoute direct_touch_route_for(
      * handler decides whether the point hit a unit. */
     if (direct_touch_grid_contains(x, y)) {
         DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "grid");
+    }
+    /* The hero bar is anchored in the upper-left and its lower slots can
+     * overlap the field rectangle on short surfaces.  Claim the visible slot
+     * union for NATIVE first; the guest hero handler applies a unit target
+     * only when a target mode is live, otherwise the native hero bar keeps
+     * its selection tap. */
+    if (direct_touch_hero_contains(x, y)) {
+        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "hero");
     }
     if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD &&
         direct_touch_field_contains(x, y)) {
@@ -1265,6 +1282,12 @@ void controls_set_direct_touch_inventory_gate(
     Wc3DirectTouchInventoryRectGate gate, void *user) {
     g_direct_touch_inventory_gate = gate;
     g_direct_touch_inventory_gate_user = user;
+}
+
+void controls_set_direct_touch_hero_gate(
+    Wc3DirectTouchHeroRectGate gate, void *user) {
+    g_direct_touch_hero_gate = gate;
+    g_direct_touch_hero_gate_user = user;
 }
 
 /*

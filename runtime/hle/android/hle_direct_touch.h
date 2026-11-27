@@ -178,6 +178,15 @@ int wc3_hle_direct_touch_grid_rect(float *left, float *top,
 int wc3_hle_direct_touch_inventory_rect(float *left, float *top,
                                         float *right, float *bottom);
 
+/* Lock-free snapshot of the visible hero-bar slot union in
+ * surface-normalised coordinates.  The bar is anchored in the upper-left and
+ * its lower slots can overlap the field rectangle; the controls layer forces
+ * a press inside this union to the raw NATIVE route.  The guest hero handler
+ * then applies a unit target when a target mode is live, and leaves a normal
+ * tap to the native hero-bar selection. */
+int wc3_hle_direct_touch_hero_rect(float *left, float *top,
+                                   float *right, float *bottom);
+
 #ifdef __cplusplus
 }
 #endif

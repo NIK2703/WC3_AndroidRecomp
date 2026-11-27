@@ -74,6 +74,28 @@
         <item name="android:textColor">@color/launch_parchment</item>
     </style>
 
+    <style name="Wc3Tab">
+        <item name="android:orientation">vertical</item>
+        <item name="android:gravity">center</item>
+        <item name="android:background">?android:attr/selectableItemBackground</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+
+    <style name="Wc3TabText">
+        <item name="android:fontFamily">sans-serif-condensed</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.08</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:gravity">center</item>
+        <item name="android:autoSizeTextType">uniform</item>
+        <item name="android:autoSizeMinTextSize">10sp</item>
+        <item name="android:autoSizeMaxTextSize">13sp</item>
+        <item name="android:textColor">@color/tab_text</item>
+    </style>
+
     <style name="Wc3Field">
         <item name="android:background">@drawable/bg_field</item>
         <item name="android:backgroundTint">@null</item>

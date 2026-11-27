@@ -1007,7 +1007,7 @@ static inline int wc3_dt_minimap_input_contains(float x, float y,
                                                 float left, float top,
                                                 float right, float bottom)
 {
-    return x >= left && x <= right && y >= top && y <= bottom;
+    return wc3_dt_rect_contains_inclusive(x, y, left, top, right, bottom);
 }
 
 /* Prefer the live CGameUI+0x41C panel rect over the console-derived guess.

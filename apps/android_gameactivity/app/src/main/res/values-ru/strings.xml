@@ -3,6 +3,9 @@
     <!-- Russian settings UI.  The project brand and the two game titles are
          product names and stay in values/strings.xml. -->
     <string name="launch_title">Настройки запуска</string>
+    <string name="launch_tab_game">Игра</string>
+    <string name="launch_tab_video">Видео</string>
+    <string name="launch_tab_controls">Управление</string>
 
     <string name="launch_folder_label">Каталог игры</string>
     <string name="launch_folder_choose">Выбрать</string>
@@ -17,16 +20,12 @@
     <string name="launch_selection_24">24 юнита</string>
     <string name="launch_selection_40">40 юнитов</string>
     <string name="launch_hide_cursor_label">Скрыть игровой курсор</string>
-    <string name="launch_cpu_cores_label">Ядра CPU</string>
-    <string name="launch_cpu_cores_hint">Выбрано %1$d из %2$d ядер · основной поток: CPU %3$d · параллелизм включён, воркеров: %1$d · применится при следующем запуске</string>
-    <string name="launch_cpu_cores_single">Выбрано одно ядро · основной поток: CPU %1$d · параллелизм выключен · выберите два и более ядра для воркеров · применится при следующем запуске</string>
-    <string name="launch_cpu_cores_unavailable">Не удалось определить доступные ядра · параллелизм выключен</string>
-    <string name="launch_cpu_cores_required">Выберите хотя бы одно ядро.</string>
+    <string name="launch_cpu_cores_label">Ядро для выполнения основного потока игры</string>
     <string name="launch_cpu_core_description">Ядро CPU %1$d</string>
     <string name="launch_gesture_mode_label">Жесты тачскрин управления</string>
     <string name="launch_gesture_mode_double">Двойное касание, одиночное с задержкой</string>
     <string name="launch_gesture_mode_single">Без двойного касания, одиночное без задержки</string>
-    <string name="launch_gesture_mode_direct">Прямое касание (тап / долгое нажатие)</string>
+    <string name="launch_gesture_mode_direct">Адаптивное (по игровым условиям)</string>
     <!-- Mirrors the authored Warcraft 3.icp touchscreenGestures and
          wc3_profile_apply_gesture_mode(): the no-double-tap mode clears every
          double-tap package and maps the long press to the right button.  The
@@ -34,7 +33,7 @@
          bound to the Sd2 camera scroll keys. -->
     <string name="launch_gesture_hint_double">• Одиночное касание — ЛКМ (с задержкой)\n• Двойное касание — ПКМ\n• Долгое нажатие — A + ЛКМ\n• Перетаскивание одним пальцем — СКМ\n• Долгое нажатие с перетаскиванием — ЛКМ\n• Двойное касание с перетаскиванием — ЛКМ\n• Свайп двумя пальцами вверх/вниз — наклон камеры\n• Свайп двумя пальцами влево/вправо — поворот камеры</string>
     <string name="launch_gesture_hint_single">• Одиночное касание — ЛКМ (без задержки)\n• Долгое нажатие — ПКМ\n• Перетаскивание одним пальцем — СКМ\n• Долгое нажатие с перетаскиванием — ЛКМ\n• Свайп двумя пальцами вверх/вниз — наклон камеры\n• Свайп двумя пальцами влево/вправо — поворот камеры</string>
-    <string name="launch_gesture_hint_direct">• Тап по доступному юниту без управляемого выделения — выбор\n• Тап по подконтрольному юниту при выбранном управляемом юните — выбрать его\n• Тап по остальной цели при выбранном управляемом юните — умный приказ\n• Долгое нажатие по юниту или декорации при выбранных управляемых юнитах — умный приказ\n• Долгое нажатие по земле при выбранных управляемых юнитах — attack-move\n• Долгое нажатие с перетаскиванием — рамка выделения\n• Долгое нажатие без управляемого выделения — нативный клик\n• Жесты двумя пальцами — камера\n• Нативные панели HUD (command card, миникарта, портрет, ресурсы, меню) получают нативные клики\n• Кнопки оверлея (D-pad, 1–8, Shift, Enter, Esc) идут прежним путём</string>
+    <string name="launch_gesture_hint_direct">• Если не выделены юниты или выделен неподконтрольный: касание/долгое касание — выделить юнита\n• Если выделены подконтрольные:\n– касание по земле — приказ, долгое касание по земле — отправить в атаку\n– если цель: юнит подконтрольный (за исключением рудника/транспорта): касание — выделить, долгое касание — приказ\n– если цель: юнит неподконтрольный или рудник/транспорт: касание — приказ, долгое касание — выделить\n• Долгое касание с перетаскиванием — выделение юнитов\n• Провести пальцем по приказу на панели приказов и отпустить над целью/землёй — выполнить приказ для цели/точки\n• Провести пальцем по предмету в инвентаре и отпустить над землёй/целью — выбросить/передать предмет</string>
     <string name="launch_double_tap_delay_label">Задержка двойного касания</string>
     <string name="launch_long_press_delay_label">Задержка долгого нажатия</string>
     <string name="launch_gesture_delay_value">%1$d мс</string>
@@ -45,7 +44,6 @@
     <string name="launch_grid_cycle_label">Период сдвига сетки (OLED)</string>
     <string name="launch_grid_cycle_value">%1$d с</string>
     <string name="launch_grid_cycle_off">Выкл.</string>
-    <string name="launch_presentation_label">Отображение</string>
     <string name="launch_present_mode_label">Режим синхронизации</string>
     <string name="launch_present_mode_fifo">FIFO</string>
     <string name="launch_present_mode_fifo_relaxed">FIFO relaxed</string>

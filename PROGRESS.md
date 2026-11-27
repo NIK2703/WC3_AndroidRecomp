@@ -1820,3 +1820,187 @@ distcc auto: `workers=pc local=7 remote=4 jobs=11`; the unavailable
   long tap по врагу/нейтралу → select, tap по врагу/нейтралу → smart
   order; long tap + drag по `egol`/врагу → selection rectangle сразу с
   BEGIN, без ожидания drag-квадрата.
+
+## 2026-11-27: настройки запуска разнесены по вкладкам (source-only)
+
+- `activity_launch_settings.xml` больше не один длинный ScrollView: шапка
+  (заголовок, Play, баннер ошибки) зафиксирована, ниже — три вкладки
+  «Игра / Видео / Управление» и стандартный `ViewPager`
+  (`androidx.viewpager.widget`, уже транзитивно доступен через
+  AppCompat/fragment; новых зависимостей нет).
+- Страницы: `page_launch_game.xml` (каталог игры, звук, скрытие курсора,
+  лимит выделения, ядро CPU), `page_launch_video.xml` (разрешение, сетка,
+  presentation, Vulkan driver, DXVK), `page_launch_controls.xml`
+  (прозрачность оверлея, жесты, задержки). Порядок сохранения и валидация
+  не менялись.
+- Вкладки — стандартные `LinearLayout`/`TextView` с золотым индикатором;
+  переключение тапом и свайпом, состояние вкладки синхронизировано с pager
+  через `onPageSelected`.
+- Подпись ядра CPU уточнена до «Ядро для выполнения основного потока
+  игры»; пояснительный текст под сеткой (`parallel_cpu_hint`) и его строки
+  удалены.
+- Пункт режима жестов «Прямое касание…» переименован в «Адаптивное
+  (по игровым условиям)»; поведение режима не менялось.
+- Подсказка адаптивного режима переписана компактно с сохранением
+  исходных формулировок: выделение (в т.ч. перетаскиванием), три случая
+  цели, drag приказа и предмета.
+- «Скрыть игровой курсор» перенесён в «Игру»; заголовок «Отображение» в
+  «Видео» убран, сами настройки presentation остались.
+- Pager растянут на всю ширину; горизонтальные отступы 24dp оставлены у
+  шапки, вкладок и содержимого страниц, чтобы элементы не липли к краям.
+- «Непрозрачность элементов управления» поднята в начало «Управления».
+- Сборка не запускалась; T2 не проверялся. При следующей сборке проверить
+  свайп и тапы вкладок, сохранение настроек на всех трёх страницах,
+  видимость grid/gesture-групп и поведение при повороте.
+
+## 2026-11-27: сигнал союзникам через CNetCommandAllyPing (source-only)
+
+- Причина: `dt_add_beacon()` вызывал только `CMinimap::AddSignal`
+  (`0x6F3B0A30`) — локальный ринг. Нативный путь кнопки сигнала и клика по
+  миникарте/миру (`0x6F3C4DE0`) строит `CNetCommandAllyPing` (ID `0xA0068`,
+  тип `0x68`) и отправляет его через `0x6F26FF00` → `0x6F26B5B0`;
+  локальный ринг добавляет приёмный путь `0x6F26EE28` при обработке
+  команды. Поэтому другие игроки не получали сигнал.
+- `dt_add_beacon()` теперь вызывает `DT_FN_SEND_ALLY_PING = 0x6F3C4DE0` с
+  указателем на мировую точку `{x, y}`. `AddSignal` оставлен как локальный
+  fallback только вне сетевой игры (`[0x6FCE5518] & 0x100 == 0`), чтобы не
+  дублировать ринг в сети.
+- T0: `direct_touch`, `direct_touch_wiring` проходят; в wiring добавлена
+  проверка адреса отправителя и порядка send/fallback. `clang
+  -fsyntax-only` debug/release — 0/0. APK не пересобирался, T2 не
+  запускался.
+- При следующей сборке проверить: сигнал с кнопки и драг на миникарту видны
+  союзнику; у отправителя нет двойного ринга; в одиночной игре локальный
+  ринг остаётся.
+- Остаётся риск: сериализатор `0x6F26B5B0` сам `AddSignal` не вызывает, но
+  локальное применение команды может идти через `0x6F26EE28`. Если в
+  одиночной игре эхо есть, fallback даст второй ринг; проверить на T2 и при
+  дубле либо убрать fallback, либо вызывать его только при отсутствии эха.
+
+## 2026-11-27: P1 дедупликация direct-touch (source-only)
+
+- Основание: `docs/research/DIRECT_TOUCH_DEDUP_REAUDIT_2026-11-27.md`,
+  пункты P1-1…P1-6. Поведение не меняется, только общие помощники и
+  константы.
+- P1-1: прямоугольник поля вынесен в
+  `runtime/ipc/direct_touch_event.h` как `WC3_DT_FIELD_*`. HLE
+  `dt_field_contains()` и host `direct_touch_field_contains()` плюс debug-лог
+  маршрута используют его; локальные `DT_INV_FIELD_*` удалены.
+- P1-2: ручные inclusive-проверки заменены на
+  `wc3_dt_rect_contains_inclusive()` в beacon DOWN/UP, command portrait
+  target и beacon TAP fallback; `wc3_dt_minimap_input_contains()` теперь
+  делегирует тому же помощнику.
+- P1-3: ручная slop-математика заменена на `wc3_dt_past_slop()` /
+  `wc3_dt_command_moved()` в field defer, beacon move и command move.
+  Отдельные константы `DT_CMD_TAP_SLOP`, `DT_FIELD_TAP_SLOP`,
+  `DT_BEACON_TAP_SLOP`, `DT_INV_TAP_SLOP` оставлены раздельными: это
+  независимые политики, общий alias не вводился.
+- P1-4: `select_drag_begin_if_needed()` в
+  `runtime/platform/android/controls/direct_touch.c` объединяет MOVE/UP
+  ветки SELECT drag begin.
+- P1-5: `find_role_pointer_id()` объединяет поиск camera/action pointer.
+- P1-6: у `dt_command_targeting()` убран неиспользуемый параметр `type`.
+- T0: `direct_touch`, `direct_touch_wiring` проходят; `clang
+  -fsyntax-only` debug/release — 0/0; `git diff --check` чист. APK не
+  пересобирался, T2 не запускался.
+
+## 2026-11-27: crash target-mode grid tap (source-only)
+
+- Симптом: после команды Death Knight's Coil тап по иконке гуля в нижней
+  сетке selection падает в гостевом `L_6F3BF055`. Воспроизводится в debug,
+  значит это не release-only дефект.
+- Трасса: `POINTER_DOWN` на `n=0.4520,0.8627` при `target_active=1`,
+  `probe begin#4 ... a=41F2DAF0`; `dt_grid_target()` шлёт synthetic
+  `0x50065` в `0x6F3BF010` с `event+0xC = unit`. Нативный обработчик
+  читает `[[unit+0x6C]+0x124]`; у выбранного CUnit `[unit+0x6C] == 8`,
+  отсюда fault `0x10000012c` (guest VA `0x12C` = `8+0x124`).
+- this regression прямой части P1: путь `dt_grid_target()` добавлен коммитом
+  `9f06f56` (P1 «grid tap/drag selection»), не унаследован от старого дерева.
+  Нативный grid-обработчик `0x6F393430` перед использованием холдера
+  проверяет его через `0x6F0549F0`; целевой `0x6F3BF010` такой проверки
+  не делает.
+- Fix: `dt_grid_target()` перед dispatch вызывает уже существующий
+  `dt_unit_holder(c, unit)` — тот же разбор `[[unit+0x6C]+0x124]` и
+  валидацию `0x6F0549F0`. При отсутствии живого UI-подобъекта событие не
+  шлётся, guest не падает. Матрица select/order, маршруты и жесты не
+  изменились.
+- T0: `direct_touch`, `direct_touch_wiring`, `inventory_gesture` проходят;
+  `git diff --check` чист.
+- Собрано и установлено по явной команде: `tools/android/build_apk.sh
+  --variant debug --install`, distcc не отключался. APK
+  `build/android_app/wc3-debug.apk`, SHA-256
+  `ae1a3158722a59314a3373ab0fdb118f557fa3929f1469332cea55dec76ab528`,
+  размер `178965621`. Установлен `wc3.recomp.debug` versionName `0.1.1-debug`;
+  staged-копия `/storage/emulated/0/1/wc3-debug.apk` обновлена с
+  `b25b4cac…` до того же хэша. T2 ещё не прогонялся.
+
+## 2026-11-27: target-режим по иконкам героев (source-only)
+
+- Источник: `CGameUI+0x3DC` → `CHeroBar`; `+0x154` — массив строк
+  `CGridPanel`, 7 строк по 0x10 байт, `[row+8]` — массив слотов, `[row_ptr]`
+  — единственный слот строки. Видимость слота — `slot+0x90`, её ставят
+  show/hide-помощники `0x6F3C7C6B`/`0x6F3C7C2B` из rebuild
+  `0x6F3C6E90`. Юнит берётся из health stat bar
+  `[[slot+0x1CC]+0x154]`, fallback — mana `[[slot+0x1D0]+0x154]`;
+  `slot+0x1D4` — только кэш портрета и очищается, источником не является.
+- `dt_hero_snapshot()` публикует union видимых slot-прямоугольников через
+  `dt_console_rect_read()`: `CFrame+0x44` у всех HUD-фреймов живёт в
+  фиксированном 0.8×0.6 DDC-пространстве, включая hero bar. Getter
+  `wc3_hle_direct_touch_hero_rect()`; host-гейт `hero` проверяется до поля,
+  чтобы нижние слоты не уходили в FIELD.
+- `dt_hero_pointer()` работает только на NATIVE-маршруте. При живом target
+  mode (`ui+0x210`/`ui+0x1B4`) DOWN находит видимый слот и вызывает
+  `dt_grid_target()` с `0x50065`; MOVE/UP/CANCEL этого pointer
+  поглощаются. Без target mode обработчик возвращает 0 — обычный тап
+  остаётся нативным и выбирает героя. Жест сбрасывается в FULL/PAUSE/STALE
+  и при старте.
+- T0: `hero_target`, `direct_touch`, `direct_touch_wiring`,
+  `inventory_gesture` проходят; `clang -fsyntax-only` debug/release для
+  `hle_direct_touch.c`, `controls.c`, `direct_touch.c` — 0/0;
+  `git diff --check` чист. APK не пересобирался, T2 не запускался.
+- При следующей сборке проверить: тап по иконке героя в target mode даёт
+  приказ именно этому герою (не выделение); обычный тап по иконке
+  по-прежнему выбирает героя; нет двойного приказа/двойного клика; сигнал
+  союзнику и отсутствие двойного ринга у отправителя — из предыдущего
+  пункта.
+## 2026-11-27: root cause и исправление target-приказа по иконке сетки (source-only)
+
+- Причина №1 (краш): `dt_grid_target()` клал CUnit в `event+0xC`, но нативный
+  обработчик `0x6F3BF010` → `0x6F3BF055` читает `[[event+0xC]+0x6C]+0x124`
+  как холдер. У юнита из иконки сетки `[unit+0x6C] == 8`, отсюда fault
+  `8+0x124 = 0x12C`. Guard `dt_unit_holder()` убирал краш, но навсегда
+  пропускал приказ (`grid-target-skip` на каждом тапе).
+- Причина №2 (тихий no-op даже без краша): `0x6F3BF055` передаёт в
+  `0x6F3C39B0` пару `(holder, [event+0x10], 0)`. Наш synthetic event оставлял
+  `event+0x10 == 0`, а режим `0` в `0x6F3C39B0` — пустой (`0x6F3C3F41`).
+  Режим `1` — приказ по юниту, `2` — по точке, `4` — отмена.
+- Native-нагрузка `0x50065` — это фрейм (кнопка/портрет), а не CUnit;
+  обработчик сам достаёт холдер из `[frame+0x6C]+0x124`. В сетке этот
+  холдер уже есть: `dt_grid_button_at()` читает `[button+0x124]` и
+  резолвит его через `dt_handle_unit()`.
+- Fix: `dt_grid_target()` больше не шлёт synthetic event. Он вызывает
+  `0x6F3C39B0` напрямую с живым холдером и режимом 1:
+  `args = {holder, 1, 0}`, `ecx = target_mode`. Валидация холдера
+  сохранена через `0x6F0549F0` (`DT_FN_HOLDER_ALIVE`) — тот же check,
+  что делал старый guard. Маршрут хоста, порядок dispatch и остальные жесты
+  не тронуты.
+- Вызовы обновлены: сетка и command-drag передают `hit.holder`, портрет —
+  `dt_portrait_lookup(..., &holder, ...)`, hero bar — `dt_unit_holder(unit)`
+  (герои сохраняют UI-подобъект) с отдельным `hero-target-skip`.
+- T0: `direct_touch`, `direct_touch_wiring`, `inventory_gesture`,
+  `hero_target` проходят; release source audit `ungated 0`;
+  `git diff --check` чист. APK **не** пересобирался и не устанавливался
+  после этого исправления — нужна явная команда пользователя.
+- При следующей сборке/T2 проверить Death Knight's Coil → иконка гуля:
+  приказ применяется (юнит идёт на цель), нет краша и нет
+  `grid-target-skip` в `dt_trace`; обычный тап по иконке всё ещё выбирает
+  подгруппу.
+
+### Сборка после исправления (по явной команде пользователя)
+
+- `tools/android/build_apk.sh --variant debug --install`: успех, distcc не
+  отключался (`workers=pc local=7 remote=4 jobs=11`).
+- APK `build/android_app/wc3-debug.apk`, размер `178985509`, SHA-256
+  `a66829b9b50c4de651c127899288e915b8244be1b5d303286d55d5cbf89a9251`.
+- Установлен `wc3.recomp.debug`, `versionName=0.1.1-debug`;
+  `pm path` подтверждает установку. T2 ещё не прогонялся.

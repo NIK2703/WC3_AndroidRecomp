@@ -175,6 +175,19 @@ typedef enum {
     WC3_DT_OWNER_CAMERA = 2u
 } Wc3DirectTouchOwnerRole;
 
+/*
+ * Shared battlefield rectangle in normalised surface coordinates.  The host
+ * route gate and the guest inventory/field exclusion must agree: inside this
+ * rectangle is battlefield, outside it is native HUD.  Both sides use
+ * inclusive bounds, and the minimap/portrait/beacon/command gates run before
+ * this rectangle.  Keeping the values here stops the two layers from
+ * drifting apart.
+ */
+#define WC3_DT_FIELD_LEFT    0.03f
+#define WC3_DT_FIELD_RIGHT   0.97f
+#define WC3_DT_FIELD_TOP     0.10f
+#define WC3_DT_FIELD_BOTTOM  0.85f
+
 typedef struct {
     uint32_t kind;       /* Wc3DirectTouchKind */
     uint32_t pointer_id; /* source pointer, diagnostics only */

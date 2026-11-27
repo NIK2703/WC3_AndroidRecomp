@@ -4104,7 +4104,7 @@ def test_direct_touch_wiring() -> int:
         else:
             require_order(
                 full[1].split("case DT_RESET_PAUSE:", 1)[0],
-                ("dt_scratch_invalidate", "dt_grid_reset",
+                ("dt_scratch_invalidate", "dt_grid_reset", "dt_hero_reset",
                  "dt_inventory_reset", "dt_command_reset",
                  "dt_command_target_reset", "dt_field_reset",
                  "dt_camera_pan_reset", "dt_field_click_reset",
@@ -4113,16 +4113,17 @@ def test_direct_touch_wiring() -> int:
                 "reset FULL")
             require_order(
                 pause[1].split("case DT_RESET_STALE:", 1)[0],
-                ("dt_grid_reset", "dt_inventory_reset", "dt_command_reset",
-                 "dt_command_target_reset", "dt_field_reset",
-                 "dt_camera_pan_reset", "g_native_up_pending",
-                 "dt_native_abort", "g_field_defer_active",
-                 "dt_field_click_reset", "dt_beacon_cancel",
-                 "g_portrait_follow_active", "g_portrait_release_pending"),
+                ("dt_grid_reset", "dt_hero_reset", "dt_inventory_reset",
+                 "dt_command_reset", "dt_command_target_reset",
+                 "dt_field_reset", "dt_camera_pan_reset",
+                 "g_native_up_pending", "dt_native_abort",
+                 "g_field_defer_active", "dt_field_click_reset",
+                 "dt_beacon_cancel", "g_portrait_follow_active",
+                 "g_portrait_release_pending"),
                 "reset PAUSE")
             require_order(
                 stale[1],
-                ("dt_grid_reset", "dt_inventory_reset", "dt_command_reset",
+                ("dt_grid_reset", "dt_hero_reset", "dt_inventory_reset", "dt_command_reset",
                  "dt_command_target_reset", "dt_field_click_reset",
                  "dt_native_release"),
                 "reset STALE")
@@ -4265,6 +4266,24 @@ def test_direct_touch_wiring() -> int:
     if "event.y = normalized_y(dt, y)" not in host:
         errors.append("host event y is not normalised through the helper")
 
+    # Beacon placement must use the native ally-ping sender.  AddSignal only
+    # draws the local ring; the network command is what allies receive.  The
+    # local fallback stays for a non-network game, where there is no echo.
+    beacon = function_body("static int dt_add_beacon(")
+    if not beacon:
+        errors.append("dt_add_beacon definition missing")
+    else:
+        if not re.search(r"#define\s+DT_FN_SEND_ALLY_PING\s+0x6F3C4DE0u", dt):
+            errors.append("ally-ping sender address changed")
+        require_order(
+            beacon,
+            ("DT_FN_SEND_ALLY_PING", "DT_GAME_FLAG_NETWORK",
+             "DT_FN_ADD_SIGNAL"),
+            "beacon send/fallback")
+    minimap_place = function_body("static int dt_beacon_place_minimap(")
+    if "dt_add_beacon(" not in minimap_place:
+        errors.append("minimap beacon does not use dt_add_beacon")
+
     if errors:
         for line in errors:
             print(f"direct-touch-wiring: {line}", file=sys.stderr)
@@ -4364,6 +4383,91 @@ def test_inventory_gesture() -> int:
     return 0
 
 
+def test_hero_target() -> int:
+    """T0: hero-bar slots are gated natively and target through 0x50065."""
+    errors: list[str] = []
+    hle = (ROOT / "runtime/hle/android/hle_direct_touch.c").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    hle_h = (ROOT / "runtime/hle/android/hle_direct_touch.h").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    controls = (ROOT / "runtime/platform/android/controls/controls.c").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    controls_h = (ROOT / "runtime/platform/android/controls/controls.h").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    host = (ROOT / "apps/android_gameactivity/src/main/cpp/host_shell.c").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+
+    snapshot = hle.split("static void dt_snapshot_all(", 1)
+    snapshot_body = snapshot[1].split("\n}\n", 1)[0] if len(snapshot) == 2 else ""
+    if "dt_hero_snapshot(" not in snapshot_body:
+        errors.append("snapshot_all does not publish the hero-bar rect")
+    if "int wc3_hle_direct_touch_hero_rect(" not in hle:
+        errors.append("hero rect read function missing")
+    if "int wc3_hle_direct_touch_hero_rect(" not in hle_h:
+        errors.append("hero rect declaration missing")
+    if "dt_hero_publish(0.0f, 0.0f, 0.0f, 0.0f);" not in hle:
+        errors.append("hero snapshot is not cleared")
+
+    # The hero bar is a HUD frame in the fixed 0.8x0.6 DDC space: its slot
+    # rect must use the same console scale as the portrait/minimap/beacon.
+    hero_at = hle.split("static uint32_t dt_hero_unit_at(", 1)
+    if len(hero_at) != 2:
+        errors.append("hero hit-test missing")
+    else:
+        block = hero_at[1].split("\n}\n", 1)[0]
+        if "dt_console_rect_read(" not in block:
+            errors.append("hero hit-test does not apply the DDC scale")
+        if "dt_frame_rect_read(" in block:
+            errors.append("hero hit-test bypasses the DDC scale")
+        if "DT_HERO_SLOT_VISIBLE" not in block:
+            errors.append("hero hit-test ignores the slot visibility flag")
+
+    pointer = hle.split("static int dt_hero_pointer(", 1)
+    if len(pointer) != 2:
+        errors.append("hero pointer handler missing")
+    else:
+        block = pointer[1].split("\n}\n", 1)[0]
+        if "WC3_DIRECT_TOUCH_ROUTE_NATIVE" not in block:
+            errors.append("hero pointer does not require the NATIVE route")
+        if "dt_grid_target_mode(" not in block:
+            errors.append("hero pointer does not gate on a live target mode")
+        if "dt_grid_target(" not in block:
+            errors.append("hero pointer bypasses the 0x50065 target path")
+
+    route = controls.split("static Wc3DirectTouchRoute direct_touch_route_for(", 1)
+    if len(route) != 2:
+        errors.append("controls route resolver missing")
+    else:
+        block = route[1]
+        gate = block.find("direct_touch_hero_contains(x, y)")
+        field = block.find(
+            "if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD &&\n"
+            "        direct_touch_field_contains(x, y))")
+        if gate < 0:
+            errors.append("controls route misses the hero gate")
+        elif field < 0 or gate > field:
+            errors.append("hero gate is not checked before the field")
+    if "void controls_set_direct_touch_hero_gate(" not in controls:
+        errors.append("hero gate setter missing")
+    if "Wc3DirectTouchHeroRectGate" not in controls_h:
+        errors.append("hero gate type missing")
+    if "controls_set_direct_touch_hero_gate(" not in host:
+        errors.append("host does not wire the hero gate")
+
+    for policy in ("DT_RESET_FULL", "DT_RESET_PAUSE", "DT_RESET_STALE"):
+        chunk = hle.split(f"case {policy}:", 1)
+        if len(chunk) != 2 or "dt_hero_reset();" not in chunk[1].split(
+                "break;", 1)[0]:
+            errors.append(f"hero gesture is not reset in {policy}")
+
+    if errors:
+        for line in errors:
+            print(f"hero-target: {line}", file=sys.stderr)
+        return 1
+    print("hero-target: NATIVE gate, DDC-scaled slots, 0x50065 target")
+    return 0
+
+
 def test_group_chord() -> int:
     """T0: a group-button swipe is add-to-group, never store."""
     errors: list[str] = []
@@ -4448,6 +4552,7 @@ TESTS = {
     "native_press_barrier": test_native_press_barrier,
     "group_chord": test_group_chord,
     "inventory_gesture": test_inventory_gesture,
+    "hero_target": test_hero_target,
     "cpu_helpers": test_cpu_helpers,
     "cpu_selftest": test_cpu_selftest,
     "grid_pattern": test_grid_pattern,

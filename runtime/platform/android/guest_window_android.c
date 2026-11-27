@@ -35,6 +35,15 @@
 #define MADV_DONTNEED 4
 #endif
 
+/* Guest-window diagnostics are memory-subsystem debug output.  The macro is
+ * a no-op in release, so every call site can stay where it belongs without
+ * shipping an fprintf. */
+#if WC3_DEBUG && WC3_DEBUG_MEMORY
+#define GW_LOG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define GW_LOG(...) ((void)0)
+#endif
+
 #define GW_SIZE       0x100000000ull
 #define GW_ALIGN      0x100000000ull
 #define GW_MAX_RANGES 8192u
@@ -159,9 +168,9 @@ static int gw_mprotect(uint32_t base, uint32_t size, int prot)
     if (end <= start) return -1;
     void *host = (void *)(g_guest_host_base + start);
     if (mprotect(host, (size_t)(end - start), prot) != 0) {
-        fprintf(stderr, "[mem] guest window mprotect(%08X+%X, %d) -> %s\n",
-                (uint32_t)start, (uint32_t)(end - start), prot,
-                strerror(errno));
+        GW_LOG("[mem] guest window mprotect(%08X+%X, %d) -> %s\n",
+               (uint32_t)start, (uint32_t)(end - start), prot,
+               strerror(errno));
         return -1;
     }
     return 0;
@@ -204,17 +213,16 @@ static void gw_try_once(void)
         g_active = 0;
         g_aligned = 1;
         g_init_result = 0;
-        fprintf(stderr, "[mem] guest window: identity mode (WC3_GUEST_WINDOW=%s)\n",
-                mode);
+        GW_LOG("[mem] guest window: identity mode (WC3_GUEST_WINDOW=%s)\n",
+               mode);
         return;
     }
 
     long ps = sysconf(_SC_PAGESIZE);
     if (ps > 0) g_page = (size_t)ps;
     if (g_page > 4096u) {
-        fprintf(stderr,
-                "[mem] guest window: host page=%zu; guest 4 KiB protection "
-                "will be host-page granular\n", g_page);
+        GW_LOG("[mem] guest window: host page=%zu; guest 4 KiB protection "
+               "will be host-page granular\n", g_page);
     }
 
     static const uintptr_t candidates[] = {
@@ -246,12 +254,9 @@ static void gw_try_once(void)
         g_active = 1;
         g_aligned = (g_guest_host_base & (GW_ALIGN - 1u)) == 0;
         g_init_result = 0;
-#if WC3_DEBUG && WC3_DEBUG_MEMORY
-        fprintf(stderr,
-                "[mem] guest window base=%p size=0x%llX page=%zu aligned=%d\n",
-                (void *)g_guest_host_base, (unsigned long long)GW_SIZE,
-                g_page, g_aligned);
-#endif
+        GW_LOG("[mem] guest window base=%p size=0x%llX page=%zu aligned=%d\n",
+               (void *)g_guest_host_base, (unsigned long long)GW_SIZE,
+               g_page, g_aligned);
         return;
     }
 
@@ -271,20 +276,17 @@ static void gw_try_once(void)
             g_active = 1;
             g_aligned = 1;
             g_init_result = 0;
-#if WC3_DEBUG && WC3_DEBUG_MEMORY
-            fprintf(stderr,
-                    "[mem] guest window base=%p size=0x%llX page=%zu aligned=1 "
-                    "(trimmed)\n",
-                    (void *)g_guest_host_base, (unsigned long long)GW_SIZE,
-                    g_page);
-#endif
+            GW_LOG("[mem] guest window base=%p size=0x%llX page=%zu aligned=1 "
+                   "(trimmed)\n",
+                   (void *)g_guest_host_base, (unsigned long long)GW_SIZE,
+                   g_page);
             return;
         }
         munmap(raw, (size_t)(GW_SIZE * 2u));
     }
 
-    fprintf(stderr, "[mem] guest window: no 4 GiB host range (errno=%d %s)\n",
-            errno, strerror(errno));
+    GW_LOG("[mem] guest window: no 4 GiB host range (errno=%d %s)\n",
+           errno, strerror(errno));
     g_init_result = -1;
 }
 
@@ -467,27 +469,24 @@ int wc3_guest_window_place(uint64_t size, uint64_t alignment, uint32_t *gva)
 void wc3_guest_window_dump(void)
 {
     if (wc3_guest_window_init() != 0) {
-        fprintf(stderr, "[mem] guest window: unavailable\n");
+        GW_LOG("[mem] guest window: unavailable\n");
         return;
     }
     if (!g_active) {
-        fprintf(stderr, "[mem] guest window: identity mode\n");
+        GW_LOG("[mem] guest window: identity mode\n");
         return;
     }
     pthread_mutex_lock(&g_lock);
-    fprintf(stderr, "[mem] guest window base=%p page=%zu ranges=%u\n",
-            (void *)g_guest_host_base, g_page, g_range_count);
-#if WC3_DEBUG && WC3_DEBUG_MEMORY
-    fprintf(stderr,
-            "[mem] guest window place calls=%llu ok=%llu fail=%llu\n",
-            g_place_calls, g_place_ok, g_place_fail);
-#endif
+    GW_LOG("[mem] guest window base=%p page=%zu ranges=%u\n",
+           (void *)g_guest_host_base, g_page, g_range_count);
+    GW_LOG("[mem] guest window place calls=%llu ok=%llu fail=%llu\n",
+           g_place_calls, g_place_ok, g_place_fail);
     unsigned n = g_range_count < 48u ? g_range_count : 48u;
     for (unsigned i = 0; i < n; i++)
-        fprintf(stderr, "[mem]   guest %08X+%08X -> host %p prot=%d\n",
-                g_ranges[i].lo, g_ranges[i].hi - g_ranges[i].lo,
-                guest_host_ptr(g_ranges[i].lo), g_ranges[i].prot);
+        GW_LOG("[mem]   guest %08X+%08X -> host %p prot=%d\n",
+               g_ranges[i].lo, g_ranges[i].hi - g_ranges[i].lo,
+               guest_host_ptr(g_ranges[i].lo), g_ranges[i].prot);
     if (n < g_range_count)
-        fprintf(stderr, "[mem]   ... %u more\n", g_range_count - n);
+        GW_LOG("[mem]   ... %u more\n", g_range_count - n);
     pthread_mutex_unlock(&g_lock);
 }
