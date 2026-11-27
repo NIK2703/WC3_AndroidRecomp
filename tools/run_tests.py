@@ -4068,8 +4068,71 @@ def test_inventory_gesture() -> int:
     return 0
 
 
+def test_group_chord() -> int:
+    """T0: a group-button swipe is add-to-group, never store."""
+    errors: list[str] = []
+    controls = (ROOT / "runtime/platform/android/controls/controls.c").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    vendor_lp = (ROOT / "third_party/winlator-input/core/long_press.c").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    profile = (ROOT / "apps/android_gameactivity/app/src/main/assets/Warcraft 3.icp").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+
+    # The adapter must let Shift beat Ctrl when a gesture batch resolves
+    # both modifiers; a later Ctrl must not downgrade add to store.
+    chunk = controls.split("int chord_action = 0;", 1)
+    if len(chunk) != 2:
+        errors.append("group chord action resolution missing")
+    else:
+        block = chunk[1].split("if (has_digit) chord_action = digit_action;", 1)[0]
+        if "if (action == 2) digit_action = 2;" not in block:
+            errors.append("gesture Shift does not outrank long-press Ctrl")
+        if "digit_action != 2" not in block:
+            errors.append("Ctrl may downgrade an add-to-group chord")
+
+    if "TOUCH_BIT_LONG_PRESS_DEFERRED" not in vendor_lp:
+        errors.append("long press is not deferred for gesture buttons")
+
+    selection = (ROOT / "runtime/features/selection.c").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    if "#define SEL_STRUCT_CAP 40u" not in selection:
+        errors.append("selection profile no longer has a 40-unit structural cap")
+
+    hle = (ROOT / "runtime/hle/android/hle_direct_touch.c").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    if "#define DT_GROUP_SET_MAX     40u" not in hle:
+        errors.append("group merge still uses the original 12-unit cap")
+    merge = hle.split("static void dt_group_merge_set(", 1)
+    if len(merge) != 2:
+        errors.append("group merge helper missing")
+    else:
+        block = merge[1].split("\n}\n", 1)[0]
+        if "live_count >= DT_GROUP_SET_MAX" not in block:
+            errors.append("group merge does not clamp to the structural cap")
+        if "live_array = wc3_rd32g(dst + DT_GROUP_SET_ARRAY)" not in block:
+            errors.append("group merge reuses a stale vector pointer after grow")
+        if "wc3_rd32g(live_array + j * 4u)" not in block:
+            errors.append("group merge duplicate check reads the stale array")
+        if "group-add-bad-count" not in block:
+            errors.append("group merge failure is not traced")
+
+    for group in range(1, 9):
+        if f'"KEY_{group}","MOD_CTRL"' not in profile:
+            errors.append(f"group {group} has no Ctrl store long press")
+        if f'"KEY_{group}","MOD_SHIFT"' not in profile:
+            errors.append(f"group {group} has no Shift add gesture")
+
+    if errors:
+        for line in errors:
+            print(f"group-chord: {line}", file=sys.stderr)
+        return 1
+    print("group-chord: swipe adds, long press stores")
+    return 0
+
+
 TESTS = {
     "native_press_barrier": test_native_press_barrier,
+    "group_chord": test_group_chord,
     "inventory_gesture": test_inventory_gesture,
     "cpu_helpers": test_cpu_helpers,
     "cpu_selftest": test_cpu_selftest,

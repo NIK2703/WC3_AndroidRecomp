@@ -336,7 +336,14 @@ static void emit_actions(const TouchActionResult *result) {
             if (group_of_keycode(a->key.keycode)) has_digit = true;
             if (a->type == ACT_KEY_PRESS) {
                 int action = modifier_action_of_keycode(a->key.keycode);
-                if (action) digit_action = action;
+                /* Shift means "add the selected units to the group"; Ctrl
+                 * means "store/replace the group".  Once a batch contains
+                 * Shift, a later Ctrl must not downgrade the gesture to a
+                 * store.  The vendored deferral normally emits exactly one
+                 * modifier, but the priority keeps the add path safe if both
+                 * presses ever land in the same batch. */
+                if (action == 2) digit_action = 2;
+                else if (action && digit_action != 2) digit_action = action;
             }
         }
         if (has_digit) chord_action = digit_action;

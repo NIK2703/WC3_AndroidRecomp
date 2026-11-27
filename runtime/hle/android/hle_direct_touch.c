@@ -321,10 +321,15 @@
 /* Non-group overlay bindings keep the original key-signal path. */
 #define DT_FN_KEY_SIGNAL     0x6F358940u
 #define DT_FN_SET_KEY_STATE  0x6F35A9F0u
-/* set layout used by 0x6F2939F0/0x6F293050: +4 count, +8 unit array. */
+/* set layout used by 0x6F2939F0/0x6F293050: +4 count, +8 unit array.
+ * The set owns a dynamically grown vector (0x6F268150 grows it), so the
+ * bound below is the selection profile's structural cap, not the original
+ * 12-unit gameplay cap.  A group slot can hold 24 or 40 units when the
+ * launch setting raises WC3_SELECTION_CAP; rejecting counts above 12 made a
+ * Shift+digit merge silently fall back to a plain store. */
 #define DT_GROUP_SET_COUNT   0x00000004u
 #define DT_GROUP_SET_ARRAY   0x00000008u
-#define DT_GROUP_SET_MAX     12u
+#define DT_GROUP_SET_MAX     40u
 
 #define DT_SELECTION_ACTIVE_GROUP 0x0000020Cu
 /* The native 0x50065 handler derives the selection holder from the unit:
@@ -2375,22 +2380,28 @@ static void dt_group_merge_set(CPU *c, uint32_t dst, uint32_t src)
         !dt_guest_readable(dst, DT_GROUP_SET_ARRAY + 4u)) return;
     const uint32_t src_count = wc3_rd32g(src + DT_GROUP_SET_COUNT);
     const uint32_t src_array = wc3_rd32g(src + DT_GROUP_SET_ARRAY);
-    const uint32_t dst_array = wc3_rd32g(dst + DT_GROUP_SET_ARRAY);
     const uint32_t dst_count = wc3_rd32g(dst + DT_GROUP_SET_COUNT);
+    const uint32_t dst_array = wc3_rd32g(dst + DT_GROUP_SET_ARRAY);
     if (src_count > DT_GROUP_SET_MAX || dst_count > DT_GROUP_SET_MAX ||
         !src_array || !dst_array ||
         !dt_guest_readable(src_array, src_count * 4u) ||
-        !dt_guest_readable(dst_array, dst_count * 4u)) return;
+        !dt_guest_readable(dst_array, dst_count * 4u)) {
+        dt_trace("group-add-bad-count", src_count, dst_count);
+        return;
+    }
 
     for (uint32_t i = 0; i < src_count; i++) {
         const uint32_t unit = wc3_rd32g(src_array + i * 4u);
         if (!unit || !dt_guest_readable(unit, 4u)) continue;
         const uint32_t live_count = wc3_rd32g(dst + DT_GROUP_SET_COUNT);
-        if (live_count > DT_GROUP_SET_MAX ||
-            !dt_guest_readable(dst_array, live_count * 4u)) break;
+        /* 0x6F268150 reallocates the vector when it grows past its
+         * capacity, so the array pointer must be re-read after every add. */
+        const uint32_t live_array = wc3_rd32g(dst + DT_GROUP_SET_ARRAY);
+        if (live_count >= DT_GROUP_SET_MAX || !live_array ||
+            !dt_guest_readable(live_array, live_count * 4u)) break;
         int present = 0;
         for (uint32_t j = 0; j < live_count; j++) {
-            if (wc3_rd32g(dst_array + j * 4u) == unit) {
+            if (wc3_rd32g(live_array + j * 4u) == unit) {
                 present = 1;
                 break;
             }

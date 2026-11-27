@@ -1551,3 +1551,48 @@ Storm `L_3502A21B` зарезервировал `0x46590000`, но следую�
 - T2 не выполнялся: нужен ручной прогон tap/drag по grid. После него
   читать `grid-miss-ui`/`grid-miss-cell` в `dt_trace.txt` и устранить
   конкретную проверку, отсекающую ячейку.
+
+## 2026-11-27: свайп по кнопкам 1..8 — add-to-group
+
+### Причина
+
+- В `dt_trace.txt` для Shift+digit видно `group-add-merge a=3 b=13`,
+  затем `group-add a=0 b=3`: выборка из 3 юнитов и группа из 13 юнитов
+  не слились, в слот записалась только текущая выборка. Это и есть
+  поведение «как long tap» (store).
+- Граница видна в той же трассе: `group-add-merge a=5 b=11` дал
+  `group-add ... b=13`, то есть 13-юнитный слот уже был создан и
+  сохранился; следующий merge с `b=13` отвергся, а `a=13 b=3` тоже
+  оставил 13. Значит, отказ срабатывает ровно на счётчике 13, а не на
+  выборе или модификаторе.
+- `dt_group_merge_set()` отвергал `src_count > DT_GROUP_SET_MAX`, а
+  `DT_GROUP_SET_MAX` был равен 12. При `WC3_SELECTION_CAP=24/40` слот
+  группы законно содержит 13+ юнитов, поэтому merge молча
+  превращался в store.
+- Вектор set'а в `0x6F268150` динамический: при росте он
+  переаллоцируется и меняет указатель `+8`. Старый цикл merge читал
+  `dst_array`, снятый до первого `SET_ADD`, поэтому после роста мог
+  проверять дубликаты по освобождённому массиву.
+
+### Правки
+
+- `DT_GROUP_SET_MAX` поднят до 40 (структурный cap selection-профиля
+  `SEL_STRUCT_CAP`), merge клампится по этому пределу.
+- `dt_group_merge_set()` перечитывает `dst + DT_GROUP_SET_ARRAY` на
+  каждой итерации; при выходе за предел или нечитаемом массиве пишет
+  debug-only `group-add-bad-count`.
+- В `controls.c` при неоднозначном батче с Ctrl и Shift приоритет у
+  Shift: свайп всегда add-to-group, long tap остаётся store.
+- T0 `group_chord` проверяет cap 40, перечитывание указателя, трассу
+  отказа, отложенный long press и профильные биндинги 1..8.
+
+### Проверка
+
+- T0: `group_chord`, `controls_mode`, `gesture_button_swipe`,
+  `direct_touch`, `native_press_barrier`, `inventory_gesture`,
+  `grid_pattern` — проходят.
+- `gcc -fsyntax-only` для `hle_direct_touch.c`: debug и release — чисто.
+- `git diff --check` — чисто.
+- T2 не выполнялся: нужен новый debug APK и ручной свайп по группе с
+  13+ юнитами; в `dt_trace.txt` ожидается `group-add-merge a=<sel>
+  b=<group>` с `group-add ... b=<union>`, без падения до `<sel>`.
