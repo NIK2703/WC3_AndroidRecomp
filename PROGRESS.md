@@ -1622,3 +1622,104 @@ Storm `L_3502A21B` зарезервировал `0x46590000`, но следую�
   b=<selection>` (новый порядок) и `group-add ... b=<union>`; при
   переполнении cap в слоте остаются первые юниты группы, а не вся
   выборка. `group-add-bad-count` не должен появляться.
+
+## 2026-11-27: портрет — CUnit/holder split, grid — CUnit
+
+### Причина
+
+- `dt_handle_unit()` использовал `0x6F1EEF90` и затем проверял класс
+  CUnit по `[+0xC]`. `0x6F1EEF90` возвращает **holder** (класс
+  `0x2B773375`) с handle в `[+0xC]` и serial в `[+0x10]`, поэтому
+  сравнение handle с class id отсекало и портрет, и каждую ячейку
+  grid. В результате `dt_portrait_unit()` возвращал 0, а
+  `grid_button_at()` не находил ни одной живой ячейки.
+- Резервный путь портрета читал `selection+0x1E4`, но это не primary
+  CUnit: в трассе `+1E4=0`, при живом `+1E0`. Нативный primary для
+  приказов и портрета — `0x6F290240(selection)` (первый CUnit активной
+  подгруппы).
+- Типы нативных путей разные:
+  - `0x6F054530(handle, serial)` возвращает **CUnit** (class
+    `0x2B61676C` в `[+0xC]`); его принимает synthetic `0x50065`
+    (`dt_grid_target`).
+  - `0x6F1EEF90` возвращает **holder** (class `0x2B773375`); его
+    принимает `0x6F3635E0` (camera follow) и `0x6F290450` (selection
+    add). Портрет хранит готовый holder в `[portrait+0x238]`; grid-
+    событие `0x50065` берёт holder из `[[CUnit+0x6C]+0x124]`. Это не
+    общий обратный переход: у юнита портрета `+0x124` может быть 0.
+  - `dt_unit_position()` берёт **CUnit**, вызывает его vtable `+0xB8`
+    (position subobject с handle `+8`/type `+0xC`) и передаёт его в
+    `0x6F058900`; это отдельный subobject, не camera-follow holder.
+
+### Правки
+
+- `dt_handle_unit()` резолвит `[holder+0xC]/[holder+0x10]` через
+  `0x6F054530` и возвращает CUnit. Прямая ветка «holder уже CUnit»
+  удалена: она сравнивала handle с class id.
+- Добавлен `dt_unit_holder(CPU*, CUnit*)` — обратный переход
+  `[[unit+0x6C]+0x124]` с проверкой `0x6F0549F0`; используется только
+  как fallback для selection, когда у портрета нет holder.
+- `dt_grid_button_at()` теперь отдаёт CUnit и живой holder ячейки.
+  DOWN/MOVE передают holder прямо в `dt_grid_switch`, UP — в
+  `dt_grid_select_unit`; target mode берёт CUnit. Round-trip
+  CUnit→holder из grid-пути убран: на тап/смену ячейки остаётся один
+  guest-вызов `0x6F054530`, а не два.
+- `dt_portrait_unit()` остаётся CUnit-функцией:
+  - видимый holder портрета `[portrait+0x238]` резолвится
+    `dt_handle_unit()`; невалидный/мёртвый holder не подменяется
+    другим юнитом;
+  - при пустом портрете primary CUnit берётся из `0x6F290240` с
+    проверкой class/`[+0x20]`.
+- `dt_portrait_follow_start()` получал CUnit из портрета и затем
+  восстанавливал holder через `[[CUnit+0x6C]+0x124]`. Это поле —
+  путь grid-события `0x50065` (`0x6F393430`), а не общий обратный
+  переход: для юнита портрета оно даёт 0, trace
+  `portrait-follow-no-holder a=453C1C00`. Нативный портрет
+  (`0x6F3D33C0`, `0x6F3D3570`) holder не восстанавливает, а берёт
+  `[portrait+0x238]` и валидирует его `0x6F0549F0`.
+- `dt_portrait_lookup()` резолвит holder и CUnit за один вызов
+  `0x6F054530`. `dt_portrait_follow_start()` передаёт holder портрета
+  напрямую в `0x6F3635E0`; `dt_unit_holder()` остаётся только для
+  fallback на selection. Trace `portrait-follow` пишет `holder` и
+  `unit`, при отказе — `portrait-follow-no-holder`, при
+  выключенном/невалидном портрете — `portrait-follow-blocked`.
+- `dt_beacon_place_portrait()`, `dt_portrait_tap()` и target mode
+  (`cmd-portrait-target`) продолжают работать с CUnit: position и
+  synthetic `0x50065` принимают именно его.
+- Удалены неиспользуемые `DT_SELECTION_PRIMARY=0x1E4` и
+  `DT_FN_HANDLE_TO_UNIT=0x6F1EEF90`.
+
+### Проверка
+
+- T0: `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `grid_pattern`, `inventory_gesture`, `group_chord` — проходят.
+- NDK `clang -fsyntax-only -Wall -Wextra -Werror` для
+  `hle_direct_touch.c`: debug (`WC3_DEBUG=1`, `WC3_DEBUG_INPUT=1`) и
+  release (`0/0`) — чисто.
+- `git diff --check` — чисто.
+- Сборка/установка выполнены: `bash tools/android/build_apk.sh --variant
+  debug --install --serial emulator-5554`. Первый линк упал на
+  transient abort Termux `ld.lld` 21.1.8 (`Pointer tag ... truncated`);
+  повторный `ninja libwc3gameactivity.so` и полный перезапуск скрипта
+  прошли.
+- APK `build/android_app/wc3-debug.apk`, SHA-256
+  `be9b317af62217651771f627692cbbec830e4237262cd4d1c2e196c16350fec0`;
+  установленный `base.apk` совпадает по SHA-256. Пакет
+  `wc3.recomp.debug`: versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-27 13:46:34`.
+- В упакованном `libwc3gameactivity.so` есть `portrait-follow-no-holder`,
+  `grid-miss-ui`, `grid-miss-cell`, `grid-select`, `cmd-portrait-target`.
+- T2 предыдущего APK: приложение запускалось; удержание портрета дало
+  `portrait-follow-no-holder a=453C1C00`, follow не стартовал. Причина
+  и исправление — выше. Grid-путь в этой сессии отдельно не подтверждён.
+- Повторная сборка/установка после правки holder (по явной команде):
+  `bash tools/android/build_apk.sh --variant debug --install --serial
+  emulator-5554`, BUILD SUCCESSFUL. APK
+  `build/android_app/wc3-debug.apk`, 178945469 байт, SHA-256
+  `df1c45fe27bcd25902c5f17842479153a0af11ed93940d8882a06c52beaaee88`;
+  установленный `base.apk` совпадает по SHA-256, `lastUpdateTime=2026-11-27
+  14:11:49`. В упакованном `.so` есть `portrait-follow` и
+  `portrait-follow-blocked`.
+- T2 после этой сборки не выполнялся: приложение не запускалось. При
+  запуске ждать `portrait-follow holder=<h> unit=<u>`; если снова
+  `portrait-follow-no-holder` — значит у портрета нет holder и сработал
+  selection fallback.

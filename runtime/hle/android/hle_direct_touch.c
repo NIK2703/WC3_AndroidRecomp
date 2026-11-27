@@ -210,8 +210,6 @@
  * margin extended the top row above the card and captured world points. */
 #define DT_CMD_HIT_MARGIN_RIGHT 0.017f
 
-#define DT_SELECTION_PRIMARY 0x000001E4u
-
 #define DT_WORLD_SELECT_GATE 0x000001A4u
 #define DT_WORLD_ALT_GATE    0x000001A8u
 
@@ -258,7 +256,6 @@
 #define DT_FN_GHOST_INIT       0x6F37C550u
 #define DT_FN_CLICK_DISPATCH   0x6F392FA0u
 #define DT_FN_GROUND_ORDER     0x6F394680u
-#define DT_FN_HANDLE_TO_UNIT   0x6F1EEF90u
 #define DT_FN_UNIT_POSITION    0x6F058900u
 #define DT_FN_CAMERA_PAN       0x6F361B90u
 #define DT_FN_CAMERA_FOLLOW    0x6F3635E0u
@@ -3362,60 +3359,118 @@ static uint32_t dt_selection(CPU *c, const DtContext *ctx)
 }
 
 /*
- * The portrait stores a handle-holder, not a CUnit*: [holder+0xC] is the JASS
- * handle and [holder+0x10] is its type.  0x6F1EEF90 resolves and validates it
- * exactly like the native GetUnitX/Y path.  Accept a direct CUnit* too, since
- * a fallback selection slot may already be resolved.
+ * A grid button and the portrait store a holder, not a CUnit*:
+ * [holder+0xC] is the object handle and [holder+0x10] its generation serial.
+ * 0x6F054530(handle, serial) is the resolver inside the native 0x6F0549F0
+ * holder validation and returns the CUnit.  dt_unit_holder() is the inverse
+ * for the camera-follow path; the grid uses the button's holder directly.
  */
 static uint32_t dt_handle_unit(CPU *c, uint32_t holder)
 {
     if (!holder || !dt_guest_readable(holder, 0x14u)) return 0;
-    if (wc3_rd32g(holder + 0x0Cu) == DT_CLASS_UNIT) {
-        if (wc3_rd32g(holder + 0x20u) != 0) return 0;
-        return holder;
-    }
 
     const uint32_t handle = wc3_rd32g(holder + 0x0Cu);
+    const uint32_t serial = wc3_rd32g(holder + 0x10u);
     if (!handle) return 0;
-    const uint32_t unit = dt_call_thiscall(c, handle,
-                                           DT_FN_HANDLE_TO_UNIT, 0, NULL);
+
+    c->ecx = handle;
+    c->edx = serial;
+    const uint32_t unit = wc3_hle_call_guest(c, DT_FN_HANDLE_LOOKUP, 0, NULL);
     if (!unit || !dt_guest_readable(unit, 0x24u)) return 0;
     if (wc3_rd32g(unit + 0x0Cu) != DT_CLASS_UNIT) return 0;
     if (wc3_rd32g(unit + 0x20u) != 0) return 0;
     return unit;
 }
 
+/* The native 0x50065 handler derives the selection holder from a CUnit as
+ * [[unit+0x6C]+0x124] and validates it with 0x6F0549F0.  That is the path for
+ * the units the grid event carries, not a general CUnit-to-holder inverse:
+ * the portrait and the grid button already store the exact holder.  Keep this
+ * only for the selection fallback when the portrait has no holder. */
+static uint32_t dt_unit_holder(CPU *c, uint32_t unit)
+{
+    if (!c || !unit ||
+        !dt_guest_readable(unit + DT_UNIT_HOLDER_SUB + 4u, 4u)) {
+        return 0;
+    }
+    const uint32_t sub = wc3_rd32g(unit + DT_UNIT_HOLDER_SUB);
+    if (!sub ||
+        !dt_guest_readable(sub + DT_UNIT_HOLDER_REF + 4u, 4u)) {
+        return 0;
+    }
+    const uint32_t holder = wc3_rd32g(sub + DT_UNIT_HOLDER_REF);
+    if (!holder || !dt_guest_readable(holder, 0x14u)) return 0;
+    if (!dt_call_thiscall(c, holder, DT_FN_HOLDER_ALIVE, 0, NULL)) return 0;
+    return holder;
+}
+
 /*
- * The unit shown by the portrait, or the primary selection when the portrait
- * has no unit.  A displayed unit that no longer validates is not silently
- * replaced by a different selection: the portrait is the user's target.
+ * The portrait stores the holder that camera follow takes.  The native
+ * portrait handlers (0x6F3BDB33 / 0x6F3D3570) validate [portrait+0x238] with
+ * 0x6F0549F0 and pass that holder on directly; they never rebuild a holder
+ * from the CUnit.  Resolve it once so follow keeps the exact portrait holder
+ * while position and target mode still get the CUnit.
+ */
+enum {
+    DT_PORTRAIT_NONE = 0,   /* no portrait unit: selection fallback is valid */
+    DT_PORTRAIT_BLOCKED,    /* portrait is off or its holder is invalid */
+    DT_PORTRAIT_READY       /* holder and CUnit resolved */
+};
+
+static int dt_portrait_lookup(CPU *c, const DtContext *ctx,
+                              uint32_t *holder_out, uint32_t *unit_out)
+{
+    if (holder_out) *holder_out = 0;
+    if (unit_out) *unit_out = 0;
+    if (!c || !ctx || !ctx->ui) return DT_PORTRAIT_NONE;
+    if (!dt_guest_readable(ctx->ui + DT_UI_PORTRAIT, 4u)) {
+        return DT_PORTRAIT_NONE;
+    }
+
+    const uint32_t portrait = wc3_rd32g(ctx->ui + DT_UI_PORTRAIT);
+    if (!portrait) return DT_PORTRAIT_NONE;
+    if (!dt_guest_readable(portrait, DT_PORTRAIT_OFF + 4u) ||
+        wc3_rd32g(portrait + DT_PORTRAIT_OFF) != 0) {
+        /* The native handler ignores the frame while this flag is set; do
+         * not fall back to the selection and pan anyway. */
+        return DT_PORTRAIT_BLOCKED;
+    }
+    if (!dt_guest_readable(portrait, DT_PORTRAIT_UNIT + 4u)) {
+        return DT_PORTRAIT_NONE;
+    }
+    const uint32_t holder = wc3_rd32g(portrait + DT_PORTRAIT_UNIT);
+    if (!holder) return DT_PORTRAIT_NONE;
+
+    const uint32_t unit = dt_handle_unit(c, holder);
+    if (!unit) return DT_PORTRAIT_BLOCKED;
+    if (holder_out) *holder_out = holder;
+    if (unit_out) *unit_out = unit;
+    return DT_PORTRAIT_READY;
+}
+
+/*
+ * The CUnit shown by the portrait, or the primary selection when the portrait
+ * has no unit.  Unit position and target mode take this CUnit.  A displayed
+ * unit that no longer validates is not silently replaced by a different
+ * selection: the portrait is the user's target.
  */
 static uint32_t dt_portrait_unit(CPU *c, const DtContext *ctx)
 {
-    uint32_t holder = 0;
-    if (dt_guest_readable(ctx->ui + DT_UI_PORTRAIT, 4u)) {
-        const uint32_t portrait = wc3_rd32g(ctx->ui + DT_UI_PORTRAIT);
-        if (portrait) {
-            if (!dt_guest_readable(portrait, DT_PORTRAIT_OFF + 4u) ||
-                wc3_rd32g(portrait + DT_PORTRAIT_OFF) != 0) {
-                /* The native handler ignores the frame while this flag is
-                 * set; do not fall back to the selection and pan anyway. */
-                return 0;
-            }
-            if (dt_guest_readable(portrait, DT_PORTRAIT_UNIT + 4u)) {
-                holder = wc3_rd32g(portrait + DT_PORTRAIT_UNIT);
-            }
-            if (holder) return dt_handle_unit(c, holder);
-        }
-    }
+    uint32_t unit = 0;
+    const int portrait_state = dt_portrait_lookup(c, ctx, NULL, &unit);
+    if (portrait_state == DT_PORTRAIT_READY) return unit;
+    if (portrait_state == DT_PORTRAIT_BLOCKED) return 0;
 
     const uint32_t selection = dt_selection(c, ctx);
-    if (!selection ||
-        !dt_guest_readable(selection + DT_SELECTION_PRIMARY, 4u)) {
-        return 0;
-    }
-    holder = wc3_rd32g(selection + DT_SELECTION_PRIMARY);
-    return dt_handle_unit(c, holder);
+    if (!selection) return 0;
+    /* 0x6F290240 returns the active subgroup's first CUnit, the same unit the
+     * native order paths resolve.  The raw +0x1E4 slot is not the primary. */
+    unit = dt_call_thiscall(c, selection, DT_FN_SELECTION_PRIMARY_UNIT, 0,
+                            NULL);
+    if (!unit || !dt_guest_readable(unit, 0x24u)) return 0;
+    if (wc3_rd32g(unit + 0x0Cu) != DT_CLASS_UNIT) return 0;
+    if (wc3_rd32g(unit + 0x20u) != 0) return 0;
+    return unit;
 }
 
 static uint32_t dt_camera(uint32_t ui)
@@ -3534,15 +3589,31 @@ static void dt_portrait_follow_start(CPU *c, const DtContext *ctx)
         dt_trace("portrait-follow-no-camera", 0, 0);
         return;
     }
-    const uint32_t unit = dt_portrait_unit(c, ctx);
-    if (!unit) {
-        dt_trace("portrait-follow-no-unit", 0, 0);
+    uint32_t holder = 0;
+    uint32_t unit = 0;
+    const int portrait_state = dt_portrait_lookup(c, ctx, &holder, &unit);
+    if (portrait_state == DT_PORTRAIT_BLOCKED) {
+        dt_trace("portrait-follow-blocked", unit, 0);
         return;
     }
-    const uint32_t args[5] = { unit, 0u, 0u, 0u, 0u };
+    if (portrait_state != DT_PORTRAIT_READY) {
+        unit = dt_portrait_unit(c, ctx);
+        if (!unit) {
+            dt_trace("portrait-follow-no-unit", 0, 0);
+            return;
+        }
+        /* 0x6F3635E0 follows a holder.  The portrait normally supplies the
+         * exact holder; only the selection fallback has to derive one. */
+        holder = dt_unit_holder(c, unit);
+        if (!holder) {
+            dt_trace("portrait-follow-no-holder", unit, 0);
+            return;
+        }
+    }
+    const uint32_t args[5] = { holder, 0u, 0u, 0u, 0u };
     (void)dt_call_thiscall(c, camera, DT_FN_CAMERA_FOLLOW, 5, args);
     g_portrait_follow_active = 1;
-    dt_trace("portrait-follow", unit, 0);
+    dt_trace("portrait-follow", holder, unit);
 }
 
 /* Release: a null unit makes the native follow path drop its reference. */
@@ -3991,10 +4062,14 @@ static int dt_grid_targeting(uint32_t ui)
 }
 
 /* Return the CUnit under the normalised surface point, or 0 when the point is
- * outside the active grid or the cell has no live unit. */
+ * outside the active grid or the cell has no live unit.  holder_out receives
+ * the button's live holder, which selection and subgroup paths use directly;
+ * target mode uses the CUnit. */
 static uint32_t dt_grid_button_at(CPU *c, uint32_t ui, float nx, float ny,
-                                  uint32_t width, uint32_t height)
+                                  uint32_t width, uint32_t height,
+                                  uint32_t *holder_out)
 {
+    if (holder_out) *holder_out = 0;
     uint32_t rows = 0;
     uint32_t cols = 0;
     uint32_t row_array = 0;
@@ -4038,7 +4113,10 @@ static uint32_t dt_grid_button_at(CPU *c, uint32_t ui, float nx, float ny,
             if (!ref || !dt_guest_readable(ref, 0x60u)) continue;
             if (wc3_rd32g(ref + 0x5Cu) & 0x100u) continue;
             const uint32_t unit = dt_handle_unit(c, ref);
-            if (unit) return unit;
+            if (unit) {
+                if (holder_out) *holder_out = ref;
+                return unit;
+            }
         }
     }
     return 0;
@@ -4099,28 +4177,6 @@ static void dt_grid_dump_miss(CPU *c, uint32_t ui, float nx, float ny,
 }
 #endif
 
-/* The native 0x50065 handler resolves the selection holder from the touched
- * unit as [[unit+0x6C]+0x124] and validates it with 0x6F0549F0.  The grid
- * button stores a unit holder, not the class instance, so dt_grid_button_at()
- * resolves it first and this function derives the same holder the native
- * handler uses. */
-static uint32_t dt_grid_holder(CPU *c, uint32_t unit)
-{
-    if (!c || !unit ||
-        !dt_guest_readable(unit + DT_UNIT_HOLDER_SUB + 4u, 4u)) {
-        return 0;
-    }
-    const uint32_t sub = wc3_rd32g(unit + DT_UNIT_HOLDER_SUB);
-    if (!sub ||
-        !dt_guest_readable(sub + DT_UNIT_HOLDER_REF + 4u, 4u)) {
-        return 0;
-    }
-    const uint32_t holder = wc3_rd32g(sub + DT_UNIT_HOLDER_REF);
-    if (!holder || !dt_guest_readable(holder, 0x14u)) return 0;
-    if (!dt_call_thiscall(c, holder, DT_FN_HOLDER_ALIVE, 0, NULL)) return 0;
-    return holder;
-}
-
 /* Native single-unit selection: 0x6F396CF0(manager, holder, 0, 0, 0).  The
  * manager is [CGameUI+0x24C], exactly what the native 0x50065 branch uses. */
 static void dt_grid_select_unit(CPU *c, uint32_t ui, uint32_t holder)
@@ -4160,14 +4216,13 @@ static void dt_grid_prepare_command_bar(CPU *c, uint32_t ui)
  * 0x6F291240(selection, 0); the realize alone is only a mirror update.  The
  * command bar is reset first because the old page's buttons belong to the
  * previous subgroup.  The native selection-option overrides are not
- * reproduced: this is the standard panel path. */
+ * reproduced: this is the standard panel path.  holder is the live grid
+ * button holder; it is used synchronously, exactly like the native handler
+ * uses [[unit+0x6C]+0x124]. */
 static void dt_grid_switch(CPU *c, uint32_t ui, uint32_t selection,
-                           uint32_t unit)
+                           uint32_t holder)
 {
-    if (!c || !selection || !unit) return;
-
-    const uint32_t holder = dt_grid_holder(c, unit);
-    if (!holder) return;
+    if (!c || !selection || !holder) return;
     if (!dt_guest_readable(selection + DT_SELECTION_ACTIVE_GROUP, 4u)) return;
 
     const uint32_t active =
@@ -4236,8 +4291,9 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
 #endif
             return 0;
         }
+        uint32_t holder = 0;
         const uint32_t unit =
-            dt_grid_button_at(c, ui, ev->x, ev->y, width, height);
+            dt_grid_button_at(c, ui, ev->x, ev->y, width, height, &holder);
         if (!unit) {
 #if WC3_DEBUG && WC3_DEBUG_INPUT
             dt_grid_dump_miss(c, ui, ev->x, ev->y, width, height);
@@ -4273,7 +4329,7 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
              * If the finger then crosses into another cell, MOVE switches
              * again; the cell under the finger is always the highlighted
              * subgroup. */
-            dt_grid_switch(c, ui, selection, unit);
+            dt_grid_switch(c, ui, selection, holder);
         }
         dt_trace("grid-down", unit, g_grid.target);
         return 1;
@@ -4282,8 +4338,10 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
         if (!g_grid.active || ev->pointer_id != g_grid.pointer) return 0;
         if (g_grid.target) return 1;
 
+        uint32_t holder = 0;
         const uint32_t unit =
-            dt_grid_button_at(c, g_grid.ui, ev->x, ev->y, width, height);
+            dt_grid_button_at(c, g_grid.ui, ev->x, ev->y, width, height,
+                              &holder);
         if (!unit) {
             /* Leaving the cells makes this a drag, not a tap, even if the
              * finger returns to the original cell before release. */
@@ -4298,7 +4356,7 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
                  * disable subgroup switching for the rest of the drag. */
                 (void)dt_grid_context(c, g_grid.ui, &g_grid.selection);
             }
-            dt_grid_switch(c, g_grid.ui, g_grid.selection, unit);
+            dt_grid_switch(c, g_grid.ui, g_grid.selection, holder);
             dt_trace("grid-move", unit, 0);
         }
         return 1;
@@ -4314,14 +4372,14 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
              * without an intervening MOVE, so a release outside the starting
              * cell must still be classified as a drag. */
             const int tap_possible = !g_grid.target && !g_grid.moved;
+            uint32_t up_holder = 0;
             const uint32_t up_unit = tap_possible
                 ? dt_grid_button_at(c, g_grid.ui, ev->x, ev->y,
-                                    width, height)
+                                    width, height, &up_holder)
                 : 0;
             if (wc3_dt_grid_release_select(g_grid.target, g_grid.moved,
                                            up_unit == g_grid.down_unit)) {
-                const uint32_t holder = dt_grid_holder(c, g_grid.unit);
-                if (holder) dt_grid_select_unit(c, g_grid.ui, holder);
+                if (up_holder) dt_grid_select_unit(c, g_grid.ui, up_holder);
                 dt_trace("grid-select", g_grid.unit, 0);
             }
         }
@@ -7687,7 +7745,8 @@ static void dt_command_finish(CPU *c, const Wc3DirectTouchEvent *ev,
         uint32_t grid_ui = 0;
         if (dt_grid_ui(&grid_ui)) {
             const uint32_t grid_unit = dt_grid_button_at(c, grid_ui, ev->x,
-                                                          ev->y, width, height);
+                                                          ev->y, width, height,
+                                                          NULL);
             /* The live target mode is authoritative: the command data word
              * cannot reliably identify a targeted button. */
             const uint32_t target = dt_grid_target_mode(grid_ui);
