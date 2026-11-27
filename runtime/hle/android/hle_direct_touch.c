@@ -2370,10 +2370,13 @@ static void dt_group_assign(CPU *c, uint32_t sel, uint32_t slot,
     (void)wc3_hle_call_guest(c, DT_FN_STORE_GROUP, 0, NULL);
 }
 
-/* Shift+digit in the native handler merges the stored group into the
- * exported selection set, then stores the union back into the same slot.
- * 0x6F268150 appends a unit and returns the new element; 0x6F1DBB50 takes
- * that element in ecx and the unit as its stack argument. */
+/* Shift+digit in the native handler builds the union group-first: it copies
+ * the stored group into the union set, then appends the current selection,
+ * and stores that union back into the same slot.  The order matters when the
+ * runtime cap truncates the union: a selection-first merge would store the
+ * selection and drop the group, which looks like a plain store.  0x6F268150
+ * appends a unit and returns the new element; 0x6F1DBB50 takes that element
+ * in ecx and the unit as its stack argument. */
 static void dt_group_merge_set(CPU *c, uint32_t dst, uint32_t src)
 {
     if (!dt_guest_readable(src, DT_GROUP_SET_ARRAY + 4u) ||
@@ -2383,9 +2386,10 @@ static void dt_group_merge_set(CPU *c, uint32_t dst, uint32_t src)
     const uint32_t dst_count = wc3_rd32g(dst + DT_GROUP_SET_COUNT);
     const uint32_t dst_array = wc3_rd32g(dst + DT_GROUP_SET_ARRAY);
     if (src_count > DT_GROUP_SET_MAX || dst_count > DT_GROUP_SET_MAX ||
-        !src_array || !dst_array ||
-        !dt_guest_readable(src_array, src_count * 4u) ||
-        !dt_guest_readable(dst_array, dst_count * 4u)) {
+        (src_count && (!src_array ||
+                       !dt_guest_readable(src_array, src_count * 4u))) ||
+        (dst_count && (!dst_array ||
+                       !dt_guest_readable(dst_array, dst_count * 4u)))) {
         dt_trace("group-add-bad-count", src_count, dst_count);
         return;
     }
@@ -2397,8 +2401,10 @@ static void dt_group_merge_set(CPU *c, uint32_t dst, uint32_t src)
         /* 0x6F268150 reallocates the vector when it grows past its
          * capacity, so the array pointer must be re-read after every add. */
         const uint32_t live_array = wc3_rd32g(dst + DT_GROUP_SET_ARRAY);
-        if (live_count >= DT_GROUP_SET_MAX || !live_array ||
-            !dt_guest_readable(live_array, live_count * 4u)) break;
+        if (live_count >= DT_GROUP_SET_MAX ||
+            (live_count && (!live_array ||
+                            !dt_guest_readable(live_array, live_count * 4u))))
+            break;
         int present = 0;
         for (uint32_t j = 0; j < live_count; j++) {
             if (wc3_rd32g(live_array + j * 4u) == unit) {
@@ -2467,22 +2473,26 @@ static void dt_group_signal(CPU *c, uint32_t group, uint32_t action)
         (void)wc3_hle_call_guest(c, DT_FN_EXPORT_SELECT, 1, args);
         dt_trace("group-store", slot, wc3_rd32g(set + DT_GROUP_SET_COUNT));
         dt_group_assign(c, sel, slot, set);
-    } else if (action == 2u) { /* Shift: merge the group into the selection */
-        const uint32_t group_set = dt_scratch_alloc();
-        if (!group_set) {
+    } else if (action == 2u) { /* Shift: merge the selection into the group */
+        const uint32_t selection_set = dt_scratch_alloc();
+        if (!selection_set) {
             dt_scratch_free(set);
             return;
         }
-        const uint32_t export_args[1] = { set };
-        const uint32_t group_args[2] = { slot, group_set };
-        c->ecx = sel;
-        (void)wc3_hle_call_guest(c, DT_FN_EXPORT_SELECT, 1, export_args);
+        /* Native 0x6F393D50 exports the group into the union set first and
+         * then appends the selection.  Keep that order so a capped store
+         * truncates the selection tail, not the group. */
+        const uint32_t group_args[2] = { slot, set };
+        const uint32_t selection_args[1] = { selection_set };
         c->ecx = sel;
         (void)wc3_hle_call_guest(c, DT_FN_EXPORT_GROUP, 2, group_args);
+        c->ecx = sel;
+        (void)wc3_hle_call_guest(c, DT_FN_EXPORT_SELECT, 1, selection_args);
+        /* Trace order matches the union: group count, then selection. */
         dt_trace("group-add-merge", wc3_rd32g(set + DT_GROUP_SET_COUNT),
-                 wc3_rd32g(group_set + DT_GROUP_SET_COUNT));
-        dt_group_merge_set(c, set, group_set);
-        dt_scratch_free(group_set);
+                 wc3_rd32g(selection_set + DT_GROUP_SET_COUNT));
+        dt_group_merge_set(c, set, selection_set);
+        dt_scratch_free(selection_set);
         dt_group_assign(c, sel, slot, set);
         dt_trace("group-add", slot, wc3_rd32g(set + DT_GROUP_SET_COUNT));
     }

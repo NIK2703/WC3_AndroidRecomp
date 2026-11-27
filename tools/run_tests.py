@@ -4113,8 +4113,26 @@ def test_group_chord() -> int:
             errors.append("group merge reuses a stale vector pointer after grow")
         if "wc3_rd32g(live_array + j * 4u)" not in block:
             errors.append("group merge duplicate check reads the stale array")
+        if "src_count && (!src_array" not in block:
+            errors.append("group merge rejects an empty selection set")
+        if "dst_count && (!dst_array" not in block:
+            errors.append("group merge rejects an empty group set")
+        if "live_count && (!live_array" not in block:
+            errors.append("group merge cannot append to an empty group set")
         if "group-add-bad-count" not in block:
             errors.append("group merge failure is not traced")
+
+    signal = hle.split("} else if (action == 2u)", 1)
+    if len(signal) != 2:
+        errors.append("Shift group path missing")
+    else:
+        block = signal[1].split("\n    }\n    dt_scratch_free(set);", 1)[0]
+        if "DT_FN_EXPORT_GROUP, 2, group_args" not in block:
+            errors.append("Shift does not start the union with the group")
+        if "dt_group_merge_set(c, set, selection_set)" not in block:
+            errors.append("Shift does not merge the selection into the group")
+        if block.find("DT_FN_EXPORT_GROUP") > block.find("DT_FN_EXPORT_SELECT"):
+            errors.append("Shift exports the selection before the group")
 
     for group in range(1, 9):
         if f'"KEY_{group}","MOD_CTRL"' not in profile:
