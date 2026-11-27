@@ -16,8 +16,9 @@
  *     selects a box; without it a stationary release clicks one unit;
  *   - portrait: sticky-finger camera follow;
  *   - minimap: native pointer phases clamped to its frame;
- *   - selected-unit grid: tap selects a unit, drag switches the subgroup
- *     under the finger without collapsing the squad;
+ *   - selected-unit grid: a tap on an inactive subgroup activates it without
+ *     collapsing the squad, a tap on the active subgroup selects that unit,
+ *     and a drag switches the subgroup under the finger;
  *   - inventory: native click pairs for use/swap/move/drop;
  *   - command card: select on finger-down, targeted drag and autocast.
  * Native UI paths post the same Win32 mouse messages a real mouse
@@ -616,16 +617,17 @@ static int g_portrait_follow_active;
  * as the MENU route in the published snapshot.  Main guest thread only. */
 static int g_pause_menu_active;
 /* Selected-unit grid gesture.  A press on a cell makes that unit's subgroup
- * active immediately; a release without crossing into another cell then
- * selects the unit individually.  Crossing to another cell keeps switching
- * the active subgroup and suppresses the individual selection, so a drag is
- * a subgroup switch while a tap is a unit selection.  Main guest thread
- * only. */
+ * active immediately.  A tap that started on the already-active subgroup then
+ * selects the unit individually; a tap that activated a different subgroup
+ * only switches the panel and keeps the whole selection.  Crossing to another
+ * cell keeps switching the active subgroup and suppresses the individual
+ * selection, so a drag is a subgroup switch.  Main guest thread only. */
 typedef struct {
     uint8_t active;
     uint8_t pointer;
     uint8_t target;
     uint8_t moved;
+    uint8_t switched;   /* DOWN activated a different subgroup */
     uint32_t ui;
     uint32_t selection;
     uint32_t unit;      /* cell currently under the finger */
@@ -4226,6 +4228,7 @@ static void dt_grid_reset(void)
     g_grid.pointer = 0;
     g_grid.target = 0;
     g_grid.moved = 0;
+    g_grid.switched = 0;
     g_grid.ui = 0;
     g_grid.selection = 0;
     g_grid.unit = 0;
@@ -4479,12 +4482,16 @@ static void dt_grid_prepare_command_bar(CPU *c, uint32_t ui)
  * previous subgroup.  The native selection-option overrides are not
  * reproduced: this is the standard panel path.  holder is the live grid
  * button holder; it is used synchronously, exactly like the native handler
- * uses [[unit+0x6C]+0x124]. */
-static void dt_grid_switch(CPU *c, uint32_t ui, uint32_t selection,
-                           uint32_t holder)
+ * uses [[unit+0x6C]+0x124].
+ *
+ * Returns 1 when the active subgroup changed.  The caller uses that to keep
+ * the release from selecting the tapped unit individually: a tap on an
+ * inactive subgroup is a panel switch, not a squad collapse. */
+static int dt_grid_switch(CPU *c, uint32_t ui, uint32_t selection,
+                          uint32_t holder)
 {
-    if (!c || !selection || !holder) return;
-    if (!dt_guest_readable(selection + DT_SELECTION_ACTIVE_GROUP, 4u)) return;
+    if (!c || !selection || !holder) return 0;
+    if (!dt_guest_readable(selection + DT_SELECTION_ACTIVE_GROUP, 4u)) return 0;
 
     const uint32_t active =
         wc3_rd32g(selection + DT_SELECTION_ACTIVE_GROUP);
@@ -4493,7 +4500,7 @@ static void dt_grid_switch(CPU *c, uint32_t ui, uint32_t selection,
         if (dt_call_thiscall(c, active, DT_FN_SUBGROUP_HAS_UNIT, 1, &arg)) {
             /* Already the active subgroup: the touch only selects the unit
              * on release, so there is no command-bar rebuild here. */
-            return;
+            return 0;
         }
     }
 
@@ -4505,6 +4512,7 @@ static void dt_grid_switch(CPU *c, uint32_t ui, uint32_t selection,
     (void)dt_call_thiscall(c, 0u, DT_FN_UI_DIRTY, 0, NULL);
     dt_trace("grid-switch", holder,
              wc3_rd32g(selection + DT_SELECTION_ACTIVE_GROUP));
+    return 1;
 }
 
 /* Apply a unit target to the live target mode.
@@ -4586,6 +4594,7 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
         g_grid.down_unit = unit;
         g_grid.moved = 0;
         g_grid.target = 0;
+        g_grid.switched = 0;
 #if WC3_DEBUG && WC3_DEBUG_INPUT
         wc3_hle_direct_touch_probe_begin("grid-select", unit, selection);
 #endif
@@ -4597,8 +4606,10 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
             /* The subgroup under the finger becomes current immediately.
              * If the finger then crosses into another cell, MOVE switches
              * again; the cell under the finger is always the highlighted
-             * subgroup. */
-            dt_grid_switch(c, ui, selection, holder);
+             * subgroup.  A DOWN that changed the subgroup is remembered so
+             * the release cannot also collapse the squad to one unit. */
+            g_grid.switched = (uint8_t)dt_grid_switch(c, ui, selection,
+                                                      holder);
         }
         dt_trace("grid-down", unit, g_grid.target);
         return 1;
@@ -4625,7 +4636,7 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
                  * disable subgroup switching for the rest of the drag. */
                 (void)dt_grid_context(c, g_grid.ui, &g_grid.selection);
             }
-            dt_grid_switch(c, g_grid.ui, g_grid.selection, holder);
+            (void)dt_grid_switch(c, g_grid.ui, g_grid.selection, holder);
             dt_trace("grid-move", unit, 0);
         }
         return 1;
@@ -4635,21 +4646,26 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
         if (!g_grid.active || ev->pointer_id != g_grid.pointer) return 0;
         if (ev->kind == WC3_DIRECT_TOUCH_POINTER_UP) {
             /* Re-hit-test the release point only while the gesture can still
-             * become a tap.  A target press or a crossed cell has already
-             * decided the gesture, so a hit test there would be wasted guest
-             * calls.  Android may deliver a UP at a different coordinate
-             * without an intervening MOVE, so a release outside the starting
-             * cell must still be classified as a drag. */
-            const int tap_possible = !g_grid.target && !g_grid.moved;
+             * become a unit-selecting tap.  A target press, a crossed cell,
+             * or a DOWN that activated another subgroup has already decided
+             * the gesture, so a hit test there would be wasted guest calls.
+             * Android may deliver a UP at a different coordinate without an
+             * intervening MOVE, so a release outside the starting cell must
+             * still be classified as a drag. */
+            const int tap_possible =
+                !g_grid.target && !g_grid.moved && !g_grid.switched;
             uint32_t up_holder = 0;
             const uint32_t up_unit = tap_possible
                 ? dt_grid_button_at(c, g_grid.ui, ev->x, ev->y,
                                     width, height, &up_holder)
                 : 0;
             if (wc3_dt_grid_release_select(g_grid.target, g_grid.moved,
-                                           up_unit == g_grid.down_unit)) {
+                                           up_unit == g_grid.down_unit,
+                                           g_grid.switched)) {
                 if (up_holder) dt_grid_select_unit(c, g_grid.ui, up_holder);
                 dt_trace("grid-select", g_grid.unit, 0);
+            } else if (g_grid.switched) {
+                dt_trace("grid-subgroup", g_grid.unit, 0);
             }
         }
         dt_trace("grid-up", g_grid.unit, g_grid.target);

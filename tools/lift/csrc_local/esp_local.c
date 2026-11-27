@@ -422,8 +422,11 @@ static void load_paths(const char *path, char ***out, size_t *count)
 
 static const char *path_base(const char *path)
 {
-    const char *slash = strrchr(path, '/');
-    return slash ? slash + 1 : path;
+    const char *p = path;
+    const char *base = path;
+    for (; *p; p++)
+        if (*p == '/' || *p == '\\') base = p + 1;
+    return base;
 }
 
 static int trimmed_is(const char *s, size_t n, const char *want)

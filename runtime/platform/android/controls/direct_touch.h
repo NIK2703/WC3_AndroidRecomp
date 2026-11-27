@@ -30,11 +30,20 @@ void wc3_direct_touch_debug_log(const char *fmt, ...);
 /* Field gesture state.  A quick move before the long-press deadline becomes
  * a camera drag; a move after the deadline becomes a selection drag.  The
  * legacy profile uses one drag threshold for both, so there is no separate
- * long-press slop. */
+ * long-press slop.
+ *
+ * HERO is a separate route: a short tap is replayed as a native click so the
+ * bar keeps its selection action, while a long press is consumed and issues
+ * the native smart order with the hero as the target.  HERO_PENDING holds the
+ * press until that decision, HERO_NATIVE forwards a drag to the native bar,
+ * and HERO_HOLD consumes the rest of the gesture after LONG_PRESS. */
 typedef enum {
     WC3_DIRECT_TOUCH_FIELD_PENDING = 0,
     WC3_DIRECT_TOUCH_FIELD_CAMERA,
-    WC3_DIRECT_TOUCH_FIELD_SELECT
+    WC3_DIRECT_TOUCH_FIELD_SELECT,
+    WC3_DIRECT_TOUCH_HERO_PENDING,
+    WC3_DIRECT_TOUCH_HERO_NATIVE,
+    WC3_DIRECT_TOUCH_HERO_HOLD
 } Wc3DirectTouchFieldMode;
 
 /*

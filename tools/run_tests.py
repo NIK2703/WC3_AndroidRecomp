@@ -4158,8 +4158,10 @@ def test_direct_touch_wiring() -> int:
             require_order(
                 down[1].split("case WC3_DIRECT_TOUCH_POINTER_MOVE:", 1)[0],
                 ("g_grid.active = 1", "g_grid.pointer = ev->pointer_id",
-                 "g_grid.moved = 0", "g_grid.target = 0", "if (target)",
-                 "dt_grid_target", "g_grid.target = 1", "dt_grid_switch"),
+                 "g_grid.moved = 0", "g_grid.target = 0",
+                 "g_grid.switched = 0", "if (target)", "dt_grid_target",
+                 "g_grid.target = 1",
+                 "g_grid.switched = (uint8_t)dt_grid_switch"),
                 "grid DOWN")
             require_order(
                 move[1].split("case WC3_DIRECT_TOUCH_POINTER_UP:", 1)[0],
@@ -4168,9 +4170,10 @@ def test_direct_touch_wiring() -> int:
                 "grid MOVE")
             require_order(
                 up[1].split("default:", 1)[0],
-                ("tap_possible = !g_grid.target && !g_grid.moved",
+                ("!g_grid.target && !g_grid.moved && !g_grid.switched",
                  "dt_grid_button_at", "wc3_dt_grid_release_select",
-                 "dt_grid_select_unit", "dt_grid_reset"),
+                 "g_grid.switched))", "dt_grid_select_unit",
+                 "dt_grid_reset"),
                 "grid UP")
 
     # Phase 2 long tap: one coordinate conversion, one left pick, then the

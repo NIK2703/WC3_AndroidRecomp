@@ -23,10 +23,12 @@ typedef enum {
     /* Semantic battlefield gestures: resolved by the guest-side executor
      * against the live selection/world state. */
     WC3_DIRECT_TOUCH_TAP = 1,
-    /* Reserved.  The field long press is now a native left-button press
-     * expressed as FIELD_SELECT_BEGIN at the deadline.  Keep the value for
-     * queued events from an older build; the executor no longer runs a
-     * semantic selection for it. */
+    /* Long press on the upper-left hero bar.  The field long press is a
+     * native left-button press expressed as FIELD_SELECT_BEGIN at the
+     * deadline, but a hero-bar press is consumed by the guest: it issues the
+     * native smart order with the hero as the target.  The value is also
+     * kept for queued events from an older build; the field executor does
+     * not run a semantic selection for it. */
     WC3_DIRECT_TOUCH_LONG_PRESS = 2,
     /* Raw pointer phases for native UI: minimap, command card, resource
      * bar, menus, and targeting/placement.  The guest-side service turns
@@ -148,6 +150,11 @@ typedef enum {
  *         pointer phases stay owned by the minimap for the whole gesture and
  *         are clamped to its rectangle, so dragging the finger across the
  *         screen keeps moving the camera until the finger is released.
+ * HERO:   the touch started on a visible upper-left hero-bar slot.  A short
+ *         tap is replayed as the native left-button click so the bar keeps
+ *         its selection action.  A long press is emitted as LONG_PRESS on
+ *         this route and the guest issues the native smart order with the
+ *         hero as the target; the native bar never sees that press.
  * MENU:   the guest has an open native menu (the pause/ESC menu).  The input
  *         thread must use exactly the main-menu gesture set: raw pointer
  *         phases, no battlefield, portrait, minimap, command-card or beacon
@@ -161,7 +168,8 @@ typedef enum {
     WC3_DIRECT_TOUCH_ROUTE_NATIVE = 2,
     WC3_DIRECT_TOUCH_ROUTE_PORTRAIT = 3,
     WC3_DIRECT_TOUCH_ROUTE_MINIMAP = 4,
-    WC3_DIRECT_TOUCH_ROUTE_MENU = 5
+    WC3_DIRECT_TOUCH_ROUTE_MENU = 5,
+    WC3_DIRECT_TOUCH_ROUTE_HERO = 6
 } Wc3DirectTouchRoute;
 
 /*

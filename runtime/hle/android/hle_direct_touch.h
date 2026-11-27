@@ -37,11 +37,13 @@
  *     commits the native box selection.
  *   - the selected-unit panel grid and the inventory bar are the native-route
  *     gestures the executor claims itself.  Touching or dragging onto a grid
- *     button activates that subgroup or selects the individual unit
- *     immediately (and applies the unit as a target in target mode) instead
- *     of waiting for the native 0x50065 click on release.  A gesture that
- *     starts on an occupied inventory slot is replayed on release as the
- *     native left click (use) or right click + left click (swap/move/drop).
+ *     button activates that subgroup immediately; a tap on a button of the
+ *     already-active subgroup selects that individual unit, while a tap that
+ *     activates a different subgroup keeps the whole squad selected.  In
+ *     target mode the same press applies the unit as a target instead of
+ *     waiting for the native 0x50065 click on release.  A gesture that starts
+ *     on an occupied inventory slot is replayed on release as the native left
+ *     click (use) or right click + left click (swap/move/drop).
  *
  * The overlay engine remains only for overlay control elements.  It is never
  * used as a fallback for a native HUD or targeting touch in direct mode.

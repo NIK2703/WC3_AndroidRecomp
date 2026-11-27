@@ -1404,12 +1404,14 @@ static void test_command_release_resolution(void)
     assert(!wc3_dt_command_grid_target(1, 0, 1));
     assert(!wc3_dt_command_grid_target(1, 1, 0));
 
-    /* A tap on a selected-unit grid cell selects that unit; a target press,
-     * a drag that crossed cells, and a release on a different cell do not. */
-    assert(wc3_dt_grid_release_select(0, 0, 1));
-    assert(!wc3_dt_grid_release_select(1, 0, 1));
-    assert(!wc3_dt_grid_release_select(0, 1, 1));
-    assert(!wc3_dt_grid_release_select(0, 0, 0));
+    /* A tap on a cell of the already-active subgroup selects that unit; a
+     * target press, a drag that crossed cells, a release on a different cell,
+     * and a press that activated another subgroup do not. */
+    assert(wc3_dt_grid_release_select(0, 0, 1, 0));
+    assert(!wc3_dt_grid_release_select(1, 0, 1, 0));
+    assert(!wc3_dt_grid_release_select(0, 1, 1, 0));
+    assert(!wc3_dt_grid_release_select(0, 0, 0, 0));
+    assert(!wc3_dt_grid_release_select(0, 0, 1, 1));
 
     /* Portrait is the same kind of HUD target: the displayed/selected unit
      * is resolved by the HLE, so the pure rule only gates live target mode,

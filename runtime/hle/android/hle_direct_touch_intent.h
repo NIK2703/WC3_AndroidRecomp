@@ -712,15 +712,17 @@ static inline int wc3_dt_command_grid_target(int targeted, int grid_hit,
 
 /*
  * A selected-unit grid press becomes an individual unit selection only when
- * it was a tap: no target was applied, the finger never crossed into another
- * cell (or left the cells), and it ended on the cell where it started.
- * Crossing cells is the subgroup switch gesture and must not collapse the
- * squad to one unit on release.
+ * it was a tap on the subgroup that was already active: no target was
+ * applied, the finger never crossed into another cell (or left the cells),
+ * it ended on the cell where it started, and the press did not activate a
+ * different subgroup.  Activating an inactive subgroup must keep the whole
+ * squad selected; crossing cells is the drag subgroup-switch gesture.
  */
 static inline int wc3_dt_grid_release_select(int target, int moved,
-                                             int same_cell)
+                                             int same_cell,
+                                             int subgroup_switched)
 {
-    return !target && !moved && same_cell;
+    return !target && !moved && same_cell && !subgroup_switched;
 }
 
 /*

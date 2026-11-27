@@ -2004,3 +2004,49 @@ distcc auto: `workers=pc local=7 remote=4 jobs=11`; the unavailable
   `a66829b9b50c4de651c127899288e915b8244be1b5d303286d55d5cbf89a9251`.
 - Установлен `wc3.recomp.debug`, `versionName=0.1.1-debug`;
   `pm path` подтверждает установку. T2 ещё не прогонялся.
+
+## 2026-11-28: тап по неактивной подгруппе в сетке (debug APK)
+
+- Симптом: при выделенном отряде из нескольких типов юнитов тап по ячейке
+  неактивной подгруппы в selected-unit grid переключал подгруппу и сразу
+  выделял только тапнутый юнит, схлопывая отряд.
+- Причина: `dt_grid_pointer()` на DOWN уже вызывал `dt_grid_switch()`, а на
+  UP правило `wc3_dt_grid_release_select()` не знало о переключении и для
+  любого тапа в той же ячейке вызывало `dt_grid_select_unit()`. То есть
+  один и тот же tap выполнял и активацию подгруппы, и одиночное выделение.
+- Присланный `dt_trace.txt` содержит только загрузку карты и нажатия до
+  появления UI; строк `grid-down`/`grid-switch`/`grid-select` в нём нет,
+  поэтому причина определена по коду и покрыта T0.
+- Fix: `dt_grid_switch()` теперь возвращает 1, когда активная подгруппа
+  действительно сменилась; DOWN сохраняет это в `g_grid.switched`.
+  `wc3_dt_grid_release_select()` получил `subgroup_switched` и больше не
+  выбирает юнит после активации другой подгруппы. Тап по ячейке уже
+  активной подгруппы по-прежнему выбирает этот юнит; drag по ячейкам
+  по-прежнему только переключает подгруппы. Добавлена debug-трасса
+  `grid-subgroup`.
+- T0: `direct_touch` (новый случай матрицы), `direct_touch_wiring`
+  (DOWN хранит switched, UP его учитывает), `native_press_barrier`,
+  `controls_mode`, `controls_idle`, `gesture_lifetime`,
+  `inventory_gesture`, `hero_target`, `grid_pattern`, `group_chord` —
+  проходят. `gcc -fsyntax-only` debug — чисто; release проходит с прежним
+  предупреждением `unused parameter 'unit'` в `dt_grid_target()` при
+  выключенных trace-макросах. `git diff --check` чист.
+- Windows build: `esp_local` извлекал basename только после `/`, поэтому
+  входные пути вида `E:\...` давали неверный выходной путь и стадия падала
+  с `cannot open output`. `path_base()` теперь понимает и `\`, и `/`.
+- Debug APK собран и установлен:
+  `tools/android/build_apk.ps1 -Variant debug -Install
+  -Serial 10.16.32.239:5555`; лог
+  `build/logs/apk_grid_subgroup_20261128_relift.log`. APK
+  `build/android_app/wc3-debug.apk`, размер `178981189`, SHA-256
+  `cf712c49eedc543740b012ee37a1aba05e74feed747c4fdc7c9ed34fb3429d6d`.
+  Установлен `wc3.recomp.debug`, versionCode `2`, versionName
+  `0.1.1-debug`, `lastUpdateTime=2026-11-28 00:23:46`;
+  `[apk] native packaged .so matches debug`, установка `Success`.
+- В локальном APK `lib/arm64-v8a/libwc3gameactivity.so` присутствуют
+  строки `grid-subgroup` и `grid-switch`, то есть новая ветка попала в
+  собранный бинарник.
+- T2 ещё не выполнялся. Проверить на устройстве: тап по неактивной
+  подгруппе оставляет весь отряд и подсвечивает подгруппу (`grid-switch`
+  без `grid-select`); повторный тап по той же ячейке выбирает один юнит
+  (`grid-select`); drag по сетке переключает подгруппы.
