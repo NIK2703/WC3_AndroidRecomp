@@ -188,6 +188,34 @@ static int command_rect(float *left, float *top, float *right,
     return 1;
 }
 
+/* The selected-unit grid's top row also overlaps the field rectangle; the
+ * grid gate must claim the press for NATIVE so the guest can select a unit
+ * or switch the subgroup instead of issuing a world tap. */
+static int grid_rect(float *left, float *top, float *right,
+                     float *bottom, void *user)
+{
+    (void)user;
+    *left = 0.30f;
+    *top = 0.82f;
+    *right = 0.45f;
+    *bottom = 0.88f;
+    return 1;
+}
+
+/* The inventory bar's top row overlaps the field rectangle too; the
+ * inventory gate must claim it for NATIVE so the guest inventory handler can
+ * start an item gesture instead of issuing a world click. */
+static int inventory_rect(float *left, float *top, float *right,
+                          float *bottom, void *user)
+{
+    (void)user;
+    *left = 0.48f;
+    *top = 0.80f;
+    *right = 0.58f;
+    *bottom = 0.86f;
+    return 1;
+}
+
 static int has_pointer_move(int x, int y)
 {
     for (int i = 0; i < g_action_count; i++) {
@@ -502,6 +530,8 @@ int main(int argc, char **argv)
     controls_set_direct_touch_minimap_gate(minimap_rect, NULL);
     controls_set_direct_touch_beacon_gate(beacon_rect, NULL);
     controls_set_direct_touch_command_gate(command_rect, NULL);
+    controls_set_direct_touch_grid_gate(grid_rect, NULL);
+    controls_set_direct_touch_inventory_gate(inventory_rect, NULL);
     controls_set_direct_touch_enabled(true);
     controls_set_key_signal_vk_map(test_key_vk, NULL);
 
@@ -866,6 +896,36 @@ int main(int argc, char **argv)
     assert(direct_has(WC3_DIRECT_TOUCH_POINTER_DOWN));
     assert(direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
 
+    /* Selected-unit grid: its top row also starts above the field bottom.
+     * A tap there must stay on the raw NATIVE route; the guest grid handler
+     * then selects the unit or switches the subgroup. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 350.0f, 830.0f, 7501) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 350.0f, 830.0f, 7502) == 0);
+    controls_tick(7503);
+    assert(g_action_count == 0);
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+    assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_DOWN,
+                            WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+    assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_UP,
+                            WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+
+    /* Inventory bar: its top row also overlaps the field rectangle.  A press
+     * inside the slot union must reach the guest inventory handler as raw
+     * NATIVE phases, not become a world tap. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, 530.0f, 830.0f, 7504) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, 530.0f, 830.0f, 7505) == 0);
+    controls_tick(7506);
+    assert(g_action_count == 0);
+    assert(!direct_has(WC3_DIRECT_TOUCH_TAP));
+    assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_DOWN,
+                            WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+    assert(direct_has_route(WC3_DIRECT_TOUCH_POINTER_UP,
+                            WC3_DIRECT_TOUCH_ROUTE_NATIVE));
+
     /* Swipe on a digit folds its authored KEY_N + MOD_SHIFT chord into one
      * direct group action: group 1, route 2 (add to the control group). */
     actions_clear();
@@ -1032,6 +1092,8 @@ int main(int argc, char **argv)
     controls_set_direct_touch_minimap_gate(NULL, NULL);
     controls_set_direct_touch_beacon_gate(NULL, NULL);
     controls_set_direct_touch_command_gate(NULL, NULL);
+    controls_set_direct_touch_grid_gate(NULL, NULL);
+    controls_set_direct_touch_inventory_gate(NULL, NULL);
     controls_set_action_sink(NULL, NULL);
     controls_cancel_all();
     free(json);

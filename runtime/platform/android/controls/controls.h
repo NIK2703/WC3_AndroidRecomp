@@ -141,6 +141,29 @@ typedef Wc3DirectTouchRectGate Wc3DirectTouchCommandRectGate;
 void controls_set_direct_touch_command_gate(
     Wc3DirectTouchCommandRectGate gate, void *user);
 
+/*
+ * Lock-free selected-unit grid rectangle supplied by the host, same contract
+ * as the command gate.  The grid's top row overlaps the battlefield rectangle
+ * (the 6x2 panel reaches roughly y 0.82 while the field ends at 0.85), so a
+ * touch that starts inside the grid is forced to the raw NATIVE route; the
+ * guest grid handler then switches the active subgroup or selects the unit.
+ */
+typedef Wc3DirectTouchRectGate Wc3DirectTouchGridRectGate;
+void controls_set_direct_touch_grid_gate(
+    Wc3DirectTouchGridRectGate gate, void *user);
+
+/*
+ * Lock-free inventory-bar rectangle supplied by the host, same contract as
+ * the command gate.  The bar sits left of the command card and its top row
+ * overlaps the battlefield rectangle (the slot centres are around y 0.8355
+ * while the field ends at 0.85), so a touch that starts inside the bar is
+ * forced to the raw NATIVE route; the guest inventory handler then decides
+ * whether an occupied slot starts an item gesture.
+ */
+typedef Wc3DirectTouchRectGate Wc3DirectTouchInventoryRectGate;
+void controls_set_direct_touch_inventory_gate(
+    Wc3DirectTouchInventoryRectGate gate, void *user);
+
 /* Profile JSON must stay valid only for the duration of this call. */
 int controls_init(const char *profile_json, int width, int height);
 

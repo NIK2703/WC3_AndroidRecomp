@@ -1258,6 +1258,13 @@ static void test_command_release_resolution(void)
     assert(!wc3_dt_command_grid_target(1, 0, 1));
     assert(!wc3_dt_command_grid_target(1, 1, 0));
 
+    /* A tap on a selected-unit grid cell selects that unit; a target press,
+     * a drag that crossed cells, and a release on a different cell do not. */
+    assert(wc3_dt_grid_release_select(0, 0, 1));
+    assert(!wc3_dt_grid_release_select(1, 0, 1));
+    assert(!wc3_dt_grid_release_select(0, 1, 1));
+    assert(!wc3_dt_grid_release_select(0, 0, 0));
+
     /* Portrait is the same kind of HUD target: the displayed/selected unit
      * is resolved by the HLE, so the pure rule only gates live target mode,
      * portrait hit and movement. */
@@ -1265,6 +1272,46 @@ static void test_command_release_resolution(void)
     assert(!wc3_dt_command_portrait_target(0, 1, 1));
     assert(!wc3_dt_command_portrait_target(1, 0, 1));
     assert(!wc3_dt_command_portrait_target(1, 1, 0));
+}
+
+static void test_inventory_release_resolution(void)
+{
+    /* A stale source cancels before any destination rule. */
+    assert(wc3_dt_inventory_release(-1, 0, 1, 1, 1, 0) ==
+           WC3_DT_INV_CANCEL);
+    assert(wc3_dt_inventory_release(-1, -1, 0, 1, 1, 0) ==
+           WC3_DT_INV_CANCEL);
+
+    /* Same slot is a tap/use even when every other condition would also
+     * match a drop. */
+    assert(wc3_dt_inventory_release(2, 2, 1, 0, 1, 1) ==
+           WC3_DT_INV_USE);
+
+    /* A destination slot wins over the tap slop: a short deliberate drag to
+     * an adjacent slot must move, not use. */
+    assert(wc3_dt_inventory_release(2, 3, 1, 1, 1, 1) ==
+           WC3_DT_INV_MOVE_SLOT);
+
+    /* A destination slot without a readable button rect must cancel, not
+     * fall through to a world drop at the same point. */
+    assert(wc3_dt_inventory_release(2, 3, 0, 0, 1, 0) ==
+           WC3_DT_INV_CANCEL);
+    assert(wc3_dt_inventory_release(2, 3, 0, 1, 1, 0) ==
+           WC3_DT_INV_CANCEL);
+
+    /* A tap that drifted out of the slot still uses the item. */
+    assert(wc3_dt_inventory_release(2, -1, 0, 1, 1, 0) ==
+           WC3_DT_INV_USE);
+    assert(wc3_dt_inventory_release(2, -1, 0, 1, 0, 0) ==
+           WC3_DT_INV_USE);
+
+    /* A real drag to the battlefield drops only outside every HUD panel. */
+    assert(wc3_dt_inventory_release(2, -1, 0, 0, 1, 0) ==
+           WC3_DT_INV_DROP_FIELD);
+    assert(wc3_dt_inventory_release(2, -1, 0, 0, 1, 1) ==
+           WC3_DT_INV_CANCEL);
+    assert(wc3_dt_inventory_release(2, -1, 0, 0, 0, 0) ==
+           WC3_DT_INV_CANCEL);
 }
 
 static void test_command_target_mode(void)
@@ -1763,6 +1810,7 @@ int main(void)
     test_portrait_gesture();
     test_beacon_release_resolution();
     test_command_release_resolution();
+    test_inventory_release_resolution();
     test_command_target_mode();
     test_command_target_live();
     test_target_mode_live();

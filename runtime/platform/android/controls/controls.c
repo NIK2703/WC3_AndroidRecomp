@@ -139,6 +139,10 @@ static Wc3DirectTouchBeaconRectGate g_direct_touch_beacon_gate;
 static void *g_direct_touch_beacon_gate_user;
 static Wc3DirectTouchCommandRectGate g_direct_touch_command_gate;
 static void *g_direct_touch_command_gate_user;
+static Wc3DirectTouchGridRectGate g_direct_touch_grid_gate;
+static void *g_direct_touch_grid_gate_user;
+static Wc3DirectTouchInventoryRectGate g_direct_touch_inventory_gate;
+static void *g_direct_touch_inventory_gate_user;
 static Wc3DirectTouchHapticSink g_direct_touch_haptic_sink;
 static void *g_direct_touch_haptic_user;
 /* Legacy profile default; direct_touch_configure() replaces it with the
@@ -956,6 +960,18 @@ static int direct_touch_command_contains(float x, float y) {
                                       x, y);
 }
 
+static int direct_touch_grid_contains(float x, float y) {
+    return direct_touch_rect_contains(g_direct_touch_grid_gate,
+                                      g_direct_touch_grid_gate_user,
+                                      x, y);
+}
+
+static int direct_touch_inventory_contains(float x, float y) {
+    return direct_touch_rect_contains(g_direct_touch_inventory_gate,
+                                      g_direct_touch_inventory_gate_user,
+                                      x, y);
+}
+
 /* Snapshot the guest route once per input event.  A NULL gate is the
  * unit-test/host-only mode and keeps the phase-1 semantic field behavior. */
 static Wc3DirectTouchRoute direct_touch_gate_route(void) {
@@ -1012,6 +1028,10 @@ static Wc3DirectTouchRoute direct_touch_route_for(
                                 g_direct_touch_minimap_gate_user);
         direct_touch_trace_gate("command", g_direct_touch_command_gate,
                                 g_direct_touch_command_gate_user);
+        direct_touch_trace_gate("grid", g_direct_touch_grid_gate,
+                                g_direct_touch_grid_gate_user);
+        direct_touch_trace_gate("inventory", g_direct_touch_inventory_gate,
+                                g_direct_touch_inventory_gate_user);
     }
 #endif
     if (route == WC3_DIRECT_TOUCH_ROUTE_MENU) {
@@ -1054,6 +1074,20 @@ static Wc3DirectTouchRoute direct_touch_route_for(
      * first; the guest command handler then hit-tests the real buttons. */
     if (direct_touch_command_contains(x, y)) {
         DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "command");
+    }
+    /* The inventory bar is left of the command card and its top row also
+     * starts above the field bottom.  Claim the slot-button union for NATIVE
+     * first; the guest inventory handler decides whether an occupied slot
+     * starts an item gesture.  An empty slot or a gap inside the bar stays a
+     * native HUD press instead of becoming a world click. */
+    if (direct_touch_inventory_contains(x, y)) {
+        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "inventory");
+    }
+    /* The selected-unit grid's top row also starts above the field bottom.
+     * Claim the whole grid for NATIVE before the field test; the guest grid
+     * handler decides whether the point hit a unit. */
+    if (direct_touch_grid_contains(x, y)) {
+        DT_ROUTE_RETURN(WC3_DIRECT_TOUCH_ROUTE_NATIVE, "grid");
     }
     if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD &&
         direct_touch_field_contains(x, y)) {
@@ -1160,6 +1194,10 @@ void controls_set_direct_touch_sink(Wc3DirectTouchSink sink, void *user) {
         g_direct_touch_beacon_gate_user = NULL;
         g_direct_touch_command_gate = NULL;
         g_direct_touch_command_gate_user = NULL;
+        g_direct_touch_grid_gate = NULL;
+        g_direct_touch_grid_gate_user = NULL;
+        g_direct_touch_inventory_gate = NULL;
+        g_direct_touch_inventory_gate_user = NULL;
     }
     if (g_initialized) {
         wc3_direct_touch_set_sink(&g_direct_touch, sink, user);
@@ -1197,6 +1235,18 @@ void controls_set_direct_touch_command_gate(
     Wc3DirectTouchCommandRectGate gate, void *user) {
     g_direct_touch_command_gate = gate;
     g_direct_touch_command_gate_user = user;
+}
+
+void controls_set_direct_touch_grid_gate(
+    Wc3DirectTouchGridRectGate gate, void *user) {
+    g_direct_touch_grid_gate = gate;
+    g_direct_touch_grid_gate_user = user;
+}
+
+void controls_set_direct_touch_inventory_gate(
+    Wc3DirectTouchInventoryRectGate gate, void *user) {
+    g_direct_touch_inventory_gate = gate;
+    g_direct_touch_inventory_gate_user = user;
 }
 
 /*

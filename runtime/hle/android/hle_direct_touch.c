@@ -16,7 +16,8 @@
  *     selects a box; without it a stationary release clicks one unit;
  *   - portrait: sticky-finger camera follow;
  *   - minimap: native pointer phases clamped to its frame;
- *   - selected-unit grid: activate the subgroup under the finger;
+ *   - selected-unit grid: tap selects a unit, drag switches the subgroup
+ *     under the finger without collapsing the squad;
  *   - inventory: native click pairs for use/swap/move/drop;
  *   - command card: select on finger-down, targeted drag and autocast.
  * Native UI paths post the same Win32 mouse messages a real mouse
@@ -159,6 +160,9 @@
 #define DT_INV_FIELD_RIGHT   0.97f
 #define DT_INV_FIELD_TOP     0.10f
 #define DT_INV_FIELD_BOTTOM  0.85f
+/* A tap that drifts out of its slot still uses the item; a real drag to the
+ * field drops it.  The slop matches the command/field tap slop. */
+#define DT_INV_TAP_SLOP      0.02f
 
 /* Command card: CGameUI+0x3C8 -> CCommandBar.  The bar is a CGridPanel with
  * 3 rows x 4 columns at +0x124/+0x128; +0x154 is the row array, each row is
@@ -528,6 +532,19 @@ static DtRectSnapshot g_beacon_snapshot;
  * card rect to claim the press for NATIVE before the field recognizer sees
  * it.  Published in surface coordinates, like the beacon snapshot. */
 static DtRectSnapshot g_command_snapshot;
+/* The selected-unit grid's top row overlaps the field rectangle, so the
+ * controls layer needs the union of the visible cell rectangles to claim a
+ * unit tap for NATIVE before the field recognizer turns it into a world
+ * selection.  Published in surface coordinates. */
+static DtRectSnapshot g_grid_snapshot;
+/* The union of the live inventory slot-button rectangles.  The bar sits left
+ * of the command card and its top row overlaps the field rectangle (the
+ * inventory top row centre is around y 0.8355, inside the field bottom 0.85),
+ * so the controls layer must claim a press inside this union for the raw
+ * NATIVE route before the field recognizer sees it.  The same union is the
+ * HUD exclusion for an item-drag release: a point over the bar is never a
+ * battlefield drop. */
+static DtRectSnapshot g_inventory_snapshot;
 /* Set by wc3_hle_direct_touch_reset() (any thread) when the game leaves the
  * in-game UI.  The service, on the main guest thread, clears the camera
  * follow before it drops the queue. */
@@ -540,17 +557,21 @@ static int g_portrait_follow_active;
  * cached copy of dt_pause_menu_active(); the input thread sees the same state
  * as the MENU route in the published snapshot.  Main guest thread only. */
 static int g_pause_menu_active;
-/* Selected-unit grid drag.  The native grid only reacts on a completed click,
- * so a touch that starts on a button is consumed here and the subgroup under
- * the finger is activated on DOWN and on every MOVE to a different button.
- * Main guest thread only. */
+/* Selected-unit grid gesture.  A press on a cell makes that unit's subgroup
+ * active immediately; a release without crossing into another cell then
+ * selects the unit individually.  Crossing to another cell keeps switching
+ * the active subgroup and suppresses the individual selection, so a drag is
+ * a subgroup switch while a tap is a unit selection.  Main guest thread
+ * only. */
 typedef struct {
     uint8_t active;
     uint8_t pointer;
     uint8_t target;
+    uint8_t moved;
     uint32_t ui;
     uint32_t selection;
-    uint32_t unit;
+    uint32_t unit;      /* cell currently under the finger */
+    uint32_t down_unit; /* cell where the press started */
 } DtGridGesture;
 
 static DtGridGesture g_grid;
@@ -1408,6 +1429,18 @@ static void dt_command_publish(float left, float top, float right,
     dt_rect_publish(&g_command_snapshot, left, top, right, bottom);
 }
 
+static void dt_grid_publish(float left, float top, float right,
+                            float bottom)
+{
+    dt_rect_publish(&g_grid_snapshot, left, top, right, bottom);
+}
+
+static void dt_inventory_publish(float left, float top, float right,
+                                 float bottom)
+{
+    dt_rect_publish(&g_inventory_snapshot, left, top, right, bottom);
+}
+
 int wc3_hle_direct_touch_portrait_rect(float *left, float *top,
                                        float *right, float *bottom)
 {
@@ -1479,6 +1512,18 @@ int wc3_hle_direct_touch_command_rect(float *left, float *top,
                                       float *right, float *bottom)
 {
     return dt_rect_read(&g_command_snapshot, left, top, right, bottom);
+}
+
+int wc3_hle_direct_touch_grid_rect(float *left, float *top,
+                                   float *right, float *bottom)
+{
+    return dt_rect_read(&g_grid_snapshot, left, top, right, bottom);
+}
+
+int wc3_hle_direct_touch_inventory_rect(float *left, float *top,
+                                        float *right, float *bottom)
+{
+    return dt_rect_read(&g_inventory_snapshot, left, top, right, bottom);
 }
 
 /*
@@ -1801,6 +1846,180 @@ static void dt_command_snapshot(uint32_t ui, uint32_t width, uint32_t height)
     dt_command_publish(l, t, r, b);
 }
 
+/*
+ * Resolve the active grid's rows, columns and row array.  The controls gate
+ * snapshot and the pointer hit test share this check so they cannot disagree
+ * about whether the panel is live and visible.
+ */
+static int dt_grid_layout(uint32_t ui, uint32_t *rows_out,
+                          uint32_t *cols_out, uint32_t *row_array_out)
+{
+    if (!ui || !dt_guest_readable(ui + DT_UI_INFO_BAR, 4u)) return 0;
+    const uint32_t infobar = wc3_rd32g(ui + DT_UI_INFO_BAR);
+    if (!infobar || !dt_guest_readable(infobar + DT_INFO_GROUP, 4u)) return 0;
+    const uint32_t group = wc3_rd32g(infobar + DT_INFO_GROUP);
+    if (!group || !dt_guest_readable(group, DT_GROUP_ACTIVE_GRID + 4u) ||
+        !wc3_rd32g(group + DT_GROUP_VISIBLE)) {
+        return 0;
+    }
+    const uint32_t grid = wc3_rd32g(group + DT_GROUP_ACTIVE_GRID);
+    if (!grid || !dt_guest_readable(grid, DT_GRID_ROW_ARRAY + 4u) ||
+        !wc3_rd32g(grid + DT_GRID_VISIBLE)) {
+        return 0;
+    }
+    const uint32_t rows = wc3_rd32g(grid + DT_GRID_ROWS);
+    const uint32_t cols = wc3_rd32g(grid + DT_GRID_COLS);
+    if (!rows || !cols || rows > DT_GRID_MAX_ROWS ||
+        cols > DT_GRID_MAX_COLS) {
+        return 0;
+    }
+    const uint32_t row_array = wc3_rd32g(grid + DT_GRID_ROW_ARRAY);
+    if (!row_array ||
+        !dt_guest_readable(row_array, rows * DT_GRID_ROW_STRIDE)) {
+        return 0;
+    }
+    *rows_out = rows;
+    *cols_out = cols;
+    *row_array_out = row_array;
+    return 1;
+}
+
+/*
+ * Publish the union of the visible selected-unit cell rectangles.  The grid
+ * frame's own +0x44 rect is not used here: the cells are the clickable
+ * geometry, and their union is exactly the area the controls layer must keep
+ * out of the field recognizer.  A hidden group/grid publishes an empty rect.
+ */
+static void dt_grid_snapshot(uint32_t ui, uint32_t width, uint32_t height)
+{
+    uint32_t rows = 0;
+    uint32_t cols = 0;
+    uint32_t row_array = 0;
+    if (!dt_grid_layout(ui, &rows, &cols, &row_array)) {
+        dt_grid_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+    int have = 0;
+    for (uint32_t row_index = 0; row_index < rows; row_index++) {
+        const uint32_t row = row_array + row_index * DT_GRID_ROW_STRIDE;
+        const uint32_t buttons = wc3_rd32g(row + DT_GRID_ROW_BUTTONS);
+        if (!buttons || !dt_guest_readable(buttons, cols * 4u)) continue;
+        for (uint32_t col = 0; col < cols; col++) {
+            const uint32_t button = wc3_rd32g(buttons + col * 4u);
+            /* The gate claims every visible cell, including one whose unit
+             * field is currently stale: the hit test will reject that cell,
+             * but the press must still not fall through to the field. */
+            if (!button ||
+                !dt_guest_readable(button, DT_GRID_BUTTON_VISIBLE + 4u) ||
+                !wc3_rd32g(button + DT_GRID_BUTTON_VISIBLE)) {
+                continue;
+            }
+            float bl = 0.0f;
+            float bt = 0.0f;
+            float br = 0.0f;
+            float bb = 0.0f;
+            if (!dt_console_rect_read(button, width, height,
+                                      &bl, &bt, &br, &bb)) {
+                continue;
+            }
+            if (!have) {
+                left = bl;
+                top = bt;
+                right = br;
+                bottom = bb;
+                have = 1;
+            } else {
+                if (bl < left) left = bl;
+                if (bt < top) top = bt;
+                if (br > right) right = br;
+                if (bb > bottom) bottom = bb;
+            }
+        }
+    }
+    if (!have) {
+        dt_grid_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    dt_grid_publish(left, top, right, bottom);
+}
+
+/*
+ * Publish the union of the inventory slot-button rectangles.  Empty slots
+ * keep their buttons and rects, so the gate also claims a press on an empty
+ * slot instead of letting the field recognizer turn it into a world click.
+ * The bar's own frame rect is not used: the buttons are the clickable
+ * geometry and their union is what dt_inventory_slot_at() hit-tests.
+ */
+static void dt_inventory_snapshot(uint32_t ui, uint32_t width,
+                                  uint32_t height)
+{
+    if (!ui || !dt_guest_readable(ui + DT_UI_INFO_BAR, 4u)) {
+        dt_inventory_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    const uint32_t infobar = wc3_rd32g(ui + DT_UI_INFO_BAR);
+    if (!infobar || !dt_guest_readable(infobar + DT_INFO_INVENTORY, 4u)) {
+        dt_inventory_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    const uint32_t bar = wc3_rd32g(infobar + DT_INFO_INVENTORY);
+    if (!bar || !dt_guest_readable(bar, DT_INV_ARRAY + 4u)) {
+        dt_inventory_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    const uint32_t cap = wc3_rd32g(bar + DT_INV_CAP);
+    const uint32_t array = wc3_rd32g(bar + DT_INV_ARRAY);
+    if (!cap || cap > DT_INV_MAX_SLOTS || !array ||
+        !dt_guest_readable(array, cap * 8u)) {
+        dt_inventory_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+    int have = 0;
+    for (uint32_t i = 0; i < cap; i++) {
+        const uint32_t button =
+            wc3_rd32g(array + i * 8u + DT_INV_ENTRY_BUTTON);
+        if (!button ||
+            !dt_guest_readable(button, DT_INV_BUTTON_DATA + 4u)) {
+            continue;
+        }
+        float bl = 0.0f;
+        float bt = 0.0f;
+        float br = 0.0f;
+        float bb = 0.0f;
+        if (!dt_console_rect_read(button, width, height,
+                                  &bl, &bt, &br, &bb)) {
+            continue;
+        }
+        if (!have) {
+            left = bl;
+            top = bt;
+            right = br;
+            bottom = bb;
+            have = 1;
+        } else {
+            if (bl < left) left = bl;
+            if (bt < top) top = bt;
+            if (br > right) right = br;
+            if (bb > bottom) bottom = bb;
+        }
+    }
+    if (!have) {
+        dt_inventory_publish(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    dt_inventory_publish(left, top, right, bottom);
+}
+
 #if WC3_DEBUG && WC3_DEBUG_INPUT
 static void dt_trace_one_rect(const char *where, const char *name,
                               const DtRectSnapshot *snap,
@@ -1838,11 +2057,15 @@ static void dt_trace_snapshots(const char *where)
     static float minimap_input[4];
     static float beacon[4];
     static float command[4];
+    static float grid[4];
+    static float inventory[4];
     static int portrait_present = -1;
     static int minimap_present = -1;
     static int minimap_input_present = -1;
     static int beacon_present = -1;
     static int command_present = -1;
+    static int grid_present = -1;
+    static int inventory_present = -1;
 
     dt_trace_one_rect(where, "portrait", &g_portrait_snapshot,
                       portrait, &portrait_present);
@@ -1876,6 +2099,10 @@ static void dt_trace_snapshots(const char *where)
                       beacon, &beacon_present);
     dt_trace_one_rect(where, "command", &g_command_snapshot,
                       command, &command_present);
+    dt_trace_one_rect(where, "grid", &g_grid_snapshot,
+                      grid, &grid_present);
+    dt_trace_one_rect(where, "inventory", &g_inventory_snapshot,
+                      inventory, &inventory_present);
 }
 #endif
 
@@ -2564,6 +2791,8 @@ static void dt_sync_idle_context(uint32_t width, uint32_t height)
     dt_minimap_panel_snapshot(ui, width, height);
     dt_beacon_snapshot(width, height);
     dt_command_snapshot(ui, width, height);
+    dt_grid_snapshot(ui, width, height);
+    dt_inventory_snapshot(ui, width, height);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     dt_trace_snapshots("idle");
 #endif
@@ -3674,22 +3903,24 @@ static void dt_grid_reset(void)
 {
     g_grid.active = 0;
     g_grid.pointer = 0;
+    g_grid.target = 0;
+    g_grid.moved = 0;
     g_grid.ui = 0;
     g_grid.selection = 0;
     g_grid.unit = 0;
-    g_grid.target = 0;
+    g_grid.down_unit = 0;
 }
 
 /*
- * Resolve the live UI and selection without requiring the full field context.
- * A modal menu clears [ui+0x1AC]; in that state the grid is not a valid
- * recipient even if its frames are still visible underneath.
+ * Resolve the live UI for the grid without a guest call.  A modal menu clears
+ * [ui+0x1AC]; in that state the grid is not a valid recipient even if its
+ * frames are still visible underneath.  Hit-testing a cell only needs this
+ * half of the context, so it must not wait on player/selection resolution.
  */
-static int dt_grid_context(CPU *c, uint32_t *ui_out, uint32_t *selection_out)
+static int dt_grid_ui(uint32_t *ui_out)
 {
-    if (!c || !ui_out || !selection_out) return 0;
+    if (!ui_out) return 0;
     *ui_out = 0;
-    *selection_out = 0;
 
     if (!dt_guest_readable(DT_UI_GLOBAL, 4u)) return 0;
     const uint32_t ui = wc3_rd32g(DT_UI_GLOBAL);
@@ -3697,6 +3928,18 @@ static int dt_grid_context(CPU *c, uint32_t *ui_out, uint32_t *selection_out)
     if (!wc3_rd32g(ui + DT_UI_WORLD_FRAME)) return 0;
     if (!wc3_rd32g(ui + DT_UI_CLICK_GATE)) return 0;
     if (!wc3_rd32g(ui + DT_UI_SELECT_MODE)) return 0;
+
+    *ui_out = ui;
+    return 1;
+}
+
+/* Selection is only needed when a subgroup is actually switched.  Keeping it
+ * out of the hit test removes a guest call from every DOWN/MOVE/UP and stops
+ * a transient player lookup from swallowing an otherwise valid cell press. */
+static int dt_grid_context(CPU *c, uint32_t ui, uint32_t *selection_out)
+{
+    if (!c || !ui || !selection_out) return 0;
+    *selection_out = 0;
 
     if (!dt_guest_readable(DT_PLAYER_MANAGER, 4u)) return 0;
     const uint32_t manager = wc3_rd32g(DT_PLAYER_MANAGER);
@@ -3709,17 +3952,21 @@ static int dt_grid_context(CPU *c, uint32_t *ui_out, uint32_t *selection_out)
     const uint32_t selection = dt_selection(c, &ctx);
     if (!selection) return 0;
 
-    *ui_out = ui;
     *selection_out = selection;
     return 1;
 }
 
-static int dt_grid_targeting(uint32_t ui)
+static uint32_t dt_grid_target_mode(uint32_t ui)
 {
     if (!ui || !dt_guest_readable(ui, DT_UI_TARGET_MODE + 4u)) return 0;
     const uint32_t target = wc3_rd32g(ui + DT_UI_TARGET_MODE);
     if (!target) return 0;
-    return wc3_rd32g(ui + DT_UI_ACTIVE_MODE) == target;
+    return wc3_rd32g(ui + DT_UI_ACTIVE_MODE) == target ? target : 0;
+}
+
+static int dt_grid_targeting(uint32_t ui)
+{
+    return dt_grid_target_mode(ui) != 0;
 }
 
 /* Return the CUnit under the normalised surface point, or 0 when the point is
@@ -3727,28 +3974,10 @@ static int dt_grid_targeting(uint32_t ui)
 static uint32_t dt_grid_button_at(CPU *c, uint32_t ui, float nx, float ny,
                                   uint32_t width, uint32_t height)
 {
-    if (!c || !ui || !dt_guest_readable(ui + DT_UI_INFO_BAR, 4u)) return 0;
-    const uint32_t infobar = wc3_rd32g(ui + DT_UI_INFO_BAR);
-    if (!infobar || !dt_guest_readable(infobar + DT_INFO_GROUP, 4u)) return 0;
-    const uint32_t group = wc3_rd32g(infobar + DT_INFO_GROUP);
-    if (!group || !dt_guest_readable(group, DT_GROUP_ACTIVE_GRID + 4u)) return 0;
-    if (!wc3_rd32g(group + DT_GROUP_VISIBLE)) return 0;
-
-    const uint32_t grid = wc3_rd32g(group + DT_GROUP_ACTIVE_GRID);
-    if (!grid || !dt_guest_readable(grid, DT_GRID_ROW_ARRAY + 4u)) return 0;
-    if (!wc3_rd32g(grid + DT_GRID_VISIBLE)) return 0;
-
-    const uint32_t rows = wc3_rd32g(grid + DT_GRID_ROWS);
-    const uint32_t cols = wc3_rd32g(grid + DT_GRID_COLS);
-    if (!rows || !cols || rows > DT_GRID_MAX_ROWS ||
-        cols > DT_GRID_MAX_COLS) {
-        return 0;
-    }
-    const uint32_t row_array = wc3_rd32g(grid + DT_GRID_ROW_ARRAY);
-    if (!row_array ||
-        !dt_guest_readable(row_array, rows * DT_GRID_ROW_STRIDE)) {
-        return 0;
-    }
+    uint32_t rows = 0;
+    uint32_t cols = 0;
+    uint32_t row_array = 0;
+    if (!c || !dt_grid_layout(ui, &rows, &cols, &row_array)) return 0;
 
     for (uint32_t row_index = 0; row_index < rows; row_index++) {
         const uint32_t row =
@@ -3768,8 +3997,12 @@ static uint32_t dt_grid_button_at(CPU *c, uint32_t ui, float nx, float ny,
             float top = 0.0f;
             float right = 0.0f;
             float bottom = 0.0f;
-            if (!dt_console_rect_snapshot(button, width, height, &left, &top,
-                                          &right, &bottom)) {
+            /* CInfoPanelGroupButton uses +0x90 for visibility, not the
+             * CFrame +0x54 flag checked by dt_console_rect_snapshot().  The
+             * +0x90 check above is authoritative; read the rect without the
+             * unrelated +0x54 gate. */
+            if (!dt_console_rect_read(button, width, height, &left, &top,
+                                      &right, &bottom)) {
                 continue;
             }
             if (!(nx >= left && nx < right && ny >= top && ny < bottom)) {
@@ -3789,6 +4022,61 @@ static uint32_t dt_grid_button_at(CPU *c, uint32_t ui, float nx, float ny,
     }
     return 0;
 }
+
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+/* Explain a failed cell hit test.  The controls gate already claimed the
+ * point from the published rect union, so the only remaining reasons are a
+ * layout mismatch, a rect mismatch, or a cell whose unit field cannot be
+ * resolved.  Keep this out of the success path. */
+static void dt_grid_dump_miss(CPU *c, uint32_t ui, float nx, float ny,
+                              uint32_t width, uint32_t height)
+{
+    uint32_t rows = 0;
+    uint32_t cols = 0;
+    uint32_t row_array = 0;
+    if (!dt_grid_layout(ui, &rows, &cols, &row_array)) {
+        dt_log("grid-miss-ui ui=%08X layout=0", ui);
+        return;
+    }
+    dt_log("grid-miss-ui ui=%08X rows=%u cols=%u row_array=%08X n=%.4f,%.4f",
+           ui, rows, cols, row_array, nx, ny);
+    for (uint32_t r = 0; r < rows; r++) {
+        const uint32_t row = row_array + r * DT_GRID_ROW_STRIDE;
+        const uint32_t buttons = wc3_rd32g(row + DT_GRID_ROW_BUTTONS);
+        if (!buttons || !dt_guest_readable(buttons, cols * 4u)) {
+            dt_log("grid-miss-row r=%u buttons=%08X", r, buttons);
+            continue;
+        }
+        for (uint32_t col = 0; col < cols; col++) {
+            const uint32_t button = wc3_rd32g(buttons + col * 4u);
+            if (!button ||
+                !dt_guest_readable(button, DT_GRID_BUTTON_UNIT + 4u)) {
+                dt_log("grid-miss-cell r=%u c=%u btn=%08X unreadable", r, col,
+                       button);
+                continue;
+            }
+            float l = 0.0f;
+            float t = 0.0f;
+            float rr = 0.0f;
+            float b = 0.0f;
+            const int rect_ok = dt_console_rect_read(button, width, height,
+                                                     &l, &t, &rr, &b);
+            const int inside = rect_ok && nx >= l && nx < rr &&
+                               ny >= t && ny < b;
+            const uint32_t ref = wc3_rd32g(button + DT_GRID_BUTTON_UNIT);
+            const uint32_t flags = ref && dt_guest_readable(ref, 0x60u)
+                ? wc3_rd32g(ref + 0x5Cu) : 0u;
+            const uint32_t unit = inside && ref ? dt_handle_unit(c, ref) : 0u;
+            dt_log("grid-miss-cell r=%u c=%u btn=%08X vis=%u "
+                   "rect=%d(%.4f,%.4f..%.4f,%.4f) inside=%d "
+                   "ref=%08X flags=%08X unit=%08X",
+                   r, col, button,
+                   wc3_rd32g(button + DT_GRID_BUTTON_VISIBLE),
+                   rect_ok, l, t, rr, b, inside, ref, flags, unit);
+        }
+    }
+}
+#endif
 
 /* The native 0x50065 handler resolves the selection holder from the touched
  * unit as [[unit+0x6C]+0x124] and validates it with 0x6F0549F0.  The grid
@@ -3846,19 +4134,14 @@ static void dt_grid_prepare_command_bar(CPU *c, uint32_t ui)
     (void)dt_call_thiscall(c, bar, DT_FN_COMMAND_BAR_HIDE, 0, NULL);
 }
 
-/* Native 0x50065: a unit already in the active subgroup is selected
- * individually; otherwise 0x6F293480 makes its subgroup current and the
- * native command follows that with 0x6F291240(selection, 0).  Never call the
- * realize alone: it is a mirror update, not a selection change.
- *
- * The native handler also consults the player's selection options through
- * 0x6F0731A0(0)/(1): option 0 forces individual selection, and option 1
- * switches to the multi-unit 0x6F3968B0 branch.  Direct touch intentionally
- * follows the standard option-1-off "activate subgroup, then select the
- * individual unit" rule requested for the panel; the option overrides are
- * not reproduced. */
-static void dt_grid_activate(CPU *c, uint32_t ui, uint32_t selection,
-                             uint32_t unit)
+/* Make the unit's subgroup current without changing the selection.  The
+ * native 0x50065 handler uses 0x6F293480 for this and follows it with
+ * 0x6F291240(selection, 0); the realize alone is only a mirror update.  The
+ * command bar is reset first because the old page's buttons belong to the
+ * previous subgroup.  The native selection-option overrides are not
+ * reproduced: this is the standard panel path. */
+static void dt_grid_switch(CPU *c, uint32_t ui, uint32_t selection,
+                           uint32_t unit)
 {
     if (!c || !selection || !unit) return;
 
@@ -3871,9 +4154,8 @@ static void dt_grid_activate(CPU *c, uint32_t ui, uint32_t selection,
     if (active && dt_guest_readable(active, 0x10u)) {
         const uint32_t arg = holder;
         if (dt_call_thiscall(c, active, DT_FN_SUBGROUP_HAS_UNIT, 1, &arg)) {
-            /* Legacy semantics: the first touch activates the subgroup, a
-             * touch on an already-active subgroup selects that unit. */
-            dt_grid_select_unit(c, ui, holder);
+            /* Already the active subgroup: the touch only selects the unit
+             * on release, so there is no command-bar rebuild here. */
             return;
         }
     }
@@ -3884,7 +4166,7 @@ static void dt_grid_activate(CPU *c, uint32_t ui, uint32_t selection,
     const uint32_t mode = 0;
     (void)dt_call_thiscall(c, selection, DT_FN_SELECTION_REALIZE, 1, &mode);
     (void)dt_call_thiscall(c, 0u, DT_FN_UI_DIRTY, 0, NULL);
-    dt_trace("grid-activate", holder,
+    dt_trace("grid-switch", holder,
              wc3_rd32g(selection + DT_SELECTION_ACTIVE_GROUP));
 }
 
@@ -3923,29 +4205,54 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
     case WC3_DIRECT_TOUCH_POINTER_DOWN: {
         if (g_grid.active) return 1;
 
+        /* Hit-test first.  Selection resolution is a guest call and is not
+         * needed to decide whether this press belongs to the grid; doing it
+         * first made a transient player lookup swallow valid cell presses. */
         uint32_t ui = 0;
-        uint32_t selection = 0;
-        if (!dt_grid_context(c, &ui, &selection)) return 0;
+        if (!dt_grid_ui(&ui)) {
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+            dt_log("grid-ui-fail n=%.4f,%.4f", ev->x, ev->y);
+#endif
+            return 0;
+        }
         const uint32_t unit =
             dt_grid_button_at(c, ui, ev->x, ev->y, width, height);
-        if (!unit) return 0;
+        if (!unit) {
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+            dt_grid_dump_miss(c, ui, ev->x, ev->y, width, height);
+#endif
+            return 0;
+        }
+
+        const uint32_t target = dt_grid_target_mode(ui);
+        uint32_t selection = 0;
+        if (!target && !dt_grid_context(c, ui, &selection)) {
+            /* The cell is still owned by the grid: the release can select
+             * the unit through the manager without a selection pointer. */
+            dt_trace("grid-no-selection", unit, ui);
+        }
 
         g_grid.active = 1;
         g_grid.pointer = ev->pointer_id;
         g_grid.ui = ui;
         g_grid.selection = selection;
         g_grid.unit = unit;
+        g_grid.down_unit = unit;
+        g_grid.moved = 0;
         g_grid.target = 0;
 #if WC3_DEBUG && WC3_DEBUG_INPUT
         wc3_hle_direct_touch_probe_begin("grid-select", unit, selection);
 #endif
 
-        if (dt_grid_targeting(ui)) {
-            const uint32_t target = wc3_rd32g(ui + DT_UI_TARGET_MODE);
+        if (target) {
             dt_grid_target(c, target, unit);
             g_grid.target = 1;
         } else {
-            dt_grid_activate(c, ui, selection, unit);
+            /* The subgroup under the finger becomes current immediately.
+             * If the finger then crosses into another cell, MOVE switches
+             * again; the cell under the finger is always the highlighted
+             * subgroup. */
+            dt_grid_switch(c, ui, selection, unit);
         }
         dt_trace("grid-down", unit, g_grid.target);
         return 1;
@@ -3956,9 +4263,21 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
 
         const uint32_t unit =
             dt_grid_button_at(c, g_grid.ui, ev->x, ev->y, width, height);
-        if (unit && unit != g_grid.unit) {
+        if (!unit) {
+            /* Leaving the cells makes this a drag, not a tap, even if the
+             * finger returns to the original cell before release. */
+            g_grid.moved = 1;
+            return 1;
+        }
+        if (unit != g_grid.unit) {
+            g_grid.moved = 1;
             g_grid.unit = unit;
-            dt_grid_activate(c, g_grid.ui, g_grid.selection, unit);
+            if (!g_grid.selection) {
+                /* A failed player lookup at DOWN must not permanently
+                 * disable subgroup switching for the rest of the drag. */
+                (void)dt_grid_context(c, g_grid.ui, &g_grid.selection);
+            }
+            dt_grid_switch(c, g_grid.ui, g_grid.selection, unit);
             dt_trace("grid-move", unit, 0);
         }
         return 1;
@@ -3966,6 +4285,25 @@ static int dt_grid_pointer(CPU *c, const Wc3DirectTouchEvent *ev,
     case WC3_DIRECT_TOUCH_POINTER_UP:
     case WC3_DIRECT_TOUCH_POINTER_CANCEL:
         if (!g_grid.active || ev->pointer_id != g_grid.pointer) return 0;
+        if (ev->kind == WC3_DIRECT_TOUCH_POINTER_UP) {
+            /* Re-hit-test the release point only while the gesture can still
+             * become a tap.  A target press or a crossed cell has already
+             * decided the gesture, so a hit test there would be wasted guest
+             * calls.  Android may deliver a UP at a different coordinate
+             * without an intervening MOVE, so a release outside the starting
+             * cell must still be classified as a drag. */
+            const int tap_possible = !g_grid.target && !g_grid.moved;
+            const uint32_t up_unit = tap_possible
+                ? dt_grid_button_at(c, g_grid.ui, ev->x, ev->y,
+                                    width, height)
+                : 0;
+            if (wc3_dt_grid_release_select(g_grid.target, g_grid.moved,
+                                           up_unit == g_grid.down_unit)) {
+                const uint32_t holder = dt_grid_holder(c, g_grid.unit);
+                if (holder) dt_grid_select_unit(c, g_grid.ui, holder);
+                dt_trace("grid-select", g_grid.unit, 0);
+            }
+        }
         dt_trace("grid-up", g_grid.unit, g_grid.target);
         dt_grid_reset();
         return 1;
@@ -5873,6 +6211,14 @@ static int dt_field_hud_contains(float x, float y)
         wc3_dt_point_in_rect(x, y, left, top, right, bottom)) {
         return 1;
     }
+    if (wc3_hle_direct_touch_inventory_rect(&left, &top, &right, &bottom) &&
+        wc3_dt_point_in_rect(x, y, left, top, right, bottom)) {
+        return 1;
+    }
+    if (wc3_hle_direct_touch_grid_rect(&left, &top, &right, &bottom) &&
+        wc3_dt_point_in_rect(x, y, left, top, right, bottom)) {
+        return 1;
+    }
     return 0;
 }
 
@@ -6453,6 +6799,22 @@ static int dt_field_contains(float nx, float ny)
            ny >= DT_INV_FIELD_TOP && ny <= DT_INV_FIELD_BOTTOM;
 }
 
+/* A release over a live HUD panel is never a battlefield point.  The command
+ * card, inventory bar and unit grid all overlap the field rectangle at the
+ * bottom edge; without this exclusion a release on their top row would turn
+ * an item drag into a world drop.
+ *
+ * Use the same gated rectangles as the controls layer and the field
+ * recognizer.  In particular the minimap panel snapshot can hold a whole-HUD
+ * or whole-screen frame while the game builds the HUD; the published
+ * minimap-input rectangle applies wc3_dt_minimap_panel_plausible() and falls
+ * back to the map frame, but a raw dt_rect_read() of g_minimap_panel_snapshot
+ * would claim every release in the field as HUD. */
+static int dt_inventory_hud_contains(float nx, float ny)
+{
+    return dt_field_hud_contains(nx, ny);
+}
+
 /* Replay a native left click from a guest-thread modal path.  Use this only
  * for an already-resolved target/placement confirmation: the modal loop may
  * never call GetCursorPos, so the idle gateway slot cannot publish it.  A
@@ -6641,11 +7003,12 @@ static void dt_native_right_click(float x, float y)
 }
 
 /*
- * Resolve the release.  Same slot is a tap and uses the item; another slot
- * is a swap/move confirmed by a left click on that slot; a field point is a
- * drop confirmed by a left click at the world position.  Anywhere else
- * cancels, so a release over the command card or a HUD panel never turns
- * into a world order.
+ * Resolve the release through the pure release rule.  Same slot is a tap and
+ * uses the item; another slot is a swap/move confirmed by a left click on
+ * that slot; a field point is a drop confirmed by a left click at the world
+ * position.  A HUD release cancels, and a tap that drifted out of its slot
+ * still uses the item.  The destination rect is read once and supplies both
+ * the decision and the native click centre.
  */
 static void dt_inventory_finish(const Wc3DirectTouchEvent *ev,
                                 uint32_t width, uint32_t height)
@@ -6674,34 +7037,53 @@ static void dt_inventory_finish(const Wc3DirectTouchEvent *ev,
     uint32_t dest_button = 0;
     const int dest_slot = dt_inventory_slot_at(bar, ev->x, ev->y, width,
                                                height, 0, &dest_button);
+    float dest_left = 0.0f;
+    float dest_top = 0.0f;
+    float dest_right = 0.0f;
+    float dest_bottom = 0.0f;
+    int dest_rect_ok = 0;
+    if (dest_slot >= 0 && dest_button) {
+        dest_rect_ok = dt_console_rect_read(dest_button, width, height,
+                                            &dest_left, &dest_top,
+                                            &dest_right, &dest_bottom);
+    }
+
+    const int tap_slop_ok = !wc3_dt_past_slop(down_x, down_y, ev->x, ev->y,
+                                              DT_INV_TAP_SLOP);
+    const int inside_field = dt_field_contains(ev->x, ev->y);
+    const int inside_hud = dt_inventory_hud_contains(ev->x, ev->y);
+    const Wc3DtInventoryRelease action =
+        wc3_dt_inventory_release((int)src_slot, dest_slot, dest_rect_ok,
+                                 tap_slop_ok, inside_field, inside_hud);
     dt_inventory_reset();
 
-    if (dest_slot == (int)src_slot) {
+    switch (action) {
+    case WC3_DT_INV_USE:
         dt_native_left_click(down_x, down_y);
         dt_trace("inv-tap", src_slot, 0);
         return;
-    }
-    if (dest_slot >= 0 && dest_button) {
-        float left = 0.0f;
-        float top = 0.0f;
-        float right = 0.0f;
-        float bottom = 0.0f;
-        if (dt_console_rect_read(dest_button, width, height, &left, &top,
-                                 &right, &bottom)) {
-            dt_native_right_click(down_x, down_y);
-            dt_native_left_click((left + right) * 0.5f,
-                                    (top + bottom) * 0.5f);
-            dt_trace("inv-slot", src_slot, (uint32_t)dest_slot);
-            return;
-        }
-    }
-    if (dt_field_contains(ev->x, ev->y)) {
+    case WC3_DT_INV_MOVE_SLOT:
+        dt_native_right_click(down_x, down_y);
+        dt_native_left_click((dest_left + dest_right) * 0.5f,
+                             (dest_top + dest_bottom) * 0.5f);
+        dt_trace("inv-slot", src_slot, (uint32_t)dest_slot);
+        return;
+    case WC3_DT_INV_DROP_FIELD:
         dt_native_right_click(down_x, down_y);
         dt_native_left_click(ev->x, ev->y);
         dt_trace("inv-drop", src_slot, 0);
         return;
+    case WC3_DT_INV_CANCEL:
+    default:
+        if (dest_slot >= 0 && !dest_rect_ok) {
+            dt_trace("inv-dest-rect", src_slot, (uint32_t)dest_slot);
+        } else if (inside_hud) {
+            dt_trace("inv-hud", src_slot, 0);
+        } else {
+            dt_trace("inv-cancel", src_slot, 0);
+        }
+        return;
     }
-    dt_trace("inv-cancel", src_slot, 0);
 }
 
 static int dt_inventory_pointer(const Wc3DirectTouchEvent *ev,
@@ -7258,14 +7640,11 @@ static void dt_command_finish(CPU *c, const Wc3DirectTouchEvent *ev,
             dt_context(&portrait_ctx)) {
             const int portrait_hit =
                 ev->x >= pl && ev->x <= pr && ev->y >= pt && ev->y <= pb;
-            const int target_mode_live =
-                dt_grid_targeting(portrait_ctx.ui);
-            if (wc3_dt_command_portrait_target(target_mode_live,
-                                               portrait_hit, moved)) {
+            const uint32_t target = dt_grid_target_mode(portrait_ctx.ui);
+            if (wc3_dt_command_portrait_target(target != 0, portrait_hit,
+                                               moved)) {
                 const uint32_t unit = dt_portrait_unit(c, &portrait_ctx);
                 if (unit) {
-                    const uint32_t target =
-                        wc3_rd32g(portrait_ctx.ui + DT_UI_TARGET_MODE);
                     dt_grid_target(c, target, unit);
                     dt_command_target_reset();
                     dt_command_reset();
@@ -7280,20 +7659,19 @@ static void dt_command_finish(CPU *c, const Wc3DirectTouchEvent *ev,
     /* A targeted command dragged onto a selected-unit grid button targets
      * that unit.  The grid is below the field rectangle, so the generic
      * field branch would otherwise cancel the command on release.  This uses
-     * the same native target-mode event a grid press sends while targeting. */
+     * the same native target-mode event a grid press sends while targeting.
+     * Only the UI half of the context is needed: resolving the selection here
+     * would add a guest call to every command drag release. */
     {
         uint32_t grid_ui = 0;
-        uint32_t grid_selection = 0;
-        if (dt_grid_context(c, &grid_ui, &grid_selection)) {
+        if (dt_grid_ui(&grid_ui)) {
             const uint32_t grid_unit = dt_grid_button_at(c, grid_ui, ev->x,
                                                           ev->y, width, height);
             /* The live target mode is authoritative: the command data word
              * cannot reliably identify a targeted button. */
-            const int target_mode_live = dt_grid_targeting(grid_ui);
-            if (wc3_dt_command_grid_target(target_mode_live,
-                                           grid_unit != 0, moved)) {
-                const uint32_t target =
-                    wc3_rd32g(grid_ui + DT_UI_TARGET_MODE);
+            const uint32_t target = dt_grid_target_mode(grid_ui);
+            if (wc3_dt_command_grid_target(target != 0, grid_unit != 0,
+                                           moved)) {
                 dt_grid_target(c, target, grid_unit);
                 dt_command_target_reset();
                 dt_command_reset();
@@ -7709,6 +8087,8 @@ void wc3_hle_direct_touch_start(void)
     dt_minimap_panel_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_beacon_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
+    dt_grid_publish(0.0f, 0.0f, 0.0f, 0.0f);
+    dt_inventory_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_publish_route(WC3_DIRECT_TOUCH_ROUTE_LEGACY);
     g_portrait_follow_active = 0;
     g_last_ui = 0;
@@ -7756,6 +8136,8 @@ void wc3_hle_direct_touch_reset(void)
     dt_minimap_panel_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_beacon_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_command_publish(0.0f, 0.0f, 0.0f, 0.0f);
+    dt_grid_publish(0.0f, 0.0f, 0.0f, 0.0f);
+    dt_inventory_publish(0.0f, 0.0f, 0.0f, 0.0f);
     dt_publish_route(WC3_DIRECT_TOUCH_ROUTE_LEGACY);
     g_portrait_follow_active = 0;
     g_pause_menu_active = 0;
@@ -7925,6 +8307,8 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
     dt_minimap_panel_snapshot(cur_ui, width, height);
     dt_beacon_snapshot(width, height);
     dt_command_snapshot(cur_ui, width, height);
+    dt_grid_snapshot(cur_ui, width, height);
+    dt_inventory_snapshot(cur_ui, width, height);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     dt_trace_snapshots("service");
 #endif
@@ -8274,6 +8658,8 @@ void wc3_hle_direct_touch_service(CPU *c, uint32_t width, uint32_t height)
     dt_minimap_panel_snapshot(final_ui, width, height);
     dt_beacon_snapshot(width, height);
     dt_command_snapshot(final_ui, width, height);
+    dt_grid_snapshot(final_ui, width, height);
+    dt_inventory_snapshot(final_ui, width, height);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
     dt_trace_snapshots("final");
 #endif

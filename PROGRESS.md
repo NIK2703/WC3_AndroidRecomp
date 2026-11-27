@@ -1410,3 +1410,144 @@ Storm `L_3502A21B` зарезервировал `0x46590000`, но следую�
    attack-move (`key vk=41`).
 6. Проверить, что crash `SFile.cpp:4654` не воспроизводится; отдельно
    проверить VA-фикс.
+
+## 2026-11-27: inventory gate и release rule (source-only)
+
+### Причина
+
+Верхний ряд слотов инвентаря пересекает field-rect: центры кнопок около
+`y 0.8355`, поле заканчивается на `0.85`. Без отдельного gate'а нажатие
+на слот уходило в FIELD и превращалось в world-click. Кроме того,
+отпускание предмета над command card, inventory bar или unit grid
+геометрически попадало в field-rect и могло стать world-drop; короткий
+дрейф пальца за край слота также ронял предмет.
+
+### Изменения
+
+- HLE публикует объединение rect'ов живых кнопок слотов
+  (`dt_inventory_snapshot()` → `wc3_hle_direct_touch_inventory_rect()`)
+  в idle/service/final путях; `start/reset` очищают snapshot. Пустые
+  слоты входят в объединение, поэтому нажатие на пустой слот остаётся
+  HUD-нажатием.
+- `dt_inventory_finish()` переведён на чистый helper
+  `wc3_dt_inventory_release()` с результатами `CANCEL`, `USE`,
+  `MOVE_SLOT`, `DROP_FIELD`. Порядок: stale source → destination slot →
+  tap-slop `DT_INV_TAP_SLOP = 0.02` → field вне HUD → отмена. Целевой
+  слот имеет приоритет над tap-slop; destination rect читается один раз
+  и используется для клика.
+- `dt_inventory_hud_contains()` исключает command card, inventory bar,
+  unit grid, minimap, minimap panel, portrait и beacon. HUD больше не
+  становится world-drop.
+- Controls: добавлен inventory gate; порядок маршрутов —
+  beacon → portrait → minimap → command → inventory → grid → field →
+  NATIVE. Gate и его user очищаются при удалении sink'а.
+- `host_shell.c` публикует inventory gate и очищает его вместе с
+  остальными gate'ами.
+- T0: матрица `wc3_dt_inventory_release()` в `tests/direct_touch_test.c`;
+  NATIVE-маршрут инвентаря в `tests/controls_mode_test.c` на
+  `(530, 830)`; source-audit `inventory_gesture` в
+  `tools/run_tests.py`.
+
+### Проверка
+
+- T0: `direct_touch`, `controls_mode`, `inventory_gesture`,
+  `native_press_barrier`, `gesture_lifetime` — проходят.
+- NDK `clang -fsyntax-only -Wall -Wextra -Werror` для
+  `hle_direct_touch.c`, `controls.c`, `host_shell.c` — debug и release
+  проходят.
+- `git diff --check` — чисто (только предупреждения CRLF).
+
+### Не сделано
+
+- Пересборка/установка не запускались: нет явной команды.
+- T2 с реальным предметом не выполнен. Нужно проверить: tap по
+  занятому слоту → использование; drag на другой слот → move/swap;
+  drag в поле → drop; drag на HUD → отмена; tap с дрейфом →
+  использование.
+- Открытые вопросы 15–17: rect'ы пустых слотов, `MK_RBUTTON` в wParam
+  следующего left-click, узкий зазор между inventory bar и command
+  card (геометрически в field-rect, может дать drop).
+
+## 2026-11-27: debug build/install (grid + inventory)
+
+- Команда: `bash tools/android/build_apk.sh --variant debug --install
+  --serial emulator-5554`.
+- Native: exit 0; пересобраны `controls.c`, `hle_direct_touch.c`,
+  `host_shell.c`; SO `160532992` байт.
+- Gradle: `BUILD SUCCESSFUL in 1m 7s`; `Performing Streamed Install` →
+  `Success`.
+- Установлен `wc3.recomp.debug`: versionCode `2`, versionName
+  `0.1.1-debug`, `lastUpdateTime=2026-11-27 10:56:53`.
+- APK `build/android_app/wc3-debug.apk`, SHA-256
+  `469999e5dc367efa0f0f45ef512d857dde1a0813e85f7e1f92125d0690981c1b`;
+  pulled installed `base.apk` совпадает по хэшу.
+- В упакованном SO присутствуют строки `grid-down`, `grid-move`,
+  `grid-select`, `grid-select-unit`, `grid-switch`, `grid-target`,
+  `grid-up`.
+- T2 не выполнялся: нужен ручной прогон tap/drag по grid и inventory на
+  устройстве.
+
+## 2026-11-27: grid hit-test — диагноз и source-only правки
+
+### Что показали трассы
+
+- `touch_trace.txt`: касания в области сетки идут `gate => NATIVE (grid)`
+  и emit'ят `POINTER_DOWN`/`UP`.
+- `dt_trace.txt`: те же события имеют `event_route=NATIVE`,
+  `service_route=FIELD`; строк `grid-down`/`grid-move`/`grid-select` нет.
+  Значит gate работает, а свой жест grid не забирает.
+- `rects[idle] grid=1(...)` публикуется, то есть `dt_grid_layout()`,
+  видимость `+0x90` и rect'ы кнопок читаются. Разбор нативного
+  `0x6F3DA470`/`0x6F3DA4E0`/`0x6F3DA7FA` подтверждает, что
+  `button+0x124` — refcounted указатель на юнит ячейки, а
+  `[button+0x90]` — её видимость; `dt_handle_unit()` совместим с этим
+  полем. То есть отказ идёт внутри `dt_grid_context()` или
+  `dt_grid_button_at()`, а не в gate'е и не в геометрии.
+
+### Source-only изменения
+
+- `dt_grid_context()` разделён: `dt_grid_ui()` делает только дешёвые
+  проверки UI/gate/select-mode без guest-вызова; разрешение selection
+  через `DT_FN_PLAYER` осталось в `dt_grid_context(c, ui, ...)` и теперь
+  вызывается только после успешного hit-test'а. Это убирает guest-call
+  из каждого DOWN/MOVE/UP и не даёт transient-отказу player lookup
+  проглотить нажатие на валидную ячейку.
+- `dt_grid_pointer()` DOWN сначала hit-test'ит ячейку, затем (для
+  не-target жеста) разрешает selection. При отказе selection жест всё
+  равно остаётся за grid: отпускание может выбрать юнит через manager;
+  MOVE повторяет разрешение один раз при первом переходе в другую
+  ячейку, чтобы временный отказ не отключал switch на весь drag.
+- Command→grid target использует `dt_grid_ui()` вместо полного контекста.
+- Добавлен debug-only (`WC3_DEBUG && WC3_DEBUG_INPUT`) дамп
+  `dt_grid_dump_miss()`: при отказе hit-test'а печатает rows/cols, rect,
+  `ref`, флаги `+0x5C` и результат `dt_handle_unit()` по каждой ячейке.
+  Это позволит по следующему debug-прогону точно сказать, какая проверка
+  отсекает касание.
+
+### Проверка
+
+- T0: `direct_touch`, `controls_mode`, `native_press_barrier`,
+  `grid_pattern`, `inventory_gesture` — проходят.
+- `gcc -fsyntax-only` для `hle_direct_touch.c`: debug (`WC3_DEBUG=1`,
+  `WC3_DEBUG_INPUT=1`) и release (`0/0`) — чисто.
+- `git diff --check` — чисто.
+
+### Сборка/установка (по явной команде)
+
+- Команда: `bash tools/android/build_apk.sh --variant debug --install
+  --serial emulator-5554`.
+- Native/Gradle exit 0; `BUILD SUCCESSFUL in 1m 10s`.
+- distcc не отключался: `workers=pc local=7 remote=4 jobs=11 variant=debug`;
+  ideapad-worker был недоступен и пропущен скриптом.
+- Лог: `/data/user/0/com.termux/files/usr/tmp/opencode/build_debug_grid2.log`.
+- Установлен `wc3.recomp.debug`: versionCode `2`, versionName
+  `0.1.1-debug`, `lastUpdateTime=2026-11-27 11:55:40`.
+- APK `build/android_app/wc3-debug.apk`, SHA-256
+  `5facb1753c100a8e1cc69b2e49d6878f0f60aea3206d19b746b17c0777c94aca`;
+  pulled installed `base.apk` совпадает по хэшу.
+- `lib/arm64-v8a/libwc3gameactivity.so` — `160538384` байт; в нём есть
+  `grid-no-selection`, `grid-ui-fail`, `grid-miss-ui`, `grid-miss-cell`,
+  `grid-miss-row`, `grid-down`, `grid-move`, `grid-select`, `grid-switch`.
+- T2 не выполнялся: нужен ручной прогон tap/drag по grid. После него
+  читать `grid-miss-ui`/`grid-miss-cell` в `dt_trace.txt` и устранить
+  конкретную проверку, отсекающую ячейку.

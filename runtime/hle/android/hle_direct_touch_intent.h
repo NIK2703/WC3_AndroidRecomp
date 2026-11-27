@@ -418,6 +418,42 @@ static inline int wc3_dt_point_in_rect(float x, float y, float left,
 }
 
 /*
+ * Inventory item release.  The source slot was occupied at DOWN; the caller
+ * resolves the live destination slot and whether its button rect is
+ * readable, plus the field/HUD state of the release point.
+ *
+ * A destination slot wins over the tap slop: a deliberate short drag to an
+ * adjacent slot must move the item, not degrade into a use.  The tap slop
+ * then keeps a finger that drifted out of the source slot from turning a tap
+ * into a world drop.  A HUD panel (command card, inventory bar, minimap,
+ * portrait, beacon) is never a battlefield drop.  `source_slot < 0` is the
+ * stale/unknown context and always cancels.
+ */
+typedef enum {
+    WC3_DT_INV_CANCEL = 0,
+    WC3_DT_INV_USE,
+    WC3_DT_INV_MOVE_SLOT,
+    WC3_DT_INV_DROP_FIELD
+} Wc3DtInventoryRelease;
+
+static inline Wc3DtInventoryRelease wc3_dt_inventory_release(
+    int source_slot, int dest_slot, int dest_rect_ok, int tap_slop_ok,
+    int inside_field, int inside_hud)
+{
+    if (source_slot < 0) return WC3_DT_INV_CANCEL;
+    if (dest_slot == source_slot) return WC3_DT_INV_USE;
+    if (dest_slot >= 0) {
+        /* A destination slot without a readable button rect cannot be
+         * confirmed by a native click; do not fall through to a world drop
+         * at the same point. */
+        return dest_rect_ok ? WC3_DT_INV_MOVE_SLOT : WC3_DT_INV_CANCEL;
+    }
+    if (tap_slop_ok) return WC3_DT_INV_USE;
+    if (inside_field && !inside_hud) return WC3_DT_INV_DROP_FIELD;
+    return WC3_DT_INV_CANCEL;
+}
+
+/*
  * Smart-order gate for a long tap without drag.  The caller has already
  * resolved the live selection, the field rectangle and the published HUD
  * rectangles; the target itself is resolved on release, so no pick is part of
@@ -566,6 +602,19 @@ static inline int wc3_dt_command_grid_target(int targeted, int grid_hit,
                                              int moved)
 {
     return targeted && grid_hit && moved;
+}
+
+/*
+ * A selected-unit grid press becomes an individual unit selection only when
+ * it was a tap: no target was applied, the finger never crossed into another
+ * cell (or left the cells), and it ended on the cell where it started.
+ * Crossing cells is the subgroup switch gesture and must not collapse the
+ * squad to one unit on release.
+ */
+static inline int wc3_dt_grid_release_select(int target, int moved,
+                                             int same_cell)
+{
+    return !target && !moved && same_cell;
 }
 
 /*

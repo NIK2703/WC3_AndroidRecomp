@@ -161,6 +161,23 @@ int wc3_hle_direct_touch_beacon_rect(float *left, float *top,
 int wc3_hle_direct_touch_command_rect(float *left, float *top,
                                       float *right, float *bottom);
 
+/* Lock-free snapshot of the visible selected-unit grid in
+ * surface-normalised coordinates.  The grid's top row starts above the field
+ * bottom (the 6x2 panel reaches roughly y 0.82 while the field ends at 0.85),
+ * so the controls layer must claim the whole grid for the raw NATIVE route
+ * before the field recognizer turns a unit tap into a world selection. */
+int wc3_hle_direct_touch_grid_rect(float *left, float *top,
+                                   float *right, float *bottom);
+
+/* Lock-free snapshot of the live inventory slot-button union in
+ * surface-normalised coordinates.  The inventory bar sits left of the
+ * command card and its top row overlaps the field rectangle (the slot centres
+ * are around y 0.8355 while the field ends at 0.85), so the controls layer
+ * must claim the whole union for the raw NATIVE route before the field
+ * recognizer turns an item press into a world click. */
+int wc3_hle_direct_touch_inventory_rect(float *left, float *top,
+                                        float *right, float *bottom);
+
 #ifdef __cplusplus
 }
 #endif

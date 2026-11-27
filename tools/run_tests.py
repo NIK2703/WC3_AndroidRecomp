@@ -3959,6 +3959,24 @@ def test_native_press_barrier() -> int:
         gate = block.find("wc3_dt_selection_can_order(")
         if owner < 0 or gate < 0 or owner > gate:
             errors.append("selection controllability ignores neutral owner")
+    # The selected-unit grid's buttons use the +0x90 visible flag, not the
+    # CFrame +0x54 flag that dt_console_rect_snapshot() checks.  Reading the
+    # rect through the snapshot helper silently rejected every cell, so keep
+    # the direct rect read and the grid gate/tap rules wired.
+    grid_fn = dt.split("static uint32_t dt_grid_button_at", 1)
+    if len(grid_fn) != 2:
+        errors.append("selected-unit grid hit test missing")
+    else:
+        block = grid_fn[1].split("\n}\n", 1)[0]
+        if "DT_GRID_BUTTON_VISIBLE" not in block:
+            errors.append("grid hit test lost the +0x90 visibility check")
+        if "dt_console_rect_read(button" not in block:
+            errors.append("grid hit test uses the +0x54 rect snapshot gate")
+    for token in ("dt_grid_snapshot(", "wc3_hle_direct_touch_grid_rect",
+                  "wc3_dt_grid_release_select("):
+        if token not in dt:
+            errors.append(f"selected-unit grid tap/gate rule missing: {token}")
+
     if errors:
         for line in errors:
             print(f"native-press-barrier: {line}", file=sys.stderr)
@@ -3967,8 +3985,92 @@ def test_native_press_barrier() -> int:
     return 0
 
 
+def test_inventory_gesture() -> int:
+    """T0: inventory gate and release stay on the exact native click path."""
+    errors: list[str] = []
+    hle = (ROOT / "runtime/hle/android/hle_direct_touch.c").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    hle_h = (ROOT / "runtime/hle/android/hle_direct_touch.h").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    controls = (ROOT / "runtime/platform/android/controls/controls.c").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    host = (ROOT / "apps/android_gameactivity/src/main/cpp/host_shell.c").read_text(
+        encoding="utf-8", errors="replace").replace("\r\n", "\n")
+
+    if hle.count("dt_inventory_snapshot(") < 4:
+        errors.append("inventory snapshot is not published from idle/service/final")
+    if "int wc3_hle_direct_touch_inventory_rect(" not in hle:
+        errors.append("inventory rect read function missing")
+    if "int wc3_hle_direct_touch_inventory_rect(" not in hle_h:
+        errors.append("inventory rect declaration missing")
+    if "dt_inventory_publish(0.0f, 0.0f, 0.0f, 0.0f);" not in hle:
+        errors.append("inventory snapshot is not cleared")
+
+    finish = hle.split("static void dt_inventory_finish(", 1)
+    if len(finish) != 2:
+        errors.append("inventory finish missing")
+    else:
+        body = finish[1].split("\n}\n", 1)[0]
+        if "wc3_dt_inventory_release(" not in body:
+            errors.append("inventory finish bypasses the pure release rule")
+        if "DT_INV_TAP_SLOP" not in body:
+            errors.append("inventory finish has no tap slop")
+        if "dt_inventory_hud_contains(" not in body:
+            errors.append("inventory finish has no HUD exclusion")
+
+    hud = hle.split("static int dt_inventory_hud_contains(", 1)
+    if len(hud) != 2:
+        errors.append("inventory HUD exclusion missing")
+    else:
+        block = hud[1].split("\n}\n", 1)[0]
+        if "dt_field_hud_contains(nx, ny)" not in block:
+            errors.append("inventory HUD exclusion bypasses the gated field HUD rects")
+        for name in ("g_command_snapshot", "g_inventory_snapshot",
+                     "g_grid_snapshot", "g_minimap_snapshot",
+                     "g_minimap_panel_snapshot", "g_portrait_snapshot",
+                     "g_beacon_snapshot"):
+            if name in block:
+                errors.append(f"inventory HUD exclusion reads raw snapshot {name}")
+
+    pointer = hle.split("static int dt_inventory_pointer(", 1)
+    if len(pointer) != 2:
+        errors.append("inventory pointer handler missing")
+    else:
+        block = pointer[1].split("\n}\n", 1)[0]
+        if "WC3_DIRECT_TOUCH_ROUTE_NATIVE" not in block:
+            errors.append("inventory pointer does not require the NATIVE route")
+        if "height, 1, NULL)" not in block:
+            errors.append("inventory press does not require an occupied slot")
+
+    route = controls.split("static Wc3DirectTouchRoute direct_touch_route_for(", 1)
+    if len(route) != 2:
+        errors.append("controls route resolver missing")
+    else:
+        block = route[1]
+        gate = block.find("direct_touch_inventory_contains(x, y)")
+        field = block.find(
+            "if (route == WC3_DIRECT_TOUCH_ROUTE_FIELD &&\n"
+            "        direct_touch_field_contains(x, y))")
+        if gate < 0:
+            errors.append("controls route misses the inventory gate")
+        elif field < 0 or gate > field:
+            errors.append("inventory gate is not checked before the field")
+    if "void controls_set_direct_touch_inventory_gate(" not in controls:
+        errors.append("inventory gate setter missing")
+    if "controls_set_direct_touch_inventory_gate(" not in host:
+        errors.append("host does not wire the inventory gate")
+
+    if errors:
+        for line in errors:
+            print(f"inventory-gesture: {line}", file=sys.stderr)
+        return 1
+    print("inventory-gesture: NATIVE gate, occupied source, pure release rule")
+    return 0
+
+
 TESTS = {
     "native_press_barrier": test_native_press_barrier,
+    "inventory_gesture": test_inventory_gesture,
     "cpu_helpers": test_cpu_helpers,
     "cpu_selftest": test_cpu_selftest,
     "grid_pattern": test_grid_pattern,
