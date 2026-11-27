@@ -566,21 +566,25 @@ int main(int argc, char **argv)
     assert(!direct_has_signal('1', 1));
 
     /* Long press on the same button fires the authored KEY_1 + MOD_CTRL
-     * chord as a single store action (route 1), with no modifier key signal. */
+     * chord as a single store action (route 1) when the finger lifts.  The
+     * action is deferred so a swipe that starts after the deadline can win;
+     * the adapter still sees one complete chord, with no modifier key
+     * signal. */
     actions_clear();
     direct_clear();
     assert(controls_touch(WC3_TOUCH_DOWN, 0, one->x, one->y, 5500) == 0);
     controls_tick(5700);
     assert(!has_key(10, 1));
     assert(!has_key(37, 1));
+    assert(direct_index(WC3_DIRECT_TOUCH_GROUP_SIGNAL) < 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, one->x, one->y, 5750) == 0);
+    controls_tick(5800);
     int store_group = direct_index(WC3_DIRECT_TOUCH_GROUP_SIGNAL);
     assert(store_group >= 0);
     assert(g_direct_pointer_ids[store_group] == 1);
     assert(g_direct_routes[store_group] == 1);
     assert(!direct_has_signal(0x31, 1));
     assert(!direct_has_signal(0xA2, 1));
-    assert(controls_touch(WC3_TOUCH_UP, 0, one->x, one->y, 5750) == 0);
-    controls_tick(5800);
 
     actions_clear();
     direct_clear();
@@ -996,6 +1000,30 @@ int main(int argc, char **argv)
     controls_tick(8330);
     assert(g_direct_count == minimap_cancel_count);
     assert(!direct_has(WC3_DIRECT_TOUCH_POINTER_UP));
+
+    /* A slow swipe that crosses the long-press deadline before it crosses
+     * the gesture threshold must still be an add-to-group gesture, not a
+     * store.  The finger is stationary for 200 ms, then moves past the
+     * gesture threshold. */
+    actions_clear();
+    direct_clear();
+    assert(controls_touch(WC3_TOUCH_DOWN, 0, one->x, one->y, 8400) == 0);
+    controls_tick(8600);
+    assert(direct_index(WC3_DIRECT_TOUCH_GROUP_SIGNAL) < 0);
+    assert(controls_touch(WC3_TOUCH_MOVE, 0, one->x - 80.0f, one->y, 8610) == 0);
+    assert(controls_touch(WC3_TOUCH_UP, 0, one->x - 80.0f, one->y, 8620) == 0);
+    controls_tick(8630);
+    int slow_group = direct_index(WC3_DIRECT_TOUCH_GROUP_SIGNAL);
+    assert(slow_group >= 0);
+    assert(g_direct_pointer_ids[slow_group] == 1);
+    assert(g_direct_routes[slow_group] == 2);
+    int slow_group_count = 0;
+    for (int i = 0; i < g_direct_count; i++) {
+        if (g_direct_kinds[i] != WC3_DIRECT_TOUCH_GROUP_SIGNAL) continue;
+        slow_group_count++;
+        assert(g_direct_routes[i] == 2);
+    }
+    assert(slow_group_count == 1);
 
     controls_set_direct_touch_enabled(false);
     controls_set_direct_touch_sink(NULL, NULL);

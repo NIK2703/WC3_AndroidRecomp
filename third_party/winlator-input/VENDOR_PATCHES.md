@@ -2,7 +2,7 @@
 
 Base commit: `208371f89e2e2d218263308f26ee02bbf149a70e`
 
-The detached host tests found boundary defects.  Four required vendored
+The detached host tests found boundary defects.  Six required vendored
 patches; the duplicate-action defect is handled at the adapter sink, and the
 HOVER digit-to-digit expectation was corrected rather than inventing a binding.
 Keep this list in sync with the host gesture tests (`test_gestures.c` in the
@@ -122,3 +122,38 @@ Host test: `tests/gesture_button_swipe_test.c` now also presses a plain HOVER
 button (no gesture or long-press binding), leaves it on an outside MOVE, and
 ticks past `longPressTimeout`.  It verifies that no global long-press haptic or
 binding press is emitted and that the following UP leaks no tap.
+
+## 6. `core/long_press.c`, `core/element_helpers.h`, `element/button.c`, `element/shared.c`: let a swipe win a deferred long press
+
+A button may carry both a long-press package and a gesture package.  The
+product group buttons 1..8 are exactly this: long press is
+`KEY_N + MOD_CTRL` (store the selection into group N), and swipe is
+`KEY_N + MOD_SHIFT` (add the selection).  `process_button_long_press()` fired
+the long-press bindings at `longPressDelay` (150 ms) and set
+`TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED`.  `handle_gesture_swipe()` refuses to
+trigger once that bit is set, so a finger that rested for 150 ms before moving
+emitted the store action and the swipe was ignored.  The gesture threshold is
+20 px, so a normal slow swipe hit the race.
+
+For a non-toggle, non-auto-repeat element that has a gesture package,
+`process_button_long_press()` now records `TOUCH_BIT_LONG_PRESS_DEFERRED` and
+keeps the long-tap visual and haptic, but does not press the long-press
+bindings and does not set `TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED`.  A later
+threshold crossing in `handle_gesture_swipe()` clears the deferred flag and
+triggers the gesture normally.  If the finger lifts without crossing the
+threshold, `button_up_handle_deferred()` presses the long-press bindings and
+releases them in the same action batch, so the adapter still sees one complete
+chord.  The deferred bit is cleared by the gesture flags, non-toggle release,
+UP cleanup, new-touch reset, and multi-touch tracking reset, so a cancel never
+leaks a store.
+
+Toggle and auto-repeat long presses keep the immediate press semantics; the
+deferral is scoped to the package combination that needs the swipe race
+resolved.
+
+Host test: `tests/controls_mode_test.c`, T0 gate `controls_mode`.  The
+long-press case holds group button 1 for 200 ms and releases; it expects no
+group signal or key press at the deadline and one route-1 store signal on UP.
+The slow-swipe case holds for 200 ms, moves 80 px, and releases; it expects
+exactly one route-2 add signal and no route-1 store.  Before the patch the
+slow swipe produced route 1.

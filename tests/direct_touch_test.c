@@ -708,15 +708,100 @@ static void test_coordinate_mapping(void)
                 359.4f);
 }
 
+static void test_unit_type_tap_order(void)
+{
+    /* Lock the big-endian rawcode dwords, not just the helper's internal
+     * consistency: these are the dwords native GetUnitTypeId returns.
+     * Device log 2026-11-27: egol arrived as 0x65676F6C. */
+    assert(wc3_dt_unit_type_tap_order(0x65676F6Cu));
+    assert(WC3_DT_UNIT_TYPE_ENTANGLED_GOLD_MINE == 0x65676F6Cu);
+    assert(WC3_DT_UNIT_TYPE_HAUNTED_GOLD_MINE == 0x75676F6Cu);
+    assert(WC3_DT_UNIT_TYPE_HUMAN_TRANSPORT == 0x68626F74u);
+    assert(WC3_DT_UNIT_TYPE_ORC_TRANSPORT == 0x6F626F74u);
+    assert(WC3_DT_UNIT_TYPE_UNDEAD_TRANSPORT == 0x75626F74u);
+    assert(WC3_DT_UNIT_TYPE_NEUTRAL_TRANSPORT == 0x6E626F74u);
+    assert(WC3_DT_UNIT_TYPE_NIGHT_ELF_TRANSPORT == 0x65747273u);
+    assert(WC3_DT_UNIT_TYPE_UNDEAD_AIR_BARGE == 0x75617262u);
+    assert(WC3_DT_UNIT_TYPE_GOBLIN_ZEPPELIN == 0x6E7A6570u);
+
+    /* Base-game gold mines and cargo transports are the only controllable
+     * targets that take the smart-order leg. */
+    assert(wc3_dt_unit_type_tap_order(
+        WC3_DT_UNIT_TYPE_ENTANGLED_GOLD_MINE));
+    assert(wc3_dt_unit_type_tap_order(
+        WC3_DT_UNIT_TYPE_HAUNTED_GOLD_MINE));
+    assert(wc3_dt_unit_type_tap_order(WC3_DT_UNIT_TYPE_HUMAN_TRANSPORT));
+    assert(wc3_dt_unit_type_tap_order(WC3_DT_UNIT_TYPE_ORC_TRANSPORT));
+    assert(wc3_dt_unit_type_tap_order(WC3_DT_UNIT_TYPE_UNDEAD_TRANSPORT));
+    assert(wc3_dt_unit_type_tap_order(WC3_DT_UNIT_TYPE_NEUTRAL_TRANSPORT));
+    assert(wc3_dt_unit_type_tap_order(
+        WC3_DT_UNIT_TYPE_NIGHT_ELF_TRANSPORT));
+    assert(wc3_dt_unit_type_tap_order(WC3_DT_UNIT_TYPE_UNDEAD_AIR_BARGE));
+    assert(wc3_dt_unit_type_tap_order(WC3_DT_UNIT_TYPE_GOBLIN_ZEPPELIN));
+
+    /* The neutral gold mine is not controllable; its normal leg already
+     * orders.  Ordinary units and a missing type stay on select. */
+    assert(!wc3_dt_unit_type_tap_order(WC3_DT_RAWCODE('n', 'g', 'o', 'l')));
+    assert(!wc3_dt_unit_type_tap_order(WC3_DT_RAWCODE('h', 'f', 'o', 'o')));
+    assert(!wc3_dt_unit_type_tap_order(0));
+}
+
 static void test_tap_unit_intent(void)
 {
     /* A controllable target is selected even while another controlled
      * selection is live.  An uncontrollable target is a smart order only
      * when the live selection can receive one. */
-    assert(wc3_dt_tap_unit_intent(0, 0) == WC3_DT_INTENT_SELECT_UNIT);
-    assert(wc3_dt_tap_unit_intent(0, 1) == WC3_DT_INTENT_SELECT_UNIT);
-    assert(wc3_dt_tap_unit_intent(1, 0) == WC3_DT_INTENT_ORDER_UNIT);
-    assert(wc3_dt_tap_unit_intent(1, 1) == WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_tap_unit_intent(0, 0, 0) == WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_tap_unit_intent(0, 1, 0) == WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_tap_unit_intent(1, 0, 0) == WC3_DT_INTENT_ORDER_UNIT);
+    assert(wc3_dt_tap_unit_intent(1, 1, 0) == WC3_DT_INTENT_SELECT_UNIT);
+
+    /* The exception classes order a controlled selection, but a tap with no
+     * order source still selects the target. */
+    assert(wc3_dt_tap_unit_intent(1, 1, 1) == WC3_DT_INTENT_ORDER_UNIT);
+    assert(wc3_dt_tap_unit_intent(0, 1, 1) == WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_tap_unit_intent(1, 0, 1) == WC3_DT_INTENT_ORDER_UNIT);
+    assert(wc3_dt_tap_unit_intent(0, 0, 1) == WC3_DT_INTENT_SELECT_UNIT);
+}
+
+static void test_long_tap_unit_intent(void)
+{
+    /* A long tap is a selection gesture: any controllable target is
+     * selected, including an own entangled gold mine whose tap is the
+     * exception smart order, and an ordinary own unit/building.  This is
+     * the gesture that must select the mine while a controlled worker is
+     * selected. */
+    assert(wc3_dt_long_tap_unit_intent(1, 1) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+
+    /* An uncontrollable unit/decoration keeps the long-tap smart order. */
+    assert(wc3_dt_long_tap_unit_intent(1, 0) ==
+           WC3_DT_INTENT_ORDER_UNIT);
+
+    /* Without a controlled selection the executor never defers; the native
+     * press selects.  The helper stays consistent for that case. */
+    assert(wc3_dt_long_tap_unit_intent(0, 1) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_long_tap_unit_intent(0, 0) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+}
+
+static void test_selection_can_order(void)
+{
+    /* Only playable slots 0..11 can be an order source.  Slots 12..15 are
+     * neutral: selectable, but not controllable by the local player.  The
+     * native predicate alone accepted a selected neutral Goblin Ammo Dump
+     * (ngad, owner 15), so the owner gate is required. */
+    assert(wc3_dt_selection_can_order(0u, 1));
+    assert(wc3_dt_selection_can_order(11u, 1));
+    assert(!wc3_dt_selection_can_order(12u, 1));
+    assert(!wc3_dt_selection_can_order(15u, 1));
+    assert(!wc3_dt_selection_can_order(0u, 0));
+
+    /* A neutral target remains selectable; only the selection gate changes.
+     * This locks the behavior that tapping egol with ngad selected selects
+     * egol instead of issuing an order. */
+    assert(wc3_dt_tap_unit_intent(0, 1, 1) == WC3_DT_INTENT_SELECT_UNIT);
 }
 
 static void test_tap_intent_resolution(void)
@@ -751,35 +836,47 @@ static void test_field_tap_intent(void)
 {
     /* Unit leg: target controllability decides before selection
      * controllability.  T=1 selects with or without a controlled selection;
-     * T=0 orders only when the live selection can receive one. */
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 1) ==
+     * T=0 orders only when the live selection can receive one.  The final
+     * argument marks the gold-mine/transport exception classes. */
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 1, 0) ==
            WC3_DT_INTENT_SELECT_UNIT);
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 1) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 1, 0) ==
            WC3_DT_INTENT_SELECT_UNIT);
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 0) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 0, 0) ==
            WC3_DT_INTENT_ORDER_UNIT);
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 0) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 0, 0) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+
+    /* A controllable exception target orders only while the live selection
+     * can receive one; without a selection it is selected normally. */
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 1, 1) ==
+           WC3_DT_INTENT_ORDER_UNIT);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 1, 1) ==
+           WC3_DT_INTENT_SELECT_UNIT);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 1, 0, 1) ==
+           WC3_DT_INTENT_ORDER_UNIT);
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 1, 0, 0, 1) ==
            WC3_DT_INTENT_SELECT_UNIT);
 
     /* Non-unit objects: a controlled selection orders, otherwise a
      * validated sprite is a no-op and an invalid object clears. */
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 1, 0) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 1, 0, 0) ==
            WC3_DT_INTENT_ORDER_UNIT);
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 0, 0) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 1, 0, 0, 0, 0) ==
            WC3_DT_INTENT_NONE);
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 1, 0) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 1, 0, 0) ==
            WC3_DT_INTENT_ORDER_UNIT);
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 0, 0) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_OBJECT, 0, 0, 0, 0, 0) ==
            WC3_DT_INTENT_CLEAR_SELECTION);
 
     /* Terrain and miss. */
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 1, 0) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 1, 0, 0) ==
            WC3_DT_INTENT_ORDER_GROUND);
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0, 0) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0, 0, 0, 0) ==
            WC3_DT_INTENT_CLEAR_SELECTION);
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_NONE, 0, 0, 0, 0) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_NONE, 0, 0, 0, 0, 0) ==
            WC3_DT_INTENT_NONE);
-    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_NONE, 0, 0, 1, 0) ==
+    assert(wc3_dt_field_tap_intent(WC3_DT_PICK_NONE, 0, 0, 1, 0, 0) ==
            WC3_DT_INTENT_NONE);
 }
 
@@ -843,6 +940,32 @@ static void test_smart_order_candidate(void)
     assert(!wc3_dt_smart_order_candidate(1, 1, 0, 1, 0, 0));
     assert(!wc3_dt_smart_order_candidate(1, 1, 0, 0, 1, 0));
     assert(!wc3_dt_smart_order_candidate(1, 1, 0, 0, 0, 1));
+}
+
+static void test_order_route(void)
+{
+    /* A controllable unit comes back from the right pick as a CUnit, and
+     * 0x6F21B730 rejects it.  It is still a unit target: the native right
+     * click, never A + left click on a friendly unit. */
+    assert(wc3_dt_order_route(WC3_DT_PICK_OBJECT, 0, 1) ==
+           WC3_DT_ORDER_ROUTE_NATIVE);
+    assert(wc3_dt_order_route(WC3_DT_PICK_OBJECT, 0, 0) ==
+           WC3_DT_ORDER_ROUTE_NATIVE);
+    /* A hostile/neutral unit or a decoration is a validated ghost. */
+    assert(wc3_dt_order_route(WC3_DT_PICK_OBJECT, 1, 1) ==
+           WC3_DT_ORDER_ROUTE_UNIT);
+    assert(wc3_dt_order_route(WC3_DT_PICK_OBJECT, 1, 0) ==
+           WC3_DT_ORDER_ROUTE_UNIT);
+    /* Terrain: tap is a smart move, long tap is attack-move. */
+    assert(wc3_dt_order_route(WC3_DT_PICK_TERRAIN, 0, 0) ==
+           WC3_DT_ORDER_ROUTE_GROUND);
+    assert(wc3_dt_order_route(WC3_DT_PICK_TERRAIN, 0, 1) ==
+           WC3_DT_ORDER_ROUTE_ATTACK_MOVE);
+    /* A failed pick: tap falls back to native, long tap keeps attack-move. */
+    assert(wc3_dt_order_route(WC3_DT_PICK_NONE, 0, 0) ==
+           WC3_DT_ORDER_ROUTE_NATIVE);
+    assert(wc3_dt_order_route(WC3_DT_PICK_NONE, 0, 1) ==
+           WC3_DT_ORDER_ROUTE_ATTACK_MOVE);
 }
 
 static void test_point_in_rect(void)
@@ -1621,11 +1744,15 @@ int main(void)
     test_reset_discards_pending();
     test_pointer_snapshot();
     test_coordinate_mapping();
+    test_unit_type_tap_order();
     test_tap_unit_intent();
+    test_long_tap_unit_intent();
+    test_selection_can_order();
     test_tap_intent_resolution();
     test_field_tap_intent();
     test_configured_long_press_and_threshold();
     test_smart_order_candidate();
+    test_order_route();
     test_point_in_rect();
     test_route();
     test_physical_route();

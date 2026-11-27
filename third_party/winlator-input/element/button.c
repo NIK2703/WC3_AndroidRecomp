@@ -14,7 +14,7 @@ static inline bool toggle_debouncing(const TouchElement* e, uint64_t now_tick) {
 
 static inline void clear_gesture_defer_state(TouchElement* e, TouchActionResult* restrict result) {
     int _ei = element_index(e);
-    e->flags &= ~TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED;
+    e->flags &= ~(TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED | TOUCH_BIT_LONG_PRESS_DEFERRED);
     vis_clear(e, VF_LONG_TAP);
     if (!(e->flags & TOUCH_BIT_LP_TOGGLED))
         release_bindings_list(result, ELEM_LP(_ei), ELEM_LP_COUNT(_ei));
@@ -184,9 +184,11 @@ static inline bool handle_gesture_swipe(TouchElement* e, float dx, float dy, boo
             float dist_sq = dx_sq + dy_sq;
             if (dist_sq > gesture_threshold * gesture_threshold) {
                 e->flags |= TOUCH_BIT_GESTURE_SWIPE_TRIGGERED;
+                e->flags &= ~(TOUCH_BIT_LONG_PRESS_ARM | TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED
+                              | TOUCH_BIT_LONG_PRESS_DEFERRED);
+                vis_clear(e, VF_LONG_TAP);
                 vis_set(e, VF_GESTURE);
                 if (gf) gf->gesture_activated_in_touch = true;
-                e->flags &= ~(TOUCH_BIT_LONG_PRESS_ARM | TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED);
                 if (e->button_gesture_haptic > 0)
                     add_action(result, ACT_HAPTIC, e->button_gesture_haptic, 0, 0);
                 toggle_alternate_bindings(e, TOUCH_BIT_GESTURE_TOGGLED, (e->flags & TOUCH_BIT_CACHED_GESTURE_HAS_TOGGLE) != 0,
@@ -277,6 +279,22 @@ static inline bool button_up_handle_deferred(TouchElement* e, float x, float y,
     bool has_primary = element_has_primary(e);
 
     if ((e->flags & TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED) || (e->flags & TOUCH_BIT_GESTURE_SWIPE_TRIGGERED)) {
+        clear_gesture_and_release_lp(e, result);
+        e->flags &= ~(TOUCH_BIT_DEFER_PRIMARY | TOUCH_BIT_GESTURE_TIMER_ARMED);
+        return true;
+    }
+
+    /* The long press lost the race only if the swipe threshold was not
+     * crossed before UP.  Emit its bindings now; the release follows in the
+     * same batch so the adapter still sees one complete chord. */
+    if (e->flags & TOUCH_BIT_LONG_PRESS_DEFERRED) {
+        int _ei = element_index(e);
+        e->flags &= ~TOUCH_BIT_LONG_PRESS_DEFERRED;
+        e->flags |= TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED;
+        toggle_alternate_bindings(e, TOUCH_BIT_LP_TOGGLED,
+            (e->flags & TOUCH_BIT_CACHED_LP_HAS_TOGGLE) != 0,
+            ELEM_LP(_ei), ELEM_LP_COUNT(_ei),
+            e->bindings[0].type != NONE, result);
         clear_gesture_and_release_lp(e, result);
         e->flags &= ~(TOUCH_BIT_DEFER_PRIMARY | TOUCH_BIT_GESTURE_TIMER_ARMED);
         return true;
@@ -418,5 +436,6 @@ void element_button_up(TouchElement* e, float x, float y, uint64_t now_tick, Tou
     }
 
 cleanup:
-    e->flags &= ~(TOUCH_BIT_GESTURE_TIMER_ARMED | TOUCH_BIT_AUTO_REPEAT_PRIMARY_PRESSED);
+    e->flags &= ~(TOUCH_BIT_GESTURE_TIMER_ARMED | TOUCH_BIT_AUTO_REPEAT_PRIMARY_PRESSED
+                   | TOUCH_BIT_LONG_PRESS_DEFERRED);
 }

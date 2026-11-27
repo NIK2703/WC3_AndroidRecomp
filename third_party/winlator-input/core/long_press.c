@@ -13,13 +13,26 @@ void process_button_long_press(TouchElement* e, uint64_t now_tick, TouchActionRe
     {
         uint64_t elapsed = now_tick - e->down_tick;
         if (elapsed >= (uint64_t)g_state.cfg.long_press_delay_ticks) {
-            e->flags |= TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED;
-            if (_lp_f) _lp_f->gesture_activated_in_touch = true;
+            /* A button that also has a gesture package treats the long press
+             * as a fallback: hold the action until UP so a swipe that starts
+             * after the deadline can still win.  Toggle and auto-repeat
+             * long presses keep their immediate semantics. */
+            const bool has_gesture =
+                ELEM_GEST_COUNT(_ei) > 0 && ELEM_GEST(_ei)[0].type != NONE;
+            const bool defer_lp = has_gesture
+                && !(e->flags & TOUCH_BIT_CACHED_LP_HAS_TOGGLE)
+                && !(e->flags & TOUCH_BIT_CACHED_HAS_AUTO_REPEAT);
             vis_set(e, VF_LONG_TAP);
             e->flags &= ~TOUCH_BIT_LONG_PRESS_ARM;
-            toggle_alternate_bindings(e, TOUCH_BIT_LP_TOGGLED, (e->flags & TOUCH_BIT_CACHED_LP_HAS_TOGGLE) != 0,
-                ELEM_LP(_ei), ELEM_LP_COUNT(_ei),
-                e->bindings[0].type != NONE, result);
+            if (defer_lp) {
+                e->flags |= TOUCH_BIT_LONG_PRESS_DEFERRED;
+            } else {
+                e->flags |= TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED;
+                if (_lp_f) _lp_f->gesture_activated_in_touch = true;
+                toggle_alternate_bindings(e, TOUCH_BIT_LP_TOGGLED, (e->flags & TOUCH_BIT_CACHED_LP_HAS_TOGGLE) != 0,
+                    ELEM_LP(_ei), ELEM_LP_COUNT(_ei),
+                    e->bindings[0].type != NONE, result);
+            }
             finish_visual_update(e);
             if (e->button_long_press_haptic > 0 && ELEM_LP_COUNT(_ei) > 0)
                 add_action(result, ACT_HAPTIC, e->button_long_press_haptic, 0, 0);
@@ -36,9 +49,10 @@ void process_button_gesture_timer(TouchElement* e, uint64_t now_tick, TouchActio
     {
         if (now_tick - e->down_tick >= (uint64_t)g_state.cfg.gesture_swipe_min_ticks) {
             e->flags |= TOUCH_BIT_GESTURE_SWIPE_TRIGGERED;
+            e->flags &= ~(TOUCH_BIT_GESTURE_TIMER_ARMED | TOUCH_BIT_LONG_PRESS_DEFERRED);
+            vis_clear(e, VF_LONG_TAP);
             vis_set(e, VF_GESTURE);
             if (_gt_f) _gt_f->gesture_activated_in_touch = true;
-            e->flags &= ~TOUCH_BIT_GESTURE_TIMER_ARMED;
             toggle_alternate_bindings(e, TOUCH_BIT_GESTURE_TOGGLED, (e->flags & TOUCH_BIT_CACHED_GESTURE_HAS_TOGGLE) != 0,
                 ELEM_GEST(_ei), ELEM_GEST_COUNT(_ei),
                 e->bindings[0].type != NONE, result);

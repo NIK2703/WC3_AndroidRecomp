@@ -152,7 +152,7 @@ __attribute__((hot)) void handle_element_down(TouchElement* e, int ptr_id, float
     }
     e->flags &= ~(TOUCH_BIT_LONG_PRESS_ARM | TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED |
                   TOUCH_BIT_GESTURE_SWIPE_TRIGGERED | TOUCH_BIT_GESTURE_TIMER_ARMED |
-                  TOUCH_BIT_GESTURE_SUPPRESSED);
+                  TOUCH_BIT_GESTURE_SUPPRESSED | TOUCH_BIT_LONG_PRESS_DEFERRED);
     vis_clear(e, VF_LONG_TAP | VF_GESTURE);
     update_visual_layers(e);
 
@@ -179,6 +179,10 @@ __attribute__((hot)) void handle_element_down(TouchElement* e, int ptr_id, float
 // WHEN: handle_element_up — clean up non-toggle gesture presses that shouldn't persist
 void release_non_toggle_gestures(TouchElement* e, TouchActionResult* restrict result) {
     int _ei = element_index(e);
+    if (e->flags & TOUCH_BIT_LONG_PRESS_DEFERRED) {
+        e->flags &= ~TOUCH_BIT_LONG_PRESS_DEFERRED;
+        vis_clear(e, VF_LONG_TAP);
+    }
     if (__builtin_expect((e->flags & TOUCH_BIT_GESTURE_SWIPE_TRIGGERED) && !(e->flags & TOUCH_BIT_GESTURE_TOGGLED), 0))
         release_bindings_list(result, ELEM_GEST(_ei), ELEM_GEST_COUNT(_ei));
     if (__builtin_expect((e->flags & TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED) && !(e->flags & TOUCH_BIT_LP_TOGGLED), 0))
@@ -289,7 +293,8 @@ __attribute__((hot)) void update_visual_layers(TouchElement* e) {
 
 void clear_element_gesture_flags(TouchElement* e, bool set_suppressed) {
     e->flags &= ~(TOUCH_BIT_LONG_PRESS_ARM | TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED |
-                  TOUCH_BIT_GESTURE_SWIPE_TRIGGERED | TOUCH_BIT_GESTURE_TIMER_ARMED);
+                  TOUCH_BIT_GESTURE_SWIPE_TRIGGERED | TOUCH_BIT_GESTURE_TIMER_ARMED |
+                  TOUCH_BIT_LONG_PRESS_DEFERRED);
     vis_clear(e, VF_LONG_TAP | VF_GESTURE);
     if (set_suppressed) e->flags |= TOUCH_BIT_GESTURE_SUPPRESSED;
 }
@@ -480,7 +485,8 @@ void release_element_bindings(TouchElement* e, TouchActionResult* restrict resul
         release_non_toggle_gestures(e, result);
         clear_element_gesture_flags(e, false);
     } else {
-        e->flags &= ~(TOUCH_BIT_LONG_PRESS_ARM | TOUCH_BIT_GESTURE_TIMER_ARMED);
+        e->flags &= ~(TOUCH_BIT_LONG_PRESS_ARM | TOUCH_BIT_GESTURE_TIMER_ARMED
+                       | TOUCH_BIT_LONG_PRESS_DEFERRED);
         vis_clear(e, VF_LONG_TAP);
     }
     if (!element_is_toggle_active(e)) {

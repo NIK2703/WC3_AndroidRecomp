@@ -442,10 +442,17 @@ typedef struct {
     uint8_t select_pointer;
     /* A controlled selection in the field: the recognizer emitted BEGIN but
      * the native LMB press is withheld until the gesture proves to be a drag
-     * (DRAG_BEGIN -> selection rectangle) or is released (END -> smart order,
-     * attack-move or native fallback click). */
+     * (DRAG_BEGIN -> selection rectangle) or is released (END -> select for
+     * a controllable exception target, smart order for every other unit,
+     * attack-move for terrain, or native fallback click). */
     uint8_t select_deferred;
     uint8_t select_deferred_pointer;
+    /* Hold point of the deferred long tap.  The target is resolved at the
+     * point where the long press was recognised, not at the release point:
+     * a finger that drifts a few pixels inside the drag threshold must not
+     * turn an entangled gold mine into a ground order. */
+    float select_deferred_x;
+    float select_deferred_y;
     uint8_t target_active;
     uint8_t target_pointer;
 } DtFieldGesture;
@@ -3581,6 +3588,11 @@ static void dt_trace_selection_impl(CPU *c, const DtContext *ctx,
  * selection on +0x1E0 would let the tap issue an order that the native path
  * then rejects.  0x6F66EC60 is a CUnit predicate (owner at +0x58, flags at
  * +0x5C, CUnit vtable +0xEC), not a CSelectionWar3 predicate.
+ *
+ * 0x6F66EC60 is necessary but not sufficient.  Device log 2026-11-27 showed
+ * a selected neutral Goblin Ammo Dump (ngad, owner 15) returning can_order=1;
+ * tapping egol then issued an order even though the selection was not under
+ * local control.  The owner gate keeps neutral slots select-only.
  */
 static int dt_selection_controlled(CPU *c, const DtContext *ctx)
 {
@@ -3597,16 +3609,20 @@ static int dt_selection_controlled(CPU *c, const DtContext *ctx)
     /* The selection list stores CUnit objects; 0x2B61676C is the class id
      * of the handle-holder resolved by 0x6F054530, not of the CUnit at
      * +0xC (that field is the unit type).  The native controllable
-     * predicate is the authority. */
+     * predicate is necessary, but owner 12..15 (neutral) is select-only. */
     if (!primary || !dt_guest_readable(primary, 0x60u)) {
         dt_log("controlled selection=%08X primary=%08X readable=0",
                selection, primary);
         return 0;
     }
-    const int can_order =
+    const uint32_t owner = wc3_rd16g(primary + 0x58u);
+    const int native_controllable =
         dt_call_thiscall(c, primary, DT_FN_UNIT_CONTROLLABLE, 0, NULL) != 0;
-    dt_log("controlled selection=%08X primary=%08X can_order=%d",
-           selection, primary, can_order);
+    const int can_order =
+        wc3_dt_selection_can_order(owner, native_controllable);
+    dt_log("controlled selection=%08X primary=%08X owner=%u "
+           "native_controllable=%d can_order=%d",
+           selection, primary, owner, native_controllable, can_order);
     return can_order;
 }
 
@@ -3621,6 +3637,18 @@ static int dt_unit_controlled(CPU *c, uint32_t unit)
 {
     if (!unit || !dt_guest_readable(unit, 0x60u)) return 0;
     return dt_call_thiscall(c, unit, DT_FN_UNIT_CONTROLLABLE, 0, NULL) != 0;
+}
+
+/*
+ * Native GetUnitTypeId 0x6F2040C0 resolves the JASS handle through
+ * 0x6F1EEF90 and returns dword [CUnit+0x30].  dt_validate_unit already
+ * produced the validated CUnit, so this reads the same rawcode directly.
+ * The value is a unit-type rawcode (for example 'ugol'), not a pointer.
+ */
+static uint32_t dt_unit_type_id(uint32_t unit)
+{
+    if (!unit || !dt_guest_readable(unit, 0x34u)) return 0;
+    return wc3_rd32g(unit + 0x30u);
 }
 
 static void dt_clear_selection(CPU *c, const DtContext *ctx)
@@ -4014,6 +4042,7 @@ static int dt_world_click_allowed(CPU *c, const DtContext *ctx,
  */
 typedef enum {
     DT_ORDER_NONE = 0,
+    DT_ORDER_SELECT,
     DT_ORDER_UNIT,
     DT_ORDER_GROUND,
     DT_ORDER_ATTACK_MOVE,
@@ -4021,11 +4050,15 @@ typedef enum {
 } DtOrderResult;
 
 /*
- * Issue one order at the contact point.  Tap and long tap share this
- * executor:
- *   - a right-button pick yields a CGhostImage for a unit/decoration or a
- *     world point for terrain;
- *   - a unit/decoration is a smart order through 0x6F392FA0;
+ * Issue one order at the contact point.  Tap and the order leg of a long tap
+ * share this executor; a long tap on a controllable exception target is
+ * selected by dt_long_tap_at() before this function runs:
+ *   - a right-button pick yields a CGhostImage for a hostile/neutral unit
+ *     or decoration, a CUnit for a controllable unit, or a world point for
+ *     terrain;
+ *   - a validated ghost is a smart order through 0x6F392FA0;
+ *   - a CUnit (the ghost validation fails) and any other failed pick use
+ *     the native right click, which is the game's own fallback;
  *   - terrain is a right-click smart move for tap and the legacy attack-move
  *     (A + left click) for long tap.
  * The native right-click fallback is used only while the live context still
@@ -4070,43 +4103,52 @@ static DtOrderResult dt_smart_order_at(CPU *c, const DtContext *ctx,
     dt_log("order pick r=%d object=%08X world=%08X,%08X,%08X attack=%d",
            r, object, wx, wy, wz, attack_move);
 
-    DtOrderResult result = DT_ORDER_NONE;
-    int unit_handled = 0;
-    if (r == 1) {
-        /* The right pick returns a CGhostImage; 0x6F21B730 validates it and
-         * takes its own reference for the native dispatcher. */
-        const uint32_t ghost = dt_validate_object(c, object, unit_out);
-        if (ghost) {
-            unit_handled = 1;
-            result = dt_order_unit(c, ctx, scratch, object, candidate,
-                                   wx, wy, wz)
-                         ? DT_ORDER_UNIT
-                         : DT_ORDER_FALLBACK;
-            dt_release_object(c, ghost);
-        }
-        dt_log("order unit object=%08X ghost=%08X result=%d", object, ghost,
-               result);
+    /* 0x6F21B730 accepts only a CGhostImage and takes its own reference for
+     * the native dispatcher.  A controllable target is a CUnit instead, so
+     * the validation fails; wc3_dt_order_route() keeps that pick on the unit
+     * leg and selects the native right click rather than the terrain
+     * attack-move. */
+    uint32_t ghost = 0;
+    if (r == WC3_DT_PICK_OBJECT) {
+        ghost = dt_validate_object(c, object, unit_out);
     }
+    const Wc3DtOrderRoute route =
+        wc3_dt_order_route(r, ghost != 0, attack_move);
 
-    if (!unit_handled) {
-        if (attack_move) {
-            /* Long tap on terrain keeps the legacy attack-move: the native A
-             * key enters target mode, then a deferred native left click
-             * confirms the ground point once the guest has built that mode.
-             * Tap keeps the right-click smart move.  The A key is synthetic:
-             * it belongs to this command and must not advance the input epoch
-             * past the click's snapshot. */
-            hle_android_key_event_synthetic(0x41, 1);
-            hle_android_key_event_synthetic(0x41, 0);
-            dt_field_attack_move_click_queue_at(ev, input_epoch);
-            result = DT_ORDER_ATTACK_MOVE;
-            dt_log("order attack-move");
-        } else if (r == 2) {
-            result = dt_order_ground(c, ctx, wx, wy) ? DT_ORDER_GROUND
-                                                     : DT_ORDER_FALLBACK;
-            dt_log("order ground result=%d", result);
-        }
+    DtOrderResult result = DT_ORDER_NONE;
+    switch (route) {
+    case WC3_DT_ORDER_ROUTE_UNIT:
+        result = dt_order_unit(c, ctx, scratch, object, candidate,
+                               wx, wy, wz)
+                     ? DT_ORDER_UNIT
+                     : DT_ORDER_FALLBACK;
+        dt_release_object(c, ghost);
+        break;
+    case WC3_DT_ORDER_ROUTE_GROUND:
+        result = dt_order_ground(c, ctx, wx, wy) ? DT_ORDER_GROUND
+                                                 : DT_ORDER_FALLBACK;
+        break;
+    case WC3_DT_ORDER_ROUTE_ATTACK_MOVE:
+        /* Long tap on terrain keeps the legacy attack-move: the native A
+         * key enters target mode, then a deferred native left click
+         * confirms the ground point once the guest has built that mode.
+         * Tap keeps the right-click smart move.  The A key is synthetic:
+         * it belongs to this command and must not advance the input epoch
+         * past the click's snapshot. */
+        hle_android_key_event_synthetic(0x41, 1);
+        hle_android_key_event_synthetic(0x41, 0);
+        dt_field_attack_move_click_queue_at(ev, input_epoch);
+        result = DT_ORDER_ATTACK_MOVE;
+        break;
+    case WC3_DT_ORDER_ROUTE_NATIVE:
+        result = DT_ORDER_FALLBACK;
+        break;
+    case WC3_DT_ORDER_ROUTE_NONE:
+    default:
+        break;
     }
+    dt_log("order r=%d object=%08X ghost=%08X route=%d result=%d", r, object,
+           ghost, route, result);
 
     if (result == DT_ORDER_NONE || result == DT_ORDER_FALLBACK) {
         if (dt_world_click_allowed(c, ctx, ev)) {
@@ -4122,6 +4164,85 @@ static DtOrderResult dt_smart_order_at(CPU *c, const DtContext *ctx,
 
     dt_scratch_free(scratch);
     return result;
+}
+
+/*
+ * Long tap without drag.  The target is resolved at the hold point with a
+ * left pick so its CUnit controllability can be tested before the order
+ * executor runs:
+ *   - any controllable target (gold mine, transport, zeppelin, air barge or
+ *     an ordinary own unit/building) is selected with the native left
+ *     click; this is the selection gesture the user expects even when the
+ *     target's tap is the exception smart order;
+ *   - an uncontrollable unit/decoration and terrain keep the rev 10
+ *     long-tap action through dt_smart_order_at().
+ * The caller has already checked the field/HUD/target/paused/native-busy
+ * gates.  This function re-checks the live selection because the release can
+ * follow a selection change; without a controlled selection a native left
+ * click is the correct select/clear action.
+ */
+static DtOrderResult dt_long_tap_at(CPU *c, const DtContext *ctx,
+                                    const Wc3DirectTouchEvent *ev,
+                                    uint32_t width, uint32_t height)
+{
+    if (!c || !ctx || !ctx->ui || !ctx->world) return DT_ORDER_NONE;
+    if (dt_paused(c)) return DT_ORDER_NONE;
+
+    const int controlled = dt_selection_controlled(c, ctx);
+    if (!controlled) {
+        dt_native_press_deferred(ev, 0);
+        return DT_ORDER_SELECT;
+    }
+
+    const uint32_t scratch = dt_scratch_alloc();
+    if (!scratch) {
+        dt_log("long-tap no-scratch");
+        return DT_ORDER_NONE;
+    }
+
+    const uint32_t pick = scratch + DT_PICK_OFFSET;
+    const uint32_t unit_out = scratch + DT_UNIT_OFFSET;
+    const uint32_t point = scratch + DT_POINT_OFFSET;
+    if (!dt_event_point(c, ev->x, ev->y, width, height, point)) {
+        dt_log("long-tap no-point");
+        dt_scratch_free(scratch);
+        return DT_ORDER_NONE;
+    }
+
+    uint32_t object = 0, wx = 0, wy = 0, wz = 0;
+    const int r = dt_pick(c, ctx, wc3_rd32g(point), wc3_rd32g(point + 4u),
+                          pick, 1u, &object, &wx, &wy, &wz);
+    dt_log("long-tap pick r=%d object=%08X world=%08X,%08X,%08X",
+           r, object, wx, wy, wz);
+
+    if (r == WC3_DT_PICK_OBJECT) {
+        const uint32_t unit = dt_validate_unit(c, object, unit_out);
+        const int is_unit = unit != 0;
+        const int target_controllable =
+            is_unit ? dt_unit_controlled(c, unit) : 0;
+#if WC3_DEBUG && WC3_DEBUG_INPUT
+        const uint32_t target_type =
+            is_unit ? dt_unit_type_id(unit) : 0u;
+#endif
+        const int intent = wc3_dt_long_tap_unit_intent(
+            1, target_controllable);
+        dt_log("long-tap unit object=%08X unit=%08X is_unit=%d "
+               "target_type=%08X target_controlled=%d intent=%d",
+               object, unit, is_unit, target_type, target_controllable,
+               intent);
+        if (intent == WC3_DT_INTENT_SELECT_UNIT) {
+            dt_native_press_deferred(ev, 0);
+            dt_release_object(c, unit);
+            dt_scratch_free(scratch);
+            return DT_ORDER_SELECT;
+        }
+        dt_release_object(c, unit);
+        dt_scratch_free(scratch);
+        return dt_smart_order_at(c, ctx, ev, width, height, 1);
+    }
+
+    dt_scratch_free(scratch);
+    return dt_smart_order_at(c, ctx, ev, width, height, 1);
 }
 
 static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
@@ -4189,17 +4310,25 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
         const uint32_t unit = dt_validate_unit(c, object, unit_out);
         const int is_unit = unit != 0;
         const int target_controllable = dt_unit_controlled(c, unit);
+        const uint32_t target_type =
+            is_unit ? dt_unit_type_id(unit) : 0u;
+        const int target_tap_order =
+            wc3_dt_unit_type_tap_order(target_type);
         const int intent = wc3_dt_field_tap_intent(
             WC3_DT_PICK_OBJECT, is_unit, is_unit, controlled,
-            target_controllable);
+            target_controllable, target_tap_order);
         dt_log("tap unit object=%08X unit=%08X is_unit=%d "
-               "target_controlled=%d intent=%d",
-               object, unit, is_unit, target_controllable, intent);
+               "target_type=%08X target_controlled=%d "
+               "target_tap_order=%d intent=%d",
+               object, unit, is_unit, target_type, target_controllable,
+               target_tap_order, intent);
 #if WC3_DEBUG && WC3_DEBUG_INPUT
         if (g_map_contacts > 0 && g_map_contacts <= DT_MAP_AUDIT_CONTACTS) {
-            dt_log("map-tap#%u pick object=%08X unit=%08X intent=%d "
-                   "controlled=%d target_controlled=%d", g_map_contacts,
-                   object, unit, intent, controlled, target_controllable);
+            dt_log("map-tap#%u pick object=%08X unit=%08X type=%08X "
+                   "intent=%d controlled=%d target_controlled=%d "
+                   "target_tap_order=%d", g_map_contacts, object, unit,
+                   target_type, intent, controlled, target_controllable,
+                   target_tap_order);
         }
 #endif
         switch (intent) {
@@ -4244,7 +4373,7 @@ static void dt_tap(CPU *c, const DtContext *ctx, const Wc3DirectTouchEvent *ev,
 
     if (r == 2) {
         const int intent = wc3_dt_field_tap_intent(WC3_DT_PICK_TERRAIN, 0, 0,
-                                                   controlled, 0);
+                                                   controlled, 0, 0);
         dt_log("tap terrain r=2 controlled=%d intent=%d world=%08X,%08X",
                controlled, intent, wx, wy);
         if (intent == WC3_DT_INTENT_ORDER_GROUND) {
@@ -5785,6 +5914,8 @@ static void dt_field_select_begin(CPU *c, const DtContext *ctx,
     }
     g_field_drag.select_deferred = 0;
     g_field_drag.select_deferred_pointer = 0;
+    g_field_drag.select_deferred_x = 0.0f;
+    g_field_drag.select_deferred_y = 0.0f;
     if (g_native_down || g_native_up_pending ||
         (!g_native_release.left && hle_android_mouse_is_down(0))) {
         /* A HUD click or another native press still owns the left button.
@@ -5797,6 +5928,8 @@ static void dt_field_select_begin(CPU *c, const DtContext *ctx,
     if (dt_smart_order_ready(c, ctx, ev)) {
         g_field_drag.select_deferred = 1;
         g_field_drag.select_deferred_pointer = (int)ev->pointer_id;
+        g_field_drag.select_deferred_x = ev->x;
+        g_field_drag.select_deferred_y = ev->y;
         dt_trace("field-select-deferred", dt_bits(ev->x), dt_bits(ev->y));
         dt_log("field-select-deferred ptr=%u", ev->pointer_id);
         return;
@@ -5870,14 +6003,23 @@ static void dt_field_select_end(CPU *c, const DtContext *ctx,
                                 uint32_t width, uint32_t height)
 {
     dt_log("field-select-end ptr=%u n=%.4f,%.4f active=%d deferred=%d "
-           "owner=%d",
+           "owner=%d hold=%.4f,%.4f",
            ev->pointer_id, ev->x, ev->y, g_field_drag.select_active,
-           g_field_drag.select_deferred, g_field_drag.select_pointer);
+           g_field_drag.select_deferred, g_field_drag.select_pointer,
+           g_field_drag.select_deferred_x,
+           g_field_drag.select_deferred_y);
 
     if (g_field_drag.select_deferred &&
         (int)ev->pointer_id == g_field_drag.select_deferred_pointer) {
+        const float hold_x = g_field_drag.select_deferred_x;
+        const float hold_y = g_field_drag.select_deferred_y;
+        Wc3DirectTouchEvent hold = *ev;
+        hold.x = hold_x;
+        hold.y = hold_y;
         g_field_drag.select_deferred = 0;
         g_field_drag.select_deferred_pointer = 0;
+        g_field_drag.select_deferred_x = 0.0f;
+        g_field_drag.select_deferred_y = 0.0f;
 
         /* A reset/cancel path emits END with time_ms 0.  It must not turn a
          * held gesture into an order. */
@@ -5896,10 +6038,12 @@ static void dt_field_select_end(CPU *c, const DtContext *ctx,
         }
         /* A HUD edge is not a world order and must not receive the fallback
          * click either: dropping it keeps the minimap/command panel edge
-         * free of gesture leakage. */
-        if (dt_field_hud_contains(ev->x, ev->y)) {
-            dt_trace("field-select-deferred-hud", dt_bits(ev->x),
-                     dt_bits(ev->y));
+         * free of gesture leakage.  Check both endpoints because the target
+         * is resolved at the hold point while the release can drift. */
+        if (dt_field_hud_contains(ev->x, ev->y) ||
+            dt_field_hud_contains(hold.x, hold.y)) {
+            dt_trace("field-select-deferred-hud", dt_bits(hold.x),
+                     dt_bits(hold.y));
             return;
         }
         if (dt_paused(c)) {
@@ -5914,13 +6058,16 @@ static void dt_field_select_end(CPU *c, const DtContext *ctx,
             dt_trace("field-select-deferred-target", ev->pointer_id, 0);
             return;
         }
-        if (dt_smart_order_ready(c, ctx, ev)) {
+        if (dt_smart_order_ready(c, ctx, &hold)) {
             const DtOrderResult order =
-                dt_smart_order_at(c, ctx, ev, width, height, 1);
+                dt_long_tap_at(c, ctx, &hold, width, height);
             dt_log("field-order ptr=%u result=%d", ev->pointer_id, order);
-            dt_trace(order == DT_ORDER_ATTACK_MOVE ? "field-attack-move"
-                                                   : "field-smart-order",
-                     dt_bits(ev->x), dt_bits(ev->y));
+            dt_trace(order == DT_ORDER_SELECT
+                         ? "field-long-tap-select"
+                         : order == DT_ORDER_ATTACK_MOVE
+                               ? "field-attack-move"
+                               : "field-smart-order",
+                     dt_bits(hold.x), dt_bits(hold.y));
             (void)order;
             return;
         }
@@ -5954,6 +6101,8 @@ static void dt_field_reset(void)
     g_field_drag.target_pointer = 0;
     g_field_drag.select_deferred = 0;
     g_field_drag.select_deferred_pointer = 0;
+    g_field_drag.select_deferred_x = 0.0f;
+    g_field_drag.select_deferred_y = 0.0f;
     if (g_field_drag.select_active) {
         dt_log("field-reset select ptr=%d native_down=%d",
                g_field_drag.select_pointer, g_native_down);

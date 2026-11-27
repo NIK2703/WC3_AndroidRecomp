@@ -243,7 +243,8 @@ static inline void reset_tracked_slot(TrackedButtons* tb, int pid_slot) {
 static inline void reset_first_tracked_long_press(const TrackedButtons* tb) {
     if (tb->count >= 2) {
         TouchElement* first = &g_state.elements[tb->element_indices[0]];
-        first->flags &= ~(TOUCH_BIT_LONG_PRESS_ARM | TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED);
+        first->flags &= ~(TOUCH_BIT_LONG_PRESS_ARM | TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED
+                          | TOUCH_BIT_LONG_PRESS_DEFERRED);
     }
 }
 

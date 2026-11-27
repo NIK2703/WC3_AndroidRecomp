@@ -3882,6 +3882,83 @@ def test_native_press_barrier() -> int:
         if min(snap, a_down, queue) < 0 or not (snap < a_down < queue):
             errors.append("attack-move epoch snapshot does not precede the "
                           "synthetic A and click")
+        # A right pick on a controllable target is a CUnit, not a ghost.
+        # The executor must keep every object pick on the unit leg and use
+        # the native right click when the ghost validation fails; only
+        # terrain and a failed pick may enter attack-move.  The pure rule is
+        # covered by direct_touch; this keeps the executor wired to it.
+        route = block.find("wc3_dt_order_route(r, ghost != 0, attack_move)")
+        attack = block.find("WC3_DT_ORDER_ROUTE_ATTACK_MOVE")
+        if route < 0 or attack < 0 or route > attack:
+            errors.append("smart-order executor bypasses wc3_dt_order_route")
+    # The tap exception must read the same CUnit+0x30 rawcode that native
+    # GetUnitTypeId returns, classify it before the intent call, and feed the
+    # result into the single field-tap decision point.
+    tap_fn = dt.split("static void dt_tap(", 1)
+    if len(tap_fn) != 2:
+        errors.append("tap executor missing")
+    else:
+        block = tap_fn[1].split("\n}\n", 1)[0]
+        validate = block.find("dt_validate_unit(c, object, unit_out)")
+        type_read = block.find("dt_unit_type_id(unit)")
+        type_rule = block.find("wc3_dt_unit_type_tap_order(target_type)")
+        intent = block.find("wc3_dt_field_tap_intent(")
+        if (min(validate, type_read, type_rule, intent) < 0 or
+                not (validate < type_read < type_rule < intent)):
+            errors.append("tap executor bypasses the unit-type exception")
+    if dt.find("wc3_rd32g(unit + 0x30u)") < 0:
+        errors.append("unit-type rawcode is not read from CUnit+0x30")
+
+    # A long tap on any controllable target (gold mine, transport, zeppelin,
+    # air barge, ordinary own unit/building) selects it.  The tap exception
+    # already orders the gold-mine/transport class, so the long tap is the
+    # selection gesture there; ordinary own units also select.  An
+    # uncontrollable target keeps the rev 10 long-tap order/attack-move.  The
+    # target must be resolved at the hold point, not at the release point.
+    long_fn = dt.split("static DtOrderResult dt_long_tap_at", 1)
+    if len(long_fn) != 2:
+        errors.append("long-tap executor missing")
+    else:
+        block = long_fn[1].split("\n}\n", 1)[0]
+        validate = block.find("dt_validate_unit(c, object, unit_out)")
+        controlled = block.find("dt_unit_controlled(c, unit)")
+        type_read = block.find("dt_unit_type_id(unit)")
+        intent = block.find("wc3_dt_long_tap_unit_intent(")
+        select = block.find("dt_native_press_deferred(ev, 0)",
+                            max(intent, 0))
+        order = block.find(
+            "dt_smart_order_at(c, ctx, ev, width, height, 1)")
+        if (min(validate, controlled, type_read, intent, select, order) < 0
+                or not (validate < controlled < type_read < intent < select
+                        < order)):
+            errors.append(
+                "long-tap executor bypasses the controllable select rule")
+    end_fn = dt.split("static void dt_field_select_end", 1)
+    if len(end_fn) != 2:
+        errors.append("field-select-end executor missing")
+    else:
+        block = end_fn[1].split("\n}\n", 1)[0]
+        if "dt_long_tap_at(c, ctx, &hold, width, height)" not in block:
+            errors.append("field long tap bypasses dt_long_tap_at")
+        if "dt_smart_order_at(c, ctx, ev, width, height, 1)" in block:
+            errors.append("field long tap still orders every target")
+        if ("select_deferred_x" not in block or
+                "select_deferred_y" not in block):
+            errors.append("field long tap does not use the hold point")
+
+    # A selected neutral unit is not an order source, even though the broad
+    # native 0x6F66EC60 predicate accepted it in the 2026-11-27 device log.
+    # The selection gate must read the primary owner and apply the pure
+    # owner/neutrality rule before any tap can take the order leg.
+    selection_fn = dt.split("static int dt_selection_controlled(", 1)
+    if len(selection_fn) != 2:
+        errors.append("selection controllability gate missing")
+    else:
+        block = selection_fn[1].split("\n}\n", 1)[0]
+        owner = block.find("wc3_rd16g(primary + 0x58u)")
+        gate = block.find("wc3_dt_selection_can_order(")
+        if owner < 0 or gate < 0 or owner > gate:
+            errors.append("selection controllability ignores neutral owner")
     if errors:
         for line in errors:
             print(f"native-press-barrier: {line}", file=sys.stderr)

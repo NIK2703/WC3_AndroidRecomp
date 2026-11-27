@@ -35,6 +35,11 @@
 #define TOUCH_BIT_CACHED_GESTURE_HAS_TOGGLE (1u << 22)
 #define TOUCH_BIT_CACHED_BIND0_IS_GAMEPAD (1u << 23)
 #define TOUCH_BIT_CACHED_BIND0_IS_RIGHT_STICK (1u << 24)
+/* A long press with both a long-press and a gesture package is a fallback:
+ * the binding is pressed on UP only if the finger never crossed the gesture
+ * threshold.  This lets a swipe win the race when the hold deadline expires
+ * before the finger moves. */
+#define TOUCH_BIT_LONG_PRESS_DEFERRED   (1u << 25)
 
 #define VISUAL_LAYER_FILL            (1u << 0)
 #define VISUAL_LAYER_STROKE_TEXT     (1u << 1)

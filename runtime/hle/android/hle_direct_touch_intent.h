@@ -241,21 +241,125 @@ typedef enum {
 } Wc3DtTapIntent;
 
 /*
+ * Unit-type rawcodes are big-endian FourCC dwords: the high byte is the
+ * first character, so 'egol' is 0x65676F6C.  Native GetUnitTypeId
+ * (0x6F2040C0) returns this dword from CUnit+0x30.
+ */
+#define WC3_DT_RAWCODE(a, b, c, d) \
+    (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | \
+     ((uint32_t)(c) << 8) | (uint32_t)(d))
+
+#define WC3_DT_UNIT_TYPE_ENTANGLED_GOLD_MINE \
+    WC3_DT_RAWCODE('e', 'g', 'o', 'l')
+#define WC3_DT_UNIT_TYPE_HAUNTED_GOLD_MINE \
+    WC3_DT_RAWCODE('u', 'g', 'o', 'l')
+#define WC3_DT_UNIT_TYPE_HUMAN_TRANSPORT \
+    WC3_DT_RAWCODE('h', 'b', 'o', 't')
+#define WC3_DT_UNIT_TYPE_ORC_TRANSPORT \
+    WC3_DT_RAWCODE('o', 'b', 'o', 't')
+#define WC3_DT_UNIT_TYPE_UNDEAD_TRANSPORT \
+    WC3_DT_RAWCODE('u', 'b', 'o', 't')
+#define WC3_DT_UNIT_TYPE_NEUTRAL_TRANSPORT \
+    WC3_DT_RAWCODE('n', 'b', 'o', 't')
+#define WC3_DT_UNIT_TYPE_NIGHT_ELF_TRANSPORT \
+    WC3_DT_RAWCODE('e', 't', 'r', 's')
+#define WC3_DT_UNIT_TYPE_UNDEAD_AIR_BARGE \
+    WC3_DT_RAWCODE('u', 'a', 'r', 'b')
+#define WC3_DT_UNIT_TYPE_GOBLIN_ZEPPELIN \
+    WC3_DT_RAWCODE('n', 'z', 'e', 'p')
+
+/*
+ * Warcraft III 1.27 has twelve playable player slots, 0..11.  Slots 12..15
+ * are the neutral players (Passive/Hostile/Victim/Extra).  A neutral unit
+ * can be selected, but it is not an order source for the local player.
+ */
+#define WC3_DT_PLAYER_NEUTRAL_FIRST 12u
+
+/*
+ * A live selection can receive an order only when its primary unit belongs
+ * to a playable player and the native 0x6F66EC60 predicate accepts it.
+ * 0x6F66EC60 alone is too broad for this decision: on 2026-11-27 a selected
+ * neutral Goblin Ammo Dump (ngad, owner 15) returned can_order=1, so a tap
+ * on egol took the order path instead of selecting the mine.  Owner 12..15
+ * must stay a select-only selection.
+ */
+static inline int wc3_dt_selection_can_order(uint32_t owner,
+                                             int native_controllable)
+{
+    return owner < WC3_DT_PLAYER_NEUTRAL_FIRST && native_controllable != 0;
+}
+
+/*
+ * Target types whose tap must use the native right-click smart order even
+ * when the target itself is controllable.  These are the base-game rawcodes
+ * from Units\UnitData.slk and Units\UnitAbilities.slk:
+ *   egol Entangled Gold Mine, ugol Haunted Gold Mine,
+ *   hbot/obot/ubot/nbot/etrs transport ships,
+ *   nzep Goblin Zeppelin, uarb Undead air barge.
+ * The neutral gold mine ngol is intentionally absent: it is not
+ * controllable, so the ordinary uncontrollable-target leg already orders.
+ * A custom map can clone these units under new rawcodes; an ability-based
+ * check (Aegm/Abgm/Acar) is possible but not proven yet.  Keep this decision
+ * pure so T0 can lock the list without a guest image.
+ */
+static inline int wc3_dt_unit_type_tap_order(uint32_t type_id)
+{
+    switch (type_id) {
+    case WC3_DT_UNIT_TYPE_ENTANGLED_GOLD_MINE:
+    case WC3_DT_UNIT_TYPE_HAUNTED_GOLD_MINE:
+    case WC3_DT_UNIT_TYPE_HUMAN_TRANSPORT:
+    case WC3_DT_UNIT_TYPE_ORC_TRANSPORT:
+    case WC3_DT_UNIT_TYPE_UNDEAD_TRANSPORT:
+    case WC3_DT_UNIT_TYPE_NEUTRAL_TRANSPORT:
+    case WC3_DT_UNIT_TYPE_NIGHT_ELF_TRANSPORT:
+    case WC3_DT_UNIT_TYPE_UNDEAD_AIR_BARGE:
+    case WC3_DT_UNIT_TYPE_GOBLIN_ZEPPELIN:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/*
  * Unit-tap decision.  `target_controllable` is the native 0x6F66EC60 result
- * for the CUnit under the finger, not an owner/friendliness guess.  A
- * controllable target is always selected, even while another controlled
- * selection is live: tapping a second own unit must move the selection, not
- * order the first one to walk onto it.  An uncontrollable target (hostile,
- * neutral, or an ally without shared control) becomes a smart order only when
- * the live selection can receive one; otherwise it is selected like any other
- * unit tap.
+ * for the CUnit under the finger, not an owner/friendliness guess.
+ * `target_tap_order` is true for the gold-mine/transport rawcodes above.
+ *
+ * A controllable target is normally selected, even while another controlled
+ * selection is live: tapping a second ordinary own unit must move the
+ * selection, not order the first one to walk onto it.  The two exception
+ * classes are the only controllable targets that take the native right-click
+ * order path.  An uncontrollable target (hostile, neutral, or an ally without
+ * shared control) becomes a smart order only when the live selection can
+ * receive one; otherwise it is selected like any other unit tap.
  */
 static inline Wc3DtTapIntent wc3_dt_tap_unit_intent(
-    int selection_controlled, int target_controllable)
+    int selection_controlled, int target_controllable,
+    int target_tap_order)
 {
+    if (selection_controlled && target_tap_order)
+        return WC3_DT_INTENT_ORDER_UNIT;
     if (target_controllable) return WC3_DT_INTENT_SELECT_UNIT;
     return selection_controlled ? WC3_DT_INTENT_ORDER_UNIT
                                 : WC3_DT_INTENT_SELECT_UNIT;
+}
+
+/*
+ * Long-tap unit decision.  A long tap is a selection gesture: with a live
+ * controlled selection, a controllable target is selected with the native
+ * left click instead of receiving a smart order.  This covers the
+ * controllable exception targets whose tap orders (gold mines, transports,
+ * zeppelins, air barges) and ordinary own units/buildings alike.  An
+ * uncontrollable target (enemy, neutral, no shared control) still takes the
+ * smart order.  With no controlled selection the executor never defers the
+ * native press, so the SELECT return is only the consistency case.
+ */
+static inline Wc3DtTapIntent wc3_dt_long_tap_unit_intent(
+    int selection_controlled, int target_controllable)
+{
+    if (!selection_controlled) return WC3_DT_INTENT_SELECT_UNIT;
+    return target_controllable ? WC3_DT_INTENT_SELECT_UNIT
+                               : WC3_DT_INTENT_ORDER_UNIT;
 }
 
 /*
@@ -293,11 +397,13 @@ static inline Wc3DtTapIntent wc3_dt_tap_intent(int pick_result,
  */
 static inline Wc3DtTapIntent wc3_dt_field_tap_intent(
     int pick_result, int validated_object, int is_unit,
-    int selection_controlled, int target_controllable)
+    int selection_controlled, int target_controllable,
+    int target_tap_order)
 {
     if (pick_result == WC3_DT_PICK_OBJECT && validated_object && is_unit)
         return wc3_dt_tap_unit_intent(selection_controlled,
-                                      target_controllable);
+                                      target_controllable,
+                                      target_tap_order);
     return wc3_dt_tap_intent(pick_result, validated_object, is_unit,
                              selection_controlled);
 }
@@ -328,6 +434,41 @@ static inline int wc3_dt_smart_order_candidate(int controlled,
 {
     return controlled && inside_field && !inside_hud &&
            !target_active && !paused && !native_busy;
+}
+
+/*
+ * Order route for a right-button pick.  WC3_DT_PICK_OBJECT is not only a
+ * CGhostImage: a controllable unit is returned as a CUnit, and 0x6F21B730
+ * accepts only the ghost.  A CUnit pick is still a unit target and must use
+ * the native right click, never the terrain attack-move: A + left click on a
+ * friendly unit is not a valid confirmation and the game drops the order.
+ *
+ * Terrain and a failed pick use the attack-move only when the caller asked
+ * for it (long tap); tap keeps the right-click smart move and the native
+ * fallback.
+ */
+typedef enum {
+    WC3_DT_ORDER_ROUTE_NONE = 0,
+    WC3_DT_ORDER_ROUTE_UNIT,
+    WC3_DT_ORDER_ROUTE_NATIVE,
+    WC3_DT_ORDER_ROUTE_GROUND,
+    WC3_DT_ORDER_ROUTE_ATTACK_MOVE
+} Wc3DtOrderRoute;
+
+static inline Wc3DtOrderRoute wc3_dt_order_route(int pick_result,
+                                                 int ghost_valid,
+                                                 int attack_move)
+{
+    if (pick_result == WC3_DT_PICK_OBJECT) {
+        return ghost_valid ? WC3_DT_ORDER_ROUTE_UNIT
+                           : WC3_DT_ORDER_ROUTE_NATIVE;
+    }
+    if (pick_result == WC3_DT_PICK_TERRAIN) {
+        return attack_move ? WC3_DT_ORDER_ROUTE_ATTACK_MOVE
+                           : WC3_DT_ORDER_ROUTE_GROUND;
+    }
+    return attack_move ? WC3_DT_ORDER_ROUTE_ATTACK_MOVE
+                       : WC3_DT_ORDER_ROUTE_NATIVE;
 }
 
 /* Beacon button (MinimapSignal) release decision.  A release on the button

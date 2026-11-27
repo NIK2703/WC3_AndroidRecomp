@@ -1158,3 +1158,255 @@ mode is live.  Pause taps must still show `barrier-defer msg=0201` then
   `native_input_gateway.h`, `hle_input_state.h`, controls и T0, а также
   удалённый повторный pause-sync из idle-пути.  T2 остаётся ручным;
   коммит не делался.
+
+## 2026-11-27: long tap по подконтрольной цели (source-only)
+
+- Дефект: при выделенных подконтрольных юнитах long tap без drag по
+  другой подконтрольной цели не отдавал приказ. Tap по той же цели
+  перевыбирал её, как и задумано.
+- Причина: правый pick возвращает подконтрольную цель как `CUnit`
+  (class `0x2B773375`), а `0x6F21B730` принимает только `CGhostImage`
+  (`0x2B776768`). Ghost-валидация падала, и `dt_smart_order_at()` при
+  `attack_move=1` уходил в attack-move по земле: synthetic `A` +
+  отложенный left click в дружественного юнита. Игра такой target не
+  подтверждает, поэтому приказа не было.
+- Исправление: чистый `wc3_dt_order_route()` в
+  `hle_direct_touch_intent.h`; любой `r == 1` остаётся unit-целью.
+  Валидированный ghost идёт в `dt_order_unit()`, невалидированный
+  `CUnit` — в native right click, attack-move остаётся только для земли
+  и промаха. Tap и long tap по-прежнему используют один
+  `dt_smart_order_at()`.
+- T0: `direct_touch` (включая `test_order_route`),
+  `native_press_barrier` (включая source audit на `wc3_dt_order_route`),
+  `controls_mode`, `gesture_lifetime`, `controls_idle`, `hle_abi`,
+  `input_adapter` — зелёные; release/debug
+  `-fsyntax-only -Wall -Wextra -Werror` для `hle_direct_touch.c` = 0/0;
+  `git diff --check` чистый. APK не собирался и не устанавливался; T2
+  ждёт явной команды.
+
+## 2026-11-27: свайп по кнопкам групп 1..8 (source-only)
+
+- Дефект: свайп по кнопке 1..8 в оверлее закреплял выделение как long
+  tap (route 1, store), а должен добавлять юнитов (route 2, add).
+- Причина: `process_button_long_press()` на дедлайне 150 мс сразу жал
+  `KEY_N+MOD_CTRL` и ставил `TOUCH_BIT_GESTURE_LONG_PRESS_TRIGGERED`.
+  `handle_gesture_swipe()` не срабатывает при этом бите, поэтому
+  медленный свайп (палец стоит дольше 150 мс, затем проходит 20 px)
+  отдавал store, а не add.
+- Исправление (vendored patch #6): для non-toggle/non-auto-repeat кнопки
+  с gesture-пакетом long press откладывается до UP
+  (`TOUCH_BIT_LONG_PRESS_DEFERRED`); визуальный long-tap и haptic
+  остаются на дедлайне. Если палец пересёк порог, `handle_gesture_swipe()`
+  снимает deferred и срабатывает gesture. Если отпустил без порога,
+  `button_up_handle_deferred()` жмёт long-press bindings и отпускает их
+  в том же батче, поэтому адаптер видит один целый chord. Toggle и
+  auto-repeat long press сохраняют немедленную семантику; новый touch,
+  multi-touch reset и cleanup-пути снимают deferred без действия.
+- T0: `controls_mode` (новый slow-swipe кейс: 200 мс удержания, 80 px,
+  ровно один route 2 и ни одного route 1; long-press кейс: на дедлайне
+  ни сигнала, ни key, route 1 — на UP), `gesture_button_swipe`, `gesture_lifetime`,
+  `direct_touch`, `controls_idle`, `native_press_barrier` — зелёные;
+  `git diff --check` чистый. APK не собирался и не устанавливался; T2
+  ждёт явной команды. `gesture_mode` падает на
+  `caps_has_scroll_bindings`/two-finger scroll и на HEAD (проверено
+  сборкой vendor из HEAD) — это pre-existing, не связано с patch #6.
+
+## 2026-11-27: debug build/install со свайпом групп (явная команда)
+
+- `tools/android/build_apk.sh --variant debug --install --serial emulator-5554`.
+  `ideapad` не разрешился по MAC и был пропущен; использованы `pc` и
+  локальные воркеры (`workers=pc local=5 remote=4 jobs=9`). distcc не
+  отключался.
+- Native `libwc3gameactivity.so` — `160493848` байт; Gradle
+  `BUILD SUCCESSFUL in 1m 16s`; streamed install — `Success`.
+- APK: `build/android_app/wc3-debug.apk`, `178897781` байт,
+  SHA-256 `05fcdae6b6c768c8ea767d8575bd2590e070469cd0fa39540d045031ecc017c6`.
+  Установленный `base.apk` совпадает по размеру и SHA-256.
+- Пакет `wc3.recomp.debug`: versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-27 06:57:44`.
+- Сборка включает vendored patch #6 (deferred long press), smart-order
+  fix и все текущие изменения. T2 не запускался: ждёт явной команды.
+
+## 2026-11-27: tap-исключения для рудников и транспортов (source-only)
+
+- Исследование и точная идентичность: `GetUnitTypeId` (`0x6F2040C0`)
+  возвращает `[CUnit+0x30]`; `dt_validate_unit()` уже даёт валидированный
+  CUnit, поэтому rawcode читается напрямую. Признак приказа остаётся на
+  `0x6F66EC60`.
+- Из `War3Patch.mpq` подтверждены rawcode и способности:
+  `egol`/`ugol` (Haunted/Entangled Gold Mine), `ngol` (нейтральный,
+  не входит в исключение), `hbot`/`obot`/`ubot`/`nbot`/`etrs`
+  (transport ships), `nzep` (Goblin Zeppelin), `uarb` (Undead air barge).
+  Транспорты имеют `Sch5`/`Sch3` (`code=Acar`), загрузка — `Slo3`/`Aloa`.
+- Реализация: чистый `wc3_dt_unit_type_tap_order()` и константы в
+  `hle_direct_touch_intent.h`; `wc3_dt_tap_unit_intent()` и
+  `wc3_dt_field_tap_intent()` получили `target_tap_order`; `dt_tap()`
+  читает `dt_unit_type_id(unit)` и при `ORDER_UNIT` использует прежний
+  `dt_smart_order_at(..., 0)`. Для подконтрольной цели right pick даёт
+  CUnit, ghost-валидация падает, route `NATIVE` вызывает нативный right
+  click — без второго order-билдера.
+- T0: `direct_touch` (rawcode-список, exception-матрица),
+  `native_press_barrier` (source audit на `dt_unit_type_id` →
+  `wc3_dt_unit_type_tap_order` → `wc3_dt_field_tap_intent`),
+  `controls_mode`, `gesture_lifetime` — зелёные; NDK
+  `-fsyntax-only -Wall -Wextra -Werror` для `hle_direct_touch.c`
+  release/debug = 0/0; `git diff --check` чистый.
+- Документ: `docs/research/CONTROL_EXCEPTIONS_GOLD_MINE_TRANSPORT_2026-11-27.md`.
+  APK не собирался и не устанавливался; T2 ждёт явной команды.
+
+## 2026-11-27: debug build/install с tap-исключениями (явная команда)
+
+- `tools/android/build_apk.sh --variant debug --install --serial emulator-5554`.
+  `ideapad` worker недоступен; использованы `pc` и локальные воркеры
+  (`workers=pc local=5 remote=4 jobs=9`). distcc не отключался.
+- Native `libwc3gameactivity.so` — `160496632` байта; Gradle
+  `BUILD SUCCESSFUL in 57s`; streamed install — `Success`.
+- APK: `build/android_app/wc3-debug.apk`, `178900565` байт,
+  SHA-256 `aa6cf076fbd2cb67723c4e44c661b4199646618c3d2d691d8f791ec2cc242048`.
+  Установленный `base.apk` совпадает по размеру и SHA-256.
+- Пакет `wc3.recomp.debug`: versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-27 07:45:31`; устройство `emulator-5554`,
+  `arm64-v8a`, Android `17`.
+- В собранной `libwc3gameactivity.so` присутствуют новые debug-строки
+  `target_type`/`target_tap_order`. Сборка включает все текущие
+  изменения: tap-исключения, smart-order fix и deferred long press.
+  T2 не запускался: ждёт явной команды.
+
+## 2026-11-27: исправление endianness rawcode (device log + build/install)
+
+- Пользовательский тест: выделены виспы, tap по своему `egol` выбрал
+  рудник. `dt_trace.txt` показал
+  `target_type=65676F6C target_tap_order=0 intent=1` — то есть
+  `egol` в big-endian. `GetUnitTypeId` возвращает FourCC как
+  `a<<24 | b<<16 | c<<8 | d`; первая реализация собирала little-endian
+  (`0x6C6F6765`), а T0 закреплял те же неверные dwords. Поэтому
+  исключение не срабатывало.
+- Исправление: `WC3_DT_RAWCODE` переведён на big-endian; numeric-тесты
+  обновлены (`egol=0x65676F6C`, `ugol=0x75676F6C`,
+  `hbot=0x68626F74`, `obot=0x6F626F74`, `ubot=0x75626F74`,
+  `nbot=0x6E626F74`, `etrs=0x65747273`, `uarb=0x75617262`,
+  `nzep=0x6E7A6570`); добавлен прямой regression assert на
+  `0x65676F6C`. Документ обновлён.
+- T0: `direct_touch`, `native_press_barrier` — зелёные;
+  `git diff --check` чистый.
+- Пересборка/установка:
+  `tools/android/build_apk.sh --variant debug --install --serial emulator-5554`.
+  `ideapad` worker недоступен; использованы `pc` и локальные воркеры
+  (`workers=pc local=8 remote=4 jobs=12`). distcc не отключался.
+- Native `libwc3gameactivity.so` — `160495432` байта; Gradle
+  `BUILD SUCCESSFUL in 1m 16s`; streamed install — `Success`.
+- APK: `build/android_app/wc3-debug.apk`, `178899365` байт,
+  SHA-256 `1c24c3be5999437ba6a906000fc79e0346ee322523e322c3638e048fe1ff244c`.
+  Установленный `base.apk` совпадает по размеру и SHA-256.
+- Пакет `wc3.recomp.debug`: versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-27 07:59:40`; устройство `emulator-5554`,
+  `arm64-v8a`, Android `17`. T2/повторный пользовательский тест ещё
+  не выполнялся.
+
+## Rev 11: long tap по подконтрольной цели
+
+### Симптом
+
+При выделенном подконтрольном юните простой long tap без drag по своему
+оплетённому руднику (`egol`) не выделял рудник. Пользователь ожидал
+выделение, как при tap по обычному юниту.
+
+### Корень
+
+`dt_field_select_end()` в deferred-ветке безусловно вызывал
+`dt_smart_order_at(..., attack_move=1)`. Long-tap путь не проверял
+`target_controllable`, поэтому tap-исключение rev 9 (рудник/транспорт →
+native right click) автоматически распространялось и на long tap.
+План rev 10 фиксировал это как «long tap по подконтрольной цели отдаёт
+приказ», но это расходится с ожиданием пользователя: long tap — жест
+выбора/осмотра.
+
+### Что изменено
+
+- `wc3_dt_long_tap_unit_intent(selection_controlled, target_controllable)`:
+  при `S=1` и `T=1` → `SELECT_UNIT`, при `T=0` → `ORDER_UNIT`; при `S=0`
+  → `SELECT_UNIT` (executor в этом случае не откладывает native press).
+- `dt_long_tap_at(hold)` в `hle_direct_touch.c`: левый pick в hold point,
+  `dt_validate_unit`, `dt_unit_controlled`, затем select через
+  `dt_native_press_deferred(hold, 0)` или прежний
+  `dt_smart_order_at(hold, attack_move=1)`.
+- `dt_field_select_begin()` сохраняет hold point в
+  `select_deferred_x/y`; `dt_field_select_end()` разрешает цель в этой
+  точке, а не в точке release. Дрейф в пределах 11 px не превращает
+  long tap по руднику в приказ по земле.
+- Tap-матрица rev 9 не изменилась: tap по своему `egol`/транспорту
+  по-прежнему отдаёт native right-click; long tap теперь выбирает.
+- Обычный свой юнит/здание по long tap тоже выбирается: это осознанная
+  замена rev 10. Приказ по своим рудникам/транспортам остаётся на tap.
+
+### Доказательства и ограничения
+
+- Старый crash-trace (`wc3_crash_20261127_082540/dt_trace.txt`):
+  tap по `egol` в pixel `1006,438` → `target_controlled=1`,
+  `target_tap_order=1`, `intent=2`, `tap-order-native` — то есть tap
+  действительно отдавал приказ.
+- Там же long press в pixel `1065,467`: `FIELD_SELECT_BEGIN`, затем
+  `FIELD_SELECT_DRAG_BEGIN` после превышения 11 px и большой drag. Это
+  был drag, а не простой long tap; прямого лога простого long tap по
+  руднику в доступных сессиях нет.
+- Свежий `dt_trace.txt` из `wc3_dt_issue_20261127_0850` — menu-only
+  (`route=LEGACY`, `in_game=0`); `sel_trace.txt` показывает, что
+  выделение осталось на подконтрольном юните. Это согласуется с
+  приказом вместо выбора, но не является отдельным логом жеста.
+- `dt_trace.txt`/`sel_trace.txt` открываются с `"w"` на процесс, поэтому
+  menu-сессия затирает map-сессию. Для T2 нужен запуск с чистым логом.
+
+### Проверки
+
+- `python3 tools/run_tests.py --test direct_touch` — ok, включая новый
+  `test_long_tap_unit_intent`.
+- `--test native_press_barrier` — ok; source audit проверяет
+  `dt_long_tap_at`: `dt_validate_unit` → `dt_unit_controlled` →
+  `wc3_dt_long_tap_unit_intent`, select-ветка вызывает
+  `dt_native_press_deferred`, order-ветка — `dt_smart_order_at`.
+- `--test controls_mode`, `--test gesture_lifetime` — зелёные.
+- NDK `clang -fsyntax-only -Wall -Wextra -Werror` для
+  `hle_direct_touch.c`: debug `0`, release `0`. В release
+  `target_type` теперь под `#if WC3_DEBUG && WC3_DEBUG_INPUT`, иначе
+  `-Wunused-variable`.
+- `git diff --check` — чисто (только LF/CRLF предупреждения Git).
+- Debug APK собран и установлен по явной команде:
+  `tools/android/build_apk.sh --variant debug --install --serial emulator-5554`.
+  Native `libwc3gameactivity.so` — `160504472` байта; Gradle
+  `BUILD SUCCESSFUL in 1m 3s`; streamed install — `Success`.
+- APK: `build/android_app/wc3-debug.apk`, `178908405` байт,
+  SHA-256 `1ba33220923f0c2ceaab3c92886b02a775b64968ace1c59ab74bd8db7cc23fc7`.
+  Установленный `base.apk` совпадает по размеру и SHA-256.
+- Пакет `wc3.recomp.debug`: versionCode `2`, versionName `0.1.1-debug`,
+  `lastUpdateTime=2026-11-27 09:48:23`; устройство `emulator-5554`,
+  `arm64-v8a`, Android `17`.
+- В установленном APK проверены строки `field-long-tap-select`,
+  `long-tap unit ... target_controlled=%d intent=%d` (новый формат без
+  `target_tap_order`), `field-smart-order` и `field-attack-move`.
+
+### Отдельный дефект: HLE VirtualAlloc
+
+Падение `error 4096`, `SFile.cpp:4654`, `TerminateProcess code=1` —
+не следствие smart-order/long-tap. Лог:
+`[va] commit reject 46590000+1000 type=00001000 ra=3502A267`.
+Storm `L_3502A21B` зарезервировал `0x46590000`, но следующий
+`MEM_COMMIT` отклонён: резервирование отсутствует в `g_va_live`.
+Наиболее вероятная причина — `VA_LIVE_MAX=4096` и тихое отбрасывание
+записи в `va_live_add()`; отсутствие синхронизации `g_va_live`/
+`g_va_free` между гостевыми потоками — вторичная гипотеза. Это
+исправляется отдельно: растущая/потокобезопасная таблица, громкий отказ
+вместо возврата непроверенного mapping, signal-safe `va_describe()`.
+До исправления crash может повторяться независимо от long tap.
+
+### Следующий T2 (после пересборки)
+
+1. Выделен рабочий, tap по своему `egol` → приказ (регрессия rev 9).
+2. Выделен рабочий, простой long tap без drag по `egol` → выбран рудник,
+   приказа нет; в логе `field-long-tap-select`, `intent=1`.
+3. Выделен нейтральный `ngad`, tap по `egol` → выбран рудник, приказа
+   нет (`can_order=0`).
+4. Выделен юнит, long tap по обычному своему юниту/зданию → выбран.
+5. Выделен юнит, long tap по врагу/декорации → smart order; по земле →
+   attack-move (`key vk=41`).
+6. Проверить, что crash `SFile.cpp:4654` не воспроизводится; отдельно
+   проверить VA-фикс.
